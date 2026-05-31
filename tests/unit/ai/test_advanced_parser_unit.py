@@ -66,3 +66,15 @@ class TestFilterRequirementsBySizeCause1:
         )
         ids = [r["id"] for r in out]
         assert ids == sorted(ids, key=lambda x: int(x[1:]))
+
+    def test_all_ids_protected_keeps_everything_over_cap(self) -> None:
+        """Codex P2 (#688): the mapping-failure fallback protects ALL ids, so
+        an over-cap list keeps every requirement — nothing is dropped by
+        position. This is the property the except-branch fallback relies on."""
+        parser = self._parser()
+        reqs = self._reqs(25)  # 25 > medium cap 15
+        protected = {r["id"] for r in reqs}  # fallback = protect everything
+        out = parser._filter_requirements_by_size(
+            reqs, "medium", 3, "build something", protected
+        )
+        assert len(out) == 25, "all-ids fallback must drop nothing"

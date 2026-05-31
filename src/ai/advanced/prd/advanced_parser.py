@@ -2304,12 +2304,23 @@ Create design artifacts such as:
                     llm_client=self.llm_client,
                 )
             except Exception as exc:  # noqa: BLE001 — graceful degradation
+                # Codex P2 on PR #688: a transient mapping failure must NOT
+                # reintroduce the outcome-dropping behavior this fixes. With
+                # outcome coverage ON, the safe fallback is to protect ALL
+                # current requirements (treat every feature as core) so an
+                # over-cap list can't trim a real feature by list position.
+                # The deterministic tier cap still applies; #683 Cause 2
+                # backstops anything genuinely beyond it.
                 logger.warning(
-                    "#683 Cause 1: core-feature mapping failed; falling "
-                    "back to tier-cap filtering without core protection: %s",
+                    "#683 Cause 1: core-feature mapping failed; protecting "
+                    "all requirements so none are dropped by position: %s",
                     exc,
                 )
-                protected_ids = None
+                protected_ids = {
+                    str(r.get("id") or r.get("name") or "")
+                    for r in analysis.functional_requirements
+                    if (r.get("id") or r.get("name"))
+                }
 
         functional_requirements = self._filter_requirements_by_size(
             analysis.functional_requirements,
