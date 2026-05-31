@@ -17,7 +17,11 @@ class TestFilterRequirementsBySizeCause1:
     core (outcome-bearing) feature."""
 
     def _parser(self) -> AdvancedPRDParser:
-        return AdvancedPRDParser()
+        # _filter_requirements_by_size is a pure method (uses only its args
+        # + _detect_prompt_specificity, no __init__ state). Bypass __init__
+        # via __new__ so the test needs no LLM provider / API key — keeps it
+        # a true unit test and CI-safe with no config_marcus.json.
+        return AdvancedPRDParser.__new__(AdvancedPRDParser)
 
     def _reqs(self, n: int):
         return [
