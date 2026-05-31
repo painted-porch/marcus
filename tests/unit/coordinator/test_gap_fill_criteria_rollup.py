@@ -858,3 +858,73 @@ class TestCoreGapSynthesizesImplTask:
         # The 2 over-cap gaps fell back onto the design task's criteria.
         design_out = next(t for t in result.augmented_tasks if t.id == "t_design")
         assert len(design_out.completion_criteria or []) == 2
+
+
+class TestSynthesizedTaskContractRoundTrip:
+    """#687 Codex P1: a synthesized contract gap task must carry its
+    responsibility in source_context + the description marker, not only the
+    SQLite-native top-level field, so it survives the kanban round-trip and
+    the contract-responsibility instruction layer fires."""
+
+    def test_responsibility_persisted_for_round_trip(self) -> None:
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            _build_impl_task_from_gap,
+        )
+
+        task = _build_impl_task_from_gap(
+            {
+                "name": "Implement GameEngine",
+                "description": "build the loop",
+                "responsibility": "implements GameEngine from engine.ts",
+                "contract_file": "docs/engine.ts",
+            }
+        )
+        assert task is not None
+        # Native field (SQLite)
+        assert task.responsibility == "implements GameEngine from engine.ts"
+        # source_context (JSON-capable providers, via build_task_data)
+        assert task.source_context is not None
+        assert (
+            task.source_context["responsibility"]
+            == "implements GameEngine from engine.ts"
+        )
+        assert task.source_context["contract_file"] == "docs/engine.ts"
+        # Description marker (universal fallback, e.g. Planka)
+        assert "<!-- MARCUS_CONTRACT_FIRST:" in task.description
+        assert "implements GameEngine from engine.ts" in task.description
+
+    def test_non_contract_gap_has_no_marker_or_source_context(self) -> None:
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            _build_impl_task_from_gap,
+        )
+
+        task = _build_impl_task_from_gap(
+            {"name": "Implement collision", "description": "end on collision"}
+        )
+        assert task is not None
+        assert task.responsibility is None
+        assert "MARCUS_CONTRACT_FIRST" not in task.description
+        assert not (task.source_context or {})
+
+    def test_parse_contract_metadata_recovers_after_field_loss(self) -> None:
+        """Simulate the kanban round-trip dropping the native field: metadata
+        must still resolve from source_context (Codex P1 scenario)."""
+        from dataclasses import replace
+
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            _build_impl_task_from_gap,
+        )
+        from src.marcus_mcp.tools.task import _parse_contract_metadata
+
+        task = _build_impl_task_from_gap(
+            {
+                "name": "Implement GameEngine",
+                "description": "build the loop",
+                "responsibility": "implements GameEngine from engine.ts",
+            }
+        )
+        assert task is not None
+        # Drop the SQLite-native field to mimic a non-SQLite provider.
+        round_tripped = replace(task, responsibility=None)
+        meta = _parse_contract_metadata(round_tripped)
+        assert meta["responsibility"] == "implements GameEngine from engine.ts"

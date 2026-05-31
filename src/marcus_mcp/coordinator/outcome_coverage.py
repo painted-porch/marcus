@@ -1261,6 +1261,45 @@ def _gap_dict_to_criterion(gap_dict: Dict[str, Any]) -> str:
 GAP_SYNTH_CAP: int = 8
 
 
+def _gap_contract_round_trip(
+    gap: Dict[str, Any], description: str
+) -> Tuple[str, Dict[str, Any]]:
+    """Make a synthesized gap task's contract ownership survive the board.
+
+    Codex P1 on PR #687. A contract-first gap carries ``responsibility``.
+    Setting it only on the top-level ``Task.responsibility`` field is not
+    enough: that field is the SQLite-native column, but the kanban
+    conversion path (``TaskBuilder.build_task_data``) persists
+    ``source_context`` and the description, NOT arbitrary top-level
+    fields. So on the production round-trip the synthesized task loses
+    its contract ownership before ``request_next_task`` and the
+    contract-responsibility instruction layer never fires for exactly
+    these tasks.
+
+    ``_parse_contract_metadata`` in ``marcus_mcp/tools/task.py`` reads
+    contract metadata from three sources in priority order: the native
+    attribute, ``source_context["responsibility"]``, then the
+    ``<!-- MARCUS_CONTRACT_FIRST: responsibility | contract_file -->``
+    description marker. We populate sources 2 and 3 here so the metadata
+    round-trips through every provider (source_context for JSON-capable
+    providers, the marker as the universal fallback for ones like Planka
+    that drop arbitrary fields).
+
+    Returns ``(description_with_marker, source_context)``. When the gap
+    has no ``responsibility`` both are returned unchanged/empty.
+    """
+    responsibility = gap.get("responsibility")
+    if not responsibility:
+        return description, {}
+    contract_file = gap.get("contract_file") or ""
+    source_context: Dict[str, Any] = {"responsibility": responsibility}
+    if contract_file:
+        source_context["contract_file"] = contract_file
+    marker = f"<!-- MARCUS_CONTRACT_FIRST: {responsibility} | {contract_file} -->"
+    description = f"{description}\n\n{marker}" if description else marker
+    return description, source_context
+
+
 def _build_impl_task_from_gap(gap: Dict[str, Any]) -> Optional[Task]:
     """Materialize one gap-fill dict into an implementation Task (#683).
 
@@ -1284,10 +1323,15 @@ def _build_impl_task_from_gap(gap: Dict[str, Any]) -> Optional[Task]:
     labels = ["gap_fill", "intent_fidelity", "implementation"]
     if responsibility:
         labels.append("contract")
+    # Round-trip contract ownership via source_context + description
+    # marker so it survives the kanban conversion (Codex P1 on PR #687).
+    description, source_context = _gap_contract_round_trip(
+        gap, gap.get("description", "")
+    )
     return Task(
         id=f"gap_fill_{uuid4().hex[:12]}",
         name=name,
-        description=gap.get("description", ""),
+        description=description,
         status=TaskStatus.TODO,
         priority=Priority.MEDIUM,
         assigned_to=None,
@@ -1299,6 +1343,7 @@ def _build_impl_task_from_gap(gap: Dict[str, Any]) -> Optional[Task]:
         provides=gap.get("provides"),
         requires=gap.get("requires"),
         responsibility=responsibility,
+        source_context=source_context or None,
     )
 
 
@@ -1346,11 +1391,18 @@ def _materialize_gap_dicts_as_rescue_tasks(
         labels = ["gap_fill", "intent_fidelity", "rescue"]
         if responsibility:
             labels.append("contract")
+        # Round-trip contract ownership via source_context + description
+        # marker so it survives the kanban conversion (Codex P1 on PR
+        # #687) — the top-level responsibility field alone is dropped by
+        # TaskBuilder.build_task_data on non-SQLite providers.
+        description, source_context = _gap_contract_round_trip(
+            gap, gap.get("description", "")
+        )
         tasks.append(
             Task(
                 id=f"gap_fill_{uuid4().hex[:12]}",
                 name=name,
-                description=gap.get("description", ""),
+                description=description,
                 status=TaskStatus.TODO,
                 priority=Priority.MEDIUM,
                 assigned_to=None,
@@ -1364,6 +1416,7 @@ def _materialize_gap_dicts_as_rescue_tasks(
                 provides=gap.get("provides"),
                 requires=gap.get("requires"),
                 responsibility=responsibility,
+                source_context=source_context or None,
             )
         )
     return tasks
