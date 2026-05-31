@@ -545,13 +545,16 @@ class TestAdvancedPRDParserTaskGeneration:
             prd_analysis, mock_constraints
         )
 
-        # Should have all functional epics
+        # Should have all functional epics. #683: all 4 functional reqs are
+        # kept (tier cap, not team_size), so 4 functional + 1 NFR + 1 infra =
+        # 6. Previously team_size cut 'validation', giving 5.
         assert (
-            len(hierarchy) == 5
-        )  # 3 functional + 1 NFR + 1 infra (validation is filtered)
+            len(hierarchy) == 6
+        )  # 4 functional + 1 NFR + 1 infra (nothing filtered by team_size)
         assert "epic_crud_operations" in hierarchy
         assert "epic_todo_properties" in hierarchy
         assert "epic_user_auth" in hierarchy
+        assert "epic_validation" in hierarchy
 
         # Issue #607 step 3: design + implement only (no Test task) -> 2 tasks each.
         assert len(hierarchy["epic_crud_operations"]) == 2
