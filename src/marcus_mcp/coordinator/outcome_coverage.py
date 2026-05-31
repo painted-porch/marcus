@@ -28,7 +28,17 @@ import re
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Set
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 from src.ai.advanced.prd.outcome_extractor import UserOutcome
 from src.config.outcome_coverage_config import is_outcome_coverage_enabled
@@ -1241,6 +1251,57 @@ def _gap_dict_to_criterion(gap_dict: Dict[str, Any]) -> str:
     return f"{OUTCOME_GAP_CRITERION_PREFIX}{body}"
 
 
+#: Cap on implementation tasks synthesized from core gaps in a single
+#: run (#683 Cause 2). #607-step-4 moved away from synthesizing a task
+#: per gap to fight ATOMIZATION (too many tiny tasks). We reinstate
+#: synthesis only for *core* gaps with no implementation home, and cap
+#: the count so a pathological gap list cannot re-atomize the graph —
+#: excess gaps beyond the cap fall back to the completion_criteria
+#: rollup and are logged.
+GAP_SYNTH_CAP: int = 8
+
+
+def _build_impl_task_from_gap(gap: Dict[str, Any]) -> Optional[Task]:
+    """Materialize one gap-fill dict into an implementation Task (#683).
+
+    Mirrors :func:`_materialize_gap_dicts_as_rescue_tasks` but labels the
+    task ``"implementation"`` (not ``"rescue"``) and is used on the
+    NORMAL (non-empty-graph) path for core gaps that have no existing
+    implementation task to host them. The normalized name (``Implement
+    …`` / a readable verb phrase) classifies as ``implementation`` via
+    :func:`~src.core.task_classification.get_task_type`, so #680 gotcha
+    placement will treat it as a valid host.
+
+    Returns ``None`` when the gap has no usable name.
+    """
+    from uuid import uuid4
+
+    name = _normalize_gap_task_name(gap.get("name") or "")
+    if not name:
+        return None
+    now = datetime.now(timezone.utc)
+    responsibility = gap.get("responsibility")
+    labels = ["gap_fill", "intent_fidelity", "implementation"]
+    if responsibility:
+        labels.append("contract")
+    return Task(
+        id=f"gap_fill_{uuid4().hex[:12]}",
+        name=name,
+        description=gap.get("description", ""),
+        status=TaskStatus.TODO,
+        priority=Priority.MEDIUM,
+        assigned_to=None,
+        created_at=now,
+        updated_at=now,
+        due_date=None,
+        estimated_hours=4.0,
+        labels=labels,
+        provides=gap.get("provides"),
+        requires=gap.get("requires"),
+        responsibility=responsibility,
+    )
+
+
 def _materialize_gap_dicts_as_rescue_tasks(
     gap_dicts: List[Dict[str, Any]],
 ) -> List[Task]:
@@ -1438,8 +1499,8 @@ def _route_gap_fill_to_criteria(
     gap_dicts: List[Dict[str, Any]],
     coverage_before_fill: Dict[str, List[str]],
     coverage_after_fill: Optional[Dict[str, List[str]]],
-) -> List[Task]:
-    """Append gap-fill criteria to existing tasks instead of synthesizing.
+) -> Tuple[List[Task], List[Task], Dict[int, str]]:
+    """Route gap-fill outcomes to existing tasks or synthesized impl tasks.
 
     Issue #607 step 4 — replaces the previous behavior of materializing
     one ``gap_fill_<uuid>`` :class:`Task` per uncovered outcome (which
@@ -1496,16 +1557,25 @@ def _route_gap_fill_to_criteria(
 
     Returns
     -------
-    list of Task
-        Same-length list as ``tasks``. Anchor tasks are replaced with
-        new copies whose ``completion_criteria`` gained gap-fill
-        criterion strings. Non-anchor tasks pass through by reference.
-        Idempotent: re-runs find the
-        :data:`OUTCOME_GAP_CRITERION_PREFIX` stamp and skip
-        duplicates.
+    tuple of (list of Task, list of Task, dict)
+        ``(augmented_tasks, synthesized_tasks, stub_idx_to_synth_id)``:
+
+        * ``augmented_tasks`` — the input tasks (anchor tasks replaced
+          with copies whose ``completion_criteria`` gained gap-fill
+          criterion strings) followed by any synthesized impl tasks.
+          Idempotent on the :data:`OUTCOME_GAP_CRITERION_PREFIX` stamp.
+        * ``synthesized_tasks`` — implementation tasks materialized for
+          core gaps whose resolved anchor was a non-implementation task
+          (#683 Cause 2); empty when no synthesis fired.
+        * ``stub_idx_to_synth_id`` — ``{gap_index: synth_task_id}`` so
+          the caller can route the gap's outcome coverage (and thus the
+          signal + #680 gotcha enrichment) onto the synthesized task.
     """
     if not gap_dicts:
-        return tasks
+        return tasks, [], {}
+
+    tasks_by_id: Dict[str, Task] = {t.id: t for t in tasks}
+    integration_id = _find_integration_verification_task_id(tasks)
 
     # Shared anchor-resolution logic so the signal-enrichment path
     # routes outcomes the same way.
@@ -1515,16 +1585,47 @@ def _route_gap_fill_to_criteria(
         coverage_after_fill=coverage_after_fill,
     )
 
-    # Collect per-anchor criterion lists, preserving gap order.
+    # #683 Cause 2: per gap, decide between rolling the criterion onto an
+    # existing anchor (the #607-step-4 behavior) and SYNTHESIZING an
+    # implementation task. A gotcha (#680) is a failure mode in running
+    # code, so the outcome's work must live on an implementation task. We
+    # synthesize ONLY when the resolved anchor is a non-implementation
+    # (design/testing) task — the snake-run failure where collision /
+    # game-over / restart rolled onto "Design Game Core Mechanics" and
+    # never got built. When the anchor is already an implementation task
+    # (or the integration-verification task for cross-cutting outcomes),
+    # we keep the rollup — that is the anti-atomization guard: no new task
+    # is created when an existing one can host the criterion.
     criteria_per_task: Dict[str, List[str]] = {}
+    synthesized: List[Task] = []
+    stub_idx_to_synth_id: Dict[int, str] = {}
+    n_over_cap = 0
     for idx, gap in enumerate(gap_dicts):
         anchor_id = stub_to_anchor.get(f"{STUB_TASK_ID_PREFIX}{idx}")
-        if not anchor_id:
-            continue
-        criteria_per_task.setdefault(anchor_id, []).append(_gap_dict_to_criterion(gap))
+        anchor = tasks_by_id.get(anchor_id) if anchor_id else None
 
-    if not criteria_per_task:
-        return tasks
+        anchor_is_non_impl = (
+            anchor is not None
+            and anchor_id != integration_id
+            and get_task_type(anchor) != TASK_TYPE_IMPLEMENTATION
+        )
+
+        if anchor_is_non_impl:
+            # Core gap with no implementation home → synthesize one impl
+            # task (capped to bound atomization). Over the cap, fall back
+            # to the rollup on the resolved (design) anchor and log it.
+            if len(synthesized) < GAP_SYNTH_CAP:
+                synth = _build_impl_task_from_gap(gap)
+                if synth is not None:
+                    synthesized.append(synth)
+                    stub_idx_to_synth_id[idx] = synth.id
+                    continue
+            n_over_cap += 1
+
+        if anchor_id:
+            criteria_per_task.setdefault(anchor_id, []).append(
+                _gap_dict_to_criterion(gap)
+            )
 
     # Rebuild the task list, replacing anchor tasks with copies that
     # carry the new criteria. Idempotent on the criterion-prefix stamp.
@@ -1559,8 +1660,23 @@ def _route_gap_fill_to_criteria(
             n_criteria_added,
             len(gap_dicts),
         )
+    if synthesized:
+        logger.info(
+            "Gap-fill synthesis (#683 Cause 2): materialized %d "
+            "implementation task(s) for core gaps with no implementation "
+            "home (cap=%d)",
+            len(synthesized),
+            GAP_SYNTH_CAP,
+        )
+    if n_over_cap:
+        logger.warning(
+            "Gap-fill synthesis (#683 Cause 2): %d core gap(s) exceeded "
+            "the synthesis cap of %d and fell back to the criteria rollup",
+            n_over_cap,
+            GAP_SYNTH_CAP,
+        )
 
-    return enriched
+    return enriched + synthesized, synthesized, stub_idx_to_synth_id
 
 
 def _enrich_acceptance_criteria_with_signals(
@@ -2127,17 +2243,24 @@ async def apply_outcome_coverage_to_feature_graph(
     # narrowly so the atomization mechanism stays dead for the normal
     # path.
     synthesized_ids: List[str] = []
+    # ``gap_stub_to_synth`` maps a gap's stub index to the real id of the
+    # task it was materialized into, so the downstream signal + #680
+    # gotcha enrichment land on that task. Both the empty-graph rescue
+    # path and the #683 Cause-2 synthesis path populate it.
+    gap_stub_to_synth: Dict[int, str] = {}
     if not tasks:
         rescued = _materialize_gap_dicts_as_rescue_tasks(result.synthesized_tasks)
         augmented = rescued
         synthesized_ids = [t.id for t in rescued]
+        gap_stub_to_synth = {idx: rid for idx, rid in enumerate(synthesized_ids)}
     else:
-        augmented = _route_gap_fill_to_criteria(
+        augmented, gap_synth_tasks, gap_stub_to_synth = _route_gap_fill_to_criteria(
             tasks=list(tasks),
             gap_dicts=result.synthesized_tasks,
             coverage_before_fill=result.coverage_before_fill,
             coverage_after_fill=result.coverage_after_fill,
         )
+        synthesized_ids = [t.id for t in gap_synth_tasks]
 
     # Issue #523 Slice A: project each in-scope outcome's
     # ``success_signal`` into the ``acceptance_criteria`` of every task
@@ -2145,19 +2268,16 @@ async def apply_outcome_coverage_to_feature_graph(
     # (cross-cutting outcomes that only the gap-fill task covers) are
     # rewritten to the routed anchor id so the signal text follows the
     # criterion to the same task — see
-    # ``_translate_stub_ids_to_anchor_ids``. In the rescue-path case
-    # (empty native graph) stub IDs map to the rescued tasks' real
-    # IDs by index, so the standard translation handles both paths.
+    # ``_translate_stub_ids_to_anchor_ids``. Gaps materialized into tasks
+    # (empty-graph rescue OR #683 Cause-2 synthesis) map their stub id to
+    # the materialized task's real id so enrichment lands there.
     stub_to_anchor = _resolve_gap_anchor_ids(
         tasks=augmented,
         gap_dicts=result.synthesized_tasks,
         coverage_after_fill=result.coverage_after_fill,
     )
-    if synthesized_ids:
-        # Rescue path: also map each stub id to its rescued task id so
-        # signal enrichment lands on the materialized rescue task.
-        for idx, real_id in enumerate(synthesized_ids):
-            stub_to_anchor[f"{STUB_TASK_ID_PREFIX}{idx}"] = real_id
+    for idx, real_id in gap_stub_to_synth.items():
+        stub_to_anchor[f"{STUB_TASK_ID_PREFIX}{idx}"] = real_id
     coverage_mapping = _translate_stub_ids_to_anchor_ids(
         result.coverage_after_fill or result.coverage_before_fill,
         stub_to_anchor,
@@ -2261,17 +2381,20 @@ async def apply_outcome_coverage_to_contract_graph(
     # the rollup has no anchor. Materialize gaps as rescue tasks
     # instead — pre-step-4 safety net scoped narrowly.
     synthesized_ids: List[str] = []
+    gap_stub_to_synth: Dict[int, str] = {}
     if not tasks:
         rescued = _materialize_gap_dicts_as_rescue_tasks(result.synthesized_tasks)
         augmented = rescued
         synthesized_ids = [t.id for t in rescued]
+        gap_stub_to_synth = {idx: rid for idx, rid in enumerate(synthesized_ids)}
     else:
-        augmented = _route_gap_fill_to_criteria(
+        augmented, gap_synth_tasks, gap_stub_to_synth = _route_gap_fill_to_criteria(
             tasks=list(tasks),
             gap_dicts=result.synthesized_tasks,
             coverage_before_fill=result.coverage_before_fill,
             coverage_after_fill=result.coverage_after_fill,
         )
+        synthesized_ids = [t.id for t in gap_synth_tasks]
 
     # Issue #523 Slice A: mirror the feature-based path — inject each
     # in-scope outcome's ``success_signal`` into the
@@ -2279,16 +2402,16 @@ async def apply_outcome_coverage_to_contract_graph(
     # ``WorkAnalyzer`` static gate validates against the user's stated
     # signal at task completion. Post-#607-step-4: stub IDs in the
     # mapping are rewritten to the routed anchor id so the signal
-    # follows the criterion to the same task. In the rescue path
-    # (empty graph) stubs map by index to rescued task IDs.
+    # follows the criterion to the same task. Gaps materialized into
+    # tasks (empty-graph rescue OR #683 Cause-2 synthesis) map their
+    # stub id to the materialized task's real id.
     stub_to_anchor = _resolve_gap_anchor_ids(
         tasks=augmented,
         gap_dicts=result.synthesized_tasks,
         coverage_after_fill=result.coverage_after_fill,
     )
-    if synthesized_ids:
-        for idx, real_id in enumerate(synthesized_ids):
-            stub_to_anchor[f"{STUB_TASK_ID_PREFIX}{idx}"] = real_id
+    for idx, real_id in gap_stub_to_synth.items():
+        stub_to_anchor[f"{STUB_TASK_ID_PREFIX}{idx}"] = real_id
     coverage_mapping = _translate_stub_ids_to_anchor_ids(
         result.coverage_after_fill or result.coverage_before_fill,
         stub_to_anchor,
