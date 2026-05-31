@@ -84,6 +84,15 @@ OPERATIONS: Dict[str, Operation] = {
         ),
         "category": "decomposition",
     },
+    "core_feature_mapping": {
+        "label": "Core feature mapping",
+        "description": (
+            "Maps AI-generated functional requirements to in-scope user "
+            "outcomes so the capacity filter keeps core features and trims "
+            "only scope-creep (#683 Cause 1)."
+        ),
+        "category": "decomposition",
+    },
     "generate_contracts": {
         "label": "Generate contracts",
         "description": (

@@ -9,7 +9,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from src.ai.advanced.prd.outcome_extractor import (
     UserOutcome,
@@ -2280,12 +2280,44 @@ Create design artifacts such as:
         project_size = (constraints.quality_requirements or {}).get(
             "project_size", "medium"
         )
+
+        # #683 Cause 1: determine which features are CORE (serve an
+        # in-scope user outcome) via one LLM call, so the filter keeps
+        # them and trims only scope-creep — instead of dropping by list
+        # position. Gated on outcome coverage (which provides the
+        # outcomes). On flag-off / no outcomes / LLM error we pass
+        # ``None``: the filter still caps by the complexity tier
+        # (deterministic, far better than the old team_size cut) and #683
+        # Cause 2 backstops any core feature that slips through.
+        protected_ids: Optional[Set[str]] = None
+        from src.config.outcome_coverage_config import is_outcome_coverage_enabled
+
+        if is_outcome_coverage_enabled() and analysis.user_outcomes:
+            try:
+                from src.marcus_mcp.coordinator.outcome_coverage import (
+                    map_core_feature_ids_with_llm,
+                )
+
+                protected_ids = await map_core_feature_ids_with_llm(
+                    requirements=analysis.functional_requirements,
+                    outcomes=analysis.user_outcomes,
+                    llm_client=self.llm_client,
+                )
+            except Exception as exc:  # noqa: BLE001 — graceful degradation
+                logger.warning(
+                    "#683 Cause 1: core-feature mapping failed; falling "
+                    "back to tier-cap filtering without core protection: %s",
+                    exc,
+                )
+                protected_ids = None
+
         functional_requirements = self._filter_requirements_by_size(
             analysis.functional_requirements,
             project_size,
             constraints.team_size,
             # Pass original PRD for specificity detection
             analysis.original_description,
+            protected_ids,
         )
 
         # Get complexity mode from constraints (passed from create_project)
@@ -5187,6 +5219,7 @@ explanation."""
         project_size: str,
         team_size: int,
         prd_content: str,
+        protected_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Filter functional requirements based on project size and team capacity.
@@ -5261,27 +5294,59 @@ explanation."""
             f"filtering for project_size={project_size}"
         )
 
-        # Map to new 3-option system (with legacy support)
-        if project_size in ["prototype", "mvp"]:
-            # Prototype: only keep the most essential 1-2 requirements
-            filtered = requirements[:2]
-        elif project_size in ["standard", "small", "medium"]:
-            # Standard: limit based on team size (typically 3-5 features)
-            max_reqs = min(len(requirements), max(3, team_size))
-            filtered = requirements[:max_reqs]
-        else:
-            # Enterprise/Large: include all requirements
-            filtered = requirements
+        # #683 Cause 1: cap by the project's complexity tier, NOT team
+        # size. ``project_size`` IS the complexity mode; team size governs
+        # parallelism, not scope. The old ``requirements[:max(3, team_size)]``
+        # cut a "medium" project (whose own expected range is 8-15) down to
+        # 3 by list position, silently dropping core features (the snake
+        # collision / game-over / restart loss in #683). The cap is the
+        # upper bound of the tier's expected feature range.
+        tier_caps = {
+            "prototype": 5,
+            "mvp": 5,
+            "small": 10,
+            "standard": 15,
+            "medium": 15,
+            "enterprise": 30,
+            "large": 30,
+        }
+        cap = tier_caps.get(project_size, 15)
+
+        # #683 Cause 1: never drop a CORE feature (one that serves an
+        # in-scope user outcome, per the LLM mapping the caller passes in).
+        # Keep all protected requirements first; fill the rest of the cap
+        # with non-core features in order; trim only genuine scope-creep.
+        protected = protected_ids or set()
+
+        def _rid(req: Dict[str, Any]) -> str:
+            return str(req.get("id") or req.get("name") or "unknown")
+
+        core = [r for r in requirements if _rid(r) in protected]
+        non_core = [r for r in requirements if _rid(r) not in protected]
+
+        # Core features are never dropped, even if they alone exceed the
+        # cap (correctness floor — Cause 2 would otherwise have to rebuild
+        # them). Non-core fills whatever capacity remains.
+        remaining = max(0, cap - len(core))
+        filtered = core + non_core[:remaining]
+        # Preserve original ordering for stability/readability.
+        kept_ids = {_rid(r) for r in filtered}
+        filtered = [r for r in requirements if _rid(r) in kept_ids]
 
         if len(filtered) < original_count:
-            filtered_ids = [
-                req.get("id", req.get("name", "unknown")) for req in filtered
-            ]
-            dropped_ids = [id for id in original_ids if id not in filtered_ids]
+            filtered_ids = [_rid(r) for r in filtered]
+            dropped_ids = [i for i in original_ids if i not in filtered_ids]
             logger.warning(
                 f"Filtered {original_count} -> {len(filtered)} "
-                f"(size={project_size}, team={team_size}). "
+                f"(size={project_size}, cap={cap}, "
+                f"core_protected={len(core)}). "
                 f"Kept: {filtered_ids}, Dropped: {dropped_ids}"
+            )
+        if len(core) > cap:
+            logger.warning(
+                f"#683 Cause 1: {len(core)} core feature(s) exceed the "
+                f"{project_size} cap of {cap}; keeping all core features "
+                f"(scope floor) — consider a larger project_size."
             )
 
         return filtered

@@ -502,6 +502,116 @@ async def compute_coverage_with_llm(
     return coverage
 
 
+_CORE_FEATURE_PROMPT = """\
+You are reviewing the feature list a planner generated for a software \
+project, deciding which features are CORE (required for the product to \
+satisfy what the user asked for) versus scope-creep the planner added on \
+its own.
+
+A feature is CORE when it is needed to deliver at least one of the \
+user-visible outcomes below. A feature is NON-CORE when no listed outcome \
+depends on it (nice-to-have, gold-plating, or tangential).
+
+User-visible outcomes (the ground truth of what the product must do):
+{outcomes_block}
+
+Features the planner generated:
+{features_block}
+
+For each feature id, decide whether it is core. Judge by MEANING, not \
+shared words — a feature and an outcome can use the same nouns yet be \
+unrelated, and can be related with no shared words.
+
+Return strict JSON, no preamble, no markdown fences:
+
+{{
+  "core_feature_ids": ["<id of each CORE feature>"]
+}}
+"""
+
+
+async def map_core_feature_ids_with_llm(
+    *,
+    requirements: List[Dict[str, Any]],
+    outcomes: Iterable[UserOutcome],
+    llm_client: Any,
+    max_tokens: int = 1500,
+) -> Set[str]:
+    """Return the ids of functional requirements that serve an in-scope outcome.
+
+    Issue #683 Cause 1. One batched LLM call decides which AI-generated
+    features are CORE (needed for an in-scope user outcome) so the
+    capacity filter can keep them and trim only genuine scope-creep —
+    instead of dropping features by list position. Uses semantic mapping,
+    not keyword overlap (which fails both directions on shared domain
+    nouns; see :func:`keyword_overlap_mapper`'s own warning).
+
+    Cost is attributed to the ``core_feature_mapping`` operation
+    (registered in ``src/cost_tracking/operations.py``) via
+    :func:`safe_structured_call`.
+
+    The requirement id is ``req["id"]`` when present, else ``req["name"]``
+    — the same identity the filter logs as Kept/Dropped.
+
+    Graceful degradation contract: callers must treat any raised
+    exception as "protect everything" (return all ids) so a mapping
+    failure never drops a required feature. This function itself returns
+    only the ids the LLM marked core; the all-ids fallback lives in the
+    caller alongside its flag/empty checks.
+
+    Returns
+    -------
+    set of str
+        Requirement ids judged core. Unknown ids in the response are
+        dropped; out-of-scope outcomes are never sent.
+
+    Raises
+    ------
+    ValueError
+        On malformed JSON or a missing ``core_feature_ids`` key.
+    """
+
+    def _req_id(req: Dict[str, Any]) -> str:
+        return str(req.get("id") or req.get("name") or "")
+
+    in_scope = [o for o in outcomes if o.scope == "in_scope"]
+    valid_ids = {_req_id(r) for r in requirements if _req_id(r)}
+    # No outcomes to protect against, or no identifiable requirements →
+    # caller should keep everything; signal that by returning all ids.
+    if not in_scope or not valid_ids:
+        return set(valid_ids)
+
+    outcomes_block = "\n".join(
+        f"- {o.id}: {o.action} (signal: {o.success_signal})" for o in in_scope
+    )
+    features_block = "\n".join(
+        f"- {_req_id(r)}: {r.get('name', '')} — {r.get('description', '')}"
+        for r in requirements
+        if _req_id(r)
+    )
+    prompt = _CORE_FEATURE_PROMPT.format(
+        outcomes_block=outcomes_block, features_block=features_block
+    )
+
+    from src.utils.structured_llm import safe_structured_call
+
+    try:
+        payload = await safe_structured_call(
+            llm=llm_client,
+            prompt=prompt,
+            operation="core_feature_mapping",
+            initial_max_tokens=max_tokens,
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Core-feature mapping: malformed JSON: {exc}") from exc
+
+    raw = payload.get("core_feature_ids")
+    if not isinstance(raw, list):
+        raise ValueError("Core-feature mapping: response missing 'core_feature_ids'")
+
+    return {rid for rid in raw if isinstance(rid, str) and rid in valid_ids}
+
+
 _GAP_FILL_PROMPT_HEADER = """\
 The following user-visible outcomes are required by the specification
 but the current task graph does not cover them.  Generate the minimum

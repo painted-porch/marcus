@@ -280,3 +280,72 @@ class TestImplementationTaskPlacement:
         by_id = {t.id: t for t in enriched}
         assert by_id["test_x"].acceptance_criteria == []
         assert f"{GOTCHA_CRITERION_PREFIX}g" in by_id["impl_x"].acceptance_criteria
+
+
+class TestMapCoreFeatureIds:
+    """#683 Cause 1: map AI features to in-scope outcomes (semantic, via LLM)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_core_ids_from_llm(self):
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            map_core_feature_ids_with_llm,
+        )
+
+        reqs = [
+            {"id": "f_move", "name": "Movement", "description": "steer snake"},
+            {"id": "f_theme", "name": "Dark theme", "description": "color scheme"},
+        ]
+        outcomes = [_outcome("o_play", "user plays snake", "snake moves")]
+        llm = _llm(json.dumps({"core_feature_ids": ["f_move"]}))
+
+        core = await map_core_feature_ids_with_llm(
+            requirements=reqs, outcomes=outcomes, llm_client=llm
+        )
+        assert core == {"f_move"}
+
+    @pytest.mark.asyncio
+    async def test_unknown_ids_dropped(self):
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            map_core_feature_ids_with_llm,
+        )
+
+        reqs = [{"id": "f_move", "name": "Movement", "description": "d"}]
+        outcomes = [_outcome("o", "x", "y")]
+        llm = _llm(json.dumps({"core_feature_ids": ["f_move", "hallucinated"]}))
+
+        core = await map_core_feature_ids_with_llm(
+            requirements=reqs, outcomes=outcomes, llm_client=llm
+        )
+        assert core == {"f_move"}
+
+    @pytest.mark.asyncio
+    async def test_no_in_scope_outcomes_returns_all_ids(self):
+        """No in-scope outcomes → caller should keep everything; helper
+        returns all ids and makes no LLM call."""
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            map_core_feature_ids_with_llm,
+        )
+
+        reqs = [{"id": "f1", "name": "A", "description": "d"}]
+        outcomes = [_outcome("o", "x", "y", scope="out_of_scope")]
+        llm = _llm(json.dumps({"core_feature_ids": []}))
+
+        core = await map_core_feature_ids_with_llm(
+            requirements=reqs, outcomes=outcomes, llm_client=llm
+        )
+        assert core == {"f1"}
+        llm.analyze.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_malformed_response_raises(self):
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            map_core_feature_ids_with_llm,
+        )
+
+        reqs = [{"id": "f1", "name": "A", "description": "d"}]
+        outcomes = [_outcome("o", "x", "y")]
+        llm = _llm(json.dumps({"wrong_key": []}))
+        with pytest.raises(ValueError):
+            await map_core_feature_ids_with_llm(
+                requirements=reqs, outcomes=outcomes, llm_client=llm
+            )
