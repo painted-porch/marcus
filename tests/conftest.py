@@ -82,6 +82,27 @@ def _disable_outcome_coverage_by_default(
     monkeypatch.setenv("MARCUS_OUTCOME_COVERAGE", "false")
 
 
+@pytest.fixture(autouse=True)
+def _allow_mlflow_file_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Permit MLflow's filesystem tracking backend (``./mlruns``) in tests.
+
+    Newer MLflow raises ``MlflowException`` from ``mlflow.set_experiment``
+    when the resolved tracking backend is the filesystem store, unless
+    ``MLFLOW_ALLOW_FILE_STORE=true`` is set — the file store is in
+    maintenance mode and now opt-in. Several tests construct real
+    ``MarcusExperiment`` / ``LiveExperimentMonitor`` objects (e.g.
+    ``tests/unit/marcus_mcp/test_experiment_termination.py``) whose
+    ``__init__`` calls ``mlflow.set_experiment("./mlruns")``, so without
+    this opt-in the suite fails purely on the installed MLflow version.
+
+    This is a test-environment shim, not the long-term answer — the file
+    store is being removed and Marcus should migrate experiment tracking
+    to a database backend (sqlite). That migration is tracked separately;
+    until then this keeps the suite reproducible across MLflow versions.
+    """
+    monkeypatch.setenv("MLFLOW_ALLOW_FILE_STORE", "true")
+
+
 @pytest.fixture
 async def mcp_session() -> AsyncGenerator[ClientSession, None]:
     """
