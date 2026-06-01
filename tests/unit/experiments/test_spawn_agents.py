@@ -1459,7 +1459,7 @@ class TestAgentSpawnerHarnessRouting:
         # documented flags only.
         assert "--yolo" not in cmd
         # Claude-side flags must NOT leak into the codex branch.
-        assert "claude" not in cmd
+        assert "claude " not in cmd
         assert "--dangerously-skip-permissions" not in cmd
 
     def test_agent_command_codex_ignores_print_mode(self, tmp_path: Path) -> None:

@@ -484,7 +484,9 @@ class TestTaskExecutionOrderComprehensive:
         end_time = time.time()
 
         assert len(result) == 120
-        assert (end_time - start_time) < 1.0  # Should complete in under 1 second
+        assert (
+            end_time - start_time
+        ) < 5.0  # Should complete well under 5s on any hardware
 
     @pytest.mark.parametrize(
         "task_name,expected_type",

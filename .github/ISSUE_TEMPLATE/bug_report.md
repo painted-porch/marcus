@@ -26,10 +26,11 @@ A clear and concise description of what you expected to happen.
 
 What actually happened instead.
 
-## Error Messages
+## Error Type
 
 ```
-Paste any error messages or stack traces here
+If you saw an error message, paste it here or provide the error type name
+(e.g., KanbanIntegrationError, NetworkTimeoutError, ValidationError)
 ```
 
 ## Environment
@@ -38,18 +39,24 @@ Paste any error messages or stack traces here
 - OS: [e.g., macOS 13.0, Ubuntu 22.04, Windows 11]
 - Python Version: [e.g., 3.11.5]
 - Marcus Version: [e.g., 0.1.0 or commit hash]
-- Docker Version: [e.g., 24.0.6]
-- Docker Compose Version: [e.g., 2.21.0]
+- Docker Version: [e.g., 24.0.6 (if applicable)]
 
 **Configuration:**
 - Kanban Provider: [e.g., Planka, GitHub, Linear]
 - AI Provider: [e.g., Claude, GPT-4, Ollama/Qwen2.5-Coder]
 - Running via: [e.g., Docker, local Python]
 
-## Logs
+## Relevant Logs
 
 <details>
-<summary>Relevant log output (click to expand)</summary>
+<summary>Log entries from when the error occurred (click to expand)</summary>
+
+Look in one of these locations:
+- **Local file store:** `~/.marcus/telemetry_outbound.jsonl` (last few entries around error time)
+- **Console output:** Paste the error message and any surrounding context
+- **System logs:** If running in Docker, output from `docker logs <container_name>`
+
+Paste relevant entries here (focus on lines mentioning the error or what was happening):
 
 ```
 Paste logs here
