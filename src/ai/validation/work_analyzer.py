@@ -162,11 +162,19 @@ class WorkAnalyzer:
             f"({sum(f.size_bytes for f in source_files)} total bytes)"
         )
 
-        # 3. Get design artifacts from state
+        # 4. Collect full file manifest (names only, no content reads).
+        #    Injected into the prompt so the LLM knows which files exist
+        #    even when their extension is excluded from SOURCE_EXTENSIONS
+        #    (e.g. pyproject.toml, Makefile). Prevents false "file missing"
+        #    reports when the delta scan limits content to .py/.js files.
+        file_manifest = self._collect_file_manifest(project_root)
+        logger.info(f"File manifest: {len(file_manifest)} files in project")
+
+        # 5. Get design artifacts from state
         design_artifacts = state.task_artifacts.get(task.id, []).copy()
         logger.debug(f"Found {len(design_artifacts)} design artifacts")
 
-        # 4. Get decisions from get_task_context
+        # 6. Get decisions from get_task_context
         decisions = await self._get_decisions(task, state)
         logger.debug(f"Retrieved {len(decisions)} architectural decisions")
 
@@ -175,6 +183,7 @@ class WorkAnalyzer:
             design_artifacts=design_artifacts,
             decisions=decisions,
             project_root=project_root,
+            file_manifest=file_manifest,
             collection_time=datetime.utcnow(),
         )
 
@@ -523,6 +532,42 @@ class WorkAnalyzer:
                 " — falling back to full worktree scan"
             )
             return None
+
+    def _collect_file_manifest(self, project_root: str) -> list[str]:
+        """Return relative paths of every file in project_root (names only).
+
+        This is the cheap half of the git-delta approach (issue #696): we
+        scan the full worktree for filenames — no content reads — and inject
+        the list into the validation prompt so the LLM knows which files
+        *exist* even when their extension is excluded from SOURCE_EXTENSIONS
+        (e.g. ``pyproject.toml``, ``Makefile``, ``.flake8``).
+
+        Parameters
+        ----------
+        project_root : str
+            Absolute path to the project directory to scan
+
+        Returns
+        -------
+        list[str]
+            Sorted relative file paths (POSIX separators)
+        """
+        manifest: list[str] = []
+        project_path = Path(project_root).resolve()
+
+        for root, dirs, files in os.walk(project_root):
+            dirs[:] = [d for d in dirs if d not in self.EXCLUDE_DIRS]
+            for file in files:
+                file_path = Path(root) / file
+                try:
+                    resolved = file_path.resolve()
+                    if not resolved.is_relative_to(project_path):
+                        continue
+                    manifest.append(str(resolved.relative_to(project_path)))
+                except (ValueError, OSError):
+                    continue
+
+        return sorted(manifest)
 
     def _discover_source_files(
         self, project_root: str, allowed_files: list[str] | None = None
@@ -1324,6 +1369,24 @@ Focus on FUNCTIONALITY, not understanding. Code must WORK, not just exist.
         else:
             for i, criterion in enumerate(criteria, 1):
                 prompt_parts.append(f"{i}. {criterion}")
+
+        # Add file manifest — existence proof for every file in the project.
+        # This lets the LLM verify "does pyproject.toml exist?" without
+        # needing its content. Files in the manifest but absent from the
+        # source file section below exist but aren't readable (wrong
+        # extension or excluded by SOURCE_EXTENSIONS) — the LLM must NOT
+        # report them as missing. Only files absent from BOTH the manifest
+        # AND the source files section are truly missing.
+        if evidence.file_manifest:
+            prompt_parts.append("\n\nPROJECT FILE MANIFEST (every file that exists):")
+            for path in evidence.file_manifest:
+                prompt_parts.append(f"  {path}")
+            prompt_parts.append(
+                "\nNOTE: Files listed above exist in the project. "
+                "If a file appears in the manifest but not in the source "
+                "files section below, it exists but its content is not "
+                "shown. Do NOT report manifest-listed files as missing."
+            )
 
         # Add discovered source files with full content (no truncation).
         # Previously content was truncated to 8KB per file which caused

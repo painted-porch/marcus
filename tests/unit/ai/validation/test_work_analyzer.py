@@ -696,6 +696,160 @@ class TestGitDeltaEvidence:
         assert result[0].relative_path == "exists.py"
 
 
+class TestFileManifest:
+    """Tests for the file manifest injected into validation prompts (issue #696).
+
+    The manifest lists every file that exists in the project (names only,
+    no content) so the LLM knows a file exists even when it is excluded
+    from SOURCE_EXTENSIONS (e.g. pyproject.toml, Makefile).
+    """
+
+    @pytest.fixture
+    def analyzer(self) -> WorkAnalyzer:
+        """Create WorkAnalyzer instance."""
+        with patch("src.ai.validation.work_analyzer.LLMAbstraction"):
+            return WorkAnalyzer()
+
+    @pytest.fixture
+    def mock_task(self) -> Mock:
+        """Minimal mock task."""
+        task = Mock()
+        task.id = "task-manifest"
+        task.name = "Packaging Foundation"
+        task.assigned_to = None
+        task.completion_criteria = ["pyproject.toml configured with package metadata"]
+        task.dependencies = []
+        return task
+
+    @pytest.fixture
+    def mock_state(self) -> Mock:
+        """Mock state with no agent assignment."""
+        state = Mock()
+        state.task_artifacts = {}
+        state.kanban_client = Mock()
+        state.kanban_client._load_workspace_state.return_value = None
+        state.workspace_manager = Mock()
+        state.workspace_manager.project_config = Mock()
+        state.workspace_manager.project_config.main_workspace = "/fake/root"
+        state.agent_tasks = {}
+        return state
+
+    def test_collect_file_manifest_includes_all_extensions(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """Manifest includes files regardless of extension — .toml, Makefile, .yml etc."""
+        (tmp_path / "pyproject.toml").write_text("[project]")
+        (tmp_path / "setup.py").write_text("from setuptools import setup")
+        (tmp_path / "Makefile").write_text("test:\n\tpytest")
+        (tmp_path / ".flake8").write_text("[flake8]")
+        subdir = tmp_path / "src"
+        subdir.mkdir()
+        (subdir / "app.py").write_text("x = 1")
+
+        manifest = analyzer._collect_file_manifest(str(tmp_path))
+
+        assert "pyproject.toml" in manifest
+        assert "setup.py" in manifest
+        assert "Makefile" in manifest
+        assert ".flake8" in manifest
+        assert str(Path("src") / "app.py") in manifest
+
+    def test_collect_file_manifest_excludes_excluded_dirs(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """Manifest skips node_modules, .git, __pycache__ etc."""
+        (tmp_path / "app.py").write_text("x = 1")
+        node_modules = tmp_path / "node_modules"
+        node_modules.mkdir()
+        (node_modules / "some_package.js").write_text("module.exports = {}")
+        pycache = tmp_path / "__pycache__"
+        pycache.mkdir()
+        (pycache / "app.cpython-312.pyc").write_bytes(b"")
+
+        manifest = analyzer._collect_file_manifest(str(tmp_path))
+
+        assert "app.py" in manifest
+        assert not any("node_modules" in f for f in manifest)
+        assert not any("__pycache__" in f for f in manifest)
+
+    @pytest.mark.asyncio
+    async def test_gather_evidence_populates_file_manifest(
+        self,
+        analyzer: WorkAnalyzer,
+        mock_task: Mock,
+        mock_state: Mock,
+        tmp_path: Path,
+    ) -> None:
+        """gather_evidence populates WorkEvidence.file_manifest with all project files."""
+        (tmp_path / "pyproject.toml").write_text("[project]")
+        (tmp_path / "setup.py").write_text("from setuptools import setup; setup()")
+        (tmp_path / "app.py").write_text("x = 1")
+
+        mock_state.workspace_manager.project_config.main_workspace = str(tmp_path)
+
+        with patch(
+            "src.ai.validation.work_analyzer.get_task_context",
+            new_callable=AsyncMock,
+            return_value={"success": True, "context": {"decisions": []}},
+        ):
+            evidence = await analyzer.gather_evidence(mock_task, mock_state)
+
+        assert hasattr(evidence, "file_manifest")
+        assert "pyproject.toml" in evidence.file_manifest
+        assert "setup.py" in evidence.file_manifest
+        assert "app.py" in evidence.file_manifest
+
+    def test_build_validation_prompt_includes_manifest_section(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """Validation prompt contains a PROJECT FILE MANIFEST section."""
+        from src.ai.validation.validation_models import WorkEvidence
+
+        evidence = WorkEvidence(
+            source_files=[],
+            design_artifacts=[],
+            decisions=[],
+            project_root=str(tmp_path),
+            file_manifest=["pyproject.toml", "setup.py", "Makefile", "src/app.py"],
+        )
+        task = Mock()
+        task.name = "Packaging Foundation"
+        task.description = "Set up packaging"
+        task.completion_criteria = ["pyproject.toml must exist"]
+        task.acceptance_criteria = []
+
+        prompt = analyzer._build_validation_prompt(task, evidence)
+
+        assert "PROJECT FILE MANIFEST" in prompt
+        assert "pyproject.toml" in prompt
+        assert "Makefile" in prompt
+
+    def test_manifest_appears_before_source_file_content(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """Manifest section comes before source file content in the prompt."""
+        from src.ai.validation.validation_models import WorkEvidence
+
+        evidence = WorkEvidence(
+            source_files=[],
+            design_artifacts=[],
+            decisions=[],
+            project_root=str(tmp_path),
+            file_manifest=["pyproject.toml"],
+        )
+        task = Mock()
+        task.name = "Test"
+        task.description = "Test"
+        task.completion_criteria = ["criterion"]
+        task.acceptance_criteria = []
+
+        prompt = analyzer._build_validation_prompt(task, evidence)
+
+        manifest_pos = prompt.find("PROJECT FILE MANIFEST")
+        evidence_pos = prompt.find("EVIDENCE - DISCOVERED SOURCE FILES")
+        assert manifest_pos < evidence_pos
+
+
 class TestParseValidationResponse:
     """Regression tests for the validation LLM response parser.
 
