@@ -11,6 +11,7 @@ This module contains tools for task operations in the Marcus system:
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -75,6 +76,45 @@ _smoke_missing_verification_attempts: Dict[str, int] = {}
 # remediation payload.
 MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS = 2
 _smoke_behavior_evidence_attempts: Dict[str, int] = {}
+
+
+def _capture_baseline_commit(assignment: "TaskAssignment", project_root: str) -> None:
+    """Snapshot the current git HEAD into the assignment for validation scoping.
+
+    Stored on TaskAssignment.baseline_commit so that WorkAnalyzer can later
+    run ``git diff <baseline>..HEAD --name-only`` to collect only the files
+    this agent changed, rather than the entire merged worktree (issue #696).
+
+    Parameters
+    ----------
+    assignment : TaskAssignment
+        The assignment object to update in-place
+    project_root : str
+        Any directory inside the git repo to run git commands from
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            assignment.baseline_commit = result.stdout.strip()
+            logger.debug(
+                f"Captured baseline commit {assignment.baseline_commit[:8]} "
+                f"for task {assignment.task_id}"
+            )
+        else:
+            logger.warning(
+                f"git rev-parse HEAD failed for task {assignment.task_id}: "
+                f"{result.stderr.strip()}"
+            )
+    except Exception as exc:
+        logger.warning(
+            f"Could not capture baseline commit for task {assignment.task_id}: {exc}"
+        )
 
 
 def _record_missing_verification_attempt(task_id: str) -> int:
@@ -2350,6 +2390,29 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
 
                 # If kanban update succeeded, track assignment
                 state.agent_tasks[agent_id] = assignment
+
+                # Capture git HEAD as baseline for validation delta scoping
+                # (issue #696). Allows WorkAnalyzer to later compute
+                # git diff <baseline>..HEAD --name-only and load only the
+                # files this agent changed, not the entire merged codebase.
+                _project_root_for_baseline: Optional[str] = None
+                if hasattr(state, "kanban_client") and state.kanban_client:
+                    _ws = state.kanban_client._load_workspace_state()
+                    if _ws and "project_root" in _ws:
+                        _project_root_for_baseline = _ws["project_root"]
+                if not _project_root_for_baseline and (
+                    hasattr(state, "workspace_manager")
+                    and state.workspace_manager
+                    and hasattr(state.workspace_manager, "project_config")
+                    and state.workspace_manager.project_config
+                ):
+                    _project_root_for_baseline = (
+                        str(state.workspace_manager.project_config.main_workspace or "")
+                        or None
+                    )
+                if _project_root_for_baseline:
+                    _capture_baseline_commit(assignment, _project_root_for_baseline)
+
                 agent = state.agent_status[agent_id]
                 agent.current_tasks = [optimal_task]
 

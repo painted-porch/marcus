@@ -448,6 +448,7 @@ class TaskAssignment:
     due_date: Optional[datetime]
     workspace_path: Optional[str] = None
     forbidden_paths: List[str] = field(default_factory=list)
+    baseline_commit: Optional[str] = None
 
 
 @dataclass

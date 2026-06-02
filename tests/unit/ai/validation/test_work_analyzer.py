@@ -488,6 +488,214 @@ The implementation is complete and functional.
             # Should fail immediately without calling AI
 
 
+class TestGitDeltaEvidence:
+    """Tests for git-delta-scoped evidence collection (issue #696).
+
+    Validates that when a baseline_commit is available on the agent's
+    assignment, gather_evidence uses git diff to collect only the files
+    the agent changed rather than the entire merged worktree.
+    """
+
+    @pytest.fixture
+    def analyzer(self) -> WorkAnalyzer:
+        """Create WorkAnalyzer instance."""
+        with patch("src.ai.validation.work_analyzer.LLMAbstraction"):
+            return WorkAnalyzer()
+
+    @pytest.fixture
+    def mock_task(self) -> Mock:
+        """Create minimal mock task."""
+        task = Mock()
+        task.id = "task-456"
+        task.name = "Implement executor"
+        task.assigned_to = None
+        task.completion_criteria = ["Executor handles retries"]
+        task.dependencies = []
+        return task
+
+    @pytest.fixture
+    def mock_state(self) -> Mock:
+        """Create mock state with agent_tasks carrying a baseline_commit."""
+        state = Mock()
+        state.task_artifacts = {}
+        state.kanban_client = Mock()
+        state.kanban_client._load_workspace_state.return_value = None
+        state.workspace_manager = Mock()
+        state.workspace_manager.project_config = Mock()
+        state.workspace_manager.project_config.main_workspace = "/fake/root"
+        state.agent_tasks = {}
+        return state
+
+    @pytest.fixture
+    def mock_assignment(self) -> Mock:
+        """Assignment with baseline_commit set."""
+        assignment = Mock()
+        assignment.baseline_commit = "abc1234"
+        return assignment
+
+    @pytest.mark.asyncio
+    async def test_gather_evidence_uses_git_delta_when_baseline_commit_set(
+        self,
+        analyzer: WorkAnalyzer,
+        mock_task: Mock,
+        mock_state: Mock,
+        mock_assignment: Mock,
+        tmp_path: Path,
+    ) -> None:
+        """When assignment has baseline_commit, only delta files are collected.
+
+        Verifies that the validator does not load all 47 files from a merged
+        worktree — only the 2 files the agent actually changed.
+        """
+        # 3 files exist on disk; only 2 are in the agent's git delta
+        (tmp_path / "executor.py").write_text("class Executor: pass")
+        (tmp_path / "test_executor.py").write_text("def test_ok(): pass")
+        (tmp_path / "merged_by_other_agent.py").write_text("# not mine")
+
+        mock_state.kanban_client._load_workspace_state.return_value = {
+            "project_root": str(tmp_path)
+        }
+        mock_state.agent_tasks["agent-1"] = mock_assignment
+
+        git_diff_output = "executor.py\ntest_executor.py\n"
+
+        with patch("src.ai.validation.work_analyzer.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=0, stdout=git_diff_output, stderr=""
+            )
+            with patch(
+                "src.ai.validation.work_analyzer.get_task_context",
+                new_callable=AsyncMock,
+                return_value={"success": True, "context": {"decisions": []}},
+            ):
+                evidence = await analyzer.gather_evidence(
+                    mock_task, mock_state, agent_id="agent-1"
+                )
+
+        # Only the 2 delta files loaded — merged_by_other_agent.py excluded
+        assert len(evidence.source_files) == 2
+        names = {f.relative_path for f in evidence.source_files}
+        assert "executor.py" in names
+        assert "test_executor.py" in names
+        assert "merged_by_other_agent.py" not in names
+
+    @pytest.mark.asyncio
+    async def test_gather_evidence_falls_back_to_full_scan_when_no_baseline(
+        self,
+        analyzer: WorkAnalyzer,
+        mock_task: Mock,
+        mock_state: Mock,
+        tmp_path: Path,
+    ) -> None:
+        """When no baseline_commit exists, all files are collected (old behaviour)."""
+        (tmp_path / "file_a.py").write_text("x = 1")
+        (tmp_path / "file_b.py").write_text("y = 2")
+
+        mock_state.kanban_client._load_workspace_state.return_value = {
+            "project_root": str(tmp_path)
+        }
+        # No agent_tasks entry → no baseline_commit
+        mock_state.agent_tasks = {}
+
+        with patch(
+            "src.ai.validation.work_analyzer.get_task_context",
+            new_callable=AsyncMock,
+            return_value={"success": True, "context": {"decisions": []}},
+        ):
+            evidence = await analyzer.gather_evidence(
+                mock_task, mock_state, agent_id="agent-1"
+            )
+
+        assert len(evidence.source_files) == 2
+
+    @pytest.mark.asyncio
+    async def test_gather_evidence_falls_back_to_full_scan_when_git_fails(
+        self,
+        analyzer: WorkAnalyzer,
+        mock_task: Mock,
+        mock_state: Mock,
+        mock_assignment: Mock,
+        tmp_path: Path,
+    ) -> None:
+        """When git diff exits non-zero, fall back to scanning all files."""
+        (tmp_path / "executor.py").write_text("class Executor: pass")
+        (tmp_path / "other.py").write_text("# other")
+
+        mock_state.kanban_client._load_workspace_state.return_value = {
+            "project_root": str(tmp_path)
+        }
+        mock_state.agent_tasks["agent-1"] = mock_assignment
+
+        with patch("src.ai.validation.work_analyzer.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=128, stdout="", stderr="not a git repository"
+            )
+            with patch(
+                "src.ai.validation.work_analyzer.get_task_context",
+                new_callable=AsyncMock,
+                return_value={"success": True, "context": {"decisions": []}},
+            ):
+                evidence = await analyzer.gather_evidence(
+                    mock_task, mock_state, agent_id="agent-1"
+                )
+
+        # Full scan: both files returned
+        assert len(evidence.source_files) == 2
+
+    def test_discover_source_files_with_allowed_files_scopes_to_delta(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """_discover_source_files only loads files in the allowed_files list."""
+        (tmp_path / "executor.py").write_text("class Executor: pass")
+        (tmp_path / "merged.py").write_text("# merged from another agent")
+        (tmp_path / "test_executor.py").write_text("def test_ok(): pass")
+
+        result = analyzer._discover_source_files(
+            str(tmp_path), allowed_files=["executor.py", "test_executor.py"]
+        )
+
+        assert len(result) == 2
+        names = {f.relative_path for f in result}
+        assert "executor.py" in names
+        assert "test_executor.py" in names
+        assert "merged.py" not in names
+
+    def test_discover_source_files_with_empty_allowed_files_returns_empty(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """Empty allowed_files list returns no source files."""
+        (tmp_path / "executor.py").write_text("class Executor: pass")
+
+        result = analyzer._discover_source_files(str(tmp_path), allowed_files=[])
+
+        assert result == []
+
+    def test_discover_source_files_with_none_allowed_files_walks_all(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """When allowed_files=None, all matching files are returned (unchanged behaviour)."""
+        (tmp_path / "a.py").write_text("x = 1")
+        (tmp_path / "b.py").write_text("y = 2")
+
+        result = analyzer._discover_source_files(str(tmp_path), allowed_files=None)
+
+        assert len(result) == 2
+
+    def test_discover_source_files_skips_missing_allowed_files_gracefully(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """Files in allowed_files that don't exist on disk are silently skipped."""
+        (tmp_path / "exists.py").write_text("x = 1")
+
+        result = analyzer._discover_source_files(
+            str(tmp_path),
+            allowed_files=["exists.py", "phantom.py"],
+        )
+
+        assert len(result) == 1
+        assert result[0].relative_path == "exists.py"
+
+
 class TestParseValidationResponse:
     """Regression tests for the validation LLM response parser.
 
