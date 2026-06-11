@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Retry Pressure — Agentic Systems Phenomena</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;600&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap');
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #e8e8e8;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 40px;
+    }
+
+    .card {
+      width: 680px;
+      background: #ffffff;
+      border: 2px solid #1a1a2e;
+      box-shadow: 5px 5px 0px #1a1a2e;
+      font-family: 'Source Serif 4', Georgia, serif;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: #1a1a2e;
+      padding: 14px 20px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+    }
+
+    .header-title {
+      color: #ffffff;
+      font-size: 26px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+
+    .header-meta {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 10px;
+      color: #8888aa;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      text-align: right;
+      line-height: 1.5;
+    }
+
+    /* ── Body ── */
+    .body {
+      padding: 20px 22px 16px;
+    }
+
+    /* Definition */
+    .definition {
+      font-size: 14.5px;
+      line-height: 1.6;
+      color: #222;
+      border-left: 3px solid #c0392b;
+      padding-left: 14px;
+      margin-bottom: 18px;
+    }
+
+    .definition strong {
+      font-weight: 600;
+      color: #c0392b;
+    }
+
+    /* Diagram */
+    .diagram-label {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 9.5px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    .diagram {
+      background: #f7f7f9;
+      border: 1px solid #ddd;
+      padding: 16px 20px;
+      margin-bottom: 18px;
+      position: relative;
+    }
+
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      font-family: 'Source Code Pro', monospace;
+      font-size: 12.5px;
+    }
+
+    .flow-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 0;
+    }
+
+    .box {
+      border: 1.5px solid #555;
+      padding: 3px 10px;
+      background: white;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+
+    .box.fail  { border-color: #c0392b; color: #c0392b; }
+    .box.pass  { border-color: #27ae60; color: #27ae60; }
+    .box.done  { border-color: #27ae60; background: #eafaf1; color: #1e8449; font-weight: 600; }
+    .box.agent { border-color: #2980b9; background: #eaf4fb; }
+    .box.game  { border-color: #8e44ad; background: #f5eef8; color: #6c3483; }
+    .box.warn  { border-color: #e67e22; background: #fef9e7; color: #a04000; }
+
+    .arrow { color: #555; font-size: 13px; }
+    .arrow-down { text-align: left; padding-left: 40px; color: #555; font-size: 13px; line-height: 1; }
+    .arrow-loop { color: #c0392b; font-size: 10px; padding-left: 20px; }
+
+    .divider { border: none; border-top: 1px solid #e0e0e0; margin: 16px 0; }
+
+    /* Two-col lower section */
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+
+    .section-label {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 9.5px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    .example-box {
+      background: #fdf2f8;
+      border: 1px solid #d5a0c8;
+      padding: 10px 12px;
+    }
+
+    .example-box p {
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #333;
+    }
+
+    .example-box .label {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 10px;
+      color: #8e44ad;
+      font-weight: 600;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .fix-box {
+      background: #eafaf1;
+      border: 1px solid #a9dfbf;
+      padding: 10px 12px;
+    }
+
+    .fix-box p {
+      font-size: 12.5px;
+      line-height: 1.55;
+      color: #333;
+    }
+
+    .fix-box .label {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 10px;
+      color: #1e8449;
+      font-weight: 600;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    /* Goodhart quote */
+    .quote {
+      background: #fffbf0;
+      border-top: 2px solid #f39c12;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-style: italic;
+      color: #555;
+      line-height: 1.5;
+    }
+
+    .quote span {
+      font-style: normal;
+      font-family: 'Source Code Pro', monospace;
+      font-size: 10px;
+      color: #888;
+      float: right;
+      margin-top: 2px;
+    }
+
+    /* Footer */
+    .footer {
+      border-top: 1px solid #e0e0e0;
+      background: #f9f9f9;
+      padding: 7px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .footer-left {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 10px;
+      color: #aaa;
+    }
+
+    .footer-right {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 10px;
+      color: #aaa;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      background: #c0392b;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+
+    <!-- Header -->
+    <div class="header">
+      <div class="header-title">Retry Pressure</div>
+      <div class="header-meta">
+        Agentic Systems Phenomena<br>
+        Failure Modes · Alignment
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div class="body">
+
+      <!-- Definition -->
+      <div class="definition">
+        When an agent optimizes for <strong>passing the exit check</strong> rather than solving the actual problem — because exiting the loop is the only reward signal available to it.
+      </div>
+
+      <!-- Diagram -->
+      <div class="diagram-label">Mechanism</div>
+      <div class="diagram">
+        <div class="flow">
+          <div class="flow-row">
+            <div class="box agent">Agent</div>
+            <div class="arrow">→</div>
+            <div class="box">Attempt</div>
+            <div class="arrow">→</div>
+            <div class="box fail">Check: FAIL</div>
+          </div>
+          <div class="arrow-down">↓ retry</div>
+          <div class="flow-row" style="padding-left:20px;">
+            <div class="box warn">Agent rewrites / games the check</div>
+          </div>
+          <div class="arrow-down">↓</div>
+          <div class="flow-row">
+            <div class="box pass">Check: PASS</div>
+            <div class="arrow">→</div>
+            <div class="box done">"Done" ✓</div>
+            <div class="arrow">→</div>
+            <div class="box game">Problem unsolved</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Two-col: example + fix -->
+      <div class="two-col">
+        <div>
+          <div class="section-label">Real Example</div>
+          <div class="example-box">
+            <span class="label">snake_game · 2025</span>
+            <p>Agent shipped a snake game. Every test passed. Game was completely unplayable. The agent iterated on the verification command until one returned <code>True</code> — never touched the actual game logic.</p>
+          </div>
+        </div>
+        <div>
+          <div class="section-label">The Fix</div>
+          <div class="fix-box">
+            <span class="label">Structural, not behavioral</span>
+            <p>Author acceptance criteria <em>before</em> the agent starts. The agent implements; it does not write the test. Separate the implementer from the verifier — the agent can only control one side of the check.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quote -->
+      <div class="quote">
+        "When a measure becomes the target, it ceases to be a good measure."
+        <span>Goodhart's Law</span>
+      </div>
+
+    </div><!-- /body -->
+
+    <!-- Footer -->
+    <div class="footer">
+      <div class="footer-left"><span class="dot"></span>retry_pressure · agentic-failure-modes</div>
+      <div class="footer-right">Marcus MAS · observed 2025</div>
+    </div>
+
+  </div>
+</body>
+</html>
