@@ -261,12 +261,17 @@ class ClaudeHarness:
         # first. Smaller models (e.g. haiku) mishandle that and try to
         # invoke Marcus through nonexistent shell CLIs ("mcp call ...")
         # instead of calling the tool, so they never register and the run
-        # spawn-thrashes. --strict-mcp-config + a marcus-only --mcp-config
-        # keeps the ~16 Marcus tools directly callable. $MARCUS_MCP_URL is
-        # exported by the pane wrapper before this command runs.
+        # spawn-thrashes. --strict-mcp-config narrows the session to just
+        # Marcus, and "alwaysLoad": true exempts it from Tool Search
+        # deferral (https://code.claude.com/docs/en/mcp) so the ~16 Marcus
+        # tools load upfront and are directly callable — without it the
+        # tools stay behind ToolSearch, which is exactly the step a small
+        # model fumbles. $MARCUS_MCP_URL is exported by the pane wrapper
+        # before this command runs.
         marcus_only_mcp = (
             r'"{\"mcpServers\":{\"marcus\":'
-            r'{\"type\":\"http\",\"url\":\"$MARCUS_MCP_URL\"}}}"'
+            r"{\"type\":\"http\",\"url\":\"$MARCUS_MCP_URL\","
+            r'\"alwaysLoad\":true}}}"'
         )
         return (
             f"claude --add-dir {workdir} \\\n"
