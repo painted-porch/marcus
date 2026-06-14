@@ -145,12 +145,31 @@ class TestClaudeRenderedShell:
         inner = "claude --add-dir /x < /p"
         assert impl.wrap_worker_invocation(inner) == inner
 
-    def test_mcp_register_snippet_uses_http_transport(self) -> None:
-        """``claude mcp add ... -t http`` + idempotent ``|| true``."""
-        snippet = harness.get_harness("claude").build_mcp_register_snippet()
-        assert "claude mcp add marcus -t http" in snippet
-        assert "|| true" in snippet
+    def test_marcus_pinned_via_strict_config_not_global_add(
+        self, tmp_path: Path
+    ) -> None:
+        """Marcus is pinned per-pane via --strict-mcp-config, not ``claude mcp add``.
+
+        ``claude mcp add`` writes ~/.claude.json, which --strict-mcp-config
+        ignores anyway and which parallel panes can corrupt. The register
+        snippet is now a no-op marker; the agent command carries the
+        marcus-only --mcp-config with ``alwaysLoad`` so the tools load
+        upfront (exempt from ToolSearch deferral).
+        """
+        impl = harness.get_harness("claude")
+        snippet = impl.build_mcp_register_snippet()
+        assert "claude mcp add" not in snippet
         assert "codex" not in snippet
+        cmd = impl.build_agent_command(
+            tmp_path / "work",
+            tmp_path / "prompt.txt",
+            model_flag="",
+            print_mode=False,
+        )
+        assert "--strict-mcp-config" in cmd
+        assert "--mcp-config" in cmd
+        assert "marcus" in cmd
+        assert "alwaysLoad" in cmd
 
     def test_install_hint_is_single_line(self) -> None:
         """Claude install hint is a single instruction."""

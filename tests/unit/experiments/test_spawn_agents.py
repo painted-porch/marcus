@@ -1396,14 +1396,17 @@ class TestAgentSpawnerHarnessRouting:
         return spawner
 
     def test_mcp_register_claude(self, tmp_path: Path) -> None:
-        """Claude harness uses ``claude mcp add ... -t http``."""
+        """Claude harness no longer registers marcus via ``claude mcp add``.
+
+        Marcus is pinned per-pane through --strict-mcp-config on the agent
+        command; the register snippet is a no-op marker. ``claude mcp add``
+        wrote ~/.claude.json, which strict config ignores and which parallel
+        panes can corrupt.
+        """
         spawner = self._make_bypass_spawner(tmp_path, "claude")
         snippet = spawner._build_mcp_register_snippet()
-        assert "claude mcp add marcus -t http" in snippet
+        assert "claude mcp add" not in snippet
         assert "codex" not in snippet
-        # Idempotent re-runs: errors are swallowed so re-spawning doesn't
-        # abort the pane.
-        assert "|| true" in snippet
 
     def test_mcp_register_codex(self, tmp_path: Path) -> None:
         """Codex harness uses ``codex mcp add ... --url``."""
