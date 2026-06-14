@@ -181,6 +181,16 @@ async def get_task_context(task_id: str, state: Any) -> Dict[str, Any]:
         },
     )
 
+    # Record in the active experiment if one is running (mirrors
+    # log_decision above). Without this, context_requests stays 0 and the
+    # runner's spawn-thrash detector cannot see a claimed agent pulling
+    # context as a sign of forward progress.
+    from src.experiments.live_experiment_monitor import get_active_monitor
+
+    _monitor = get_active_monitor()
+    if _monitor and _monitor.is_running:
+        _monitor.record_context_request(agent_id=agent_id, task_id=task_id)
+
     try:
         # Check if this is a subtask
         if hasattr(state, "subtask_manager") and state.subtask_manager:

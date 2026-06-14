@@ -3732,6 +3732,22 @@ async def report_task_progress(
         },
     )
 
+    # Record the progress heartbeat in the active experiment monitor so
+    # the runner's spawn-thrash detector sees a claimed task advancing
+    # (report_task_progress at 25/50/75%) as real progress, not only
+    # completions. Counted on every report — a report arriving at all
+    # proves the agent is alive and working its task.
+    from src.experiments.live_experiment_monitor import get_active_monitor
+
+    _progress_monitor = get_active_monitor()
+    if _progress_monitor and _progress_monitor.is_running:
+        _progress_monitor.record_progress(
+            agent_id=agent_id,
+            task_id=task_id,
+            progress=progress,
+            status=status,
+        )
+
     # Escalation flag — set when the retry ceiling is hit during
     # validation. The task is routed through the normal completion
     # path (kanban update, lease cleanup, branch merge) but the

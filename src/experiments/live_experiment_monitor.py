@@ -96,6 +96,7 @@ class LiveExperimentMonitor:
         self.artifacts_created = 0
         self.decisions_logged = 0
         self.context_requests = 0
+        self.progress_updates = 0
 
         # Previous completed-task count, used to derive per-interval velocity
         self._last_completed_count = 0
@@ -227,6 +228,7 @@ class LiveExperimentMonitor:
             "total_artifacts": float(self.artifacts_created),
             "total_decisions": float(self.decisions_logged),
             "total_context_requests": float(self.context_requests),
+            "total_progress_updates": float(self.progress_updates),
         }
 
         # Generate summary
@@ -556,6 +558,29 @@ class LiveExperimentMonitor:
 
         logger.debug(f"Recorded context request: {agent_id} for {task_id}")
 
+    def record_progress(
+        self,
+        agent_id: str,
+        task_id: str,
+        progress: int = 0,
+        status: str = "in_progress",
+    ) -> None:
+        """Record a task-progress heartbeat (a report_task_progress call).
+
+        Counts every progress report — including intermediate 25/50/75%
+        updates — as a sign the agent is alive and working its claimed
+        task. The runner's spawn-thrash detector reads this (via
+        ``progress_updates`` in :meth:`get_status`) so it does not tear
+        down a healthy-but-slow run that is advancing without a
+        completion yet.
+        """
+        self.progress_updates += 1
+
+        logger.debug(
+            f"Recorded progress update: {agent_id} on {task_id} "
+            f"({progress}% {status})"
+        )
+
     async def get_status(self) -> Dict[str, Any]:
         """
         Get current experiment status.
@@ -598,6 +623,7 @@ class LiveExperimentMonitor:
             "artifacts_created": self.artifacts_created,
             "decisions_logged": self.decisions_logged,
             "context_requests": self.context_requests,
+            "progress_updates": self.progress_updates,
         }
 
         # Ground truth from the kanban backend. This is what
@@ -657,6 +683,7 @@ Condition Metrics:
 - Artifacts Created: {self.artifacts_created}
 - Decisions Logged: {self.decisions_logged}
 - Context Requests: {self.context_requests}
+- Progress Updates: {self.progress_updates}
 
 Top Agents by Completions:
 """

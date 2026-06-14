@@ -43,7 +43,42 @@ def _make_monitor(kanban_client: Any = None) -> LiveExperimentMonitor:
     monitor.artifacts_created = 0
     monitor.decisions_logged = 0
     monitor.context_requests = 0
+    monitor.progress_updates = 0
     return monitor
+
+
+class TestProgressHeartbeat:
+    """record_progress + progress_updates surface the report_task_progress
+    heartbeat (PR #704 review).
+
+    The spawn-thrash detector reads ``progress_updates`` so a claimed
+    agent reporting 25/50/75% counts as forward progress before any task
+    completes — closing the claim->first-artifact gap that could
+    otherwise fast-fail a healthy run.
+    """
+
+    def test_record_progress_increments_counter(self) -> None:
+        """Each report_task_progress call bumps the counter."""
+        monitor = _make_monitor()
+        assert monitor.progress_updates == 0
+        monitor.record_progress(agent_id="a1", task_id="t1", progress=25)
+        monitor.record_progress(agent_id="a1", task_id="t1", progress=50)
+        assert monitor.progress_updates == 2
+
+    @pytest.mark.asyncio
+    async def test_get_status_exposes_progress_updates(self) -> None:
+        """get_status surfaces progress_updates for the runner to read."""
+        monitor = _make_monitor()
+        monitor.record_progress(agent_id="a1", task_id="t1", progress=75)
+        status = await monitor.get_status()
+        assert status["progress_updates"] == 1
+
+    def test_record_context_request_increments_counter(self) -> None:
+        """record_context_request (now wired into get_task_context) counts."""
+        monitor = _make_monitor()
+        assert monitor.context_requests == 0
+        monitor.record_context_request(agent_id="a1", task_id="t1")
+        assert monitor.context_requests == 1
 
 
 class TestGetStatusKanbanTruth:

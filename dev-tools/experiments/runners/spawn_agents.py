@@ -1985,13 +1985,19 @@ echo "=========================================="
                     # "Real progress" signal for the spawn-thrash detector:
                     # a monotonic, cumulative tally of the signals an agent
                     # emits while genuinely working a task — completions
-                    # plus logged work (context requests, artifacts,
-                    # decisions, blockers). It rises on real work and stays
-                    # flat on claim-and-exit churn; unlike in_progress it
-                    # never flickers back down, so it cannot mask thrash.
-                    # See SpawnThrashDetector.observe.
+                    # plus the report_task_progress heartbeat (25/50/75%)
+                    # and logged work (context requests, artifacts,
+                    # decisions, blockers). progress_updates is the earliest
+                    # of these: it fires as soon as a claimed agent reports,
+                    # well before the first artifact lands, closing the
+                    # claim->first-artifact gap that would otherwise let the
+                    # detector fast-fail a healthy run. It rises on real work
+                    # and stays flat on claim-and-exit churn; unlike
+                    # in_progress it never flickers back down, so it cannot
+                    # mask thrash. See SpawnThrashDetector.observe.
                     activity = (
                         done
+                        + int(status.get("progress_updates", 0))
                         + int(status.get("context_requests", 0))
                         + int(status.get("artifacts_created", 0))
                         + int(status.get("decisions_logged", 0))
