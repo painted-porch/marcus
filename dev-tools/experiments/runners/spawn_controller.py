@@ -183,13 +183,16 @@ class SpawnThrashDetector:
     The thrash signature is much sharper than "everything is flat":
 
     - ``to_spawn > 0`` (the runner is actively spawning this poll)
-    - ``completed`` did NOT increase since the previous poll
+    - no *real progress* since the previous poll, where progress is a
+      monotonic tally of the signals an agent emits while genuinely
+      working a task (completions plus logged work — context requests,
+      artifacts, decisions, blockers). See :meth:`observe`.
 
     Each poll the runner reports both numbers to :meth:`observe`. Each
     poll matching the signature increments an internal counter; any poll
-    that completes a task — or any poll where the runner spawned nothing
-    — resets it. After ``thrash_polls`` matching polls in a row the
-    detector reports thrash and the runner tears the experiment down.
+    that shows real progress — or any poll where the runner spawned
+    nothing — resets it. After ``thrash_polls`` matching polls in a row
+    the detector reports thrash and the runner tears the experiment down.
 
     Why a separate detector instead of tightening :class:`StallWatchdog`
     ------------------------------------------------------------------
@@ -211,17 +214,30 @@ class SpawnThrashDetector:
 
     def __init__(self, thrash_polls: int) -> None:
         self._thrash_polls = thrash_polls
-        self._last_completed: Optional[int] = None
+        self._last_activity: Optional[int] = None
         self._idle_spawn_polls = 0
 
-    def observe(self, completed: int, to_spawn: int) -> bool:
+    def observe(self, activity: int, to_spawn: int) -> bool:
         """
         Record one poll and report whether the run is spawn-thrashing.
 
         Parameters
         ----------
-        completed : int
-            Tasks completed so far this run (cumulative).
+        activity : int
+            A monotonic, cumulative "real progress" counter the caller
+            assembles from the signals an agent emits while actually
+            working a task — completed tasks plus logged work
+            (``get_task_context`` requests, ``log_artifact`` /
+            ``log_decision`` calls, ``report_blocker`` calls). Any
+            increase since the previous poll proves an agent is making
+            forward progress, so the thrash counter resets.
+
+            Why not ``in_progress``: that count *flickers* (0→1→0) during
+            genuine thrash — an agent claims a task, fails to make
+            progress, exits, the lease is recovered — so resetting on it
+            would mask the very failure this detector exists to catch.
+            The work-output counters are cumulative and only ever rise:
+            they move on real work and stay flat on claim-and-exit churn.
         to_spawn : int
             Number of ephemeral agents the runner is spawning this
             poll (the output of :func:`compute_spawn_count`).
@@ -230,7 +246,7 @@ class SpawnThrashDetector:
         -------
         bool
             True once ``thrash_polls`` consecutive polls have spawned
-            agents without any task completing; always False when the
+            agents without any real progress; always False when the
             detector is disabled.
         """
         if self._thrash_polls <= 0:
@@ -238,14 +254,14 @@ class SpawnThrashDetector:
 
         # Initialize baseline on the first observation. The first poll
         # cannot itself be a thrash — we need at least one prior poll
-        # to compare ``completed`` against — so it only sets the baseline.
-        if self._last_completed is None:
-            self._last_completed = completed
+        # to compare ``activity`` against — so it only sets the baseline.
+        if self._last_activity is None:
+            self._last_activity = activity
             return False
 
-        if completed > self._last_completed:
-            # A task completed — real progress, reset the counter.
-            self._last_completed = completed
+        if activity > self._last_activity:
+            # Real forward progress — reset the counter.
+            self._last_activity = activity
             self._idle_spawn_polls = 0
             return False
 

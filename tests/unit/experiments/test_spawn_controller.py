@@ -151,37 +151,64 @@ class TestStallWatchdog:
 
 class TestSpawnThrashDetector:
     """
-    SpawnThrashDetector flags runs that spawn agents but complete no tasks.
+    SpawnThrashDetector flags runs that spawn agents but make no progress.
 
     Failure mode it catches (real incidents on test66, test71, test73):
     a BLOCKED task gates every claimable downstream task, so the runner
     keeps trying to fill the desired-agent count with ephemeral agents
-    that immediately exit. ``completed`` stays flat while the runner
-    burns one agent's worth of cost per poll. StallWatchdog cannot
-    catch this — the tuple it watches keeps flickering — and only
-    fires after 20 minutes, by which point 30–50 agents have been
-    wasted.
+    that immediately exit. The ``activity`` tally (completions plus
+    logged agent work — context requests, artifacts, decisions,
+    blockers) stays flat while the runner burns one agent's worth of
+    cost per poll. StallWatchdog cannot catch this — the tuple it
+    watches keeps flickering — and only fires after 20 minutes, by which
+    point 30–50 agents have been wasted.
+
+    The detector takes a single monotonic ``activity`` int; deciding
+    *which* signals compose it lives at the call site (spawn_agents.py).
+    ``in_progress`` is deliberately excluded there — it flickers 0→1→0
+    on claim-and-exit churn and would mask the thrash.
     """
 
     def test_fires_after_n_idle_spawn_polls(self) -> None:
-        """to_spawn>0 and completed flat for thrash_polls in a row -> fire."""
+        """to_spawn>0 and activity flat for thrash_polls in a row -> fire."""
         det = SpawnThrashDetector(thrash_polls=3)
         # First observation is baseline only — never fires.
-        assert det.observe(completed=5, to_spawn=2) is False
+        assert det.observe(activity=5, to_spawn=2) is False
         # Three more polls: still spawning, still no completions.
-        assert det.observe(completed=5, to_spawn=2) is False  # idle x1
-        assert det.observe(completed=5, to_spawn=2) is False  # idle x2
-        assert det.observe(completed=5, to_spawn=2) is True  # idle x3 -> fire
+        assert det.observe(activity=5, to_spawn=2) is False  # idle x1
+        assert det.observe(activity=5, to_spawn=2) is False  # idle x2
+        assert det.observe(activity=5, to_spawn=2) is True  # idle x3 -> fire
 
     def test_completion_resets_the_counter(self) -> None:
         """Any task completing during the streak resets thrash detection."""
         det = SpawnThrashDetector(thrash_polls=2)
-        det.observe(completed=3, to_spawn=2)  # baseline
-        assert det.observe(completed=3, to_spawn=2) is False  # idle x1
+        det.observe(activity=3, to_spawn=2)  # baseline
+        assert det.observe(activity=3, to_spawn=2) is False  # idle x1
         # An agent finishes — progress, reset.
-        assert det.observe(completed=4, to_spawn=2) is False
-        assert det.observe(completed=4, to_spawn=2) is False  # idle x1 again
-        assert det.observe(completed=4, to_spawn=2) is True  # idle x2 -> fire
+        assert det.observe(activity=4, to_spawn=2) is False
+        assert det.observe(activity=4, to_spawn=2) is False  # idle x1 again
+        assert det.observe(activity=4, to_spawn=2) is True  # idle x2 -> fire
+
+    def test_logged_work_resets_without_a_completion(self) -> None:
+        """Mid-task progress (an agent logging work) resets the streak.
+
+        The whole point of broadening the signal from ``completed`` to a
+        cumulative ``activity`` tally: a single contract task can take
+        minutes to finish, and while it runs the agent claims the task
+        and logs context requests / artifacts / decisions. Those bumps
+        must reset the thrash counter so a healthy-but-slow run is not
+        torn down before its first completion.
+        """
+        det = SpawnThrashDetector(thrash_polls=3)
+        det.observe(activity=10, to_spawn=2)  # baseline, 0 completions yet
+        assert det.observe(activity=10, to_spawn=2) is False  # idle x1
+        assert det.observe(activity=10, to_spawn=2) is False  # idle x2
+        # No task completed, but an agent logged an artifact: the tally
+        # ticks up -> real progress -> reset, even though completed==0.
+        assert det.observe(activity=11, to_spawn=2) is False
+        assert det.observe(activity=11, to_spawn=2) is False  # idle x1
+        assert det.observe(activity=11, to_spawn=2) is False  # idle x2
+        assert det.observe(activity=11, to_spawn=2) is True  # idle x3 -> fire
 
     def test_zero_spawn_poll_does_not_advance_counter(self) -> None:
         """A poll with to_spawn=0 is not burning money — don't count it.
@@ -191,26 +218,26 @@ class TestSpawnThrashDetector:
         again, and we should not have to start counting over.
         """
         det = SpawnThrashDetector(thrash_polls=3)
-        det.observe(completed=5, to_spawn=1)  # baseline
-        assert det.observe(completed=5, to_spawn=1) is False  # idle x1
-        assert det.observe(completed=5, to_spawn=1) is False  # idle x2
+        det.observe(activity=5, to_spawn=1)  # baseline
+        assert det.observe(activity=5, to_spawn=1) is False  # idle x1
+        assert det.observe(activity=5, to_spawn=1) is False  # idle x2
         # A poll where we did NOT spawn — counter held, not incremented.
-        assert det.observe(completed=5, to_spawn=0) is False  # held at 2
+        assert det.observe(activity=5, to_spawn=0) is False  # held at 2
         # Spawning resumes — one more idle-spawn poll trips the trigger.
-        assert det.observe(completed=5, to_spawn=1) is True  # idle x3 -> fire
+        assert det.observe(activity=5, to_spawn=1) is True  # idle x3 -> fire
 
     def test_zero_thrash_polls_disables_the_detector(self) -> None:
         """thrash_polls=0 means the detector never fires."""
         det = SpawnThrashDetector(thrash_polls=0)
         for _ in range(50):
-            assert det.observe(completed=0, to_spawn=10) is False
+            assert det.observe(activity=0, to_spawn=10) is False
 
     def test_first_observation_never_fires(self) -> None:
         """No prior poll to compare against — first observation is baseline."""
         det = SpawnThrashDetector(thrash_polls=1)
         # Even with the most aggressive threshold (1), the first poll
         # cannot fire because there is no last_completed yet.
-        assert det.observe(completed=0, to_spawn=99) is False
+        assert det.observe(activity=0, to_spawn=99) is False
 
     def test_progress_after_fire_threshold_does_not_unfire(self) -> None:
         """Once thrash is reported, the runner is expected to tear down.
@@ -222,27 +249,27 @@ class TestSpawnThrashDetector:
         (defensive, for future re-use).
         """
         det = SpawnThrashDetector(thrash_polls=2)
-        det.observe(completed=0, to_spawn=1)  # baseline
-        det.observe(completed=0, to_spawn=1)  # idle x1
-        assert det.observe(completed=0, to_spawn=1) is True  # fire
+        det.observe(activity=0, to_spawn=1)  # baseline
+        det.observe(activity=0, to_spawn=1)  # idle x1
+        assert det.observe(activity=0, to_spawn=1) is True  # fire
         # Completion lands — counter resets, detector is quiet again.
-        assert det.observe(completed=1, to_spawn=1) is False
-        assert det.observe(completed=1, to_spawn=1) is False  # idle x1
+        assert det.observe(activity=1, to_spawn=1) is False
+        assert det.observe(activity=1, to_spawn=1) is False  # idle x1
 
     def test_realistic_thrash_scenario_test73(self) -> None:
         """Reproduce verify-snake-10 (test73) signature: BLOCKED dep, spawn-thrash.
 
-        Baseline: ``completed=4``, then for the next ~10 polls the
+        Baseline: ``activity=4``, then for the next ~10 polls the
         runner spawns 1–3 agents each cycle because Marcus reports
         ``desired>in_flight`` and ``unclaimed>0``, but every spawned
         agent receives "no task" (the only unclaimed work is gated by
-        the BLOCKED merge-conflict task) and exits. With thrash_polls=5
-        the detector should fire on the 6th observation — capping
-        wasted spawns at ~5 instead of letting the 20-minute stall
-        watchdog count to 38+.
+        the BLOCKED merge-conflict task) and exits — logging no work, so
+        the activity tally never moves. With thrash_polls=5 the detector
+        should fire on the 6th observation — capping wasted spawns at ~5
+        instead of letting the 20-minute stall watchdog count to 38+.
         """
         det = SpawnThrashDetector(thrash_polls=5)
-        # Cumulative completed plateaus at 4 — exactly the test73 trace.
+        # The activity tally plateaus at 4 — exactly the test73 trace.
         observations = [
             (4, 2),  # baseline
             (4, 2),  # idle x1

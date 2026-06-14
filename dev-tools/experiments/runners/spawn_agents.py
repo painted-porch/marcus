@@ -1982,6 +1982,21 @@ echo "=========================================="
                     total = int(status.get("total_tasks", 0))
                     in_progress = int(status.get("in_progress_tasks", 0))
                     blocked = int(status.get("blocked_tasks", 0))
+                    # "Real progress" signal for the spawn-thrash detector:
+                    # a monotonic, cumulative tally of the signals an agent
+                    # emits while genuinely working a task — completions
+                    # plus logged work (context requests, artifacts,
+                    # decisions, blockers). It rises on real work and stays
+                    # flat on claim-and-exit churn; unlike in_progress it
+                    # never flickers back down, so it cannot mask thrash.
+                    # See SpawnThrashDetector.observe.
+                    activity = (
+                        done
+                        + int(status.get("context_requests", 0))
+                        + int(status.get("artifacts_created", 0))
+                        + int(status.get("decisions_logged", 0))
+                        + int(status.get("blockers_reported", 0))
+                    )
                     _emit(
                         f"tasks {done}/{total} done "
                         f"({in_progress} in-progress, {blocked} blocked) | "
@@ -2012,12 +2027,17 @@ echo "=========================================="
                         self._teardown("stalled")
                         break
 
-                    if thrash_detector.observe(done, to_spawn):
+                    if thrash_detector.observe(activity, to_spawn):
                         _emit(
-                            f"SPAWN-THRASH: spawned agents for "
-                            f"{thrash_polls} polls with no task "
-                            f"completing — likely BLOCKED dependency "
-                            f"gating downstream work; tearing down"
+                            f"SPAWN-THRASH: spawned an agent on each of the "
+                            f"last {thrash_polls} polls but saw no forward "
+                            f"progress — {done} completed, {in_progress} "
+                            f"in-progress, and no agent logged any work "
+                            f"(get_task_context / log_artifact / "
+                            f"log_decision). Agents are starting but not "
+                            f"claiming or working: likely deferred MCP tools, "
+                            f"a skill mismatch, or every unclaimed task gated "
+                            f"by a BLOCKED dependency. Tearing down."
                         )
                         self._teardown("spawn_thrash")
                         break
