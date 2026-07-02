@@ -695,6 +695,103 @@ class TestGitDeltaEvidence:
         assert len(result) == 1
         assert result[0].relative_path == "exists.py"
 
+    # --- Codex P2 (PR #697): empty successful delta must NOT full-scan ---
+
+    def test_get_git_delta_returns_empty_list_on_successful_empty_diff(
+        self, analyzer: WorkAnalyzer, mock_state: Mock, mock_assignment: Mock
+    ) -> None:
+        """A successful git diff with no changed files returns ``[]``, not None.
+
+        ``[]`` means "the agent changed nothing" → no source-file evidence →
+        the correct "no source files" completion failure. Returning None would
+        wrongly fall back to scanning the entire merged worktree — the exact
+        #696 mis-scoping this PR removes. Regression for Codex P2 on PR #697.
+        """
+        mock_state.agent_tasks["agent-1"] = mock_assignment
+
+        with patch("src.ai.validation.work_analyzer.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+            result = analyzer._get_git_delta_files("/fake/root", mock_state, "agent-1")
+
+        assert result == []
+
+    def test_get_git_delta_returns_none_when_no_baseline(
+        self, analyzer: WorkAnalyzer, mock_state: Mock
+    ) -> None:
+        """No baseline_commit → None (full-scan fallback), distinct from ``[]``."""
+        mock_state.agent_tasks = {}
+
+        result = analyzer._get_git_delta_files("/fake/root", mock_state, "agent-1")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_gather_evidence_empty_delta_yields_no_source_files(
+        self,
+        analyzer: WorkAnalyzer,
+        mock_task: Mock,
+        mock_state: Mock,
+        mock_assignment: Mock,
+        tmp_path: Path,
+    ) -> None:
+        """An agent that committed nothing is not graded against merged neighbors.
+
+        The worktree contains files merged from other agents, but the agent's
+        own git delta is empty. Evidence must be zero source files (→ "no
+        source files" failure), NOT a full-worktree scan. Codex P2 on PR #697.
+        """
+        (tmp_path / "merged_by_other_agent.py").write_text("# not mine")
+        (tmp_path / "another_merged.py").write_text("# also not mine")
+
+        mock_state.kanban_client._load_workspace_state.return_value = {
+            "project_root": str(tmp_path)
+        }
+        mock_state.agent_tasks["agent-1"] = mock_assignment
+
+        with patch("src.ai.validation.work_analyzer.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+            with patch(
+                "src.ai.validation.work_analyzer.get_task_context",
+                new_callable=AsyncMock,
+                return_value={"success": True, "context": {"decisions": []}},
+            ):
+                evidence = await analyzer.gather_evidence(
+                    mock_task, mock_state, agent_id="agent-1"
+                )
+
+        assert evidence.source_files == []
+
+    # --- Codex P2 (PR #697): symlink-escape guard on delta paths ---
+
+    def test_discover_source_files_skips_symlink_escaping_project_root(
+        self, analyzer: WorkAnalyzer, tmp_path: Path
+    ) -> None:
+        """A delta path that symlinks outside the worktree is skipped, not read.
+
+        Guards against leaking external file content into the validation
+        prompt via a source-named symlink (e.g. ``leak.py`` -> an external
+        secret). Regression for Codex P2 on PR #697.
+        """
+        external = tmp_path / "external"
+        external.mkdir()
+        secret = external / "secret.py"
+        secret.write_text("SECRET = 'leaked'")
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "app.py").write_text("x = 1")
+        (project / "leak.py").symlink_to(secret)
+
+        result = analyzer._discover_source_files(
+            str(project), allowed_files=["app.py", "leak.py"]
+        )
+
+        names = {f.relative_path for f in result}
+        assert "app.py" in names
+        assert "leak.py" not in names
+        # The external secret must never enter evidence content.
+        assert all("leaked" not in f.content for f in result)
+
 
 class TestFileManifest:
     """Tests for the file manifest injected into validation prompts (issue #696).

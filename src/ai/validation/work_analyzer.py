@@ -489,8 +489,12 @@ class WorkAnalyzer:
         Returns
         -------
         list[str] | None
-            Relative file paths in the delta, or None if the delta cannot be
-            computed (caller should fall back to full worktree scan)
+            Relative file paths in the delta. An empty list means the diff
+            succeeded but the agent changed no files — the caller must treat
+            this as "no source-file evidence" (a correct completion failure),
+            NOT as a reason to fall back to the full worktree scan. None is
+            returned only when the delta genuinely cannot be computed (no
+            baseline, git error), where the caller falls back to a full scan.
         """
         baseline_commit: str | None = None
         if agent_id and hasattr(state, "agent_tasks"):
@@ -524,7 +528,11 @@ class WorkAnalyzer:
                 f"Git delta for agent {agent_id}: {len(files)} files changed "
                 f"since {baseline_commit[:8]}"
             )
-            return files if files else None
+            # A successful-but-empty diff means the agent committed no changes.
+            # Return the empty list (not None) so validation surfaces the
+            # "no source files" failure instead of scanning the entire merged
+            # worktree and grading the agent against other agents' work.
+            return files
 
         except Exception as exc:
             logger.warning(
@@ -603,8 +611,24 @@ class WorkAnalyzer:
             delta_pairs = []
             for rel in allowed_files:
                 abs_p = project_path / rel
-                if abs_p.exists():
-                    delta_pairs.append((abs_p, abs_p))
+                try:
+                    resolved = abs_p.resolve()
+                except (OSError, RuntimeError):
+                    logger.debug(f"Skipping unresolvable delta file: {rel}")
+                    continue
+                # Guard against a source-named symlink escaping the worktree
+                # (e.g. leak.py -> /etc/secret). Without this, validation would
+                # follow the link and send external file content to the LLM.
+                # Mirrors the resolve + containment check in
+                # _collect_file_manifest / the legacy full scan.
+                if not resolved.is_relative_to(project_path):
+                    logger.warning(
+                        "Skipping delta file outside project root "
+                        f"(possible symlink escape): {rel}"
+                    )
+                    continue
+                if resolved.exists():
+                    delta_pairs.append((resolved, resolved))
                 else:
                     logger.debug(f"Skipping missing delta file: {rel}")
 
