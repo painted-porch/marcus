@@ -2026,3 +2026,212 @@ class TestExtendForValidation:
         # not by 600 seconds. Generous bound to avoid flakes.
         delta = (second.lease_expires - first.lease_expires).total_seconds()
         assert 0 <= delta < 5
+
+
+class TestSilentRecoveryCircuitBreaker:
+    """Test suite for the silent-recovery circuit breaker (issue #667 Fix 3a).
+
+    A "silent" recovery is a lease recovery where the agent never
+    reported progress (``renewal_count == 0`` — the ``updates=0``
+    signature from the snake_game runaway incident). After N consecutive
+    silent recoveries of the same task, Marcus must mark the task
+    BLOCKED instead of returning it to TODO, so the respawn/reclaim loop
+    physically cannot continue and the failure becomes visible on the
+    board.
+    """
+
+    @pytest.fixture
+    def mock_kanban_client(self):
+        """Create mock kanban client."""
+        client = Mock()
+        client.update_task = AsyncMock()
+        client.add_comment = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_persistence(self):
+        """Create mock assignment persistence."""
+        persistence = Mock()
+        persistence.get_assignment = AsyncMock(return_value=None)
+        persistence.save_assignment = AsyncMock()
+        persistence.remove_assignment = AsyncMock()
+        persistence.load_assignments = AsyncMock(return_value={})
+        return persistence
+
+    @pytest.fixture
+    def task(self):
+        """Create the task under recovery, registered in task_list."""
+        return Task(
+            id="task-667",
+            name="Integration verification",
+            description="Terminal integration task",
+            status=TaskStatus.IN_PROGRESS,
+            priority=Priority.HIGH,
+            estimated_hours=1.0,
+            dependencies=[],
+            labels=["type:integration"],
+            assigned_to="agent-001",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            due_date=None,
+        )
+
+    @pytest.fixture
+    def lease_manager(self, mock_kanban_client, mock_persistence, task):
+        """Create lease manager with the default breaker threshold (3)."""
+        return AssignmentLeaseManager(
+            mock_kanban_client,
+            mock_persistence,
+            default_lease_hours=1.0,
+            task_list=[task],
+        )
+
+    def _expired_lease(self, agent_id: str, renewal_count: int = 0):
+        """Build an already-expired lease for task-667.
+
+        ``renewal_count=0`` models a SILENT failure (agent never
+        reported progress); ``renewal_count>0`` models an agent that
+        made progress but still expired.
+        """
+        now = datetime.now(timezone.utc)
+        return AssignmentLease(
+            task_id="task-667",
+            agent_id=agent_id,
+            assigned_at=now - timedelta(minutes=10),
+            lease_expires=now - timedelta(minutes=1),
+            last_renewed=now - timedelta(minutes=10),
+            renewal_count=renewal_count,
+        )
+
+    @pytest.mark.asyncio
+    async def test_silent_recovery_below_threshold_resets_to_todo(
+        self, lease_manager, mock_kanban_client
+    ):
+        """First and second silent recoveries keep today's TODO reset."""
+        # Arrange / Act — two silent recoveries
+        await lease_manager.recover_expired_lease(self._expired_lease("agent-1"))
+        await lease_manager.recover_expired_lease(self._expired_lease("agent-2"))
+
+        # Assert — both board updates were TODO resets, never BLOCKED
+        statuses = [
+            call.args[1]["status"]
+            for call in mock_kanban_client.update_task.await_args_list
+        ]
+        assert statuses == [TaskStatus.TODO, TaskStatus.TODO]
+
+    @pytest.mark.asyncio
+    async def test_third_consecutive_silent_recovery_marks_task_blocked(
+        self, lease_manager, mock_kanban_client
+    ):
+        """The third consecutive silent recovery trips the breaker to BLOCKED."""
+        # Arrange / Act — three consecutive silent recoveries
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        # Assert — final board update is BLOCKED with ownership cleared
+        final_update = mock_kanban_client.update_task.await_args_list[-1]
+        assert final_update.args[1]["status"] == TaskStatus.BLOCKED
+        assert final_update.args[1]["assigned_to"] is None
+
+    @pytest.mark.asyncio
+    async def test_progressful_recovery_resets_silent_streak(
+        self, lease_manager, mock_kanban_client
+    ):
+        """A recovery WITH progress breaks the silent streak (not the pattern).
+
+        silent, silent, progressful, silent, silent → never reaches 3
+        consecutive silent recoveries, so the task stays recoverable.
+        A slow-but-alive agent must not trip the breaker (the #703
+        lesson applied at the board level).
+        """
+        await lease_manager.recover_expired_lease(self._expired_lease("a1"))
+        await lease_manager.recover_expired_lease(self._expired_lease("a2"))
+        await lease_manager.recover_expired_lease(
+            self._expired_lease("a3", renewal_count=2)
+        )
+        await lease_manager.recover_expired_lease(self._expired_lease("a4"))
+        await lease_manager.recover_expired_lease(self._expired_lease("a5"))
+
+        statuses = [
+            call.args[1]["status"]
+            for call in mock_kanban_client.update_task.await_args_list
+        ]
+        assert TaskStatus.BLOCKED not in statuses
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_posts_explanatory_comment(
+        self, lease_manager, mock_kanban_client
+    ):
+        """The BLOCKED transition posts a human-readable diagnostic comment."""
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        comment_bodies = [
+            call.args[1] for call in mock_kanban_client.add_comment.await_args_list
+        ]
+        breaker_comments = [
+            body
+            for body in comment_bodies
+            if "3 consecutive" in body and "no progress" in body
+        ]
+        assert len(breaker_comments) == 1
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_still_cleans_coordination_state(
+        self, lease_manager, mock_persistence
+    ):
+        """Tripping the breaker still releases lease + assignment + callback.
+
+        The BLOCKED path must perform the same coordination cleanup as a
+        normal recovery, or the server would leak in-memory agent state
+        (the exact class of bug behind issue #485).
+        """
+        callback_calls = []
+        lease_manager.on_recovery_callback = lambda agent_id, task_id: (
+            callback_calls.append((agent_id, task_id))
+        )
+
+        for i in range(3):
+            lease = self._expired_lease(f"agent-{i}")
+            lease_manager.active_leases[lease.task_id] = lease
+            await lease_manager.recover_expired_lease(lease)
+
+        assert "task-667" not in lease_manager.active_leases
+        assert mock_persistence.remove_assignment.await_count == 3
+        assert ("agent-2", "task-667") in callback_calls
+
+    @pytest.mark.asyncio
+    async def test_threshold_is_configurable(
+        self, mock_kanban_client, mock_persistence, task
+    ):
+        """max_silent_recoveries=1 blocks on the very first silent recovery."""
+        manager = AssignmentLeaseManager(
+            mock_kanban_client,
+            mock_persistence,
+            default_lease_hours=1.0,
+            task_list=[task],
+            max_silent_recoveries=1,
+        )
+
+        await manager.recover_expired_lease(self._expired_lease("agent-1"))
+
+        final_update = mock_kanban_client.update_task.await_args_list[-1]
+        assert final_update.args[1]["status"] == TaskStatus.BLOCKED
+
+    @pytest.mark.asyncio
+    async def test_task_model_marked_blocked_in_task_list(self, lease_manager, task):
+        """The in-memory task model (source of truth) flips to BLOCKED too."""
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        assert task.status == TaskStatus.BLOCKED
+        assert task.assigned_to is None
+
+    @pytest.mark.asyncio
+    async def test_breaker_event_recorded_in_lease_history(self, lease_manager):
+        """The breaker records an auditable lease-history event."""
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        events = [entry["event"] for entry in lease_manager.lease_history]
+        assert "task_blocked_circuit_breaker" in events
