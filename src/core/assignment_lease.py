@@ -1329,6 +1329,23 @@ class AssignmentLeaseManager:
         except Exception as e:
             logger.error(f"Failed to mark task {lease.task_id} BLOCKED on board: {e}")
 
+        # 5b. Provider-portable BLOCKED transition (Codex P2 on PR #707).
+        # GitHub- and Linear-backed boards do NOT persist status through
+        # update_task (GitHubKanban.update_task only opens/closes the
+        # issue; LinearKanban.update_task ignores status) — their
+        # blocked-state mechanics live in move_task_to_column ("blocked"
+        # → GitHub `blocked` label / Linear "Blocked" state / SQLite
+        # direct status match). Without this, the next project refresh
+        # would re-read the task as open/TODO on those providers and the
+        # runaway loop this breaker exists to stop would resume.
+        try:
+            if hasattr(self.kanban_client, "move_task_to_column"):
+                await self.kanban_client.move_task_to_column(lease.task_id, "blocked")
+        except Exception as e:
+            logger.warning(
+                f"move_task_to_column('blocked') failed for {lease.task_id}: {e}"
+            )
+
         # 6. Diagnostic comment (observability dual-write)
         try:
             await self.kanban_client.add_comment(

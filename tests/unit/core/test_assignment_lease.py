@@ -2046,6 +2046,7 @@ class TestSilentRecoveryCircuitBreaker:
         client = Mock()
         client.update_task = AsyncMock()
         client.add_comment = AsyncMock()
+        client.move_task_to_column = AsyncMock(return_value=True)
         return client
 
     @pytest.fixture
@@ -2235,3 +2236,52 @@ class TestSilentRecoveryCircuitBreaker:
 
         events = [entry["event"] for entry in lease_manager.lease_history]
         assert "task_blocked_circuit_breaker" in events
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_moves_task_to_blocked_column(
+        self, lease_manager, mock_kanban_client
+    ):
+        """The breaker also calls move_task_to_column("blocked").
+
+        Codex P2 on PR #707: GitHub- and Linear-backed boards do NOT
+        persist status through ``update_task`` (GitHub only opens/closes
+        the issue; Linear ignores status entirely) — their blocked-state
+        mechanics live in ``move_task_to_column``. Without this call,
+        the next project refresh re-reads the task as open/TODO on those
+        providers and the loop the breaker exists to stop resumes.
+        """
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        mock_kanban_client.move_task_to_column.assert_awaited_once_with(
+            "task-667", "blocked"
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_tolerates_client_without_move_method(
+        self, mock_persistence, task
+    ):
+        """A kanban client lacking move_task_to_column doesn't break the breaker.
+
+        The status write via ``update_task`` must still land and the
+        breaker must complete without raising.
+        """
+        client = Mock(spec=["update_task", "add_comment"])
+        client.update_task = AsyncMock()
+        client.add_comment = AsyncMock()
+        manager = AssignmentLeaseManager(
+            client,
+            mock_persistence,
+            default_lease_hours=1.0,
+            task_list=[task],
+        )
+
+        result = False
+        for i in range(3):
+            result = await manager.recover_expired_lease(
+                self._expired_lease(f"agent-{i}")
+            )
+
+        assert result is True
+        final_update = client.update_task.await_args_list[-1]
+        assert final_update.args[1]["status"] == TaskStatus.BLOCKED
