@@ -416,10 +416,18 @@ FILE_MANAGEMENT:
 
 
   AI_ARCHITECT_PARTNER:
-    Dr. Kaia Chen is available via the /kaia skill.
-    When the user mentions "Kaia", "Dr. Chen", "ask Kaia", "what would Kaia think",
-    or wants architectural advice, mentorship, or a second opinion, invoke the /kaia skill.
+    Dr. Kaia Chen is personal advisory tooling provided by the /kaia skill,
+    which is intentionally NOT tracked in this repository (.gitignore:
+    skills/kaia/). It exists only on machines where it has been installed
+    locally.
+    IF (and only if) the /kaia skill appears in your available-skills list:
+    when the user mentions "Kaia", "Dr. Chen", "ask Kaia", "what would Kaia
+    think", or wants architectural advice, mentorship, or a second opinion,
+    invoke the /kaia skill.
     Modes: /kaia <question>, /kaia --review, /kaia --research <topic>, /kaia --reflect, /kaia --chat
+    If the skill is NOT available, do not attempt to invoke /kaia — provide
+    the architectural advice yourself and note that the Kaia advisor is not
+    installed in this environment.
 
   MINI_RED_LINE:
     marcus-mini is the proof-of-concept and research instrument. Marcus is the product.
