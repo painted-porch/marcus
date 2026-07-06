@@ -57,3 +57,7 @@ package-lock.json
 # can leak into the repo root; ignore at root to prevent accidental commits.
 AGENTS.md
 experiment_complete.json
+
+# Personal advisory tooling — keep out of the public Marcus repo
+skills/kaia/
+skills/council/

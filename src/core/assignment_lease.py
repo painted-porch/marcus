@@ -220,6 +220,7 @@ class AssignmentLeaseManager:
         enable_adaptive_leases: bool = True,
         task_list: Optional[List[Task]] = None,
         silence_multiplier: float = 5.0,
+        max_silent_recoveries: int = 3,
     ):
         """
         Initialize the lease manager.
@@ -254,6 +255,14 @@ class AssignmentLeaseManager:
                 Enable smart lease duration adjustments.
             task_list
                 Optional reference to project tasks for recovery info updates.
+            max_silent_recoveries
+                Circuit breaker (issue #667 Fix 3a): number of CONSECUTIVE
+                silent recoveries (lease expired with zero progress updates,
+                ``renewal_count == 0``) after which the task is marked
+                BLOCKED instead of returned to TODO. Stops the
+                reclaim/re-assign runaway loop regardless of who supplies
+                agents. A recovery where the agent reported progress resets
+                the streak.
         """
         self.kanban_client = kanban_client
         self.assignment_persistence = assignment_persistence
@@ -282,6 +291,14 @@ class AssignmentLeaseManager:
         self.stuck_task_threshold_renewals = stuck_task_threshold_renewals
         self.enable_adaptive_leases = enable_adaptive_leases
         self.silence_multiplier = silence_multiplier
+        self.max_silent_recoveries = max_silent_recoveries
+
+        # Circuit breaker state (issue #667 Fix 3a): consecutive SILENT
+        # recovery count per task. In-memory by design — the observed
+        # runaway (81 registrations over 3+ hours) happened inside one
+        # server process. Restart-durable counters ride with the
+        # session-model registration-persistence work (epic #706).
+        self._silent_recovery_streaks: Dict[str, int] = {}
 
         # Active leases tracked in memory
         self.active_leases: Dict[str, AssignmentLease] = {}
@@ -1037,6 +1054,27 @@ class AssignmentLeaseManager:
                 f"(expired: {lease.lease_expires.isoformat()})"
             )
 
+            # Circuit breaker (issue #667 Fix 3a): a SILENT recovery is one
+            # where the agent never reported progress (renewal_count == 0 —
+            # the `updates=0` signature of the snake_game runaway). After
+            # max_silent_recoveries consecutive silent recoveries, mark the
+            # task BLOCKED instead of returning it to TODO: the failure is
+            # almost certainly external (LLM/API outage, broken env), and
+            # every fresh agent will hit it identically. BLOCKED tasks are
+            # never offered by request_next_task, so the loop cannot
+            # continue — regardless of who is supplying agents
+            # (Invariant #1: the guard must live in Marcus, not a spawner).
+            if lease.renewal_count == 0:
+                streak = self._silent_recovery_streaks.get(lease.task_id, 0) + 1
+                self._silent_recovery_streaks[lease.task_id] = streak
+                if streak >= self.max_silent_recoveries:
+                    return await self._block_task_after_silent_recoveries(lease, streak)
+            else:
+                # An agent that reported progress but still expired is a
+                # slow-but-alive pattern (see #703), not the silent-failure
+                # pattern — reset the streak.
+                self._silent_recovery_streaks.pop(lease.task_id, None)
+
             # Calculate time spent
             now = datetime.now(timezone.utc)
             time_spent = now - lease.assigned_at
@@ -1216,6 +1254,139 @@ class AssignmentLeaseManager:
         except Exception as e:
             logger.error(f"Error recovering lease for task {lease.task_id}: {e}")
             return False
+
+    async def _block_task_after_silent_recoveries(
+        self, lease: AssignmentLease, streak: int
+    ) -> bool:
+        """Mark a task BLOCKED after N consecutive silent recoveries.
+
+        Terminal arm of the circuit breaker (issue #667 Fix 3a). Instead
+        of resetting the task to TODO (which would let yet another agent
+        claim it and fail identically), flip it to BLOCKED, surface a
+        diagnostic comment on the board, and perform the same
+        coordination-state cleanup as a normal recovery so no in-memory
+        agent state leaks (the issue #485 failure class).
+
+        A human (or a later automated policy) can reset the task to TODO
+        to retry; the streak counter is cleared here so a reset starts
+        fresh.
+
+        Parameters
+        ----------
+        lease : AssignmentLease
+            The expired lease whose recovery tripped the breaker.
+        streak : int
+            The consecutive-silent-recovery count that tripped it.
+
+        Returns
+        -------
+        bool
+            True if the BLOCKED transition was applied (cleanup errors on
+            non-authoritative writes are logged, not raised).
+        """
+        logger.warning(
+            f"Circuit breaker: task {lease.task_id} has been recovered "
+            f"{streak} consecutive times with zero progress updates "
+            f"(last agent: {lease.agent_id}). Marking BLOCKED instead of "
+            f"TODO — likely external failure (LLM/API outage, broken "
+            f"environment). Human investigation required."
+        )
+
+        # 1. Update task model (source of truth)
+        task = self._find_task(lease.task_id)
+        if task:
+            task.status = TaskStatus.BLOCKED
+            task.assigned_to = None
+
+        # 2. Remove from active leases
+        async with self.lease_lock:
+            if lease.task_id in self.active_leases:
+                del self.active_leases[lease.task_id]
+
+        # 3. Remove assignment from persistence
+        await self.assignment_persistence.remove_assignment(lease.agent_id)
+
+        # 4. Invoke recovery callback so server cleans in-memory state
+        if self.on_recovery_callback is not None:
+            try:
+                self.on_recovery_callback(lease.agent_id, lease.task_id)
+            except Exception as e:
+                logger.warning(
+                    f"Recovery callback failed for task {lease.task_id}: {e}"
+                )
+
+        # 5. Board: status → BLOCKED, clear ownership
+        try:
+            if hasattr(self.kanban_client, "update_task"):
+                await self.kanban_client.update_task(
+                    lease.task_id,
+                    {"status": TaskStatus.BLOCKED, "assigned_to": None},
+                )
+            elif hasattr(self.kanban_client, "update_task_status"):
+                await self.kanban_client.update_task_status(
+                    lease.task_id, TaskStatus.BLOCKED
+                )
+        except Exception as e:
+            logger.error(f"Failed to mark task {lease.task_id} BLOCKED on board: {e}")
+
+        # 5b. Provider-portable BLOCKED transition (Codex P2 on PR #707).
+        # GitHub- and Linear-backed boards do NOT persist status through
+        # update_task (GitHubKanban.update_task only opens/closes the
+        # issue; LinearKanban.update_task ignores status) — their
+        # blocked-state mechanics live in move_task_to_column ("blocked"
+        # → GitHub `blocked` label / Linear "Blocked" state / SQLite
+        # direct status match). Without this, the next project refresh
+        # would re-read the task as open/TODO on those providers and the
+        # runaway loop this breaker exists to stop would resume.
+        try:
+            if hasattr(self.kanban_client, "move_task_to_column"):
+                await self.kanban_client.move_task_to_column(lease.task_id, "blocked")
+        except Exception as e:
+            logger.warning(
+                f"move_task_to_column('blocked') failed for {lease.task_id}: {e}"
+            )
+
+        # 6. Diagnostic comment (observability dual-write)
+        try:
+            await self.kanban_client.add_comment(
+                lease.task_id,
+                (
+                    f"🛑 **CIRCUIT BREAKER — task BLOCKED by Marcus**\n\n"
+                    f"{streak} consecutive agents claimed this task and "
+                    f"reported no progress before their lease expired. "
+                    f"This pattern almost always means an external "
+                    f"failure every fresh agent hits identically — an "
+                    f"LLM/API outage, a broken environment, or a task "
+                    f"that cannot run as specified — so retrying with "
+                    f"more agents only burns cost (issue #667).\n\n"
+                    f"**What to do:** investigate the root cause, then "
+                    f"reset this task's status to TODO to retry.\n\n"
+                    f"- Last agent: {lease.agent_id}\n"
+                    f"- Silent recoveries: {streak} "
+                    f"(threshold: {self.max_silent_recoveries})\n"
+                ),
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to write circuit-breaker comment for " f"{lease.task_id}: {e}"
+            )
+
+        # 7. Auditable history event
+        self.lease_history.append(
+            {
+                "event": "task_blocked_circuit_breaker",
+                "task_id": lease.task_id,
+                "agent_id": lease.agent_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "consecutive_silent_recoveries": streak,
+                "threshold": self.max_silent_recoveries,
+            }
+        )
+
+        # 8. Clear the streak — a human reset to TODO starts fresh
+        self._silent_recovery_streaks.pop(lease.task_id, None)
+
+        return True
 
     async def get_expiring_leases(self) -> List[AssignmentLease]:
         """
