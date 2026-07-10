@@ -69,9 +69,10 @@ spawns a board-visible integrator card** claimed by an intelligent session.
 The old lease conflated *"is the agent alive?"* with *"how long may it hold the
 card?"*, coupling failure-detection latency to card size. Split them:
 
-- **Liveness** = MCP-activity silence timeout (~15–30 min), independent of card
-  size. `touch_lease` already fires on every MCP call; the D4/D8 decision-logging
-  obligation doubles as the heartbeat.
+- **Liveness** = MCP-activity silence timeout, independent of card size
+  (**default 45 min** — must be ≥ 2× the D8 checkpoint cadence; see the D11
+  config invariant). `touch_lease` already fires on every MCP call; the D4/D8
+  decision-logging obligation doubles as the heartbeat.
 - **Budget ceiling** = a generous, estimate-scaled bound (~3× estimate) catching
   chatty zombies. **Replaces `max_renewals` / `stuck_task_threshold_renewals`**
   (review obligation O4).
@@ -141,7 +142,8 @@ documented fleet future.
 Keep the existing recovery handoff (next claimant merges the dead session's branch,
 reads progress notes and decisions, continues) — it survives D1 cleanly. Add a
 **checkpoint obligation** to the session contract: commit + log a decision at each
-meaningful unit, at minimum ~every 30 minutes.
+meaningful unit, at minimum **every 20 minutes** (default; paired with D3's
+45-min silence timeout to satisfy the D11 ≥ 2× invariant).
 
 - **Why:** at coarse granularity, non-resumable death wastes hours. The checkpoint
   duty makes resumability a property of the work rather than luck — and it *is*
