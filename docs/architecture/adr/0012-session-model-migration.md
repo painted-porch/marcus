@@ -1,6 +1,6 @@
 # ADR 0012: Session-Model Migration — Spawn-per-Task → Long-Lived Pull-Loop Sessions
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-07-06: added D11 — false-recovery fencing, from advisory-panel review)
 
 **Date:** 2026-07-05
 
@@ -69,9 +69,10 @@ spawns a board-visible integrator card** claimed by an intelligent session.
 The old lease conflated *"is the agent alive?"* with *"how long may it hold the
 card?"*, coupling failure-detection latency to card size. Split them:
 
-- **Liveness** = MCP-activity silence timeout (~15–30 min), independent of card
-  size. `touch_lease` already fires on every MCP call; the D4/D8 decision-logging
-  obligation doubles as the heartbeat.
+- **Liveness** = MCP-activity silence timeout, independent of card size
+  (**default 45 min** — must be ≥ 2× the D8 checkpoint cadence; see the D11
+  config invariant). `touch_lease` already fires on every MCP call; the D4/D8
+  decision-logging obligation doubles as the heartbeat.
 - **Budget ceiling** = a generous, estimate-scaled bound (~3× estimate) catching
   chatty zombies. **Replaces `max_renewals` / `stuck_task_threshold_renewals`**
   (review obligation O4).
@@ -141,7 +142,8 @@ documented fleet future.
 Keep the existing recovery handoff (next claimant merges the dead session's branch,
 reads progress notes and decisions, continues) — it survives D1 cleanly. Add a
 **checkpoint obligation** to the session contract: commit + log a decision at each
-meaningful unit, at minimum ~every 30 minutes.
+meaningful unit, at minimum **every 20 minutes** (default; paired with D3's
+45-min silence timeout to satisfy the D11 ≥ 2× invariant).
 
 - **Why:** at coarse granularity, non-resumable death wastes hours. The checkpoint
   duty makes resumability a property of the work rather than luck — and it *is*
@@ -170,6 +172,49 @@ Shape-B gate, coordination experiments) keep full run semantics.
 - **Why:** the product vision is continuous operation; the research instrument
   needs runs. This split serves both without compromise.
 
+### D11 — False-recovery fencing: the two-robots-one-chore rule *(added 2026-07-06)*
+
+**The problem this closes** (found in advisory-panel review — "Kaia" seat): under
+spawn-per-task, recovery *killed* the agent — death was the fencing token, so a
+recovered task could never be finished twice. The session model removes that
+guarantee: Marcus is deliberately process-blind, so a session that trips the D3
+silence timeout while **silently concentrating** (long build, deep work, no MCP
+calls) is *still alive*. Marcus reassigns its card to another session; the first
+session later reports 100%. Two live completions, one card, no rule for who wins
+— and D3's timeout (15–30 min) overlapped D8's checkpoint cadence (~30 min), so
+false recovery was not rare; it was designed in.
+
+**The decision — three parts:**
+
+1. **Lease epoch (the fencing token).** Every claim of a card stamps a
+   monotonically-increasing `lease_epoch` on the assignment. Every
+   `report_task_progress` call carries the epoch it was issued. A report bearing
+   a **stale epoch** is never applied as a completion.
+2. **Preserve, don't discard — reconcile via the board.** A stale-epoch
+   completion is *not* thrown away (the O3 failure): the late session's branch
+   and evidence are preserved, and Marcus spawns a **board-visible
+   reconciliation card** (the D2 integrator-card pattern, reused) whose contract
+   is: compare the two attempts, keep the verified better one or merge them,
+   record the decision. The audit trail shows exactly what happened.
+3. **Pin the dials apart.** The D3 silence timeout MUST be ≥ 2× the D8
+   checkpoint cadence, enforced as a config invariant (defaults: checkpoint
+   obligation ≤ every 20 min; silence timeout 45 min). False recovery becomes
+   rare-by-construction instead of designed-in; when it still happens, parts 1–2
+   make it safe.
+
+- **Why:** the coordinator can take the *job* away (the lease) but not the
+  *life* away (the process) — so ownership must be decided by a token both
+  sides carry, not by an assumption of death. This is the classic distributed
+  fencing problem; the epoch is the standard answer, and routing the conflict
+  to a board card keeps resolution intelligent, audited, and consistent with
+  Invariant #2.
+- **Consequences:** `AssignmentLease` gains `lease_epoch`; the stale-completion
+  guard (`task.py:3865-3960`) changes semantics from *reject-and-discard* to
+  *fence-and-reconcile*; obligation **O3 is closed by this decision**. A
+  Phase-3 verification scenario is added: falsely-recover a live session, let
+  both report, assert exactly one completion, zero discarded work, one
+  reconciliation card in the audit trail.
+
 ---
 
 ## Inherited obligations (review-found gaps — not choices)
@@ -181,7 +226,7 @@ only *after* going session-based. Each is assigned a home by this ADR:
 |---|---|---|
 | O1 | `agent_status` / `agent_project_map` are never rehydrated on restart (leases are) — a restart would orphan every registered session (`server.py:200-201`, `task.py:5150-5155`) | Phase 3 registration work (with D7's 1:1 scoping) |
 | O2 | Cost attribution is keyed to the spawn-registry file + per-agent cwd — both deleted. Re-home the `(session → agent/run/project)` binding at register/claim time (`worker_ingester.py:26,312-316`) | Phase 3, per D9 |
-| O3 | The stale-completion guard assumes agents die on recovery; a falsely-recovered *live* session would have its coarse-task output discarded (`task.py:3865-3960`) | Phase 3 lease retune, session-aware resolution per D3/D8 |
+| O3 | The stale-completion guard assumes agents die on recovery; a falsely-recovered *live* session would have its coarse-task output discarded (`task.py:3865-3960`) | **Closed by D11** (epoch fencing + board-mediated reconciliation) |
 | O4 | `max_renewals=10` / `stuck_task_threshold_renewals=5` flag healthy long tasks as stuck | **Deleted** — replaced by D3's budget ceiling |
 | O5 | No session context management exists; context grows unboundedly across cards in one process | Session contract + harness loop (compaction/reset between cards), per D8's card boundaries |
 
