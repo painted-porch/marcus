@@ -231,6 +231,42 @@ def _setup_unrecoverable_repo(tmp_path: Path) -> Path:
     return impl
 
 
+def _setup_untracked_collision_repo(tmp_path: Path) -> Path:
+    """Recoverable stale-base repo whose worktree has a colliding untracked file.
+
+    Like :func:`_setup_recoverable_repo` (the agent's commit and main's
+    commit touch different files, so the rebase is mechanically clean),
+    but ``main`` also gained a *committed* ``lock.txt`` after the agent
+    branched, and the worktree holds an *untracked* ``lock.txt`` in the
+    way.  A plain ``git reset --hard`` leaves the untracked file behind,
+    so ``git rebase main`` aborts with "untracked working tree files
+    would be overwritten by checkout" — the P2 failure mode.  Setting the
+    untracked file aside (stash ``--include-untracked``) lets the rebase
+    proceed.
+    """
+    impl = _setup_recoverable_repo(tmp_path)
+
+    def git(cwd: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    # main gains a committed lock.txt (agent's branch does not have it).
+    (impl / "lock.txt").write_text("generated on main\n")
+    git(impl, "add", "lock.txt")
+    git(impl, "commit", "-m", "main adds generated lock.txt")
+
+    # The worktree holds an untracked lock.txt with different content.
+    wt = impl.parent / "worktrees" / "agent_X"
+    (wt / "lock.txt").write_text("stale generated copy from a gate run\n")
+
+    return impl
+
+
 def _make_state(impl: Path, *, blocked_task: Task) -> MagicMock:
     """Marcus state mock with the inputs the recovery helper reads."""
     state = MagicMock()
@@ -374,6 +410,85 @@ class TestAttemptMergeRecoveryDirtyWorktreeIndex:
 
         # Task transitioned to DONE.
         state.kanban_client.update_task.assert_awaited_once()
+        kanban_call = state.kanban_client.update_task.call_args
+        update_data = (
+            kanban_call.args[1]
+            if len(kanban_call.args) > 1
+            else kanban_call.kwargs["update_data"]
+        )
+        assert update_data["status"] == TaskStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_manual_resolution_in_progress_is_not_disturbed(
+        self, tmp_path
+    ) -> None:
+        """A concurrent sweep must never wipe an in-progress manual resolve.
+
+        The merge-conflict blocker message asks the agent to resolve the
+        conflict in its worktree (``git merge main``; edit; add; commit).
+        This recovery runs on other agents' no-task polls, so if it fired
+        mid-resolution and reset the worktree it would destroy the agent's
+        work.  When a merge is in progress (``MERGE_HEAD`` present),
+        recovery must fence: return None and leave the edits untouched.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_unrecoverable_repo(tmp_path)
+        wt = tmp_path / "worktrees" / "agent_X"
+
+        # Agent starts resolving: `git merge main` conflicts, then they
+        # write a resolution into the working tree (not yet committed).
+        subprocess.run(
+            ["git", "merge", "main"],
+            cwd=wt,
+            capture_output=True,
+            text=True,
+        )
+        (wt / "conflict.txt").write_text("carefully merged by hand\n")
+
+        task = _make_blocked_task()
+        state = _make_state(impl, blocked_task=task)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        # Recovery fenced — task stays BLOCKED, no DONE transition.
+        assert result is None
+        state.kanban_client.update_task.assert_not_called()
+
+        # The agent's in-progress resolution is preserved, not reset.
+        assert (wt / "conflict.txt").read_text() == "carefully merged by hand\n"
+
+    @pytest.mark.asyncio
+    async def test_untracked_collision_is_set_aside_and_recovery_succeeds(
+        self, tmp_path
+    ) -> None:
+        """An untracked file that collides with newer main must not wedge us.
+
+        ``git reset --hard`` ignores untracked paths, so a stale untracked
+        file whose name main now tracks would abort the rebase with
+        "untracked working tree files would be overwritten by checkout".
+        Setting untracked files aside (stash ``--include-untracked``) lets
+        the mechanical rebase proceed.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_untracked_collision_repo(tmp_path)
+        task = _make_blocked_task()
+        state = _make_state(impl, blocked_task=task)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        # Recovery succeeded despite the untracked collision on entry.
+        assert result is not None
+        assert result["success"] is True
+
+        # The agent's committed work landed in main.
+        assert (impl / "agent_X.txt").exists()
+        # main's own committed lock.txt is intact (main's version, not the
+        # worktree's stale untracked copy).
+        assert (impl / "lock.txt").read_text() == "generated on main\n"
+
+        # Task transitioned to DONE.
         kanban_call = state.kanban_client.update_task.call_args
         update_data = (
             kanban_call.args[1]

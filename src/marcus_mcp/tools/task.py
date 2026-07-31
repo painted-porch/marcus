@@ -3248,25 +3248,71 @@ async def _attempt_merge_recovery(
         )
         return None
 
-    # Bug #700: a failed integration merge (or gate-test side effects) can
-    # leave the worktree index and working tree dirty.  ``git rebase``
+    # Bug #700: a failed integration merge or gate-test side effects can
+    # leave the worktree index/working tree dirty, and ``git rebase``
     # refuses to start on a non-clean state ("Your index contains
-    # uncommitted changes" / "You have unstaged changes"), which
-    # permanently wedged the task even though the agent's work is safely
-    # committed on ``branch``.  Discard the uncommitted cruft before
-    # rebasing — committed work is untouched because rebase replays it
-    # from commits.  Mirrors the defensive pre-merge ``git reset --hard``
-    # already done in ``_execute_worktree_merge`` on the main repo.
+    # uncommitted changes" / "You have unstaged changes"), permanently
+    # wedging a task whose work is safely committed on ``branch``.
+    #
+    # Two hazards must be respected before cleaning it (Codex review, #711):
+    #   P1 — the merge-conflict blocker message asks the agent to resolve
+    #        the conflict *in this same worktree* (``git merge main``;
+    #        edit; ``git add``; ``git commit``).  This recovery sweep runs
+    #        concurrently on any other agent's no-task poll, so it must
+    #        never destroy an in-progress manual resolution.  If a merge is
+    #        underway (``MERGE_HEAD`` present), fence: leave the task
+    #        BLOCKED and let the agent finish.
+    #   P2 — the dirty state may include *untracked* paths that also exist
+    #        on newer ``main`` (e.g. a generated lockfile); those abort the
+    #        rebase too, so untracked files must be set aside as well.
+    #
+    # For the remaining case (dirty, no merge underway) the changes are
+    # gate side-effects / stale artifacts.  Rather than delete them with
+    # ``reset --hard`` (which also cannot identify them as disposable),
+    # stash them — tracked AND untracked — so nothing is ever destroyed:
+    # the committed work still replays via rebase, and the stash remains
+    # recoverable if the set-aside changes turn out to matter.
     try:
-        _sp.run(
-            ["git", "reset", "--hard", "HEAD"],
+        merge_in_progress = _sp.run(
+            ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
             cwd=worktree,
             capture_output=True,
             timeout=30,
         )
     except (_sp.SubprocessError, OSError) as exc:
         logger.warning(
-            "[recovery] %s: pre-rebase worktree reset failed: %s; "
+            "[recovery] %s: could not probe worktree merge state: %s; "
+            "skipping auto-recovery to be safe",
+            task.id,
+            exc,
+        )
+        return None
+    if merge_in_progress.returncode == 0:
+        logger.info(
+            "[recovery] %s: manual merge resolution in progress in %s; "
+            "leaving BLOCKED so the agent's work is preserved",
+            task.id,
+            worktree,
+        )
+        return None
+
+    try:
+        _sp.run(
+            [
+                "git",
+                "stash",
+                "push",
+                "--include-untracked",
+                "-m",
+                f"marcus-recovery-{task.id}",
+            ],
+            cwd=worktree,
+            capture_output=True,
+            timeout=30,
+        )
+    except (_sp.SubprocessError, OSError) as exc:
+        logger.warning(
+            "[recovery] %s: pre-rebase worktree stash failed: %s; "
             "continuing to rebase attempt",
             task.id,
             exc,
