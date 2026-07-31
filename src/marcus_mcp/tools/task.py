@@ -3248,6 +3248,30 @@ async def _attempt_merge_recovery(
         )
         return None
 
+    # Bug #700: a failed integration merge (or gate-test side effects) can
+    # leave the worktree index and working tree dirty.  ``git rebase``
+    # refuses to start on a non-clean state ("Your index contains
+    # uncommitted changes" / "You have unstaged changes"), which
+    # permanently wedged the task even though the agent's work is safely
+    # committed on ``branch``.  Discard the uncommitted cruft before
+    # rebasing — committed work is untouched because rebase replays it
+    # from commits.  Mirrors the defensive pre-merge ``git reset --hard``
+    # already done in ``_execute_worktree_merge`` on the main repo.
+    try:
+        _sp.run(
+            ["git", "reset", "--hard", "HEAD"],
+            cwd=worktree,
+            capture_output=True,
+            timeout=30,
+        )
+    except (_sp.SubprocessError, OSError) as exc:
+        logger.warning(
+            "[recovery] %s: pre-rebase worktree reset failed: %s; "
+            "continuing to rebase attempt",
+            task.id,
+            exc,
+        )
+
     logger.info(
         "[recovery] %s: attempting rebase of %s onto main in %s",
         task.id,
