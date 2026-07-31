@@ -33,7 +33,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.10.0",
+    "mcp>=1.10.0,<2.0.0",
+    # Upper bound: mcp 2.0.0 restructured the package and removed
+    # mcp.server.fastmcp (imported by src/marcus_mcp/server.py), so an
+    # unpinned >=1.10.0 floats to 2.0.0 and breaks import/test collection.
+    # Cap at <2.0.0 until the 2.x import path is adopted deliberately.
     # Transitive pins forced by mcp 1.10's streamable_http transport.
     # Without anyio>=4.5 the server raises TypeError on every HTTP MCP
     # request (PEP 585 subscript on a non-generic function in anyio 3.x)
