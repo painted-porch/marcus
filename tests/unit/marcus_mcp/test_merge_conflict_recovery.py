@@ -140,6 +140,52 @@ def _setup_recoverable_repo(tmp_path: Path) -> Path:
     return impl
 
 
+def _dirty_worktree_index(impl: Path, agent_id: str = "agent_X") -> None:
+    """Leave the agent's worktree with a dirty index and working tree.
+
+    Reproduces the state that wedges recovery in bug #700: a failed
+    integration merge (or gate-test side effects) leaves *uncommitted*
+    content in the worktree.  ``git rebase`` refuses to start on a
+    non-clean index/working tree, so the stale-base rebase that would
+    otherwise recover the task fails immediately.
+
+    Parameters
+    ----------
+    impl : Path
+        The main repository directory (``.../implementation``).
+    agent_id : str
+        Agent whose worktree (``.../worktrees/<agent_id>``) to dirty.
+
+    Notes
+    -----
+    Creates BOTH failure flavours seen in the issue logs:
+
+    * a **staged** change (new file ``git add``-ed) — triggers
+      ``error: cannot rebase: Your index contains uncommitted changes``
+    * an **unstaged** change (edit to a tracked file) — triggers
+      ``error: cannot rebase: You have unstaged changes``
+
+    The agent's real work stays safely committed on its branch, so a
+    correct recovery discards this cruft and still replays the commit.
+    """
+    wt = impl.parent / "worktrees" / agent_id
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=wt,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    # Unstaged change to a tracked file.
+    (wt / "base.txt").write_text("base\nlocally scribbled by a gate test\n")
+    # Staged (index) change — new file added but never committed.
+    (wt / "leftover.txt").write_text("half-merged cruft\n")
+    git("add", "leftover.txt")
+
+
 def _setup_unrecoverable_repo(tmp_path: Path) -> Path:
     """Build a tmp git project where rebase has a real content conflict.
 
@@ -181,6 +227,42 @@ def _setup_unrecoverable_repo(tmp_path: Path) -> Path:
     (wt / "conflict.txt").write_text("agent's version\n")
     git(wt, "add", "conflict.txt")
     git(wt, "commit", "-m", "feat(agent_X): modify conflict.txt")
+
+    return impl
+
+
+def _setup_untracked_collision_repo(tmp_path: Path) -> Path:
+    """Recoverable stale-base repo whose worktree has a colliding untracked file.
+
+    Like :func:`_setup_recoverable_repo` (the agent's commit and main's
+    commit touch different files, so the rebase is mechanically clean),
+    but ``main`` also gained a *committed* ``lock.txt`` after the agent
+    branched, and the worktree holds an *untracked* ``lock.txt`` in the
+    way.  A plain ``git reset --hard`` leaves the untracked file behind,
+    so ``git rebase main`` aborts with "untracked working tree files
+    would be overwritten by checkout" — the P2 failure mode.  Setting the
+    untracked file aside (stash ``--include-untracked``) lets the rebase
+    proceed.
+    """
+    impl = _setup_recoverable_repo(tmp_path)
+
+    def git(cwd: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    # main gains a committed lock.txt (agent's branch does not have it).
+    (impl / "lock.txt").write_text("generated on main\n")
+    git(impl, "add", "lock.txt")
+    git(impl, "commit", "-m", "main adds generated lock.txt")
+
+    # The worktree holds an untracked lock.txt with different content.
+    wt = impl.parent / "worktrees" / "agent_X"
+    (wt / "lock.txt").write_text("stale generated copy from a gate run\n")
 
     return impl
 
@@ -275,6 +357,145 @@ class TestAttemptMergeRecoveryHappyPath:
         # but the merge_conflict entry must be gone.
         ctx = update_data.get("source_context", {})
         assert "merge_conflict" not in ctx
+
+
+# ---------------------------------------------------------------------------
+# _attempt_merge_recovery — dirty worktree index (bug #700)
+# ---------------------------------------------------------------------------
+
+
+class TestAttemptMergeRecoveryDirtyWorktreeIndex:
+    """A dirty worktree index must not permanently wedge recovery (#700).
+
+    A failed integration merge or gate-test side effects can leave the
+    agent's worktree with uncommitted changes.  Before the fix, the
+    recovery path ran ``git rebase main`` straight into that dirty state
+    and git aborted with "Your index contains uncommitted changes" /
+    "You have unstaged changes", so the task stayed BLOCKED forever even
+    though it was a mechanically-recoverable stale-base conflict.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dirty_worktree_is_cleaned_and_recovery_succeeds(
+        self, tmp_path
+    ) -> None:
+        """Recovery cleans uncommitted cruft, then rebases and lands the work.
+
+        This is a stale-base false conflict (recoverable), but the
+        worktree carries both a staged and an unstaged change on entry.
+        The fix discards that uncommitted state before rebasing; the
+        agent's committed work is untouched and replays onto main.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_recoverable_repo(tmp_path)
+        _dirty_worktree_index(impl)
+        task = _make_blocked_task()
+        state = _make_state(impl, blocked_task=task)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        # Recovery succeeded despite the dirty index on entry.
+        assert result is not None
+        assert result["success"] is True
+
+        # The agent's committed work landed in main (rebase replayed it).
+        assert (impl / "agent_X.txt").exists()
+        assert (impl / "agent_X.txt").read_text() == "agent X work\n"
+        # Main's own file survives.
+        assert (impl / "mainonly.txt").exists()
+
+        # The uncommitted cruft was discarded, not carried into main.
+        assert not (impl / "leftover.txt").exists()
+
+        # Task transitioned to DONE.
+        state.kanban_client.update_task.assert_awaited_once()
+        kanban_call = state.kanban_client.update_task.call_args
+        update_data = (
+            kanban_call.args[1]
+            if len(kanban_call.args) > 1
+            else kanban_call.kwargs["update_data"]
+        )
+        assert update_data["status"] == TaskStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_manual_resolution_in_progress_is_not_disturbed(
+        self, tmp_path
+    ) -> None:
+        """A concurrent sweep must never wipe an in-progress manual resolve.
+
+        The merge-conflict blocker message asks the agent to resolve the
+        conflict in its worktree (``git merge main``; edit; add; commit).
+        This recovery runs on other agents' no-task polls, so if it fired
+        mid-resolution and reset the worktree it would destroy the agent's
+        work.  When a merge is in progress (``MERGE_HEAD`` present),
+        recovery must fence: return None and leave the edits untouched.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_unrecoverable_repo(tmp_path)
+        wt = tmp_path / "worktrees" / "agent_X"
+
+        # Agent starts resolving: `git merge main` conflicts, then they
+        # write a resolution into the working tree (not yet committed).
+        subprocess.run(
+            ["git", "merge", "main"],
+            cwd=wt,
+            capture_output=True,
+            text=True,
+        )
+        (wt / "conflict.txt").write_text("carefully merged by hand\n")
+
+        task = _make_blocked_task()
+        state = _make_state(impl, blocked_task=task)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        # Recovery fenced — task stays BLOCKED, no DONE transition.
+        assert result is None
+        state.kanban_client.update_task.assert_not_called()
+
+        # The agent's in-progress resolution is preserved, not reset.
+        assert (wt / "conflict.txt").read_text() == "carefully merged by hand\n"
+
+    @pytest.mark.asyncio
+    async def test_untracked_collision_is_set_aside_and_recovery_succeeds(
+        self, tmp_path
+    ) -> None:
+        """An untracked file that collides with newer main must not wedge us.
+
+        ``git reset --hard`` ignores untracked paths, so a stale untracked
+        file whose name main now tracks would abort the rebase with
+        "untracked working tree files would be overwritten by checkout".
+        Setting untracked files aside (stash ``--include-untracked``) lets
+        the mechanical rebase proceed.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_untracked_collision_repo(tmp_path)
+        task = _make_blocked_task()
+        state = _make_state(impl, blocked_task=task)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        # Recovery succeeded despite the untracked collision on entry.
+        assert result is not None
+        assert result["success"] is True
+
+        # The agent's committed work landed in main.
+        assert (impl / "agent_X.txt").exists()
+        # main's own committed lock.txt is intact (main's version, not the
+        # worktree's stale untracked copy).
+        assert (impl / "lock.txt").read_text() == "generated on main\n"
+
+        # Task transitioned to DONE.
+        kanban_call = state.kanban_client.update_task.call_args
+        update_data = (
+            kanban_call.args[1]
+            if len(kanban_call.args) > 1
+            else kanban_call.kwargs["update_data"]
+        )
+        assert update_data["status"] == TaskStatus.DONE
 
 
 # ---------------------------------------------------------------------------
