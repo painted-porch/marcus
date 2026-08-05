@@ -1495,6 +1495,22 @@ class MarcusServer:
             )
 
         @self._fastmcp.tool()  # type: ignore[misc]
+        async def request_task_redo(
+            agent_id: str,
+            task_id: str,
+            reason: str,
+        ) -> Dict[str, Any]:
+            """Send a completed task back to the board for a fresh agent to redo."""
+            from .tools.task import request_task_redo as impl
+
+            return await impl(
+                agent_id=agent_id,
+                task_id=task_id,
+                reason=reason,
+                state=server,
+            )
+
+        @self._fastmcp.tool()  # type: ignore[misc]
         async def get_all_board_tasks(board_id: str, project_id: str) -> Dict[str, Any]:
             """Get all tasks from a specific Planka board for validation/inspection."""
             from .tools.task import get_all_board_tasks as impl
@@ -1743,6 +1759,39 @@ class MarcusServer:
                         "task_id": task_id,
                         "blocker_description": blocker_description,
                         "severity": severity,
+                    },
+                    response=result,
+                )
+
+                return result
+
+        if "request_task_redo" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def request_task_redo(
+                agent_id: str,
+                task_id: str,
+                reason: str,
+            ) -> Dict[str, Any]:
+                """Send a completed task back to the board for a fresh agent to redo."""
+                from src.logging.mcp_tool_logger import log_mcp_tool_response
+
+                from .tools.task import request_task_redo as impl
+
+                result = await impl(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    reason=reason,
+                    state=server,
+                )
+
+                # Log MCP tool response
+                log_mcp_tool_response(
+                    tool_name="request_task_redo",
+                    arguments={
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "reason": reason,
                     },
                     response=result,
                 )

@@ -105,6 +105,20 @@ class RecoveryInfo:
         agent should merge this branch to pick up committed work.
     recovery_expires_at : Optional[datetime]
         When this recovery info becomes stale (default 24 hours)
+    redo_reason : Optional[str]
+        Why a downstream agent sent this completed task back to the board
+        (issue #627, ``request_task_redo``). None for lease-expiry recovery.
+    requested_by : Optional[str]
+        Agent ID that requested the redo (typically the integration
+        verification agent). None for lease-expiry recovery.
+    previous_worktree_path : Optional[str]
+        Filesystem path of the previous attempt's worktree, when it can be
+        resolved (``<project_root>/../worktrees/<agent_id>`` convention).
+        The next agent may reuse it or start fresh.
+    redo_count : int
+        How many times this task has been sent back via
+        ``request_task_redo``. Capped by the tool (3); 0 for
+        lease-expiry recovery.
 
     Notes
     -----
@@ -120,6 +134,10 @@ class RecoveryInfo:
     instructions: str
     previous_agent_branch: Optional[str] = None
     recovery_expires_at: Optional[datetime] = None
+    redo_reason: Optional[str] = None
+    requested_by: Optional[str] = None
+    previous_worktree_path: Optional[str] = None
+    redo_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -143,6 +161,10 @@ class RecoveryInfo:
                 if self.recovery_expires_at
                 else None
             ),
+            "redo_reason": self.redo_reason,
+            "requested_by": self.requested_by,
+            "previous_worktree_path": self.previous_worktree_path,
+            "redo_count": self.redo_count,
         }
 
     @classmethod
@@ -175,6 +197,10 @@ class RecoveryInfo:
                 if data.get("recovery_expires_at")
                 else None
             ),
+            redo_reason=data.get("redo_reason"),
+            requested_by=data.get("requested_by"),
+            previous_worktree_path=data.get("previous_worktree_path"),
+            redo_count=data.get("redo_count", 0),
         )
 
 

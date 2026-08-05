@@ -32,6 +32,7 @@ from .tools import (  # Agent tools; Task tools; Project tools; System tools; NL
     report_blocker,
     report_task_progress,
     request_next_task,
+    request_task_redo,
 )
 from .tools.analytics import (  # Analytics tools
     get_agent_metrics,
@@ -283,6 +284,40 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     },
                 },
                 "required": ["agent_id", "task_id", "blocker_description"],
+            },
+        ),
+        types.Tool(
+            name="request_task_redo",
+            description=(
+                "Send a completed (DONE) task back to the board for a fresh "
+                "agent to redo. Use when you find another agent's completed "
+                "work is substantively wrong (wrong response shape, missing "
+                "behavior, logic bug) — instead of rewriting their code "
+                "yourself. Marcus resets the task to TODO with your "
+                "diagnostic; the next agent claims it normally. Capped at 3 "
+                "redos per task, after which fix in place."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Your agent ID (the redo requester)",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the DONE task to send back",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Diagnostic for the next agent: what is wrong "
+                            "and how you observed it (e.g. the contract "
+                            "clause the output violates)"
+                        ),
+                    },
+                },
+                "required": ["agent_id", "task_id", "reason"],
             },
         ),
         # Project Monitoring Tools
@@ -1283,6 +1318,21 @@ async def handle_tool_call(
                     task_id=task_id,
                     blocker_description=blocker_description,
                     severity=arguments.get("severity", "medium"),
+                    state=state,
+                )
+
+        elif name == "request_task_redo":
+            agent_id = arguments.get("agent_id") if arguments else None
+            task_id = arguments.get("task_id") if arguments else None
+            reason = arguments.get("reason") if arguments else None
+
+            if not agent_id or not task_id or not reason:
+                result = {"error": "agent_id, task_id, and reason are required"}
+            else:
+                result = await request_task_redo(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    reason=reason,
                     state=state,
                 )
 

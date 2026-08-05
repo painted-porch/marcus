@@ -88,6 +88,7 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "request_next_task",
         "report_task_progress",
         "report_blocker",
+        "request_task_redo",
         "unassign_task",
         "get_task_context",
         "get_all_board_tasks",
