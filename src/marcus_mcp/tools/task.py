@@ -5170,7 +5170,14 @@ async def request_task_redo(
     # fail the redo.
     try:
         await state.kanban_client.update_task(
-            task_id, {"status": TaskStatus.TODO, "assigned_to": None}
+            task_id,
+            {
+                "status": TaskStatus.TODO,
+                "assigned_to": None,
+                # In-memory only would be lost: request_next_task refreshes
+                # project state from the board (Tier-1 live finding).
+                "priority": Priority.URGENT,
+            },
         )
     except Exception as e:
         logger.warning("request_task_redo: kanban update failed for %s: %s", task_id, e)

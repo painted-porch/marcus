@@ -103,8 +103,16 @@ class TestRequestTaskRedoHappyPath:
             )
 
         assert task.priority == Priority.URGENT
+        # Priority must be in the BOARD write too: request_next_task refreshes
+        # project state from kanban, so an in-memory-only boost would be lost
+        # (observed live in Tier-1 verification — reclaim showed 'medium').
         state.kanban_client.update_task.assert_awaited_once_with(
-            "task-impl-1", {"status": TaskStatus.TODO, "assigned_to": None}
+            "task-impl-1",
+            {
+                "status": TaskStatus.TODO,
+                "assigned_to": None,
+                "priority": Priority.URGENT,
+            },
         )
         state.kanban_client.add_comment.assert_awaited_once()
 
