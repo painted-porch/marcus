@@ -322,3 +322,27 @@ class TestRequestTaskRedoCap:
         assert result["redo_count"] == 3
         assert task.status == TaskStatus.DONE
         assert task.recovery_info is capped
+
+
+class TestRedoEndpointExposure:
+    """Tier-1 regression (PR #712 review): the tool must reach agents.
+
+    The live-server check found request_task_redo registered in the
+    ANALYTICS tool group instead of AGENT — the agent HTTP endpoint
+    (what spawned workers connect to) never exposed it, and no unit
+    test asserted endpoint membership. These pin it to the right
+    surface: agents can call it; the observational analytics endpoint
+    cannot mutate task state.
+    """
+
+    def test_agent_endpoint_exposes_request_task_redo(self) -> None:
+        """Spawned workers connect to the agent endpoint — redo must be there."""
+        from src.marcus_mcp.tool_groups import get_tools_for_endpoint
+
+        assert "request_task_redo" in get_tools_for_endpoint("agent")
+
+    def test_analytics_endpoint_does_not_expose_request_task_redo(self) -> None:
+        """Analytics is observational — it must not mutate task state."""
+        from src.marcus_mcp.tool_groups import get_tools_for_endpoint
+
+        assert "request_task_redo" not in get_tools_for_endpoint("analytics")
