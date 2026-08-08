@@ -14,11 +14,11 @@ import os
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from src.core.ai_powered_task_assignment import find_optimal_task_for_agent_ai_powered
-from src.core.models import Priority, Task, TaskAssignment, TaskStatus
+from src.core.models import Priority, RecoveryInfo, Task, TaskAssignment, TaskStatus
 from src.core.task_classification import get_task_type
 from src.integrations.behavior_evidence import (
     behavior_evidence_contract,
@@ -76,6 +76,15 @@ _smoke_missing_verification_attempts: Dict[str, int] = {}
 # remediation payload.
 MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS = 2
 _smoke_behavior_evidence_attempts: Dict[str, int] = {}
+
+
+# Redo ceiling (issue #627). ``request_task_redo`` lets a downstream agent
+# (typically integration verification) send a DONE task back to the board for
+# a fresh implementer instead of rewriting a sibling's lane in place. Without
+# a cap, a disagreement between the integration agent and implementers could
+# ping-pong a task forever. After this many redos the tool refuses and the
+# integration agent falls back to fixing in place.
+MAX_TASK_REDO_COUNT = 3
 
 
 def _capture_baseline_commit(assignment: "TaskAssignment", project_root: str) -> None:
@@ -4983,6 +4992,233 @@ def _build_escalation_error_response(
             f"completion pipeline failed: {exc}. Task state may "
             f"be inconsistent — retry completion to re-run the "
             f"pipeline."
+        ),
+    }
+
+
+async def request_task_redo(
+    agent_id: str,
+    task_id: str,
+    reason: str,
+    state: Any,
+) -> Dict[str, Any]:
+    """
+    Send a completed task back to the board for a fresh agent to redo.
+
+    Issue #627: when integration verification finds that an implementer
+    shipped substantively wrong work (wrong response shape, missing
+    behavior, logic bug), the integration agent should not rewrite the
+    sibling's lane in place (Invariant #2 leak) nor abandon the project.
+    This tool resets the DONE task to TODO with a redo diagnostic in
+    ``RecoveryInfo``; the next agent claims it through the normal
+    ``request_next_task`` cycle (Invariant #1) and decides HOW to fix it
+    (Invariant #2) — reuse the previous worktree or start fresh.
+
+    Parameters
+    ----------
+    agent_id : str
+        The requesting agent's ID (must currently hold a claimed task).
+    task_id : str
+        ID of the DONE task to send back.
+    reason : str
+        Non-empty diagnostic for the next agent (what is wrong and how it
+        was observed — e.g. the contract clause the output violates).
+    state : Any
+        Marcus server state instance.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``{"success": True, "task_id", "redo_count", "recovery_info"}``
+        on success; ``{"success": False, "error": ...}`` with error codes
+        ``reason_required`` / ``task_not_found`` / ``task_not_done`` /
+        ``caller_not_active`` / ``max_redo_count_exceeded`` otherwise.
+        After ``max_redo_count_exceeded`` the caller's fallback is an
+        in-place fix.
+    """
+    if not reason or not reason.strip():
+        return {
+            "success": False,
+            "error": "reason_required",
+            "message": (
+                "A non-empty reason is required — the next agent needs a "
+                "diagnostic to act on. Describe what is wrong and how you "
+                "observed it."
+            ),
+        }
+
+    task = next(
+        (t for t in (getattr(state, "project_tasks", None) or []) if t.id == task_id),
+        None,
+    )
+    if task is None:
+        return {
+            "success": False,
+            "error": "task_not_found",
+            "message": f"Task {task_id} not found in the current project.",
+        }
+
+    if task.status != TaskStatus.DONE:
+        return {
+            "success": False,
+            "error": "task_not_done",
+            "message": (
+                f"Task {task_id} is {task.status.value!r}, not 'done' — only "
+                "completed work can be sent back for redo. For an in-flight "
+                "task, report a blocker instead."
+            ),
+        }
+
+    if agent_id not in (getattr(state, "agent_tasks", None) or {}):
+        return {
+            "success": False,
+            "error": "caller_not_active",
+            "message": (
+                f"Agent {agent_id} does not hold a claimed task — only an "
+                "active agent (typically integration verification) may "
+                "request a redo."
+            ),
+        }
+
+    previous_redo_count = task.recovery_info.redo_count if task.recovery_info else 0
+    if previous_redo_count >= MAX_TASK_REDO_COUNT:
+        return {
+            "success": False,
+            "error": "max_redo_count_exceeded",
+            "redo_count": previous_redo_count,
+            "message": (
+                f"Task {task_id} has already been redone "
+                f"{previous_redo_count} times (cap "
+                f"{MAX_TASK_REDO_COUNT}). Fix the remaining problem in "
+                "place and document the cross-lane edit in your progress "
+                "report."
+            ),
+        }
+
+    previous_agent = task.assigned_to or (
+        task.recovery_info.recovered_from_agent if task.recovery_info else None
+    )
+    previous_branch = f"marcus/{previous_agent}" if previous_agent else None
+
+    # Best-effort worktree resolution via the spawn_agents.py convention
+    # ``<project_root>/../worktrees/<agent_id>``. The worktree may already
+    # be cleaned up — the branch (merged work) is the durable handle.
+    previous_worktree_path: Optional[str] = None
+    if previous_agent:
+        try:
+            ws_state = state.kanban_client._load_workspace_state()
+            project_root = (ws_state or {}).get("project_root")
+            if project_root:
+                candidate = os.path.normpath(
+                    os.path.join(project_root, "..", "worktrees", previous_agent)
+                )
+                previous_worktree_path = candidate
+        except Exception as ws_err:
+            logger.debug(
+                "request_task_redo: could not resolve worktree for %s: %s",
+                task_id,
+                ws_err,
+            )
+
+    now = datetime.now(timezone.utc)
+    redo_count = previous_redo_count + 1
+    recovery_info = RecoveryInfo(
+        recovered_at=now,
+        recovered_from_agent=previous_agent or "unknown",
+        previous_progress=100,
+        time_spent_minutes=0.0,
+        recovery_reason="redo_requested",
+        previous_agent_branch=previous_branch,
+        redo_reason=reason,
+        requested_by=agent_id,
+        previous_worktree_path=previous_worktree_path,
+        redo_count=redo_count,
+        recovery_expires_at=now + timedelta(hours=24),
+        instructions=(
+            f"🔁 **REDO REQUEST** — this task was completed by "
+            f"{previous_agent or 'a previous agent'} and sent back by "
+            f"{agent_id} (redo {redo_count}/{MAX_TASK_REDO_COUNT}).\n\n"
+            f"**What is wrong (from the requesting agent):**\n{reason}\n\n"
+            "**Start from the previous attempt, don't restart:**\n"
+            + (
+                f"- Merge the previous work first: "
+                f"`git merge {previous_branch} --no-edit`\n"
+                if previous_branch
+                else ""
+            )
+            + (
+                f"- Previous worktree (may still exist): "
+                f"`{previous_worktree_path}`\n"
+                if previous_worktree_path
+                else ""
+            )
+            + "- Fix the reported problem within THIS task's scope, then "
+            "complete the original task requirements.\n"
+        ),
+    )
+
+    # 1. Task model is the source of truth (mirrors lease-expiry recovery).
+    task.recovery_info = recovery_info
+    task.status = TaskStatus.TODO
+    task.assigned_to = None
+    # Redone work gates a waiting integration agent — surface it first.
+    task.priority = Priority.URGENT
+    task.updated_at = now
+
+    # 2. Board dual-write + audit comment, best-effort: the model update
+    # above is what request_next_task assigns from; a kanban miss must not
+    # fail the redo.
+    try:
+        await state.kanban_client.update_task(
+            task_id,
+            {
+                "status": TaskStatus.TODO,
+                "assigned_to": None,
+                # In-memory only would be lost: request_next_task refreshes
+                # project state from the board (Tier-1 live finding).
+                "priority": Priority.URGENT,
+            },
+        )
+    except Exception as e:
+        logger.warning("request_task_redo: kanban update failed for %s: %s", task_id, e)
+    try:
+        await state.kanban_client.add_comment(
+            task_id,
+            f"🔁 REDO requested by {agent_id} "
+            f"(redo {redo_count}/{MAX_TASK_REDO_COUNT})\n\n"
+            f"Reason: {reason}\n\n"
+            f"Previous attempt: {previous_agent or 'unknown'}"
+            + (f" on branch {previous_branch}" if previous_branch else ""),
+        )
+    except Exception as e:
+        logger.warning(
+            "request_task_redo: kanban comment failed for %s: %s", task_id, e
+        )
+
+    # 3. Fresh validation/smoke attempt budget for the incoming agent.
+    clear_validation_retry(task_id)
+
+    log_agent_event(
+        "task_redo_requested",
+        {
+            "task_id": task_id,
+            "requested_by": agent_id,
+            "previous_agent": previous_agent,
+            "redo_count": redo_count,
+            "reason": reason,
+        },
+    )
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "redo_count": redo_count,
+        "recovery_info": recovery_info.to_dict(),
+        "message": (
+            f"Task {task_id} is back on the board (redo "
+            f"{redo_count}/{MAX_TASK_REDO_COUNT}). A fresh agent will "
+            "claim it via request_next_task and see your diagnostic in "
+            "recovery_info."
         ),
     }
 

@@ -408,7 +408,14 @@ class IntegrationTaskGenerator:
             "for you — there is no safety net behind you. YOU must build it, "
             "run it, and confirm every outcome above actually happens before "
             "you mark this complete. If you have not watched it work, it is "
-            "not done."
+            "not done.\n\n"
+            "**Before you edit any file another task created, apply this "
+            "gate.** Boundary glue (imports, type alignment, adapters, "
+            "wiring): fix yourself. ANYTHING more (wrong logic, missing "
+            "behavior, an undone lane): do NOT rewrite it — call "
+            "`request_task_redo(agent_id, task_id, reason)` and re-verify "
+            "once the redo lands. Rewriting another lane yourself is the "
+            "last resort, after the redo cap (3)."
         )
 
     @staticmethod

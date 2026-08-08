@@ -2128,3 +2128,78 @@ class TestSpawnAgentsDirectInvocation:
             "Script ran without import error but never printed usage; "
             f"stdout={result.stdout!r}, stderr={result.stderr!r}"
         )
+
+
+class TestRealTemplateRedoGuidance:
+    """Issue #627: the live worker prompt must teach request_task_redo.
+
+    The MCP schema alone does not create discovery: the template's
+    "You can only use these Marcus tools" constraint means a tool absent
+    from that list is a tool the agent will refuse to touch — even when
+    an integration task description tells it to send wrong work back.
+    """
+
+    @pytest.fixture
+    def spawner(self, tmp_path: Path) -> Any:
+        """Build an AgentSpawner with minimal config for prompt rendering."""
+        config = MagicMock()
+        config.implementation_dir = tmp_path / "impl"
+        config.project_info_file = tmp_path / "project_info.json"
+        config.prompts_dir = tmp_path / "prompts"
+        config.prompts_dir.mkdir()
+
+        template = tmp_path / "agent_template.md"
+        template.write_text("# Base agent template\n")
+
+        instance = MagicMock(spec=spawn_agents.AgentSpawner)
+        instance.config = config
+        instance.agent_prompt_template = template
+        instance.create_worker_prompt = (
+            spawn_agents.AgentSpawner.create_worker_prompt.__get__(
+                instance, spawn_agents.AgentSpawner
+            )
+        )
+        return instance
+
+    @pytest.fixture
+    def agent_config(self) -> dict[str, Any]:
+        """Minimal agent config dict for prompt rendering."""
+        return {
+            "id": "agent_test_1",
+            "name": "Test Agent 1",
+            "role": "full-stack",
+            "skills": ["python", "javascript"],
+            "subagents": 0,
+        }
+
+    def _real_prompt(self, spawner: Any, agent_config: dict[str, Any]) -> str:
+        real_template = (
+            Path(spawn_agents.__file__).resolve().parent.parent
+            / "templates"
+            / "agent_prompt.md"
+        )
+        assert real_template.exists(), f"real template missing: {real_template}"
+        spawner.agent_prompt_template = real_template
+        return spawner.create_worker_prompt(agent_config)
+
+    def test_redo_tool_is_on_the_allowlist(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """request_task_redo appears in the composed worker prompt."""
+        assert "request_task_redo" in self._real_prompt(spawner, agent_config)
+
+    def test_redo_guidance_draws_the_glue_line(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """The prompt distinguishes glue fixes from redo-worthy failures."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        assert "glue" in prompt
+        assert "redo" in prompt
+
+    def test_redo_guidance_keeps_ephemeral_contract(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """Adding redo guidance must not reintroduce loop language."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        for banned in ("keep polling", "max retries", "retries exhausted"):
+            assert banned not in prompt

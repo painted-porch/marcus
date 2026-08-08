@@ -1216,10 +1216,17 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
 
         # Appended to every synthesized description so foundation tasks
         # carry the same Marcus workflow reminder as any implementation
-        # task — agents must call log_artifact so downstream agents can
-        # discover the output via get_task_context.  This is not HOW
-        # guidance; it is standard Marcus workflow that applies to all
-        # tasks that produce artifacts consumed by other tasks.
+        # task.  Scope matters: log_artifact is for INTERFACE-BEARING
+        # reference outputs (contracts, schemas, API specs, design
+        # docs), NOT source files.  Git is already the file channel —
+        # an artifact copy of a source file goes stale the moment the
+        # real one changes (two sources of truth, the v80 failure class
+        # through a different door), it buries the one contract that
+        # matters under implementation blobs, and every artifact
+        # inflates downstream get_task_context payloads (coordination
+        # tax buying nothing git doesn't provide).  This is not HOW
+        # guidance; it is standard Marcus workflow for tasks that
+        # produce reference artifacts consumed by other tasks.
         #
         # Issue #446 (Kaia review checkpoint #2): foundation agents must
         # also call log_decision titled "Public API surface" so the
@@ -1236,9 +1243,12 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
         # the chosen surface be published.  Bright-line: coordination
         # contract requirement, not implementation guidance.
         _WORKFLOW_REMINDER = (
-            " Call log_artifact for every file you produce so that "
-            "downstream agents can discover your output via "
-            "get_task_context. Also call log_decision titled "
+            " Call log_artifact for interface-bearing outputs that "
+            "downstream agents must consume as references — contracts, "
+            "schemas, API specs, design docs — so they can discover "
+            "them via get_task_context. Do NOT log source files: they "
+            "are discovered via git once your work merges. Also call "
+            "log_decision titled "
             "'Public API surface' listing the exact import paths, "
             "exported symbols, config keys, and usage constraints "
             "downstream consumers must coordinate against — without "

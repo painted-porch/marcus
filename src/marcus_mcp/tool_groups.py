@@ -47,6 +47,7 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "request_next_task",
         "report_task_progress",
         "report_blocker",
+        "request_task_redo",  # Send failed completed work back (issue #627)
         "get_task_context",
         "log_decision",
         "log_artifact",

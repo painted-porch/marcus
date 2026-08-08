@@ -1195,7 +1195,9 @@ class TestSelfVerifyPrompt:
 
     def test_is_short(self) -> None:
         # The old wall was ~4,000 words. The self-verify prompt is a fraction.
-        assert len(self._desc(contract=None).split()) < 350
+        # Raised 350 -> 400 for the #627 redo-lane rule (glue in place,
+        # logic failures via request_task_redo) — still <10% of the wall.
+        assert len(self._desc(contract=None).split()) < 400
 
     def test_contract_preamble_preserved_when_contract_first(self) -> None:
         desc = self._desc(contract="docs/contract.md")
@@ -1250,3 +1252,79 @@ class TestGotchaPropagationToSkeptic:
             c.startswith(GOTCHA_CRITERION_PREFIX)
             for c in integration_task.acceptance_criteria
         )
+
+
+class TestIntegrationTaskRedoGuidance:
+    """
+    Issue #627: the integration description must teach the redo decision.
+
+    When integration finds a sibling agent's completed work is
+    substantively wrong, the agent should send it back via
+    request_task_redo (clean attribution, Invariant #2) rather than
+    rewrite the sibling's lane — but mechanical glue fixes at contract
+    boundaries stay in-lane and should be fixed in place.
+    """
+
+    def test_description_names_request_task_redo(
+        self, sample_implementation_tasks: list[Task]
+    ) -> None:
+        """The integration task description must mention the redo tool."""
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            sample_implementation_tasks,
+            project_name="Snake Game",
+        )
+
+        assert task is not None
+        assert "request_task_redo" in task.description
+
+    def test_description_draws_the_glue_vs_logic_line(
+        self, sample_implementation_tasks: list[Task]
+    ) -> None:
+        """The description distinguishes in-place glue fixes from redo-worthy logic failures."""
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            sample_implementation_tasks,
+            project_name="Snake Game",
+        )
+
+        assert task is not None
+        description_lower = task.description.lower()
+        assert "glue" in description_lower
+        assert "redo" in description_lower
+
+
+class TestRedoGateRebalance:
+    """PR #712 Tier-2 follow-up: the redo rule must be a GATE, not a footnote.
+
+    Two seeded-defect runs showed 0/3 redo adoption — the integration
+    agent re-implemented a gutted lane in place. The skeptic prompt's
+    'FIND and FIX' pressure dominated a trailing redo paragraph. The
+    rebalance makes the redo decision a mandatory check applied BEFORE
+    any edit to another task's files, with cross-lane rewriting framed
+    as the last resort (reserved for the redo cap).
+    """
+
+    def _desc(self) -> str:
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        return IntegrationTaskGenerator._generate_integration_description("X")
+
+    def test_gate_applies_before_any_cross_lane_edit(self) -> None:
+        """The rule is framed as a pre-edit gate, not an afterthought."""
+        desc = self._desc().lower()
+        assert "before you edit any file another task created" in desc
+
+    def test_cross_lane_rewrite_is_last_resort(self) -> None:
+        """Rewriting another lane is explicitly the last resort."""
+        desc = self._desc().lower()
+        assert "last resort" in desc
+        assert "request_task_redo" in self._desc()
