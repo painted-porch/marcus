@@ -1298,3 +1298,33 @@ class TestIntegrationTaskRedoGuidance:
         description_lower = task.description.lower()
         assert "glue" in description_lower
         assert "redo" in description_lower
+
+
+class TestRedoGateRebalance:
+    """PR #712 Tier-2 follow-up: the redo rule must be a GATE, not a footnote.
+
+    Two seeded-defect runs showed 0/3 redo adoption — the integration
+    agent re-implemented a gutted lane in place. The skeptic prompt's
+    'FIND and FIX' pressure dominated a trailing redo paragraph. The
+    rebalance makes the redo decision a mandatory check applied BEFORE
+    any edit to another task's files, with cross-lane rewriting framed
+    as the last resort (reserved for the redo cap).
+    """
+
+    def _desc(self) -> str:
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        return IntegrationTaskGenerator._generate_integration_description("X")
+
+    def test_gate_applies_before_any_cross_lane_edit(self) -> None:
+        """The rule is framed as a pre-edit gate, not an afterthought."""
+        desc = self._desc().lower()
+        assert "before you edit any file another task created" in desc
+
+    def test_cross_lane_rewrite_is_last_resort(self) -> None:
+        """Rewriting another lane is explicitly the last resort."""
+        desc = self._desc().lower()
+        assert "last resort" in desc
+        assert "request_task_redo" in self._desc()
