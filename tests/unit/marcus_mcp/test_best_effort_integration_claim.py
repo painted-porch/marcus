@@ -175,3 +175,36 @@ class TestBestEffortAddendum:
         ).lower()
         assert "request_task_redo" in text
         assert "not" in text
+
+
+class TestPhaseGateSharesTheSettledRule:
+    """Codex P1 on PR #718: the phase filter must agree with the dep gate.
+
+    Task selection applies a SECOND gate after dependencies: a task is
+    phase-ineligible while an earlier phase in the same feature has no
+    DONE task. That filter counts only DONE, so a BLOCKED same-feature
+    task (e.g. a blocked testing task sharing the 'integration' label)
+    keeps the integration task ineligible forever — while the gridlock
+    detector, now using the shared claimability rule, reports "not
+    gridlocked". The result is the original permanent hang with the
+    alarm switched off, which is strictly worse than before.
+
+    Fix: for the terminal integration task, a SETTLED earlier-phase task
+    (DONE or BLOCKED) satisfies the phase requirement, matching
+    ``deps_allow_claim``. Ordinary tasks keep the strict DONE rule.
+    """
+
+    def test_settled_counts_for_integration(self) -> None:
+        from src.core.task_claimability import phase_satisfied_by
+
+        integration = _integration([])
+        assert phase_satisfied_by(integration) == {
+            TaskStatus.DONE,
+            TaskStatus.BLOCKED,
+        }
+
+    def test_ordinary_tasks_still_require_done(self) -> None:
+        from src.core.task_claimability import phase_satisfied_by
+
+        ordinary = _task("t", status=TaskStatus.TODO)
+        assert phase_satisfied_by(ordinary) == {TaskStatus.DONE}

@@ -26,6 +26,7 @@ from src.core.models import Priority, RecoveryInfo, Task, TaskAssignment, TaskSt
 # this file.
 from src.core.task_claimability import deps_allow_claim as _deps_allow_claim
 from src.core.task_claimability import is_integration_task as _is_integration_task
+from src.core.task_claimability import phase_satisfied_by
 from src.core.task_classification import get_task_type
 from src.integrations.behavior_evidence import (
     behavior_evidence_contract,
@@ -5899,11 +5900,20 @@ async def _find_optimal_task_original_logic(
                 # Only consider non-system labels as feature identifiers
                 task_feature_labels = set(task.labels) - _SYSTEM_LABELS
                 if task_feature_labels:
-                    # Get all completed tasks in the same feature
+                    # Get all settled tasks in the same feature. Issue #629
+                    # / Codex P1 on PR #718: for the terminal integration
+                    # task a BLOCKED earlier-phase task counts as settled,
+                    # matching the dependency gate. Counting only DONE here
+                    # reintroduced the hang through a second door — the
+                    # integration task stayed phase-ineligible forever while
+                    # the gridlock detector (sharing deps_allow_claim)
+                    # reported no gridlock, so the run hung with the alarm
+                    # switched off. Ordinary tasks keep the strict DONE rule.
+                    satisfying_statuses = phase_satisfied_by(task)
                     feature_completed_tasks = [
                         t
                         for t in scoped_tasks
-                        if t.status == TaskStatus.DONE
+                        if t.status in satisfying_statuses
                         and t.labels
                         and (set(t.labels) - _SYSTEM_LABELS) & task_feature_labels
                     ]

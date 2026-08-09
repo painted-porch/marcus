@@ -15,7 +15,7 @@ This module is the single home for the rule so the selector
 layer.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 from src.core.models import Task, TaskStatus
 
@@ -118,3 +118,33 @@ def deps_allow_claim(
         if dep is not None and dep.status != TaskStatus.DONE
     ]
     return True, degraded
+
+
+def phase_satisfied_by(task: Task) -> Set[TaskStatus]:
+    """Statuses that satisfy an earlier-phase requirement for ``task``.
+
+    Task selection applies a second gate after dependencies: a task is
+    phase-ineligible while an earlier phase in the same feature has no
+    completed task. That gate counted only DONE, which reintroduced the
+    #629 hang through a different door — a BLOCKED same-feature task kept
+    the terminal integration task ineligible forever, while the gridlock
+    detector (sharing ``deps_allow_claim``) reported no gridlock. The
+    alarm went quiet and the run still hung (Codex P1 on PR #718).
+
+    For the integration task, SETTLED (DONE or BLOCKED) satisfies the
+    phase requirement, matching the dependency rule. Ordinary tasks keep
+    the strict DONE rule: implementation must not start on a dead design.
+
+    Parameters
+    ----------
+    task : Task
+        The candidate task being phase-filtered.
+
+    Returns
+    -------
+    Set[TaskStatus]
+        Statuses that count as "this earlier phase is finished".
+    """
+    if is_integration_task(task):
+        return set(SETTLED_FOR_BEST_EFFORT)
+    return {TaskStatus.DONE}
