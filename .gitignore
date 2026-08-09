@@ -61,3 +61,10 @@ experiment_complete.json
 # Personal advisory tooling — keep out of the public Marcus repo
 skills/kaia/
 skills/council/
+.plans/
+.env.test
+.claude/settings.json
+.claude/skills/
+
+# Machine-specific workspace binding — never commit (Codex P1 on PR #725)
+.marcus_workspace.json

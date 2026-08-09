@@ -8,6 +8,7 @@ import os
 from typing import Any, Dict, Optional
 
 from src.config.marcus_config import get_config
+from src.core.paths import marcus_data_dir
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 from src.integrations.providers import (
     GitHubKanban,
@@ -86,12 +87,16 @@ class KanbanFactory:
         elif provider_lower == KanbanProvider.SQLITE.value:
             if not config:
                 config = {
+                    # Issue #724: the fallback routes through the shared
+                    # resolver so tests land in the isolated temp dir (an
+                    # explicit "./data/kanban.db" here bypassed the provider
+                    # default and let test-built servers open the PRODUCTION
+                    # board). Config/env-specified paths are still honored —
+                    # production behavior is unchanged.
                     "db_path": (
                         marcus_config.kanban.sqlite_db_path
-                        or os.getenv(
-                            "SQLITE_KANBAN_DB_PATH",
-                            "./data/kanban.db",
-                        )
+                        or os.getenv("SQLITE_KANBAN_DB_PATH")
+                        or str(marcus_data_dir() / "kanban.db")
                     ),
                     "project_name": (
                         marcus_config.kanban.board_name

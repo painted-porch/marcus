@@ -10,18 +10,63 @@ This configuration file is automatically loaded by pytest and provides shared
 resources for all tests in the suite.
 """
 
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Generator
 
 import pytest
+
+# Marcus data isolation (issue #724) — must happen at IMPORT time, not in a
+# fixture: tests/unit/conftest.py imports MarcusServer during collection,
+# which constructs module-level singletons (e.g. cost_tracking's
+# token_tracker) that resolve their data paths immediately. A session
+# fixture runs too late for those; by then the singleton is bound. Codex P1
+# on PR #725. The session fixture below still owns per-session bookkeeping.
+_MARCUS_TEST_DATA_DIR = tempfile.mkdtemp(prefix="marcus_test_data_")
+os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
+atexit.register(shutil.rmtree, _MARCUS_TEST_DATA_DIR, True)
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import ClientSession, StdioServerParameters  # noqa: E402
+from mcp.client.stdio import stdio_client  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Marcus data-directory isolation (issue #724).
+#
+# On 2026-08-09, pytest runs destroyed six live project boards: tests
+# construct real Marcus components (six files build a real MarcusServer),
+# and their data paths default to the cwd-relative ./data — the PRODUCTION
+# data directory when pytest runs from the repo root. Fixture junk was
+# written into the live kanban.db and, in one run, every project created
+# after 2026-05-14 was deleted, unrecoverably (no backup existed).
+#
+# This autouse, session-scoped fixture points MARCUS_DATA_DIR at a pytest
+# temp directory before any test runs, so every default-path component
+# (SQLiteKanban, AuditLogger, TokenTracker, SubtaskManager, assignment
+# dirs) writes there. src/core/paths.py additionally REFUSES to resolve
+# the production default under pytest, so bypassing this fixture fails
+# loudly instead of touching real data.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_marcus_data() -> Generator[None, None, None]:
+    """Keep MARCUS_DATA_DIR pinned to the import-time temp directory.
+
+    The real isolation happens at module import above (it must — see the
+    comment there). This fixture guards against a test deleting or
+    rewriting the variable and leaving the rest of the session exposed.
+    """
+    os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
+    yield
+    os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
+
 
 # Import domain-specific fixtures
 pytest_plugins = [

@@ -21,9 +21,10 @@ import sqlite3
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Set, TypeVar, Union
 
 from src.core.models import Priority, Task, TaskStatus
+from src.core.paths import marcus_data_dir
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,11 @@ CREATE INDEX IF NOT EXISTS idx_blockers_task
 """
 
 
+# Databases snapshotted in this process (issue #724): one snapshot per
+# db file per process — reconnects are frequent and must not spam.
+_SNAPSHOT_TAKEN: Set[str] = set()
+
+
 class SQLiteKanban(KanbanInterface):
     """SQLite-backed kanban board — zero external dependencies.
 
@@ -252,9 +258,17 @@ class SQLiteKanban(KanbanInterface):
         super().__init__(config)
         self.provider = KanbanProvider.SQLITE
 
-        self.db_path = Path(config.get("db_path", "./data/kanban.db"))
+        db_path_cfg = config.get("db_path")
+        self.db_path = (
+            Path(db_path_cfg) if db_path_cfg else marcus_data_dir() / "kanban.db"
+        )
         self.project_name: str = config.get("project_name", "Marcus Project")
-        self.attachments_dir = Path(config.get("attachments_dir", "./data/attachments"))
+        attachments_cfg = config.get("attachments_dir")
+        self.attachments_dir = (
+            Path(attachments_cfg)
+            if attachments_cfg
+            else marcus_data_dir() / "attachments"
+        )
         self.connected = False
 
         # Project/board scoping — each experiment gets its own IDs
@@ -275,7 +289,16 @@ class SQLiteKanban(KanbanInterface):
     # ----------------------------------------------------------
 
     async def connect(self) -> bool:
-        """Create database and initialize schema.
+        """Create database, initialize schema, and secure durability.
+
+        Beyond schema init, connect() applies the #724 post-incident
+        durability measures: snapshot the existing database via the
+        SQLite backup API (WAL-safe; a bare file copy without sidecars
+        reproduces the incident's data loss), force a TRUNCATE
+        checkpoint so the main file can never lag behind its WAL
+        sidecar, and log the resolved absolute path plus WAL size —
+        a growing sidecar was the invisible precondition for losing
+        three months of boards.
 
         Returns
         -------
@@ -283,13 +306,77 @@ class SQLiteKanban(KanbanInterface):
             True if connection succeeded.
         """
         try:
+            db_existed = self.db_path.exists()
+            if db_existed:
+                await self._run_in_executor(self._snapshot_db)
             await self._run_in_executor(self._init_db)
+            await self._run_in_executor(self._checkpoint_wal)
             self.connected = True
-            logger.info("[SQLiteKanban] Connected successfully")
+            wal_path = Path(str(self.db_path) + "-wal")
+            wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+            logger.info(
+                "[SQLiteKanban] Connected: db=%s (wal sidecar: %d bytes)",
+                self.db_path.resolve(),
+                wal_size,
+            )
             return True
         except Exception as e:
             logger.error(f"[SQLiteKanban] Connect failed: {e}")
             return False
+
+    def _checkpoint_wal(self) -> None:
+        """Force WAL contents into the main database file.
+
+        Issue #724: the main file's checkpoint horizon was pinned at
+        2026-05-14 by a long-lived reader, so three months of commits
+        lived only in ``kanban.db-wal`` — and vanished with it. A
+        TRUNCATE checkpoint on every connect bounds that exposure to a
+        single session.
+        """
+        conn = self._get_raw_connection()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+
+    def _snapshot_db(self) -> None:
+        """Snapshot the database via the SQLite backup API, keeping 7.
+
+        Once per process per database file (``_SNAPSHOT_TAKEN``): the
+        provider reconnects freely, and a snapshot per reconnect would
+        be noise. The backup API copies main + WAL coherently — the
+        one safe way to copy a live WAL database. Best-effort: snapshot
+        failure must never block connecting. Retention deletes ONLY
+        files matching our own ``kanban-*.db`` naming, newest 7 kept.
+        """
+        key = str(self.db_path.resolve())
+        if key in _SNAPSHOT_TAKEN:
+            return
+        _SNAPSHOT_TAKEN.add(key)
+        try:
+            backups_dir = self.db_path.parent / "backups"
+            backups_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            dest_path = backups_dir / f"kanban-{stamp}.db"
+            src = sqlite3.connect(str(self.db_path), timeout=30)
+            try:
+                dest = sqlite3.connect(str(dest_path))
+                try:
+                    src.backup(dest)
+                finally:
+                    dest.close()
+            finally:
+                src.close()
+            snapshots = sorted(backups_dir.glob("kanban-*.db"))
+            for stale in snapshots[:-7]:
+                stale.unlink()
+            logger.info(
+                "[SQLiteKanban] Snapshot written: %s (%d kept)",
+                dest_path.name,
+                min(len(snapshots), 7),
+            )
+        except Exception as snap_err:  # noqa: BLE001 - never block connect
+            logger.warning(f"[SQLiteKanban] Snapshot failed: {snap_err}")
 
     async def disconnect(self) -> None:
         """Mark provider as disconnected."""
