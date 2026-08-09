@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from src.core.ai_powered_task_assignment import find_optimal_task_for_agent_ai_powered
 from src.core.models import Priority, RecoveryInfo, Task, TaskAssignment, TaskStatus
@@ -117,25 +117,35 @@ ADVISORY_SEVERITIES = frozenset({"low", "medium"})
 # (which recovery calls): it is the loop guard. Clearing it on requeue
 # would let a task ping-pong between TODO and blocked forever.
 MAX_BLOCKER_REPAIR_ATTEMPTS = 2
-_blocker_repair_attempts: Dict[str, int] = {}
+_blocker_repair_agents: Dict[str, Set[str]] = {}
 
 
-def _record_repair_attempt(task_id: str) -> int:
-    """Increment and return the repair-requeue count for a task.
+def _record_repair_attempt(task_id: str, agent_id: str) -> int:
+    """Record that ``agent_id`` gave up on ``task_id``; return distinct count.
+
+    Counts DISTINCT agents, not tool calls (Codex P1 on PR #722). After the
+    first requeue clears the lease, the ownership guard only rejects a lease
+    held by *someone else* — so a stale agent retrying after a lost response
+    could otherwise consume the whole budget and mark a lane dead that no
+    fresh agent ever attempted. Recording by agent makes repeat calls
+    idempotent and matches the semantic the ceiling claims: the lane is dead
+    only when independent agents agree it is.
 
     Parameters
     ----------
     task_id : str
-        The task an agent has just given up on.
+        The task that was given up on.
+    agent_id : str
+        The agent giving up.
 
     Returns
     -------
     int
-        Cumulative give-ups for this task (1 on the first call).
+        Number of distinct agents that have given up on this task.
     """
-    count = _blocker_repair_attempts.get(task_id, 0) + 1
-    _blocker_repair_attempts[task_id] = count
-    return count
+    agents = _blocker_repair_agents.setdefault(task_id, set())
+    agents.add(agent_id)
+    return len(agents)
 
 
 def clear_repair_attempts(task_id: str) -> None:
@@ -147,9 +157,47 @@ def clear_repair_attempts(task_id: str) -> None:
     Parameters
     ----------
     task_id : str
-        The task whose repair counter should be reset.
+        The task whose repair record should be reset.
     """
-    _blocker_repair_attempts.pop(task_id, None)
+    _blocker_repair_agents.pop(task_id, None)
+
+
+async def _release_task_file_locks(state: Any, task_id: str, context: str) -> None:
+    """Release the #206 file locks a task holds, best-effort.
+
+    Codex P1 on PR #722: the availability filter skips any TODO task whose
+    declared files are locked, with no exemption for locks the task itself
+    holds — so a requeue that leaves them in place makes the repair task
+    permanently unclaimable and can starve siblings sharing those files.
+    Both terminal paths must release, exactly as lease recovery and the
+    terminal-progress path already do.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state (may lack ``file_lock_registry``).
+    task_id : str
+        Task whose locks should be dropped.
+    context : str
+        Short label for the log line (e.g. "repair requeue").
+
+    Notes
+    -----
+    Best-effort and idempotent: ``release`` returns 0 for a task holding
+    nothing, and any failure is logged rather than raised — at worst a lock
+    leaks until Marcus restarts, which must never cost us the handoff.
+    """
+    if not hasattr(state, "file_lock_registry"):
+        return
+    try:
+        await state.file_lock_registry.release(task_id)
+    except Exception as release_err:  # noqa: BLE001 - never break the handoff
+        logger.warning(
+            "[#206] lock release failed for task %s during %s: %s",
+            task_id,
+            context,
+            release_err,
+        )
 
 
 def _repair_instructions(
@@ -5520,7 +5568,7 @@ async def report_blocker(
             # attempt it, rather than killing the lane on one agent's word.
             # Only after MAX_BLOCKER_REPAIR_ATTEMPTS independent agents have
             # given up is the lane recorded as genuinely dead.
-            repair_attempt = _record_repair_attempt(task_id)
+            repair_attempt = _record_repair_attempt(task_id, agent_id)
             requeued_for_repair = repair_attempt <= MAX_BLOCKER_REPAIR_ATTEMPTS
 
             if requeued_for_repair:
@@ -5560,10 +5608,11 @@ async def report_blocker(
                         "blocker": blocker_description,
                     },
                 )
+                await _release_task_file_locks(state, task_id, "repair requeue")
                 logger.warning(
                     "REPAIR REQUEUE: task %s returned to the board after "
-                    "%s gave up (attempt %d/%d); next agent gets the "
-                    "blocker diagnostic.",
+                    "%s gave up (%d/%d distinct agents); next agent gets "
+                    "the blocker diagnostic.",
                     task_id,
                     agent_id,
                     repair_attempt,
@@ -5575,11 +5624,12 @@ async def report_blocker(
                     task_id,
                     {"status": TaskStatus.BLOCKED, "blocker": blocker_description},
                 )
+                await _release_task_file_locks(state, task_id, "lane death")
                 logger.warning(
                     "LANE DEAD: task %s blocked after %d independent agents "
                     "gave up.",
                     task_id,
-                    repair_attempt - 1,
+                    repair_attempt,
                 )
 
             # Release coordination state — a blocked task is terminal for the

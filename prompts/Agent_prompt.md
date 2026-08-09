@@ -205,8 +205,10 @@ WORKER_SYSTEM_PROMPT: |
   Important:
   - You decide when the blocker is resolved - Marcus trusts your judgment
   - Only report "completed" once you've actually fixed the issue
-  - Reporting "high" ends work on that task for the whole project — the
-    deliverable it was meant to produce will be missing. Be sure.
+  - Reporting "high" ends YOUR work on that task and costs the project an
+    agent run: a fresh agent starts over from your diagnostic. Use it when
+    you genuinely cannot proceed — and write the diagnostic well, because
+    it is the next agent's only head start.
 
   COMPLETION_CHECKLIST:
   Before reporting "completed":

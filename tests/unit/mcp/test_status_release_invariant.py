@@ -95,13 +95,14 @@ def _make_state(task: Task) -> Any:
 
 
 class TestReportBlockerReleasesCoordination:
-    # Issue #719: these tests use severity="high" because the invariant
-    # under test is "a status change to a TERMINAL state releases
-    # coordination state". low/medium blockers are advisory — they make no
-    # terminal status change and deliberately keep the task with the agent
-    # (see tests/unit/mcp/test_advisory_blocker.py), so the invariant does
-    # not apply to them.
-    """``report_blocker`` must release the agent's assignment + lease."""
+    """``report_blocker`` must release the agent's assignment + lease.
+
+    Issue #719: these tests use ``severity="high"`` because the invariant
+    under test is "a terminal handoff releases coordination state".
+    low/medium blockers are advisory — they deliberately keep the task
+    with the agent (see ``tests/unit/mcp/test_advisory_blocker.py``), so
+    the invariant does not apply to them.
+    """
 
     @pytest.mark.asyncio
     async def test_report_blocker_clears_agent_tasks(self) -> None:
@@ -210,7 +211,13 @@ class TestReportBlockerReleasesCoordination:
         update_call = state.kanban_client.update_task.call_args
         assert update_call is not None
         update_payload = update_call[0][1]
-        assert update_payload["status"] == TaskStatus.BLOCKED
+        # First give-up requeues for repair (TODO); an exhausted repair
+        # budget writes BLOCKED. Both are pinned in
+        # tests/unit/mcp/test_blocker_repair_requeue.py — what matters here
+        # is that the board write happens in the same call that releases
+        # coordination state.
+        assert update_payload["status"] == TaskStatus.TODO
+        assert update_payload["assigned_to"] is None
 
 
 class TestCompletionReleasesLeaseEvenOnMergeFailure:

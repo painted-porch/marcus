@@ -81,3 +81,20 @@ class TestRepairRequeueContract:
         """The next agent reads what you wrote — say so."""
         text = prompt_path.read_text().lower()
         assert "next agent reads it" in text
+
+
+@pytest.mark.parametrize("prompt_path", ALL_PROMPTS, ids=lambda p: p.name)
+class TestNoStaleTerminalWarning:
+    """Codex P2: no leftover text claiming a terminal blocker is final.
+
+    The pre-repair prompts warned that reporting "high" ends work on the
+    task "for the whole project" and leaves the deliverable "missing".
+    That is now false — a fresh agent retries — and an agent reading both
+    statements may avoid legitimate terminal handoffs.
+    """
+
+    def test_no_whole_project_finality_claim(self, prompt_path: Path) -> None:
+        """The contradictory warning must not survive anywhere."""
+        text = prompt_path.read_text().lower()
+        assert "whole project" not in text
+        assert "will be missing" not in text

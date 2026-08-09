@@ -73,6 +73,12 @@ def _make_state(agent_id: str, task_id: str) -> MagicMock:
     state.assignment_persistence = AsyncMock()
     state.assignment_persistence.remove_assignment = AsyncMock()
 
+    # #206 lock registry: awaitable by default so the release path is
+    # exercised rather than swallowed as an error (tests that assert on
+    # release override this with their own mock).
+    state.file_lock_registry = MagicMock()
+    state.file_lock_registry.release = AsyncMock(return_value=0)
+
     state.memory = None
     state.project_state = MagicMock()
     return state
@@ -156,9 +162,9 @@ class TestRepairCeiling:
 
         clear_repair_attempts("task-1")
 
-        for _ in range(MAX_BLOCKER_REPAIR_ATTEMPTS):
-            state = _make_state("agent-x", "task-1")
-            result = await _terminal_blocker(state, "agent-x", "task-1")
+        for i in range(MAX_BLOCKER_REPAIR_ATTEMPTS):
+            state = _make_state(f"agent-{i}", "task-1")
+            result = await _terminal_blocker(state, f"agent-{i}", "task-1")
             assert result["requeued_for_repair"] is True
 
         state = _make_state("agent-final", "task-1")
@@ -183,9 +189,9 @@ class TestRepairCeiling:
         )
 
         clear_repair_attempts("task-loop")
-        assert _record_repair_attempt("task-loop") == 1
+        assert _record_repair_attempt("task-loop", "agent-1") == 1
         clear_validation_retry("task-loop")
-        assert _record_repair_attempt("task-loop") == 2
+        assert _record_repair_attempt("task-loop", "agent-2") == 2
 
     @pytest.mark.asyncio
     async def test_counter_is_per_task(self) -> None:
@@ -197,9 +203,9 @@ class TestRepairCeiling:
 
         clear_repair_attempts("task-a")
         clear_repair_attempts("task-b")
-        _record_repair_attempt("task-a")
-        _record_repair_attempt("task-a")
-        assert _record_repair_attempt("task-b") == 1
+        _record_repair_attempt("task-a", "agent-1")
+        _record_repair_attempt("task-a", "agent-2")
+        assert _record_repair_attempt("task-b", "agent-1") == 1
 
 
 class TestAdvisoryUnaffected:
@@ -230,3 +236,106 @@ class TestAdvisoryUnaffected:
         assert result["advisory"] is True
         assert result.get("requeued_for_repair") is None
         assert "agent-1" in state.agent_tasks
+
+
+class TestRequeueReleasesFileLocks:
+    """Codex P1: a requeued task must not keep holding its own file locks.
+
+    Tasks declare the files they write (#206) and hold locks on them while
+    in progress. The availability filter skips any TODO task whose declared
+    files are locked — with no exemption for locks the task itself holds.
+    So a requeue that leaves the locks in place makes the repair task
+    permanently unclaimable (and can starve siblings sharing those files),
+    which is the exact opposite of this feature's purpose.
+    """
+
+    @pytest.mark.asyncio
+    async def test_locks_released_on_requeue(self) -> None:
+        """The requeue path releases locks like lease recovery does."""
+        from src.marcus_mcp.tools.task import clear_repair_attempts
+
+        clear_repair_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+        state.file_lock_registry = MagicMock()
+        state.file_lock_registry.release = AsyncMock(return_value=2)
+
+        await _terminal_blocker(state, "agent-1", "task-1")
+
+        state.file_lock_registry.release.assert_awaited_once_with("task-1")
+
+    @pytest.mark.asyncio
+    async def test_locks_released_when_lane_dies(self) -> None:
+        """The terminal path releases them too — a dead lane holds nothing."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_ATTEMPTS,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        for i in range(MAX_BLOCKER_REPAIR_ATTEMPTS + 1):
+            state = _make_state(f"agent-{i}", "task-1")
+            state.file_lock_registry = MagicMock()
+            state.file_lock_registry.release = AsyncMock(return_value=0)
+            await _terminal_blocker(state, f"agent-{i}", "task-1")
+
+        state.file_lock_registry.release.assert_awaited_once_with("task-1")
+
+    @pytest.mark.asyncio
+    async def test_release_failure_never_breaks_the_requeue(self) -> None:
+        """A lock-registry error must not lose the repair handoff."""
+        from src.marcus_mcp.tools.task import clear_repair_attempts
+
+        clear_repair_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+        state.file_lock_registry = MagicMock()
+        state.file_lock_registry.release = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert result["requeued_for_repair"] is True
+
+
+class TestDistinctAgentsNotRawCalls:
+    """Codex P1: the budget counts independent agents, not tool calls.
+
+    After the first requeue removes the lease, the ownership guard only
+    rejects a lease held by *someone else* — so a stale agent retrying
+    after a lost response could burn the remaining attempts and mark a
+    lane dead that no fresh agent ever tried.
+    """
+
+    @pytest.mark.asyncio
+    async def test_same_agent_repeating_does_not_consume_attempts(self) -> None:
+        """Five calls from one agent = one agent having given up."""
+        from src.marcus_mcp.tools.task import clear_repair_attempts, report_blocker
+
+        clear_repair_attempts("task-1")
+
+        for _ in range(5):
+            state = _make_state("agent-1", "task-1")
+            result = await report_blocker(
+                agent_id="agent-1",
+                task_id="task-1",
+                blocker_description="same agent retrying",
+                severity="high",
+                state=state,
+                skip_ai_analysis=True,
+            )
+            assert (
+                result["requeued_for_repair"] is True
+            ), "a single agent must never be able to declare the lane dead"
+
+    @pytest.mark.asyncio
+    async def test_distinct_agents_each_consume_one(self) -> None:
+        """Independent give-ups are what exhaust the budget."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_ATTEMPTS,
+            _record_repair_attempt,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-d")
+        assert _record_repair_attempt("task-d", "agent-a") == 1
+        assert _record_repair_attempt("task-d", "agent-a") == 1
+        assert _record_repair_attempt("task-d", "agent-b") == 2
+        assert MAX_BLOCKER_REPAIR_ATTEMPTS >= 2

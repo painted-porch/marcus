@@ -69,6 +69,11 @@ def _make_state(agent_id: str, task_id: str) -> MagicMock:
     state.assignment_persistence = AsyncMock()
     state.assignment_persistence.remove_assignment = AsyncMock()
 
+    # #206 lock registry: awaitable so the terminal path's release runs
+    # for real instead of being swallowed as an error.
+    state.file_lock_registry = MagicMock()
+    state.file_lock_registry.release = AsyncMock(return_value=0)
+
     state.memory = None
     state.project_state = MagicMock()
     return state
@@ -214,10 +219,10 @@ class TestTerminalBlockerHandsTheTaskBack:
         clear_blocker_attempts("task-1")
         clear_repair_attempts("task-1")
 
-        for _ in range(MAX_BLOCKER_REPAIR_ATTEMPTS + 1):
-            state = _make_state("agent-1", "task-1")
+        for i in range(MAX_BLOCKER_REPAIR_ATTEMPTS + 1):
+            state = _make_state(f"agent-{i}", "task-1")
             result = await report_blocker(
-                agent_id="agent-1",
+                agent_id=f"agent-{i}",
                 task_id="task-1",
                 blocker_description="needs a paid API key we do not have",
                 severity="high",
