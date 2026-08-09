@@ -97,6 +97,11 @@ MAX_TASK_REDO_COUNT = 3
 MAX_ADVISORY_BLOCKER_ATTEMPTS = 3
 _advisory_blocker_attempts: Dict[str, int] = {}
 
+# The only severities that keep the task with the agent. Everything else —
+# "high", "critical", a typo — is treated as terminal so an unrecognised
+# value can never silently strand a blocked lane (Codex P2 on PR #720).
+ADVISORY_SEVERITIES = frozenset({"low", "medium"})
+
 
 def _record_blocker_attempt(task_id: str) -> int:
     """Increment and return the advisory-blocker count for a task.
@@ -5394,7 +5399,14 @@ async def report_blocker(
         # API, already sent by agents, previously ignored — is the switch:
         # low/medium keep the task, high hands it back. A ceiling stops an
         # agent looping on help while holding the lane.
-        is_terminal = severity == "high"
+        # Codex P2: ``severity`` is an unrestricted string on the wire, so
+        # "HIGH", " high ", or "critical" all arrive here. Normalise, and
+        # fail SAFE — only an explicit low/medium is advisory. Anything
+        # unrecognised hands the task back rather than silently holding a
+        # genuinely blocked lane until the ceiling or lease expiry. A blank
+        # value follows the schema default ("medium").
+        severity_normalized = (severity or "medium").strip().lower()
+        is_terminal = severity_normalized not in ADVISORY_SEVERITIES
         if not is_terminal:
             attempts = _record_blocker_attempt(task_id)
             if attempts > MAX_ADVISORY_BLOCKER_ATTEMPTS:
@@ -5459,7 +5471,7 @@ async def report_blocker(
         # blocker is real coordination history even though the lane lives on.
         kind = "BLOCKER" if is_terminal else "ADVISORY BLOCKER"
         icon = "🚫" if is_terminal else "💬"
-        comment = f"{icon} {kind} ({severity.upper()})\n"
+        comment = f"{icon} {kind} ({severity_normalized.upper()})\n"
         comment += f"Reported by: {agent_id}\n"
         comment += f"Description: {blocker_description}\n\n"
         comment += f"📋 AI Suggestions:\n{suggestions}"
@@ -5490,7 +5502,9 @@ async def report_blocker(
         # text never leaves the machine.
         from src.telemetry.events import fire_task_blocked
 
-        fire_task_blocked(severity=severity, blocker_description=blocker_description)
+        fire_task_blocked(
+            severity=severity_normalized, blocker_description=blocker_description
+        )
 
         if is_terminal:
             return {

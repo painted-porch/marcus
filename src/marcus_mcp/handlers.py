@@ -279,7 +279,17 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     },
                     "severity": {
                         "type": "string",
-                        "description": "Blocker severity: low, medium, high",
+                        "enum": ["low", "medium", "high"],
+                        "description": (
+                            "Blocker severity, which decides what happens to "
+                            "the task (issue #719). 'low'/'medium' = ADVISORY: "
+                            "you get suggestions and KEEP the task (it stays "
+                            "in progress and assigned to you) — this is the "
+                            "normal way to ask for help. 'high' = TERMINAL: "
+                            "you hand the task back, it is marked BLOCKED and "
+                            "nobody else picks it up — use only when the task "
+                            "genuinely cannot be completed by anyone."
+                        ),
                         "default": "medium",
                     },
                 },

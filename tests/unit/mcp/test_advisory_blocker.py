@@ -258,3 +258,80 @@ class TestAdvisoryCeiling:
         _record_blocker_attempt("task-c")
         clear_blocker_attempts("task-c")
         assert _record_blocker_attempt("task-c") == 1
+
+
+class TestSeverityNormalization:
+    """Codex P2: severity is a free-form string on the wire (#719).
+
+    The MCP schema declares ``severity`` as an unrestricted string, so
+    "HIGH", " high ", or "critical" all reach the tool. A case-sensitive
+    ``== "high"`` check silently treated every one of them as advisory —
+    leaving a genuinely blocked task assigned and leased until the
+    ceiling or lease expiry. Unrecognised severities must fail SAFE:
+    hand the task back rather than silently hold it.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "severity", ["HIGH", "High", " high ", "critical", "URGENT"]
+    )
+    async def test_unrecognised_or_uppercase_severity_is_terminal(
+        self, severity: str
+    ) -> None:
+        """Anything that is not an explicit low/medium hands the task back."""
+        from src.marcus_mcp.tools.task import clear_blocker_attempts, report_blocker
+
+        clear_blocker_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+
+        result = await report_blocker(
+            agent_id="agent-1",
+            task_id="task-1",
+            blocker_description="cannot proceed",
+            severity=severity,
+            state=state,
+            skip_ai_analysis=True,
+        )
+
+        assert result["advisory"] is False
+        assert "agent-1" not in state.agent_tasks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("severity", ["MEDIUM", " Low ", "medium"])
+    async def test_advisory_severities_normalize(self, severity: str) -> None:
+        """Case and whitespace variants of low/medium stay advisory."""
+        from src.marcus_mcp.tools.task import clear_blocker_attempts, report_blocker
+
+        clear_blocker_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+
+        result = await report_blocker(
+            agent_id="agent-1",
+            task_id="task-1",
+            blocker_description="need advice",
+            severity=severity,
+            state=state,
+            skip_ai_analysis=True,
+        )
+
+        assert result["advisory"] is True
+        assert "agent-1" in state.agent_tasks
+
+    @pytest.mark.asyncio
+    async def test_empty_severity_defaults_to_advisory_medium(self) -> None:
+        """An omitted/blank severity follows the schema default (medium)."""
+        from src.marcus_mcp.tools.task import clear_blocker_attempts, report_blocker
+
+        clear_blocker_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+
+        result = await report_blocker(
+            agent_id="agent-1",
+            task_id="task-1",
+            blocker_description="need advice",
+            severity="",
+            state=state,
+            skip_ai_analysis=True,
+        )
+
+        assert result["advisory"] is True
