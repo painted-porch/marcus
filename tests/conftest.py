@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Generator
 
 import pytest
@@ -53,6 +54,61 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 # the production default under pytest, so bypassing this fixture fails
 # loudly instead of touching real data.
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _block_external_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail unit tests that reach the network instead of mocking it.
+
+    ``tests/unit/integrations/test_spec_coverage.py`` shipped five "unit"
+    tests that called the live OpenAI API: they mocked one LLM boundary
+    (``extract_spec_features``) but not the second
+    (``_llm_confirm_uncovered``). The suite was therefore nondeterministic
+    (the model's coverage verdict varies run to run — ~2 failures in 6),
+    spent real money on every run, and violated the project's own rule
+    that unit tests mock ALL external dependencies.
+
+    Scope is determined by PATH as well as marker (Codex P1 on PR #726):
+    136 of 293 files under ``tests/unit`` carry no ``@pytest.mark.unit``,
+    and the full-suite workflow runs plain ``pytest`` (defaulting to
+    ``testpaths = tests/unit``) with live ``OPENAI_API_KEY`` /
+    ``CLAUDE_API_KEY`` / Planka credentials in the environment — so a
+    marker-only guard left the majority of unit tests able to reach a
+    paid service in CI.
+
+    Loopback stays open so local-socket fixtures keep working; anything
+    else raises with a pointer to the boundary that needs mocking.
+    """
+    node_path = Path(str(request.node.fspath)).as_posix()
+    is_unit = (
+        request.node.get_closest_marker("unit") is not None
+        or "/tests/unit/" in node_path
+    )
+    if not is_unit:
+        return
+
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def _guarded_connect(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if isinstance(host, str) and host not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise RuntimeError(
+                f"Unit test attempted a network connection to {host!r}. "
+                "Unit tests must mock ALL external dependencies — patch the "
+                "client/helper that makes this call (see the spec_coverage "
+                "LLM boundaries for a worked example)."
+            )
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
 
 
 @pytest.fixture(autouse=True, scope="session")
