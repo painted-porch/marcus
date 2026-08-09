@@ -13,15 +13,51 @@ resources for all tests in the suite.
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Generator
 
 import pytest
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import ClientSession, StdioServerParameters  # noqa: E402
+from mcp.client.stdio import stdio_client  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Marcus data-directory isolation (issue #724).
+#
+# On 2026-08-09, pytest runs destroyed six live project boards: tests
+# construct real Marcus components (six files build a real MarcusServer),
+# and their data paths default to the cwd-relative ./data — the PRODUCTION
+# data directory when pytest runs from the repo root. Fixture junk was
+# written into the live kanban.db and, in one run, every project created
+# after 2026-05-14 was deleted, unrecoverably (no backup existed).
+#
+# This autouse, session-scoped fixture points MARCUS_DATA_DIR at a pytest
+# temp directory before any test runs, so every default-path component
+# (SQLiteKanban, AuditLogger, TokenTracker, SubtaskManager, assignment
+# dirs) writes there. src/core/paths.py additionally REFUSES to resolve
+# the production default under pytest, so bypassing this fixture fails
+# loudly instead of touching real data.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_marcus_data(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[None, None, None]:
+    """Point all Marcus default data paths at a session temp directory."""
+    previous = os.environ.get("MARCUS_DATA_DIR")
+    isolated = tmp_path_factory.mktemp("marcus_data")
+    # Always override under pytest — even a user-set MARCUS_DATA_DIR is a
+    # real data directory that tests must not touch.
+    os.environ["MARCUS_DATA_DIR"] = str(isolated)
+    yield
+    if previous is None:
+        os.environ.pop("MARCUS_DATA_DIR", None)
+    else:
+        os.environ["MARCUS_DATA_DIR"] = previous
+
 
 # Import domain-specific fixtures
 pytest_plugins = [

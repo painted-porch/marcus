@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
 from src.core.models import Priority, Task, TaskStatus
+from src.core.paths import marcus_data_dir
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 
 logger = logging.getLogger(__name__)
@@ -252,9 +253,17 @@ class SQLiteKanban(KanbanInterface):
         super().__init__(config)
         self.provider = KanbanProvider.SQLITE
 
-        self.db_path = Path(config.get("db_path", "./data/kanban.db"))
+        db_path_cfg = config.get("db_path")
+        self.db_path = (
+            Path(db_path_cfg) if db_path_cfg else marcus_data_dir() / "kanban.db"
+        )
         self.project_name: str = config.get("project_name", "Marcus Project")
-        self.attachments_dir = Path(config.get("attachments_dir", "./data/attachments"))
+        attachments_cfg = config.get("attachments_dir")
+        self.attachments_dir = (
+            Path(attachments_cfg)
+            if attachments_cfg
+            else marcus_data_dir() / "attachments"
+        )
         self.connected = False
 
         # Project/board scoping — each experiment gets its own IDs

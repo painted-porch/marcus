@@ -8,7 +8,6 @@ import asyncio
 import logging
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.config.marcus_config import get_config
@@ -17,6 +16,7 @@ from src.core.context import Context
 from src.core.event_loop_utils import EventLoopLockManager
 from src.core.events import Events
 from src.core.models import ProjectState
+from src.core.paths import marcus_data_dir
 from src.core.persistence import Persistence
 from src.core.project_registry import ProjectConfig, ProjectRegistry
 from src.integrations.kanban_factory import KanbanFactory
@@ -360,7 +360,7 @@ class ProjectContextManager:
 
         # Create project-specific assignment persistence directory
 
-        assignments_dir = Path("data/assignments") / f"project_{project.id}"
+        assignments_dir = marcus_data_dir() / "assignments" / f"project_{project.id}"
         context.assignment_persistence = AssignmentPersistence(
             storage_dir=assignments_dir
         )

@@ -10,8 +10,9 @@ import json
 import sys
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
+
+from src.core.paths import marcus_data_dir
 
 
 class TokenTracker:
@@ -53,7 +54,7 @@ class TokenTracker:
         self.spend_rates: Dict[str, List[float]] = defaultdict(list)
 
         # Persistence
-        self.data_file = Path("data/token_usage.json")
+        self.data_file = marcus_data_dir() / "token_usage.json"
         self.load_historical_data()
 
         # Start background rate calculator
