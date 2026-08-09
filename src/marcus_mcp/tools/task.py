@@ -19,6 +19,13 @@ from typing import Any, Dict, List, Optional
 
 from src.core.ai_powered_task_assignment import find_optimal_task_for_agent_ai_powered
 from src.core.models import Priority, RecoveryInfo, Task, TaskAssignment, TaskStatus
+
+# Issue #629: claimability rules live in src/core/task_claimability.py so
+# the availability filter here and the gridlock detector share one rule
+# and cannot drift. Aliased to the module-local names used throughout
+# this file.
+from src.core.task_claimability import deps_allow_claim as _deps_allow_claim
+from src.core.task_claimability import is_integration_task as _is_integration_task
 from src.core.task_classification import get_task_type
 from src.integrations.behavior_evidence import (
     behavior_evidence_contract,
@@ -467,36 +474,40 @@ incomplete implementations."""
     return workflow_prompt
 
 
-def _is_integration_task(task: Task) -> bool:
-    """Detect whether a task is an integration verification task.
+def _best_effort_addendum(degraded_upstreams: List[Dict[str, str]]) -> str:
+    """Render the assignment-instructions addendum for a best-effort claim.
 
-    Integration verification tasks are produced by
-    ``IntegrationTaskGenerator.create_integration_task`` and carry
-    the ``"type:integration"`` label as a stable type marker. They
-    are NOT validated by the citation-based LLM validator (which
-    only runs on implementation tasks) — instead they are gated by
-    the product smoke verifier, which runs subprocess-level checks
-    that the assembled product builds.
+    Issue #629: when the integration task claims over settled-but-BLOCKED
+    upstreams, the agent must know which lanes never finished — and that
+    ``request_task_redo`` does NOT apply to them (redo sends back
+    *completed* work; these lanes are terminally blocked, so the gaps are
+    the integration agent's to account for).
 
     Parameters
     ----------
-    task : Task
-        Task to inspect.
+    degraded_upstreams : List[Dict[str, str]]
+        ``{"id", "name", "status"}`` records for each non-DONE upstream.
 
     Returns
     -------
-    bool
-        True if the task carries ``type:integration`` in its labels.
-        Defensive: returns False if labels is missing or not a
-        sequence.
+    str
+        Markdown addendum appended to the assignment instructions.
     """
-    labels = getattr(task, "labels", None)
-    if not labels:
-        return False
-    try:
-        return "type:integration" in labels
-    except TypeError:
-        return False
+    lines = "\n".join(
+        f"- {d['name']} (id {d['id']}): {d['status']}" for d in degraded_upstreams
+    )
+    return (
+        f"\n\n⚠️ **BEST-EFFORT INTEGRATION (issue #629)** — "
+        f"{len(degraded_upstreams)} upstream task(s) never completed and are "
+        f"terminally BLOCKED on the board:\n{lines}\n\n"
+        "Their deliverables may be missing or partial. Verify what actually "
+        "exists before assuming any of it works. The gaps are yours to "
+        "account for: build the minimal missing pieces yourself where the "
+        "outcomes require them (these lanes are terminal — no one else will), "
+        "or report_blocker if the product cannot work without something you "
+        "cannot supply. Note: request_task_redo does NOT apply here — it "
+        "sends back completed work, and these tasks never completed."
+    )
 
 
 def _is_composition_task(task: Task) -> bool:
@@ -2272,6 +2283,16 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     raise
 
                 _mark("instruction_generation")
+
+                # Issue #629: a best-effort integration claim must disclose
+                # exactly which upstream lanes never finished.
+                degraded_upstreams = (optimal_task.source_context or {}).get(
+                    "degraded_upstreams"
+                ) or []
+                if degraded_upstreams:
+                    instructions = instructions + _best_effort_addendum(
+                        degraded_upstreams
+                    )
 
                 # Log decision process
                 conversation_logger.log_pm_decision(
@@ -5560,6 +5581,9 @@ async def _find_optimal_task_original_logic(
 
         # Get completed task IDs for dependency checking
         completed_task_ids = {t.id for t in scoped_tasks if t.status == TaskStatus.DONE}
+        # Issue #629: full task index so the dependency gate can reason about
+        # settled-but-not-done upstreams (best-effort integration claim).
+        tasks_by_id = {t.id: t for t in scoped_tasks}
 
         # Build slug-to-ID mapping for dependency resolution
         # Bundled design tasks are created with slug IDs like
@@ -5649,11 +5673,13 @@ async def _find_optimal_task_original_logic(
                 else:
                     resolved_deps.append(dep_id)
 
-            all_deps_complete = all(
-                dep_id in completed_task_ids for dep_id in resolved_deps
+            # Issue #629: ordinary tasks require all deps DONE; the terminal
+            # integration task may claim best-effort over settled-but-BLOCKED
+            # upstreams (>=80% done) so one dead lane cannot hang the project.
+            claimable, degraded_upstreams = _deps_allow_claim(
+                t, resolved_deps, tasks_by_id
             )
-
-            if not all_deps_complete:
+            if not claimable:
                 filtering_stats["incomplete_dependencies"] += 1
                 # Log which dependencies are not complete
                 incomplete_deps = [
@@ -5666,6 +5692,16 @@ async def _find_optimal_task_original_logic(
                     f"(original: {deps}, resolved: {resolved_deps})"
                 )
                 continue
+            if degraded_upstreams:
+                sc = dict(t.source_context or {})
+                sc["degraded_upstreams"] = degraded_upstreams
+                t.source_context = sc
+                logger.warning(
+                    "BEST-EFFORT CLAIM (issue #629): integration task '%s' "
+                    "claimable with non-done upstreams: %s",
+                    t.name,
+                    [d["id"] for d in degraded_upstreams],
+                )
 
             # CRITICAL: If this is a subtask, also check parent's dependencies
             # Subtasks should not start until their parent's dependencies are met
