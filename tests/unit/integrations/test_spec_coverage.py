@@ -211,10 +211,17 @@ class TestCheckSpecCoverage:
             "weather panel",
             "5-day forecast",
         ]
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=extracted_features,
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=extracted_features,
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -233,10 +240,17 @@ class TestCheckSpecCoverage:
             "weather panel",
             "5-day forecast",
         ]
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=extracted_features,
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=extracted_features,
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -248,10 +262,16 @@ class TestCheckSpecCoverage:
     @pytest.mark.asyncio
     async def test_returns_empty_on_llm_failure(self) -> None:
         """LLM failure → no gap tasks, no crash (non-fatal)."""
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=[],  # empty on LLM failure
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=[],  # empty on LLM failure
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+            ) as mock_confirm,
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -259,14 +279,22 @@ class TestCheckSpecCoverage:
             )
 
         assert gap_tasks == []
+        mock_confirm.assert_not_awaited()  # no features -> nothing to confirm
 
     @pytest.mark.asyncio
     async def test_gap_task_has_correct_labels(self) -> None:
         """Gap tasks are labeled spec_gap so Cato/agents recognize them."""
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=["5-day forecast"],
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -280,10 +308,17 @@ class TestCheckSpecCoverage:
     @pytest.mark.asyncio
     async def test_gap_task_description_mentions_spec_source(self) -> None:
         """Gap task description explains it was found by spec coverage check."""
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=["5-day forecast"],
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,

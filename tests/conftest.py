@@ -55,6 +55,48 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _block_external_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail unit tests that reach the network instead of mocking it.
+
+    ``tests/unit/integrations/test_spec_coverage.py`` shipped five "unit"
+    tests that called the live OpenAI API: they mocked one LLM boundary
+    (``extract_spec_features``) but not the second
+    (``_llm_confirm_uncovered``). The suite was therefore nondeterministic
+    (the model's coverage verdict varies run to run — ~2 failures in 6),
+    spent real money on every run, and violated the project's own rule
+    that unit tests mock ALL external dependencies.
+
+    Loopback stays open so local-socket fixtures keep working; anything
+    else raises with a pointer to the boundary that needs mocking.
+    """
+    if request.node.get_closest_marker("unit") is None:
+        return
+
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def _guarded_connect(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if isinstance(host, str) and host not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise RuntimeError(
+                f"Unit test attempted a network connection to {host!r}. "
+                "Unit tests must mock ALL external dependencies — patch the "
+                "client/helper that makes this call (see the spec_coverage "
+                "LLM boundaries for a worked example)."
+            )
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_marcus_data() -> Generator[None, None, None]:
     """Keep MARCUS_DATA_DIR pinned to the import-time temp directory.
