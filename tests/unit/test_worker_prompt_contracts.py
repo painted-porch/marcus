@@ -61,3 +61,40 @@ class TestBlockerSeverityContract:
         text = prompt_path.read_text().lower()
         assert "only" in text
         assert "high" in text
+
+
+@pytest.mark.parametrize("prompt_path", ALL_PROMPTS, ids=lambda p: p.name)
+class TestRepairRequeueContract:
+    """A terminal blocker is retried by a fresh agent, not instantly fatal.
+
+    Agents must know their diagnostic is read by the next agent, or they
+    will write throwaway blocker text ("didn't work") and the repair
+    attempt starts blind.
+    """
+
+    def test_says_a_fresh_agent_retries(self, prompt_path: Path) -> None:
+        """The prompt must say the task goes back for another attempt."""
+        text = prompt_path.read_text().lower()
+        assert "fresh agent" in text
+
+    def test_asks_for_a_useful_diagnostic(self, prompt_path: Path) -> None:
+        """The next agent reads what you wrote — say so."""
+        text = prompt_path.read_text().lower()
+        assert "next agent reads it" in text
+
+
+@pytest.mark.parametrize("prompt_path", ALL_PROMPTS, ids=lambda p: p.name)
+class TestNoStaleTerminalWarning:
+    """Codex P2: no leftover text claiming a terminal blocker is final.
+
+    The pre-repair prompts warned that reporting "high" ends work on the
+    task "for the whole project" and leaves the deliverable "missing".
+    That is now false — a fresh agent retries — and an agent reading both
+    statements may avoid legitimate terminal handoffs.
+    """
+
+    def test_no_whole_project_finality_claim(self, prompt_path: Path) -> None:
+        """The contradictory warning must not survive anywhere."""
+        text = prompt_path.read_text().lower()
+        assert "whole project" not in text
+        assert "will be missing" not in text

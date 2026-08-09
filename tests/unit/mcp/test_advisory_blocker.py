@@ -69,6 +69,11 @@ def _make_state(agent_id: str, task_id: str) -> MagicMock:
     state.assignment_persistence = AsyncMock()
     state.assignment_persistence.remove_assignment = AsyncMock()
 
+    # #206 lock registry: awaitable so the terminal path's release runs
+    # for real instead of being swallowed as an error.
+    state.file_lock_registry = MagicMock()
+    state.file_lock_registry.release = AsyncMock(return_value=0)
+
     state.memory = None
     state.project_state = MagicMock()
     return state
@@ -163,15 +168,28 @@ class TestAdvisoryBlockerKeepsTheTask:
         assert "ADVISORY" in comment
 
 
-class TestTerminalBlockerUnchanged:
-    """high severity keeps the pre-#719 behavior: hand the task back."""
+class TestTerminalBlockerHandsTheTaskBack:
+    """high severity ends THIS agent's work on the task.
+
+    What the task's fate then is depends on the repair rung: the first
+    give-ups requeue it for a fresh agent, and only an exhausted repair
+    budget records the lane as dead (see
+    ``tests/unit/mcp/test_blocker_repair_requeue.py``). The invariant
+    pinned here — a terminal blocker always releases the reporting agent
+    (Simon 011b3fad) — holds either way.
+    """
 
     @pytest.mark.asyncio
-    async def test_high_severity_blocks_and_releases(self) -> None:
-        """A terminal blocker still marks BLOCKED and frees the agent."""
-        from src.marcus_mcp.tools.task import clear_blocker_attempts, report_blocker
+    async def test_high_severity_releases_the_agent(self) -> None:
+        """A terminal blocker frees the agent's slot, assignment and lease."""
+        from src.marcus_mcp.tools.task import (
+            clear_blocker_attempts,
+            clear_repair_attempts,
+            report_blocker,
+        )
 
         clear_blocker_attempts("task-1")
+        clear_repair_attempts("task-1")
         state = _make_state("agent-1", "task-1")
 
         result = await report_blocker(
@@ -185,14 +203,40 @@ class TestTerminalBlockerUnchanged:
 
         assert result["success"] is True
         assert result.get("advisory") is False
+        assert "agent-1" not in state.agent_tasks
+        assert "task-1" not in state.lease_manager.active_leases
+
+    @pytest.mark.asyncio
+    async def test_exhausted_repair_budget_marks_blocked(self) -> None:
+        """Once independent agents have all given up, the board says BLOCKED."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_ATTEMPTS,
+            clear_blocker_attempts,
+            clear_repair_attempts,
+            report_blocker,
+        )
+
+        clear_blocker_attempts("task-1")
+        clear_repair_attempts("task-1")
+
+        for i in range(MAX_BLOCKER_REPAIR_ATTEMPTS + 1):
+            state = _make_state(f"agent-{i}", "task-1")
+            result = await report_blocker(
+                agent_id=f"agent-{i}",
+                task_id="task-1",
+                blocker_description="needs a paid API key we do not have",
+                severity="high",
+                state=state,
+                skip_ai_analysis=True,
+            )
+
+        assert result["requeued_for_repair"] is False
         blocked_writes = [
             c
             for c in state.kanban_client.update_task.await_args_list
             if c.args[1].get("status") == TaskStatus.BLOCKED
         ]
         assert len(blocked_writes) == 1
-        assert "agent-1" not in state.agent_tasks
-        assert "task-1" not in state.lease_manager.active_leases
 
 
 class TestAdvisoryCeiling:
