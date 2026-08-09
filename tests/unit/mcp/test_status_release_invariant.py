@@ -95,6 +95,12 @@ def _make_state(task: Task) -> Any:
 
 
 class TestReportBlockerReleasesCoordination:
+    # Issue #719: these tests use severity="high" because the invariant
+    # under test is "a status change to a TERMINAL state releases
+    # coordination state". low/medium blockers are advisory — they make no
+    # terminal status change and deliberately keep the task with the agent
+    # (see tests/unit/mcp/test_advisory_blocker.py), so the invariant does
+    # not apply to them.
     """``report_blocker`` must release the agent's assignment + lease."""
 
     @pytest.mark.asyncio
@@ -113,7 +119,7 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck on dep",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 
@@ -139,7 +145,7 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck on dep",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 
@@ -165,7 +171,7 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck on dep",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 
@@ -189,7 +195,7 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 

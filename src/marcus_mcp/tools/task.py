@@ -87,6 +87,54 @@ _smoke_behavior_evidence_attempts: Dict[str, int] = {}
 MAX_TASK_REDO_COUNT = 3
 
 
+# Advisory-blocker ceiling (issue #719). ``report_blocker`` is a help
+# channel: a low/medium-severity report returns AI suggestions and leaves
+# the task with the agent so it can try them (the worker prompt's
+# ERROR_RECOVERY contract — "Don't panic or abandon the task… Continue
+# working"). Without a ceiling an agent could ask for help forever while
+# holding the lane, so after this many advisory reports on the same task
+# the next one is treated as terminal and the task is handed back.
+MAX_ADVISORY_BLOCKER_ATTEMPTS = 3
+_advisory_blocker_attempts: Dict[str, int] = {}
+
+# The only severities that keep the task with the agent. Everything else —
+# "high", "critical", a typo — is treated as terminal so an unrecognised
+# value can never silently strand a blocked lane (Codex P2 on PR #720).
+ADVISORY_SEVERITIES = frozenset({"low", "medium"})
+
+
+def _record_blocker_attempt(task_id: str) -> int:
+    """Increment and return the advisory-blocker count for a task.
+
+    Parameters
+    ----------
+    task_id : str
+        The task an agent is asking for help on.
+
+    Returns
+    -------
+    int
+        Cumulative advisory reports for this task (1 on the first call).
+    """
+    count = _advisory_blocker_attempts.get(task_id, 0) + 1
+    _advisory_blocker_attempts[task_id] = count
+    return count
+
+
+def clear_blocker_attempts(task_id: str) -> None:
+    """Reset a task's advisory-blocker budget.
+
+    Called when a task is recovered or reassigned so an incoming agent is
+    not penalised for the previous holder's requests for help.
+
+    Parameters
+    ----------
+    task_id : str
+        The task whose advisory counter should be reset.
+    """
+    _advisory_blocker_attempts.pop(task_id, None)
+
+
 def _capture_baseline_commit(assignment: "TaskAssignment", project_root: str) -> None:
     """Snapshot the current git HEAD into the assignment for validation scoping.
 
@@ -339,6 +387,9 @@ def clear_validation_retry(task_id: str) -> None:
     # Issue #676: also reset the smoke-gate missing-verifications counter so a
     # recovered/reassigned task gets a fresh set of attempts.
     _clear_smoke_attempts(task_id)
+    # Issue #719: and the advisory-blocker budget — the incoming agent has
+    # not asked for help yet.
+    clear_blocker_attempts(task_id)
 
 
 async def get_project_board_context(state: Any) -> Dict[str, Optional[str]]:
@@ -5337,32 +5388,72 @@ async def report_blocker(
                 task_id, blocker_description, severity, agent, task
             )
 
-        # Update task status
-        await state.kanban_client.update_task(
-            task_id, {"status": TaskStatus.BLOCKED, "blocker": blocker_description}
-        )
+        # Issue #719: decide advisory vs terminal. ``report_blocker`` is a
+        # help channel — the worker prompt's ERROR_RECOVERY contract is
+        # "Don't panic or abandon the task… Continue working". Marking the
+        # task BLOCKED and releasing the agent on every report handed the
+        # agent suggestions at the exact moment it lost the task, and (being
+        # ephemeral) it then exited: one dead end killed the lane with zero
+        # retries, bypassing the lease-recovery → #667 circuit-breaker
+        # ladder built for genuine failure. ``severity`` — already in the
+        # API, already sent by agents, previously ignored — is the switch:
+        # low/medium keep the task, high hands it back. A ceiling stops an
+        # agent looping on help while holding the lane.
+        # Codex P2: ``severity`` is an unrestricted string on the wire, so
+        # "HIGH", " high ", or "critical" all arrive here. Normalise, and
+        # fail SAFE — only an explicit low/medium is advisory. Anything
+        # unrecognised hands the task back rather than silently holding a
+        # genuinely blocked lane until the ceiling or lease expiry. A blank
+        # value follows the schema default ("medium").
+        severity_normalized = (severity or "medium").strip().lower()
+        is_terminal = severity_normalized not in ADVISORY_SEVERITIES
+        if not is_terminal:
+            attempts = _record_blocker_attempt(task_id)
+            if attempts > MAX_ADVISORY_BLOCKER_ATTEMPTS:
+                is_terminal = True
+                logger.warning(
+                    "Advisory blocker ceiling hit for task %s (%d reports); "
+                    "escalating to terminal (issue #719).",
+                    task_id,
+                    attempts,
+                )
 
-        # Release coordination state — a blocked task is terminal for the
-        # current agent. Without this, the agent stays bound to a task it
-        # cannot make progress on, eating its assignment slot and accruing
-        # lease renewals against work it has explicitly disclaimed.
-        # Status changes (DONE/BLOCKED) must always release coordination
-        # state independently of correctness checks (decoupling per
-        # Simon decision 011b3fad).
-        if agent_id in state.agent_status:
-            agent = state.agent_status[agent_id]
-            agent.current_tasks = []
-            if agent_id in state.agent_tasks:
-                del state.agent_tasks[agent_id]
-            if hasattr(state, "assignment_persistence"):
-                await state.assignment_persistence.remove_assignment(agent_id)
-            if hasattr(state, "lease_manager") and state.lease_manager:
-                if task_id in state.lease_manager.active_leases:
-                    del state.lease_manager.active_leases[task_id]
-                    logger.info(
-                        f"Released lease for blocked task {task_id} "
-                        f"(agent {agent_id})"
-                    )
+        if is_terminal:
+            # Update task status
+            await state.kanban_client.update_task(
+                task_id, {"status": TaskStatus.BLOCKED, "blocker": blocker_description}
+            )
+
+            # Release coordination state — a blocked task is terminal for the
+            # current agent. Without this, the agent stays bound to a task it
+            # cannot make progress on, eating its assignment slot and accruing
+            # lease renewals against work it has explicitly disclaimed.
+            # Status changes (DONE/BLOCKED) must always release coordination
+            # state independently of correctness checks (decoupling per
+            # Simon decision 011b3fad).
+            if agent_id in state.agent_status:
+                agent = state.agent_status[agent_id]
+                agent.current_tasks = []
+                if agent_id in state.agent_tasks:
+                    del state.agent_tasks[agent_id]
+                if hasattr(state, "assignment_persistence"):
+                    await state.assignment_persistence.remove_assignment(agent_id)
+                if hasattr(state, "lease_manager") and state.lease_manager:
+                    if task_id in state.lease_manager.active_leases:
+                        del state.lease_manager.active_leases[task_id]
+                        logger.info(
+                            f"Released lease for blocked task {task_id} "
+                            f"(agent {agent_id})"
+                        )
+            clear_blocker_attempts(task_id)
+        else:
+            logger.info(
+                "ADVISORY BLOCKER (issue #719): task %s stays with agent %s "
+                "(severity=%s); suggestions returned for the agent to apply.",
+                task_id,
+                agent_id,
+                severity,
+            )
 
         # Record in active experiment if one is running
         from src.experiments.live_experiment_monitor import get_active_monitor
@@ -5376,8 +5467,11 @@ async def report_blocker(
                 severity=severity,
             )
 
-        # Add detailed comment
-        comment = f"🚫 BLOCKER ({severity.upper()})\n"
+        # Add detailed comment. Both kinds are recorded — an advisory
+        # blocker is real coordination history even though the lane lives on.
+        kind = "BLOCKER" if is_terminal else "ADVISORY BLOCKER"
+        icon = "🚫" if is_terminal else "💬"
+        comment = f"{icon} {kind} ({severity_normalized.upper()})\n"
         comment += f"Reported by: {agent_id}\n"
         comment += f"Description: {blocker_description}\n\n"
         comment += f"📋 AI Suggestions:\n{suggestions}"
@@ -5408,12 +5502,32 @@ async def report_blocker(
         # text never leaves the machine.
         from src.telemetry.events import fire_task_blocked
 
-        fire_task_blocked(severity=severity, blocker_description=blocker_description)
+        fire_task_blocked(
+            severity=severity_normalized, blocker_description=blocker_description
+        )
 
+        if is_terminal:
+            return {
+                "success": True,
+                "advisory": False,
+                "suggestions": suggestions,
+                "message": (
+                    f"Blocker recorded and task {task_id} handed back "
+                    "(status BLOCKED). You no longer hold it — request your "
+                    "next task."
+                ),
+            }
         return {
             "success": True,
+            "advisory": True,
             "suggestions": suggestions,
-            "message": "Blocker reported and suggestions provided",
+            "message": (
+                f"Suggestions provided — you STILL OWN task {task_id} and it "
+                "is still in progress. Apply the suggestions and keep "
+                "working; report progress as normal. Only report severity="
+                "'high' if you truly cannot proceed and are handing the task "
+                "back."
+            ),
         }
 
     except Exception as e:

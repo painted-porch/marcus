@@ -2203,3 +2203,79 @@ class TestRealTemplateRedoGuidance:
         prompt = self._real_prompt(spawner, agent_config).lower()
         for banned in ("keep polling", "max retries", "retries exhausted"):
             assert banned not in prompt
+
+
+class TestRealTemplateBlockerSeverityContract:
+    """Issue #719: the worker prompt must teach advisory vs terminal blockers.
+
+    Marcus now branches on ``severity``: low/medium keep the task with the
+    agent, high hands it back. An agent that does not know this will send
+    "high" for an ordinary snag and kill its own lane — the exact failure
+    #719 fixes on the server side.
+    """
+
+    @pytest.fixture
+    def spawner(self, tmp_path: Path) -> Any:
+        """Build an AgentSpawner with minimal config for prompt rendering."""
+        config = MagicMock()
+        config.implementation_dir = tmp_path / "impl"
+        config.project_info_file = tmp_path / "project_info.json"
+        config.prompts_dir = tmp_path / "prompts"
+        config.prompts_dir.mkdir()
+
+        template = tmp_path / "agent_template.md"
+        template.write_text("# Base agent template\n")
+
+        instance = MagicMock(spec=spawn_agents.AgentSpawner)
+        instance.config = config
+        instance.agent_prompt_template = template
+        instance.create_worker_prompt = (
+            spawn_agents.AgentSpawner.create_worker_prompt.__get__(
+                instance, spawn_agents.AgentSpawner
+            )
+        )
+        return instance
+
+    @pytest.fixture
+    def agent_config(self) -> dict[str, Any]:
+        """Minimal agent config dict for prompt rendering."""
+        return {
+            "id": "agent_test_1",
+            "name": "Test Agent 1",
+            "role": "full-stack",
+            "skills": ["python"],
+            "subagents": 0,
+        }
+
+    def _real_prompt(self, spawner: Any, agent_config: dict[str, Any]) -> str:
+        real_template = (
+            Path(spawn_agents.__file__).resolve().parent.parent
+            / "templates"
+            / "agent_prompt.md"
+        )
+        assert real_template.exists(), f"real template missing: {real_template}"
+        spawner.agent_prompt_template = real_template
+        return spawner.create_worker_prompt(agent_config)
+
+    def test_prompt_distinguishes_advisory_from_terminal(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """Both severity behaviours must be named explicitly."""
+        prompt = self._real_prompt(spawner, agent_config)
+        assert "ADVISORY" in prompt
+        assert "TERMINAL" in prompt
+
+    def test_prompt_says_advisory_keeps_the_task(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """The load-bearing fact: a medium blocker does not lose the task."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        assert "keep the task" in prompt or "keep the task" in prompt
+        assert "medium" in prompt
+
+    def test_prompt_scopes_high_severity_to_genuinely_impossible(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """ "high" must be framed as last-resort, or agents will overuse it."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        assert "only when" in prompt

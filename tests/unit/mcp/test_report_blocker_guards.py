@@ -178,7 +178,14 @@ class TestReportBlockerDoneTaskGuard:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_report_blocker_allowed_for_lease_holder(self) -> None:
-        """Legitimate blocker from the actual lease holder must succeed."""
+        """Legitimate blocker from the actual lease holder must succeed.
+
+        Issue #719 changed what "succeed" writes: a ``high`` blocker is
+        terminal and flips the board to BLOCKED (asserted here), while
+        low/medium are advisory and deliberately leave the task with the
+        agent — see ``tests/unit/mcp/test_advisory_blocker.py``. The guard
+        behaviour under test (lease holder is not rejected) is unchanged.
+        """
         from src.marcus_mcp.tools.task import report_blocker
 
         state = _make_state(
@@ -192,7 +199,7 @@ class TestReportBlockerDoneTaskGuard:
             agent_id="agent_holder",
             task_id="task-active",
             blocker_description="Real blocker",
-            severity="medium",
+            severity="high",
             state=state,
             skip_ai_analysis=True,
         )
