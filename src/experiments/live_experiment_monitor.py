@@ -34,9 +34,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.core.models import Task, TaskStatus
 from src.experiments import MarcusExperiment
 
 logger = logging.getLogger(__name__)
+
+
+def _unfinished_reason(task: Task) -> str:
+    """Explain, in one line, why a task never reached DONE.
+
+    Parameters
+    ----------
+    task : Task
+        A task that is not DONE at the end of the run.
+
+    Returns
+    -------
+    str
+        The recorded blocker text when the lane was blocked, otherwise a
+        plain description of the state it was left in. Never empty — a
+        silent entry in the unfinished list would defeat the point.
+    """
+    blocker = (task.source_context or {}).get("blocker")
+    if blocker:
+        return str(blocker)
+    if task.status == TaskStatus.BLOCKED:
+        return "blocked (no blocker text recorded)"
+    if task.status == TaskStatus.IN_PROGRESS:
+        return "still in progress when the run ended"
+    return "never claimed by an agent"
 
 
 class LiveExperimentMonitor:
@@ -638,6 +664,28 @@ class LiveExperimentMonitor:
                 status["blocked_tasks"] = metrics.get("blocked_tasks", 0)
             except Exception as e:
                 logger.warning(f"get_status: kanban metrics fetch failed: {e}")
+
+            # Name the work that did NOT get built. Counts alone let a run
+            # end looking successful while a deliverable is silently
+            # missing — the user had to watch the live progress line or
+            # inspect the board to find out. Consumers (the runner's
+            # end-of-run report) turn this into a plain statement of what
+            # is absent and why. Best-effort: a fetch failure must never
+            # break status, which the control loop depends on.
+            try:
+                all_tasks = await self.kanban_client.get_all_tasks()
+                status["unfinished_tasks"] = [
+                    {
+                        "id": t.id,
+                        "name": t.name,
+                        "status": t.status.value,
+                        "reason": _unfinished_reason(t),
+                    }
+                    for t in all_tasks
+                    if t.status != TaskStatus.DONE
+                ]
+            except Exception as e:
+                logger.warning(f"get_status: unfinished-task fetch failed: {e}")
 
         return status
 
