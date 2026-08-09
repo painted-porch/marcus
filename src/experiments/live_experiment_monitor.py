@@ -34,9 +34,70 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.core.models import Task, TaskStatus
 from src.experiments import MarcusExperiment
 
 logger = logging.getLogger(__name__)
+
+
+async def _unfinished_reason(task: Task, kanban_client: Any = None) -> str:
+    """Explain, in one line, why a task never reached DONE.
+
+    The blocker text is NOT on the task row for every provider. Marcus's
+    ``report_blocker`` sends ``update_task(task_id, {"blocker": text})``
+    and the SQLite provider INSERTs that into a separate ``blockers``
+    table, while task hydration reads only the tasks row — so
+    ``source_context["blocker"]`` is empty for exactly the tasks this
+    report is about (Codex P1 on PR #723). Fall back to the provider's
+    blocker store, which is where the explanation actually lives.
+
+    Parameters
+    ----------
+    task : Task
+        A task that is not DONE at the end of the run.
+    kanban_client : Any, optional
+        Provider, consulted for its blocker record when the task row
+        carries no blocker text. Duck-typed: providers without
+        ``get_task_blockers`` simply fall through.
+
+    Returns
+    -------
+    str
+        The recorded blocker text when one can be found, otherwise a
+        plain description of the state the task was left in. Never
+        empty — a silent entry in the unfinished list would defeat the
+        point of the report.
+    """
+    blocker = (task.source_context or {}).get("blocker")
+    if blocker:
+        return str(blocker)
+
+    if task.status == TaskStatus.BLOCKED and kanban_client is not None:
+        getter = getattr(kanban_client, "get_task_blockers", None)
+        if getter is not None:
+            try:
+                records = await getter(task.id)
+                if records:
+                    # Most recent blocker is the operative one: a task
+                    # blocked twice should report why it is blocked now.
+                    latest = records[-1]
+                    text = (
+                        latest.get("description")
+                        if isinstance(latest, dict)
+                        else getattr(latest, "description", None)
+                    )
+                    if text:
+                        return str(text)
+            except Exception as e:  # noqa: BLE001 - never drop the entry
+                logger.warning(
+                    f"_unfinished_reason: blocker lookup failed for " f"{task.id}: {e}"
+                )
+
+    if task.status == TaskStatus.BLOCKED:
+        return "blocked (no blocker text recorded)"
+    if task.status == TaskStatus.IN_PROGRESS:
+        return "still in progress when the run ended"
+    return "never claimed by an agent"
 
 
 class LiveExperimentMonitor:
@@ -638,6 +699,47 @@ class LiveExperimentMonitor:
                 status["blocked_tasks"] = metrics.get("blocked_tasks", 0)
             except Exception as e:
                 logger.warning(f"get_status: kanban metrics fetch failed: {e}")
+
+            # Name the work that did NOT get built. Counts alone let a run
+            # end looking successful while a deliverable is silently
+            # missing — the user had to watch the live progress line or
+            # inspect the board to find out. Consumers (the runner's
+            # end-of-run report) turn this into a plain statement of what
+            # is absent and why. Best-effort: a fetch failure must never
+            # break status, which the control loop depends on.
+            try:
+                all_tasks = await self.kanban_client.get_all_tasks()
+                # Providers swallow fetch errors and return [] rather than
+                # raising (e.g. planka.py), so the exception path below
+                # cannot be trusted alone: an unreachable board would
+                # publish "nothing unfinished" and the runner would print
+                # a clean bill of health for a board it never read (Codex
+                # P1 on PR #723). Only publish when the fetch is
+                # corroborated by the metrics total; otherwise omit the
+                # field so consumers say "could not verify" instead of
+                # "all complete".
+                expected_total = int(status.get("total_tasks", 0) or 0)
+                if all_tasks and len(all_tasks) == expected_total:
+                    status["unfinished_tasks"] = [
+                        {
+                            "id": t.id,
+                            "name": t.name,
+                            "status": t.status.value,
+                            "reason": await _unfinished_reason(t, self.kanban_client),
+                        }
+                        for t in all_tasks
+                        if t.status != TaskStatus.DONE
+                    ]
+                else:
+                    logger.warning(
+                        "get_status: task fetch returned %d task(s) but "
+                        "metrics report %d — treating as an unreliable read "
+                        "and omitting unfinished_tasks",
+                        len(all_tasks),
+                        expected_total,
+                    )
+            except Exception as e:
+                logger.warning(f"get_status: unfinished-task fetch failed: {e}")
 
         return status
 

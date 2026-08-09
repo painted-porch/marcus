@@ -2055,10 +2055,86 @@ echo "=========================================="
 
                 time.sleep(poll_seconds)
         finally:
+            # Name the work that did not get built (see
+            # format_unfinished_report). Best-effort: a status-fetch
+            # failure here must never mask the run-finished line.
+            try:
+                final_status = mcp.call_tool("get_experiment_status") or {}
+                for line in format_unfinished_report(
+                    final_status.get("unfinished_tasks"),
+                    int(final_status.get("total_tasks", 0) or 0),
+                ):
+                    _emit(line)
+            except Exception as exc:  # noqa: BLE001
+                _emit(f"WARN could not build final report: {type(exc).__name__}")
             _emit(f"run finished — spawned {spawned_total} ephemeral agents")
             runner_log.close()
 
         return True
+
+
+def format_unfinished_report(
+    unfinished: Optional[List[Dict[str, Any]]], total: int
+) -> List[str]:
+    """Render the end-of-run statement of what did and did not get built.
+
+    A run used to end with ``run finished — spawned N ephemeral agents``
+    and nothing else: a project could finish with a deliverable silently
+    missing and the output still read like success. The user had to watch
+    the scrolling progress line or go inspect the board to find out.
+
+    Parameters
+    ----------
+    unfinished : List[Dict[str, Any]]
+        ``{"id", "name", "status", "reason"}`` records for every task that
+        did not reach DONE, as reported by ``get_experiment_status``.
+    total : int
+        Total task count for the project.
+
+    Returns
+    -------
+    List[str]
+        Lines to emit. A clean run returns a single confirmation line; an
+        incomplete run names every unfinished task, why it stopped, and
+        the consequence (its deliverable may be missing).
+    """
+    # Missing data must never read as success. ``unfinished`` is None when
+    # Marcus could not produce a trustworthy task list (board unreachable,
+    # or a fetch that contradicted the metrics total — providers return []
+    # on error rather than raising). Likewise a zero total tells us nothing
+    # about whether work was done (Codex P1 on PR #723).
+    if unfinished is None:
+        return [
+            "RESULT: could not verify completion — Marcus returned no "
+            "trustworthy task list (board unreachable?). Check the board "
+            "before treating this run as successful."
+        ]
+    if total <= 0:
+        return [
+            "RESULT: could not verify completion — no tasks reported for "
+            "this project. Check the board before treating this run as "
+            "successful."
+        ]
+
+    done = total - len(unfinished)
+    if not unfinished:
+        return [f"RESULT: all {done}/{total} tasks complete"]
+
+    lines = [
+        f"RESULT: {done}/{total} tasks complete — "
+        f"{len(unfinished)} task(s) did NOT complete:",
+    ]
+    for task in unfinished:
+        lines.append(
+            f"  - [{task.get('status', '?')}] {task.get('name', '?')} "
+            f"({str(task.get('id', ''))[:8]}): {task.get('reason', 'unknown')}"
+        )
+    lines.append(
+        "  Whatever these tasks were meant to produce may be missing from "
+        "the deliverable — check the board and the product before "
+        "treating this run as successful."
+    )
+    return lines
 
 
 def main() -> None:
