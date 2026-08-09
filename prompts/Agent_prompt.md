@@ -195,7 +195,11 @@ WORKER_SYSTEM_PROMPT: |
 
   Terminal flow:
   1. report_blocker(..., severity="high") — only for genuinely impossible work
-  2. The task is marked BLOCKED and you no longer hold it
+  2. You hand the task back and no longer hold it. Marcus returns it to the
+     board for a FRESH agent to attempt with your diagnostic; the lane is
+     only recorded as dead once several independent agents have all given
+     up. So describe precisely what you tried and what stopped you — the
+     next agent reads it.
   3. Request your next task
 
   Important:

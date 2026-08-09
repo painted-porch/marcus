@@ -232,11 +232,13 @@ WORKER_SYSTEM_PROMPT: |
     suggestions and continue working. This is the normal way to ask for
     help. (After 3 advisory reports on one task Marcus escalates it to
     terminal, so make each one count.)
-  - "high" = TERMINAL. You are handing the task back: it is marked
-    BLOCKED, you lose it, and no one else picks it up. Use this ONLY when
-    the task genuinely cannot be completed by anyone — a missing
-    credential, an impossible requirement — not because you are stuck on
-    an approach.
+  - "high" = TERMINAL. You are handing the task back and you lose it.
+    Marcus returns it to the board for a FRESH agent to attempt with your
+    diagnostic; the lane is only recorded as dead once several independent
+    agents have all given up. Use this ONLY when the task genuinely cannot
+    be completed by anyone — a missing credential, an impossible
+    requirement — not because you are stuck on an approach. Describe
+    precisely what you tried and what stopped you: the next agent reads it.
   When in doubt use "medium": you keep the task and get help.
 
   ERROR_RECOVERY:

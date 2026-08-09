@@ -181,7 +181,15 @@ class TestReportBlockerReleasesCoordination:
 
     @pytest.mark.asyncio
     async def test_report_blocker_still_flips_status(self) -> None:
-        """The status update to BLOCKED still happens after coordination release."""
+        """A board write still happens alongside the coordination release.
+
+        The exact status depends on the repair rung — the first give-ups
+        write TODO (requeued for a fresh agent), an exhausted repair budget
+        writes BLOCKED. Both are pinned in
+        ``tests/unit/mcp/test_blocker_repair_requeue.py``; what this test
+        guards is that the board is updated at all, in the same call that
+        releases coordination state.
+        """
         from src.marcus_mcp.tools.task import report_blocker
 
         task = _make_task()

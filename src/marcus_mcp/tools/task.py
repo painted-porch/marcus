@@ -103,6 +103,96 @@ _advisory_blocker_attempts: Dict[str, int] = {}
 ADVISORY_SEVERITIES = frozenset({"low", "medium"})
 
 
+# Repair-requeue ceiling (the missing middle rung). Marcus had no step
+# between "an agent gives up" and "this lane is dead forever": a terminal
+# blocker killed the task on the spot, so the work it was meant to produce
+# never happened and the only mitigation left was routing around the hole
+# (#629). A terminally-blocked task now goes back on the board carrying the
+# blocker text and Marcus's suggestions, so a FRESH agent attempts it with
+# the previous agent's diagnostic in hand. Only after this many independent
+# agents have given up is the lane declared genuinely dead — two agents
+# agreeing is evidence; one agent's bad afternoon is not.
+#
+# This counter is deliberately NOT cleared by ``clear_validation_retry``
+# (which recovery calls): it is the loop guard. Clearing it on requeue
+# would let a task ping-pong between TODO and blocked forever.
+MAX_BLOCKER_REPAIR_ATTEMPTS = 2
+_blocker_repair_attempts: Dict[str, int] = {}
+
+
+def _record_repair_attempt(task_id: str) -> int:
+    """Increment and return the repair-requeue count for a task.
+
+    Parameters
+    ----------
+    task_id : str
+        The task an agent has just given up on.
+
+    Returns
+    -------
+    int
+        Cumulative give-ups for this task (1 on the first call).
+    """
+    count = _blocker_repair_attempts.get(task_id, 0) + 1
+    _blocker_repair_attempts[task_id] = count
+    return count
+
+
+def clear_repair_attempts(task_id: str) -> None:
+    """Reset a task's repair budget.
+
+    Called when the task actually completes — NOT on lease recovery, which
+    must not reset the loop guard.
+
+    Parameters
+    ----------
+    task_id : str
+        The task whose repair counter should be reset.
+    """
+    _blocker_repair_attempts.pop(task_id, None)
+
+
+def _repair_instructions(
+    blocker_description: str,
+    suggestions: Any,
+    previous_agent: str,
+    attempt: int,
+) -> str:
+    """Render the handoff a repairing agent receives.
+
+    Parameters
+    ----------
+    blocker_description : str
+        What the previous agent said stopped them.
+    suggestions : Any
+        Marcus's AI analysis of that blocker.
+    previous_agent : str
+        Agent that gave up.
+    attempt : int
+        Which repair attempt this is (1-based).
+
+    Returns
+    -------
+    str
+        Multi-line guidance for the next agent.
+    """
+    return (
+        f"🔧 **REPAIR ATTEMPT {attempt}/{MAX_BLOCKER_REPAIR_ATTEMPTS}** — a "
+        f"previous agent ({previous_agent}) could not complete this task and "
+        f"handed it back.\n\n"
+        f"**What stopped them:**\n{blocker_description}\n\n"
+        f"**What Marcus suggested:**\n{suggestions}\n\n"
+        "You are a different agent with a fresh perspective. Try a different "
+        "approach than the one that failed — do not simply repeat it. If the "
+        "obstacle is real but workable, work around it and note the "
+        "workaround. If you also conclude the task is genuinely impossible "
+        "for anyone (a missing credential, an unavailable service), report a "
+        "high-severity blocker saying so and what you tried; after "
+        f"{MAX_BLOCKER_REPAIR_ATTEMPTS} independent agents agree, Marcus "
+        "records the lane as dead."
+    )
+
+
 def _record_blocker_attempt(task_id: str) -> int:
     """Increment and return the advisory-blocker count for a task.
 
@@ -4418,6 +4508,11 @@ async def report_task_progress(
         if status == "completed":
             update_data["status"] = TaskStatus.DONE
             update_data["completed_at"] = datetime.now(timezone.utc).isoformat()
+            # The repair budget is the loop guard for give-ups, so recovery
+            # must not reset it — but a genuine completion ends the cycle:
+            # if this task is ever reopened (e.g. request_task_redo), it
+            # starts with a fresh budget rather than a stale one.
+            clear_repair_attempts(task_id)
 
             # Handle subtask completion
             if hasattr(state, "subtask_manager") and state.subtask_manager:
@@ -5418,11 +5513,74 @@ async def report_blocker(
                     attempts,
                 )
 
+        requeued_for_repair = False
         if is_terminal:
-            # Update task status
-            await state.kanban_client.update_task(
-                task_id, {"status": TaskStatus.BLOCKED, "blocker": blocker_description}
-            )
+            # The missing middle rung: a first give-up returns the work to
+            # the board with the diagnostic attached so a FRESH agent can
+            # attempt it, rather than killing the lane on one agent's word.
+            # Only after MAX_BLOCKER_REPAIR_ATTEMPTS independent agents have
+            # given up is the lane recorded as genuinely dead.
+            repair_attempt = _record_repair_attempt(task_id)
+            requeued_for_repair = repair_attempt <= MAX_BLOCKER_REPAIR_ATTEMPTS
+
+            if requeued_for_repair:
+                now = datetime.now(timezone.utc)
+                recovery_info = RecoveryInfo(
+                    recovered_at=now,
+                    recovered_from_agent=agent_id,
+                    previous_progress=0,
+                    time_spent_minutes=0.0,
+                    recovery_reason="blocker_repair",
+                    previous_agent_branch=f"marcus/{agent_id}",
+                    recovery_expires_at=now + timedelta(hours=24),
+                    instructions=_repair_instructions(
+                        blocker_description,
+                        suggestions,
+                        agent_id,
+                        repair_attempt,
+                    ),
+                )
+                task_obj = next(
+                    (
+                        t
+                        for t in (getattr(state, "project_tasks", None) or [])
+                        if t.id == task_id
+                    ),
+                    None,
+                )
+                if task_obj is not None:
+                    task_obj.recovery_info = recovery_info
+                    task_obj.status = TaskStatus.TODO
+                    task_obj.assigned_to = None
+                await state.kanban_client.update_task(
+                    task_id,
+                    {
+                        "status": TaskStatus.TODO,
+                        "assigned_to": None,
+                        "blocker": blocker_description,
+                    },
+                )
+                logger.warning(
+                    "REPAIR REQUEUE: task %s returned to the board after "
+                    "%s gave up (attempt %d/%d); next agent gets the "
+                    "blocker diagnostic.",
+                    task_id,
+                    agent_id,
+                    repair_attempt,
+                    MAX_BLOCKER_REPAIR_ATTEMPTS,
+                )
+            else:
+                # Update task status
+                await state.kanban_client.update_task(
+                    task_id,
+                    {"status": TaskStatus.BLOCKED, "blocker": blocker_description},
+                )
+                logger.warning(
+                    "LANE DEAD: task %s blocked after %d independent agents "
+                    "gave up.",
+                    task_id,
+                    repair_attempt - 1,
+                )
 
             # Release coordination state — a blocked task is terminal for the
             # current agent. Without this, the agent stays bound to a task it
@@ -5507,13 +5665,29 @@ async def report_blocker(
         )
 
         if is_terminal:
+            if requeued_for_repair:
+                return {
+                    "success": True,
+                    "advisory": False,
+                    "requeued_for_repair": True,
+                    "suggestions": suggestions,
+                    "message": (
+                        f"Blocker recorded. Task {task_id} has been returned "
+                        "to the board so a fresh agent can attempt it with "
+                        "your diagnostic. You no longer hold it — request "
+                        "your next task."
+                    ),
+                }
             return {
                 "success": True,
                 "advisory": False,
+                "requeued_for_repair": False,
                 "suggestions": suggestions,
                 "message": (
                     f"Blocker recorded and task {task_id} handed back "
-                    "(status BLOCKED). You no longer hold it — request your "
+                    "(status BLOCKED) — independent agents have now given up "
+                    f"{MAX_BLOCKER_REPAIR_ATTEMPTS + 1} times, so the lane is "
+                    "recorded as dead. You no longer hold it — request your "
                     "next task."
                 ),
             }

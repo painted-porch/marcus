@@ -61,3 +61,23 @@ class TestBlockerSeverityContract:
         text = prompt_path.read_text().lower()
         assert "only" in text
         assert "high" in text
+
+
+@pytest.mark.parametrize("prompt_path", ALL_PROMPTS, ids=lambda p: p.name)
+class TestRepairRequeueContract:
+    """A terminal blocker is retried by a fresh agent, not instantly fatal.
+
+    Agents must know their diagnostic is read by the next agent, or they
+    will write throwaway blocker text ("didn't work") and the repair
+    attempt starts blind.
+    """
+
+    def test_says_a_fresh_agent_retries(self, prompt_path: Path) -> None:
+        """The prompt must say the task goes back for another attempt."""
+        text = prompt_path.read_text().lower()
+        assert "fresh agent" in text
+
+    def test_asks_for_a_useful_diagnostic(self, prompt_path: Path) -> None:
+        """The next agent reads what you wrote — say so."""
+        text = prompt_path.read_text().lower()
+        assert "next agent reads it" in text
