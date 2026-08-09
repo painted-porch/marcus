@@ -78,7 +78,7 @@ def _make_artifact(
 class MockKanbanClient:
     """Kanban client that returns no attachments."""
 
-    async def get_attachments(self, card_id: str) -> Dict[str, Any]:
+    async def get_attachments(self, task_id: str) -> Dict[str, Any]:
         """Return empty attachment list."""
         return {"success": True, "data": []}
 
@@ -537,7 +537,7 @@ class MockKanbanClientWithAttachments:
     def __init__(self, dep_attachments: list[dict]) -> None:
         self._dep_attachments = dep_attachments
 
-    async def get_attachments(self, card_id: str) -> dict:
+    async def get_attachments(self, task_id: str) -> dict:
         """Return attachments for any card."""
         return {"success": True, "data": self._dep_attachments}
 
@@ -569,9 +569,9 @@ class TestKanbanDepAttachmentAnnotation:
 
         kanban_attachment = {
             "id": "attach-1",
-            "name": "weather-contracts.ts",
-            "userId": "marcus",
-            "createdAt": "2026-04-17T00:00:00Z",
+            "filename": "weather-contracts.ts",
+            "created_by": "marcus",
+            "created_at": "2026-04-17T00:00:00Z",
         }
 
         state = MockState()
@@ -609,9 +609,9 @@ class TestKanbanDepAttachmentAnnotation:
 
         kanban_attachment = {
             "id": "attach-2",
-            "name": "time-contracts.ts",
-            "userId": "marcus",
-            "createdAt": "2026-04-17T00:00:00Z",
+            "filename": "time-contracts.ts",
+            "created_by": "marcus",
+            "created_at": "2026-04-17T00:00:00Z",
         }
 
         state = MockState()
@@ -659,9 +659,9 @@ class TestKanbanDepAttachmentAnnotation:
             [
                 {
                     "id": "attach-f",
-                    "name": "setup.ts",
-                    "userId": "marcus",
-                    "createdAt": "2026-05-21T00:00:00Z",
+                    "filename": "setup.ts",
+                    "created_by": "marcus",
+                    "created_at": "2026-05-21T00:00:00Z",
                 }
             ]
         )

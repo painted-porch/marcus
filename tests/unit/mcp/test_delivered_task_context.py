@@ -78,10 +78,10 @@ class _MockKanbanClient:
     ) -> None:
         self._attachments_by_card = attachments_by_card or {}
 
-    async def get_attachments(self, card_id: str) -> Dict[str, Any]:
+    async def get_attachments(self, task_id: str) -> Dict[str, Any]:
         return {
             "success": True,
-            "data": self._attachments_by_card.get(card_id, []),
+            "data": self._attachments_by_card.get(task_id, []),
         }
 
 
@@ -269,7 +269,7 @@ class TestCollectTransitiveContext:
         state.kanban_client = _MockKanbanClient(
             {
                 "root": [
-                    {"id": "att-1", "name": "design.md", "userId": "u1"},
+                    {"id": "att-1", "filename": "design.md", "created_by": "u1"},
                 ]
             }
         )

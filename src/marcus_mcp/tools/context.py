@@ -512,7 +512,7 @@ async def _collect_foundation_contract(
     1. ``state.task_artifacts[fid]`` — artifacts logged via
        :func:`log_artifact`.
     2. Kanban-board attachments on each foundation task — fetched via
-       ``state.kanban_client.get_attachments(card_id=...)``. Without
+       ``state.kanban_client.get_attachments(task_id=...)``. Without
        this second source, foundation documents attached to the board
        directly (not logged through ``log_artifact``) would be silently
        dropped, because the dependency-traversal path also skips
@@ -618,9 +618,9 @@ async def _collect_foundation_contract(
     # The keys are normalized; do NOT use Planka-style raw keys
     # (``name`` / ``userId`` / ``createdAt``) — they would all read
     # as ``None`` against the canonical provider output (Codex P2
-    # follow-up on PR #623). The same bug exists in
-    # ``_collect_task_artifacts`` and is tracked separately; this
-    # fix is foundation-collector only.
+    # follow-up on PR #623). The same bug existed in the task,
+    # dependency and transitive-ancestor collectors below and was
+    # fixed together in #624 — all four now share this contract.
     kanban_client = getattr(state, "kanban_client", None)
     if kanban_client is not None:
         for t in foundation_tasks:
@@ -708,22 +708,34 @@ async def _collect_task_artifacts(
         # 2. Get Kanban attachments for this task
         if state.kanban_client:
             try:
-                card_id = getattr(task, "kanban_card_id", None) or task.id
-                result = await state.kanban_client.get_attachments(card_id=card_id)
+                # Issue #624: KanbanInterface.get_attachments takes
+                # ``task_id`` and returns NORMALIZED records
+                # ({"id", "filename", "url", "content_type", "size",
+                # "created_at", "created_by"}). The previous ``card_id=``
+                # keyword raised TypeError against every compliant
+                # provider — swallowed by the except below, silently
+                # dropping all board attachments — and the Planka raw
+                # keys (name/userId/createdAt) would have read as None
+                # even if the call had succeeded. Same fix as PR #623
+                # applied to _collect_foundation_contract.
+                result = await state.kanban_client.get_attachments(task_id=task.id)
                 if result.get("success", False):
                     attachments = result.get("data", [])
                     for attachment in attachments:
+                        filename = attachment.get("filename")
+                        location = attachment.get("url") or (
+                            f"./attachments/{attachment.get('id')}/{filename}"
+                            if filename
+                            else None
+                        )
                         artifacts.append(
                             {
-                                "filename": attachment.get("name"),
-                                "location": (
-                                    f"./attachments/{attachment.get('id')}/"
-                                    f"{attachment.get('name')}"
-                                ),
+                                "filename": filename,
+                                "location": location,
                                 "storage_type": "attachment",
                                 "artifact_type": "reference",
-                                "created_by": attachment.get("userId"),
-                                "created_at": attachment.get("createdAt"),
+                                "created_by": attachment.get("created_by"),
+                                "created_at": attachment.get("created_at"),
                                 "description": f"Attachment from task {task_id}",
                             }
                         )
@@ -819,11 +831,9 @@ async def _collect_task_artifacts(
                     # Kanban attachments from dependency
                     if state.kanban_client:
                         try:
-                            dep_card_id = (
-                                getattr(dep_task, "kanban_card_id", None) or dep_task.id
-                            )
+                            # Issue #624: documented keyword is task_id.
                             result = await state.kanban_client.get_attachments(
-                                card_id=dep_card_id
+                                task_id=dep_task.id
                             )
                             if result.get("success", False):
                                 attachments = result.get("data", [])
@@ -851,15 +861,17 @@ async def _collect_task_artifacts(
                                         attachment_scope = "reference_only"
                                     artifacts.append(
                                         {
-                                            "filename": attachment.get("name"),
+                                            "filename": attachment.get("filename"),
                                             "location": (
-                                                f"./attachments/{attachment.get('id')}/"
-                                                f"{attachment.get('name')}"
+                                                attachment.get("url")
+                                                or f"./attachments/"
+                                                f"{attachment.get('id')}/"
+                                                f"{attachment.get('filename')}"
                                             ),
                                             "storage_type": "attachment",
                                             "artifact_type": "reference",
-                                            "created_by": attachment.get("userId"),
-                                            "created_at": attachment.get("createdAt"),
+                                            "created_by": attachment.get("created_by"),
+                                            "created_at": attachment.get("created_at"),
                                             "dependency_task_id": dep_id,
                                             "dependency_task_name": dep_task.name,
                                             "description": (
@@ -980,20 +992,21 @@ async def _collect_transitive_context(
         kanban = getattr(state, "kanban_client", None)
         if kanban is not None and anc_task is not None:
             try:
-                card_id = getattr(anc_task, "kanban_card_id", None) or anc_id
-                kanban_result = await kanban.get_attachments(card_id=card_id)
+                # Issue #624: documented keyword is task_id.
+                kanban_result = await kanban.get_attachments(task_id=anc_id)
                 if kanban_result.get("success", False):
                     for attachment in kanban_result.get("data", []) or []:
                         attach_artifact: Dict[str, Any] = {
-                            "filename": attachment.get("name"),
+                            "filename": attachment.get("filename"),
                             "location": (
-                                f"./attachments/{attachment.get('id')}/"
-                                f"{attachment.get('name')}"
+                                attachment.get("url")
+                                or f"./attachments/{attachment.get('id')}/"
+                                f"{attachment.get('filename')}"
                             ),
                             "storage_type": "attachment",
                             "artifact_type": "reference",
-                            "created_by": attachment.get("userId"),
-                            "created_at": attachment.get("createdAt"),
+                            "created_by": attachment.get("created_by"),
+                            "created_at": attachment.get("created_at"),
                             "dependency_task_id": anc_id,
                             "dependency_task_name": anc_name,
                             "description": (
