@@ -2060,12 +2060,11 @@ echo "=========================================="
             # failure here must never mask the run-finished line.
             try:
                 final_status = mcp.call_tool("get_experiment_status") or {}
-                unfinished = final_status.get("unfinished_tasks")
-                if unfinished is not None:
-                    for line in format_unfinished_report(
-                        unfinished, int(final_status.get("total_tasks", 0))
-                    ):
-                        _emit(line)
+                for line in format_unfinished_report(
+                    final_status.get("unfinished_tasks"),
+                    int(final_status.get("total_tasks", 0) or 0),
+                ):
+                    _emit(line)
             except Exception as exc:  # noqa: BLE001
                 _emit(f"WARN could not build final report: {type(exc).__name__}")
             _emit(f"run finished — spawned {spawned_total} ephemeral agents")
@@ -2074,7 +2073,9 @@ echo "=========================================="
         return True
 
 
-def format_unfinished_report(unfinished: List[Dict[str, Any]], total: int) -> List[str]:
+def format_unfinished_report(
+    unfinished: Optional[List[Dict[str, Any]]], total: int
+) -> List[str]:
     """Render the end-of-run statement of what did and did not get built.
 
     A run used to end with ``run finished — spawned N ephemeral agents``
@@ -2097,6 +2098,24 @@ def format_unfinished_report(unfinished: List[Dict[str, Any]], total: int) -> Li
         incomplete run names every unfinished task, why it stopped, and
         the consequence (its deliverable may be missing).
     """
+    # Missing data must never read as success. ``unfinished`` is None when
+    # Marcus could not produce a trustworthy task list (board unreachable,
+    # or a fetch that contradicted the metrics total — providers return []
+    # on error rather than raising). Likewise a zero total tells us nothing
+    # about whether work was done (Codex P1 on PR #723).
+    if unfinished is None:
+        return [
+            "RESULT: could not verify completion — Marcus returned no "
+            "trustworthy task list (board unreachable?). Check the board "
+            "before treating this run as successful."
+        ]
+    if total <= 0:
+        return [
+            "RESULT: could not verify completion — no tasks reported for "
+            "this project. Check the board before treating this run as "
+            "successful."
+        ]
+
     done = total - len(unfinished)
     if not unfinished:
         return [f"RESULT: all {done}/{total} tasks complete"]

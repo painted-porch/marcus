@@ -212,3 +212,190 @@ class TestRunnerReportRendering:
         )
 
         assert "missing" in text.lower()
+
+
+class TestBlockerTextComesFromTheStore:
+    """Codex P1: the blocker text lives in the provider's blocker store.
+
+    ``report_blocker`` sends ``update_task(task_id, {"blocker": text})``
+    and the SQLite provider INSERTs that into a separate ``blockers``
+    table. Task hydration only reads the tasks row, so
+    ``source_context["blocker"]`` is always absent — meaning every
+    genuinely blocked task rendered as "blocked (no blocker text
+    recorded)", defeating the entire point of the report.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reason_read_from_provider_blocker_store(self) -> None:
+        """The recorded description must reach the report."""
+        tasks = [_task("t1", "Implement CLI", TaskStatus.BLOCKED)]
+        monitor = _monitor(tasks)
+        monitor.kanban_client.get_task_blockers = AsyncMock(
+            return_value=[{"description": "needs a paid API key", "severity": "high"}]
+        )
+
+        status = await monitor.get_status()
+
+        assert status["unfinished_tasks"][0]["reason"] == "needs a paid API key"
+
+    @pytest.mark.asyncio
+    async def test_most_recent_blocker_wins(self) -> None:
+        """A task blocked more than once reports the latest reason."""
+        tasks = [_task("t1", "Implement CLI", TaskStatus.BLOCKED)]
+        monitor = _monitor(tasks)
+        monitor.kanban_client.get_task_blockers = AsyncMock(
+            return_value=[
+                {"description": "first attempt failed"},
+                {"description": "second attempt: API key missing"},
+            ]
+        )
+
+        status = await monitor.get_status()
+
+        assert status["unfinished_tasks"][0]["reason"] == (
+            "second attempt: API key missing"
+        )
+
+    @pytest.mark.asyncio
+    async def test_source_context_still_wins_when_present(self) -> None:
+        """Providers that do hydrate the blocker keep working."""
+        tasks = [
+            _task(
+                "t1",
+                "Implement CLI",
+                TaskStatus.BLOCKED,
+                source_context={"blocker": "from source_context"},
+            )
+        ]
+        monitor = _monitor(tasks)
+        monitor.kanban_client.get_task_blockers = AsyncMock(return_value=[])
+
+        status = await monitor.get_status()
+
+        assert status["unfinished_tasks"][0]["reason"] == "from source_context"
+
+    @pytest.mark.asyncio
+    async def test_blocker_lookup_failure_degrades_to_fallback(self) -> None:
+        """A store error must not lose the task from the report."""
+        tasks = [_task("t1", "Implement CLI", TaskStatus.BLOCKED)]
+        monitor = _monitor(tasks)
+        monitor.kanban_client.get_task_blockers = AsyncMock(
+            side_effect=RuntimeError("store unreachable")
+        )
+
+        status = await monitor.get_status()
+
+        assert len(status["unfinished_tasks"]) == 1
+        assert status["unfinished_tasks"][0]["reason"]
+
+
+class TestUntrustworthyFetchIsNotSuccess:
+    """Codex P1: an empty task list can mean "board unreachable".
+
+    The Planka provider catches fetch errors and returns ``[]`` rather
+    than raising, so the exception path never fires. Publishing
+    ``unfinished_tasks=[]`` from that makes the runner print "all
+    complete" for a board it could not read — the precise silent-success
+    failure this report exists to prevent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_list_contradicting_metrics_is_not_published(self) -> None:
+        """metrics say 9 tasks, fetch returns 0 -> untrustworthy."""
+        tasks = [_task(f"t{i}", f"T{i}", TaskStatus.DONE) for i in range(9)]
+        monitor = _monitor(tasks)
+        monitor.kanban_client.get_all_tasks = AsyncMock(return_value=[])
+
+        status = await monitor.get_status()
+
+        assert "unfinished_tasks" not in status
+
+    @pytest.mark.asyncio
+    async def test_genuinely_empty_board_is_not_published_either(self) -> None:
+        """0 tasks total is indistinguishable from a failed fetch."""
+        monitor = _monitor([])
+
+        status = await monitor.get_status()
+
+        assert "unfinished_tasks" not in status
+
+    @pytest.mark.asyncio
+    async def test_consistent_fetch_is_published(self) -> None:
+        """A fetch that matches the metrics total is trustworthy."""
+        tasks = [
+            _task("t1", "A", TaskStatus.DONE),
+            _task("t2", "B", TaskStatus.BLOCKED),
+        ]
+
+        status = await _monitor(tasks).get_status()
+
+        assert len(status["unfinished_tasks"]) == 1
+
+
+class TestRunnerRefusesToClaimSuccessBlind:
+    """The runner must never imply success from missing data."""
+
+    def test_absent_report_says_it_could_not_verify(self) -> None:
+        from runners.spawn_agents import format_unfinished_report
+
+        lines = format_unfinished_report(None, total=9)
+
+        text = "\n".join(lines).lower()
+        assert "could not" in text or "unable" in text
+        assert "complete" not in text.split("could not")[0]
+
+    def test_zero_total_does_not_claim_all_complete(self) -> None:
+        from runners.spawn_agents import format_unfinished_report
+
+        text = "\n".join(format_unfinished_report([], total=0)).lower()
+
+        assert "all 0/0" not in text
+
+
+class TestSqliteProviderExposesBlockers:
+    """The SQLite provider must offer the read path the report needs.
+
+    It already WRITES blocker descriptions (``update_task`` with a
+    ``blocker`` key INSERTs into the ``blockers`` table) but offered no
+    way to read them back, so the recorded explanation was unreachable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_task_blockers_returns_written_description(
+        self, tmp_path: Any
+    ) -> None:
+        from src.integrations.providers.sqlite_kanban import SQLiteKanban
+
+        provider = SQLiteKanban({"db_path": str(tmp_path / "k.db")})
+        await provider.connect()
+        task = await provider.create_task({"name": "Implement CLI", "description": "d"})
+
+        await provider.update_task(task.id, {"blocker": "needs a paid API key"})
+        blockers = await provider.get_task_blockers(task.id)
+
+        assert [b["description"] for b in blockers] == ["needs a paid API key"]
+
+    @pytest.mark.asyncio
+    async def test_blockers_returned_oldest_first(self, tmp_path: Any) -> None:
+        """Order matters: the report shows the most recent (last) one."""
+        from src.integrations.providers.sqlite_kanban import SQLiteKanban
+
+        provider = SQLiteKanban({"db_path": str(tmp_path / "k2.db")})
+        await provider.connect()
+        task = await provider.create_task({"name": "T", "description": "d"})
+
+        await provider.update_task(task.id, {"blocker": "first"})
+        await provider.update_task(task.id, {"blocker": "second"})
+        blockers = await provider.get_task_blockers(task.id)
+
+        assert [b["description"] for b in blockers] == ["first", "second"]
+
+    @pytest.mark.asyncio
+    async def test_no_blockers_returns_empty(self, tmp_path: Any) -> None:
+        from src.integrations.providers.sqlite_kanban import SQLiteKanban
+
+        provider = SQLiteKanban({"db_path": str(tmp_path / "k3.db")})
+        await provider.connect()
+        task = await provider.create_task({"name": "T", "description": "d"})
+
+        assert await provider.get_task_blockers(task.id) == []

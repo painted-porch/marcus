@@ -540,6 +540,40 @@ class SQLiteKanban(KanbanInterface):
         rows = await self._run_in_executor(lambda: self._with_connection(_query))
         return [await self._hydrate_task(row) for row in rows]
 
+    async def get_task_blockers(self, task_id: str) -> List[Dict[str, Any]]:
+        """Return the blocker records recorded against a task.
+
+        ``update_task`` with a ``blocker`` key and ``report_blocker`` both
+        INSERT into the ``blockers`` table, but nothing read them back, so
+        the recorded explanation for a blocked task was unreachable —
+        end-of-run reporting rendered every blocked lane as "no blocker
+        text recorded" (Codex P1 on PR #723).
+
+        Parameters
+        ----------
+        task_id : str
+            Task whose blockers to fetch.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            ``{"id", "description", "severity", "created_at"}`` per
+            blocker, oldest first — consumers wanting the operative
+            reason take the last entry. Empty when none were recorded.
+        """
+        if not self.connected:
+            await self.connect()
+
+        def _query(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+            return conn.execute(
+                "SELECT id, description, severity, created_at "
+                "FROM blockers WHERE task_id = ? ORDER BY created_at ASC",
+                (task_id,),
+            ).fetchall()
+
+        rows = await self._run_in_executor(lambda: self._with_connection(_query))
+        return [dict(row) for row in rows]
+
     async def get_all_tasks(self) -> List[Task]:
         """Get all tasks regardless of status or assignment.
 
