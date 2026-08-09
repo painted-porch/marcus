@@ -10,12 +10,25 @@ This configuration file is automatically loaded by pytest and provides shared
 resources for all tests in the suite.
 """
 
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, Generator
 
 import pytest
+
+# Marcus data isolation (issue #724) — must happen at IMPORT time, not in a
+# fixture: tests/unit/conftest.py imports MarcusServer during collection,
+# which constructs module-level singletons (e.g. cost_tracking's
+# token_tracker) that resolve their data paths immediately. A session
+# fixture runs too late for those; by then the singleton is bound. Codex P1
+# on PR #725. The session fixture below still owns per-session bookkeeping.
+_MARCUS_TEST_DATA_DIR = tempfile.mkdtemp(prefix="marcus_test_data_")
+os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
+atexit.register(shutil.rmtree, _MARCUS_TEST_DATA_DIR, True)
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
@@ -43,20 +56,16 @@ from mcp.client.stdio import stdio_client  # noqa: E402
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _isolate_marcus_data(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Generator[None, None, None]:
-    """Point all Marcus default data paths at a session temp directory."""
-    previous = os.environ.get("MARCUS_DATA_DIR")
-    isolated = tmp_path_factory.mktemp("marcus_data")
-    # Always override under pytest — even a user-set MARCUS_DATA_DIR is a
-    # real data directory that tests must not touch.
-    os.environ["MARCUS_DATA_DIR"] = str(isolated)
+def _isolate_marcus_data() -> Generator[None, None, None]:
+    """Keep MARCUS_DATA_DIR pinned to the import-time temp directory.
+
+    The real isolation happens at module import above (it must — see the
+    comment there). This fixture guards against a test deleting or
+    rewriting the variable and leaving the rest of the session exposed.
+    """
+    os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
     yield
-    if previous is None:
-        os.environ.pop("MARCUS_DATA_DIR", None)
-    else:
-        os.environ["MARCUS_DATA_DIR"] = previous
+    os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
 
 
 # Import domain-specific fixtures

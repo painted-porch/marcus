@@ -20,6 +20,7 @@ from the repo root. This guard makes that impossible:
 
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -114,3 +115,97 @@ class TestFactoryFallbackIsIsolated:
         provider = KanbanFactory.create("sqlite")
         isolated = Path(os.environ[DATA_DIR_ENV])
         assert Path(provider.db_path).is_relative_to(isolated)
+
+
+class TestDurabilityOnConnect:
+    """WAL durability measures added after the #724 whodunit.
+
+    The boards were lost because three months of commits lived only in
+    the kanban.db-wal sidecar (a pinned reader stalled checkpoints at
+    2026-05-14) and the sidecar was destroyed. Three measures on
+    connect(): force a TRUNCATE checkpoint so the main file is always
+    current, log the resolved absolute db path + WAL size so a growing
+    sidecar is visible, and snapshot via the SQLite backup API (which is
+    WAL-safe — a bare file copy without sidecars reproduces the loss).
+    """
+
+    async def _provider(self, tmp_path: Any, name: str = "k.db") -> Any:
+        from src.integrations.providers.sqlite_kanban import SQLiteKanban
+
+        provider = SQLiteKanban({"db_path": str(tmp_path / name)})
+        assert await provider.connect()
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_connect_truncates_the_wal(self, tmp_path: Any) -> None:
+        """After connect, a bare copy of the main file holds all data."""
+        import shutil
+        import sqlite3
+
+        provider = await self._provider(tmp_path)
+        task = await provider.create_task({"name": "T", "description": "d"})
+        await provider.disconnect()
+
+        provider2 = await self._provider(tmp_path)  # reconnect checkpoints
+        bare = tmp_path / "bare-copy.db"
+        shutil.copyfile(tmp_path / "k.db", bare)  # deliberately no sidecars
+        con = sqlite3.connect(f"file:{bare}?mode=ro", uri=True)
+        count = list(con.execute("SELECT count(*) FROM tasks"))[0][0]
+        assert count == 1, "main file must be self-sufficient after connect"
+
+    @pytest.mark.asyncio
+    async def test_connect_logs_resolved_path(
+        self, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The absolute db path must appear in the connect log line."""
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            await self._provider(tmp_path)
+        assert str(tmp_path) in caplog.text
+        assert "wal" in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_connect_snapshots_via_backup_api(self, tmp_path: Any) -> None:
+        """An existing db gets a readable snapshot under backups/."""
+        import sqlite3
+
+        from src.integrations.providers import sqlite_kanban as mod
+
+        provider = await self._provider(tmp_path)
+        await provider.create_task({"name": "T", "description": "d"})
+        await provider.disconnect()
+
+        mod._SNAPSHOT_TAKEN.clear()  # allow a snapshot in this process
+        await self._provider(tmp_path)
+
+        backups = sorted((tmp_path / "backups").glob("kanban-*.db"))
+        assert backups, "no snapshot created"
+        con = sqlite3.connect(f"file:{backups[-1]}?mode=ro", uri=True)
+        assert list(con.execute("SELECT count(*) FROM tasks"))[0][0] == 1
+
+    @pytest.mark.asyncio
+    async def test_snapshot_retention_keeps_seven(self, tmp_path: Any) -> None:
+        """Old snapshots beyond the newest 7 are pruned."""
+        from src.integrations.providers import sqlite_kanban as mod
+
+        provider = await self._provider(tmp_path)
+        await provider.create_task({"name": "T", "description": "d"})
+        await provider.disconnect()
+
+        backups_dir = tmp_path / "backups"
+        backups_dir.mkdir(exist_ok=True)
+        for i in range(9):
+            (backups_dir / f"kanban-2026010{i}-000000.db").write_bytes(b"x")
+
+        mod._SNAPSHOT_TAKEN.clear()
+        await self._provider(tmp_path)
+
+        remaining = sorted(backups_dir.glob("kanban-*.db"))
+        assert len(remaining) == 7
+
+    @pytest.mark.asyncio
+    async def test_fresh_db_is_not_snapshotted(self, tmp_path: Any) -> None:
+        """A brand-new (empty) database produces no snapshot noise."""
+        await self._provider(tmp_path, name="fresh.db")
+        assert not (tmp_path / "backups").exists()

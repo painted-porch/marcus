@@ -65,3 +65,6 @@ skills/council/
 .env.test
 .claude/settings.json
 .claude/skills/
+
+# Machine-specific workspace binding — never commit (Codex P1 on PR #725)
+.marcus_workspace.json

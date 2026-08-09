@@ -405,13 +405,20 @@ class ProjectContextManager:
         elif project.provider == "sqlite":
             config.update(
                 {
+                    # Issue #724 (Codex P1 on PR #725): explicit
+                    # "./data/..." literals here bypassed the factory and
+                    # provider fallbacks — a test switching to a registered
+                    # sqlite project connected straight to the production
+                    # board. Route the fallback through the shared resolver;
+                    # config-specified paths are still honored.
                     "db_path": (
-                        self.config.kanban.sqlite_db_path or "./data/kanban.db"
+                        self.config.kanban.sqlite_db_path
+                        or str(marcus_data_dir() / "kanban.db")
                     ),
                     "project_name": project.name,
                     "attachments_dir": (
                         self.config.kanban.sqlite_attachments_dir
-                        or "./data/attachments"
+                        or str(marcus_data_dir() / "attachments")
                     ),
                 }
             )
