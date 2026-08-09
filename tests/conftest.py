@@ -16,6 +16,7 @@ import shutil
 import sys
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Generator
 
 import pytest
@@ -69,10 +70,23 @@ def _block_external_network(
     spent real money on every run, and violated the project's own rule
     that unit tests mock ALL external dependencies.
 
+    Scope is determined by PATH as well as marker (Codex P1 on PR #726):
+    136 of 293 files under ``tests/unit`` carry no ``@pytest.mark.unit``,
+    and the full-suite workflow runs plain ``pytest`` (defaulting to
+    ``testpaths = tests/unit``) with live ``OPENAI_API_KEY`` /
+    ``CLAUDE_API_KEY`` / Planka credentials in the environment — so a
+    marker-only guard left the majority of unit tests able to reach a
+    paid service in CI.
+
     Loopback stays open so local-socket fixtures keep working; anything
     else raises with a pointer to the boundary that needs mocking.
     """
-    if request.node.get_closest_marker("unit") is None:
+    node_path = Path(str(request.node.fspath)).as_posix()
+    is_unit = (
+        request.node.get_closest_marker("unit") is not None
+        or "/tests/unit/" in node_path
+    )
+    if not is_unit:
         return
 
     import socket
