@@ -106,7 +106,12 @@ class AssignmentPersistence:
             await self._write_assignments()
 
     async def update_assignment_fields(
-        self, worker_id: str, task_id: str, fields: Dict[str, Any]
+        self,
+        worker_id: str,
+        task_id: str,
+        fields: Dict[str, Any],
+        *,
+        create_if_absent: bool = True,
     ) -> None:
         """
         Merge extra fields onto a worker's assignment record.
@@ -130,16 +135,32 @@ class AssignmentPersistence:
                 the previous task are dropped rather than carried over.
             fields
                 Key/value pairs merged onto the record.
+            create_if_absent
+                When True (default) a missing record is created — required
+                for a freshly-claimed lease, since ``create_lease`` runs
+                before the assignment row exists.
+
+                Callers pass **False** when the write may be racing a
+                removal. A renewal or merge-conflict extension already in
+                flight when a completion, recovery, or unassignment calls
+                ``remove_assignment`` would otherwise resurrect the
+                released row, leaving a TODO task falsely assigned on disk
+                and rehydrating a stale lease after a restart. With False,
+                a missing record — or a record now pointing at a different
+                task — is left untouched.
         """
         async with self.lock:
             existing = self._assignments_cache.get(worker_id)
             if existing is not None and existing.get("task_id") == task_id:
                 record: Dict[str, Any] = dict(existing)
-            else:
+            elif create_if_absent:
                 record = {
                     "assigned_at": datetime.now(timezone.utc).isoformat(),
                     "task_data": {},
                 }
+            else:
+                # Released or reassigned: never resurrect or clobber.
+                return
 
             record["task_id"] = task_id
             record.update(fields)

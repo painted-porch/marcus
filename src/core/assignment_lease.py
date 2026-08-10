@@ -699,9 +699,9 @@ class AssignmentLeaseManager:
             # configs set) runs for hours. Assigning unconditionally meant
             # every MCP call an agent made cut its own multi-hour lease down
             # to the next few minutes.
-            lease.lease_expires = max(
-                lease.lease_expires, now + timedelta(seconds=lease_seconds)
-            )
+            extended_to = now + timedelta(seconds=lease_seconds)
+            expiry_advanced = extended_to > lease.lease_expires
+            lease.lease_expires = max(lease.lease_expires, extended_to)
 
             # Update timestamp for cadence tracking
             lease.update_timestamps.append(now)
@@ -711,7 +711,22 @@ class AssignmentLeaseManager:
                 f"(task {lease.task_id}, "
                 f"expires: {lease.lease_expires.isoformat()})"
             )
-            return True
+
+        # Persist only when the heartbeat actually bought more time.
+        # Otherwise a restart inside the extended window would restore
+        # the older expiry and recover work from an agent whose
+        # heartbeat had successfully extended its lease.
+        #
+        # Gated on ``expiry_advanced`` because ``touch_lease`` fires on
+        # every MCP call carrying an agent_id — the highest-frequency
+        # lease mutation in the codebase — and persisting rewrites the
+        # whole assignments file. When the expiry did not move there is
+        # nothing a restart could lose. Written outside the lock, as
+        # ``_try_extend_for_merge_conflict`` does.
+        if expiry_advanced:
+            await self._persist_lease(lease)
+
+        return True
 
     async def check_expired_leases(self) -> List[AssignmentLease]:
         """
@@ -1435,7 +1450,22 @@ class AssignmentLeaseManager:
         before the assignment row exists, so the previous
         ``if assignment:`` guard persisted nothing at all for a
         freshly-claimed lease.
+
+        Creation is gated on the lease still being the live one for its
+        task. That old ``if assignment:`` check incidentally guarded
+        against resurrecting a released row; without a replacement, a
+        write already in flight when a completion, recovery, or
+        unassignment removes the record would recreate it — leaving a
+        TODO task falsely assigned on disk. This mirrors the liveness
+        re-check ``_try_extend_for_merge_conflict`` already performs
+        before mutating a lease.
         """
+        # Reading the dict is safe without ``lease_lock``: there is no
+        # await between the lookup and its use, and callers already
+        # inside the lock (create_lease, renew_lease) would deadlock on
+        # re-entry.
+        is_live = self.active_leases.get(lease.task_id) is lease
+
         await self.assignment_persistence.update_assignment_fields(
             lease.agent_id,
             lease.task_id,
@@ -1450,7 +1480,13 @@ class AssignmentLeaseManager:
                 # survives a service restart during the extension window
                 # (Codex P1 on PR #350).
                 "merge_conflict_extensions": lease.merge_conflict_extensions,
+                # Per-lease adaptive grace. ``check_expired_leases`` uses
+                # this when set and falls back to the global default
+                # otherwise, so dropping it on restart would recover
+                # tail-phase work earlier than the phase intended.
+                "grace_period_seconds": lease.grace_period_seconds,
             },
+            create_if_absent=is_live,
         )
 
     async def load_active_leases(self) -> None:
@@ -1501,6 +1537,10 @@ class AssignmentLeaseManager:
                 merge_conflict_extensions=assignment.get(
                     "merge_conflict_extensions", 0
                 ),
+                # Restore the per-lease adaptive grace. Absent on legacy
+                # records, where None correctly falls back to the global
+                # default in ``check_expired_leases``.
+                grace_period_seconds=assignment.get("grace_period_seconds"),
             )
 
             self.active_leases[task_id] = lease
