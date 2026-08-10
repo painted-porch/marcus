@@ -4970,7 +4970,7 @@ async def report_task_progress(
             and status != "completed"
         ):
             renewed_lease = await state.lease_manager.renew_lease(
-                task_id, progress, message
+                task_id, progress, message, agent_id=agent_id
             )
             if renewed_lease:
                 logger.info(

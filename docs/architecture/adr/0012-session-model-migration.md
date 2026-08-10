@@ -1,6 +1,8 @@
 # ADR 0012: Session-Model Migration — Spawn-per-Task → Long-Lived Pull-Loop Sessions
 
-**Status:** Accepted (amended 2026-07-06: added D11 — false-recovery fencing, from advisory-panel review)
+**Status:** Accepted (amended 2026-07-06: added D11 — false-recovery fencing, from
+advisory-panel review; code pointers corrected 2026-08-09 from the PRE-3 gate-1
+call-site inventory — see "Pointer corrections" below)
 
 **Date:** 2026-07-05
 
@@ -209,13 +211,62 @@ false recovery was not rare; it was designed in.
   to a board card keeps resolution intelligent, audited, and consistent with
   Invariant #2.
 - **Consequences:** `AssignmentLease` gains `lease_epoch`; the stale-completion
-  guard (`task.py:3865-3960`) changes semantics from *reject-and-discard* to
+  guard (`task.py:4136-4308`) changes semantics from *reject-and-discard* to
   *fence-and-reconcile*; obligation **O3 is closed by this decision**. A
   Phase-3 verification scenario is added: falsely-recover a live session, let
   both report, assert exactly one completion, zero discarded work, one
   reconciliation card in the audit trail.
 
+#### D11 amendment (2026-08-09): fencing covers four paths, not one
+
+The PRE-3 gate-1 inventory found that D11 as originally written fences only the
+*completion* path, while **three further paths hand out or overwrite ownership
+with no holder check at all**. All three are made more likely by the session
+model, not less. Gate 2 covers all four (Simon `05f56b57`):
+
+1. **Completion** — the original D11 scope (`task.py:4136-4308`).
+2. **`renew_lease` takes no `agent_id`** (`assignment_lease.py:437`, lookup at
+   `:460`). Any agent's progress report overwrites the real holder's
+   `progress_percentage` / `last_progress_message` and resets its expiry. The two
+   ownership guards in `report_task_progress` are gated on `status == "completed"`
+   and `status == "blocked"` — **plain in-progress reports are unguarded.**
+3. **`report_task_progress` silently re-grants the lease**
+   (`task.py:4999-5007`): `create_lease(task_id, agent_id, task_obj)` fires for
+   whoever reported, gated only on the task not already being DONE. This is a
+   second, undocumented claim site outside `request_next_task`.
+4. **`touch_lease` is ownership-blind** (`assignment_lease.py:676-698`): it scans
+   `active_leases.values()` for the *first* lease matching `agent_id` and breaks,
+   never checking which task the call concerned. It is the highest-frequency lease
+   mutation in the codebase (fired from `handlers.py` after every MCP call
+   carrying an `agent_id`) and a literal `active_leases` grep never finds it.
+
+**Also required:** `lease_epoch` must be written by `_persist_lease`
+(`assignment_lease.py:1408-1426`) or a Marcus restart resets the epoch and defeats
+the fencing. And the four external `del active_leases[...]` sites (`task.py:500,
+4721, 5673, 6582`) bypass `lease_lock`, which every manager-internal mutation
+takes — the fencing token is only as reliable as the least careful of them.
+
+**No fencing token exists today.** A whole-repo grep for `epoch` / `lease_epoch` /
+`fencing` returns nothing relevant. D11 is greenfield on both sides of the
+protocol: the dataclass has no field, `request_next_task` returns none, and
+`report_task_progress` accepts none. It is a **protocol change** requiring
+coordinated edits to Marcus, the MCP tool signatures, and the agent prompts — not
+a modification of an existing check.
+
 ---
+
+## Pointer corrections (2026-08-09)
+
+Line references in the original draft had drifted. Corrected from the PRE-3
+gate-1 inventory, each re-verified against source:
+
+| Was | Is | Notes |
+|---|---|---|
+| `task.py:3865-3960` (stale-completion guard, cited twice) | **`task.py:4136-4308`** | ~300 lines further down, and now *three* blocks: cold-cache fallback (`4180-4196`), #667 Fix 2 uncontested-accept (`4209-4283`), final rejection (`4285-4308`) |
+| `task.py:5150-5155` (`_scope_tasks_to_project` raise) | **`task.py:5817`** | 5150-5155 is now an unrelated except/finally block. Note the raise never reaches the caller — `request_next_task` swallows it at `task.py:3015`, so the O1 failure presents as an ordinary failed poll, which a long-lived session will retry forever |
+| `task.py:3874-3876` (lease reload) | **`assignment_lease.py:1430`** | 3874-3876 is a docstring about subtask lookup. Rehydration is lazily triggered from inside `request_next_task`, *not* at startup — so O1's fix cannot live in `MarcusServer.__init__` or it will never run in HTTP mode (`server.py:793-797`) |
+| `worker_ingester.py:26,312-316` | **`:24-27`** (binding docstring), **`:299-304`** (the cwd comment) | See the corrected O2 row above |
+| `server.py:200-201` | unchanged — **correct** | verified |
 
 ## Inherited obligations (review-found gaps — not choices)
 
@@ -224,10 +275,10 @@ only *after* going session-based. Each is assigned a home by this ADR:
 
 | # | Obligation | Lands in |
 |---|---|---|
-| O1 | `agent_status` / `agent_project_map` are never rehydrated on restart (leases are) — a restart would orphan every registered session (`server.py:200-201`, `task.py:5150-5155`) | Phase 3 registration work (with D7's 1:1 scoping) |
-| O2 | Cost attribution is keyed to the spawn-registry file + per-agent cwd — both deleted. Re-home the `(session → agent/run/project)` binding at register/claim time (`worker_ingester.py:26,312-316`) | Phase 3, per D9 |
-| O3 | The stale-completion guard assumes agents die on recovery; a falsely-recovered *live* session would have its coarse-task output discarded (`task.py:3865-3960`) | **Closed by D11** (epoch fencing + board-mediated reconciliation) |
-| O4 | `max_renewals=10` / `stuck_task_threshold_renewals=5` flag healthy long tasks as stuck | **Deleted** — replaced by D3's budget ceiling |
+| O1 | `agent_status` / `agent_project_map` are never rehydrated on restart (leases are) — a restart would orphan every registered session (`server.py:200-201`; the raise is `task.py:5817` in `_scope_tasks_to_project`; lease rehydration for contrast is `assignment_lease.py:1430`, called only from `LeaseMonitor.start` at `:1771`). Neither dict is ever deleted, popped, or cleared anywhere in `src/` — the state is *both* non-durable across restarts and append-only within a process | Phase 3 registration work (with D7's 1:1 scoping) |
+| O2 | Cost attribution is keyed to **the per-agent cwd** — the spawn-registry half of this obligation does not exist (no registry file is written anywhere; `resolve_binding` has no in-repo implementation). The live consumer is **Cato**, not Marcus: `cato/backend/cost_ingest.py:100` requires the path shape `<experiment_dir>/worktrees/<agent_id>` and returns `None` otherwise, silently dropping the event. `project_id` comes from `project_info.json` (written by core, `nlp.py:1267-1297`); `task_id` is derived in-stream by the `_session_task` tracker (`worker_ingester.py:299-304`) and is therefore **already session-safe**; `run_id` is already `"unassigned"` on worker rows. Re-home = keep the worktree path shape stable or change Cato in lockstep | Phase 3, per D9 |
+| O3 | The stale-completion guard assumes agents die on recovery; a falsely-recovered *live* session would have its coarse-task output discarded (`task.py:4136-4308`). **Partly pre-solved:** the #667 Fix 2 block (`task.py:4209-4283`) already accepts a late completion when the card is *uncontested*, so only the contested branch (`:4285-4308`) discards. That existing three-signal heuristic will *fight* the epoch check unless removed — a deleted lease reads as "uncontested" | **Closed by D11** (epoch fencing + board-mediated reconciliation) |
+| O4 | ~~`max_renewals=10` / `stuck_task_threshold_renewals=5` flag healthy long tasks as stuck~~ — **this premise is false.** Verified 2026-08-09: `stuck_task_threshold_renewals` is **write-only dead config** (ctor param `:219`, docstring `:252`, stored `:291`, **read by nothing**) — it flags no task and has no test. `max_renewals` is **warn-only**: its only readers are `:534` (logs a warning, then renews normally) and `:1511` (a statistic). Neither denies a renewal, escalates, or reassigns. Deleting both is nearly free **and changes nothing about premature recovery** — the mechanism that actually reclaims healthy long-running cards is the progressive-timeout curve (`:1573-1594`, 180/240/300/360s windows + 60-90s grace) plus a *second* renewal-duration curve (`:129-176`) with its own hardcoded `renewal_count > 5` ceiling at `:167`. D3 must retune those, not just delete the two named dials | **Deleted** — but D3's budget ceiling must replace the *progressive-timeout curve*, not the dead dials |
 | O5 | No session context management exists; context grows unboundedly across cards in one process | Session contract + harness loop (compaction/reset between cards), per D8's card boundaries |
 
 ---

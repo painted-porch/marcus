@@ -170,7 +170,7 @@ class TestAssignmentLeaseManager:
         assert "task-123" in lease_manager.active_leases
 
     @pytest.mark.asyncio
-    async def test_renew_lease(self, lease_manager):
+    async def test_renew_lease(self, lease_manager, agent_id="agent-001"):
         """Test lease renewal."""
         # Create initial lease
         lease = await lease_manager.create_lease("task-123", "agent-001")
@@ -178,7 +178,9 @@ class TestAssignmentLeaseManager:
         initial_expiry = lease.lease_expires
 
         # Renew lease
-        renewed_lease = await lease_manager.renew_lease("task-123", 50, "Halfway done")
+        renewed_lease = await lease_manager.renew_lease(
+            "task-123", 50, "Halfway done", agent_id="agent-001"
+        )
 
         assert renewed_lease is not None
         assert renewed_lease.renewal_count == 1
@@ -199,7 +201,9 @@ class TestAssignmentLeaseManager:
         lease_manager.active_leases["task-123"] = lease
 
         # Try to renew
-        renewed_lease = await lease_manager.renew_lease("task-123", 50, "Progress")
+        renewed_lease = await lease_manager.renew_lease(
+            "task-123", 50, "Progress", agent_id="agent-001"
+        )
 
         assert renewed_lease is None
 
@@ -1129,7 +1133,7 @@ class TestExpiredLeaseProgressCapture:
         )
 
         result = await lease_manager.renew_lease(
-            task_id="task-342", progress=50, message="halfway"
+            task_id="task-342", progress=50, message="halfway", agent_id="agent-001"
         )
 
         # Renewal still fails — lease can't be un-expired
@@ -1153,6 +1157,7 @@ class TestExpiredLeaseProgressCapture:
             task_id="task-342",
             progress=30,
             message="out of order",
+            agent_id="agent-001",
         )
 
         assert result is None
@@ -1179,7 +1184,7 @@ class TestExpiredLeaseProgressCapture:
         # 2. Agent reports late progress — renewal fails, but
         #    capture fires.
         await lease_manager.renew_lease(
-            task_id="task-342", progress=50, message="halfway"
+            task_id="task-342", progress=50, message="halfway", agent_id="agent-001"
         )
         assert expired.progress_percentage == 50
 
@@ -1210,7 +1215,7 @@ class TestExpiredLeaseProgressCapture:
         )
 
         result = await lease_manager.renew_lease(
-            task_id="task-342", progress=80, message="almost done"
+            task_id="task-342", progress=80, message="almost done", agent_id="agent-001"
         )
 
         assert result is None
