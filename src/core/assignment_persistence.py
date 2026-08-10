@@ -65,16 +65,107 @@ class AssignmentPersistence:
                 ID of the task being assigned.
             task_data
                 Additional task information to store.
+
+        Notes
+        -----
+        When the worker is already assigned to **this same task**, fields
+        written onto the record by other subsystems are preserved and
+        ``assigned_at`` keeps its original value.
+
+        This method previously replaced the record wholesale on every
+        call, which silently discarded everything
+        ``AssignmentLeaseManager._persist_lease`` had just written —
+        ``lease_expires``, ``lease_renewed_at``, ``renewal_count``,
+        ``progress_percentage``, ``update_timestamps``,
+        ``merge_conflict_extensions`` — and reset ``assigned_at`` to now
+        on every progress report. Because ``load_active_leases`` defaults
+        a missing ``lease_expires`` to *now*, every lease rehydrated
+        after a restart was born already expiring. Found while adding the
+        ADR-0012 D11 fencing token, which has the same durability
+        requirement.
+
+        A *different* task_id means a genuinely new assignment, so the
+        record is rebuilt and ``assigned_at`` is refreshed — otherwise a
+        reassigned worker would inherit the previous task's start time.
         """
         async with self.lock:
+            existing = self._assignments_cache.get(worker_id)
+            if existing is not None and existing.get("task_id") == task_id:
+                record: Dict[str, Any] = dict(existing)
+            else:
+                record = {"assigned_at": datetime.now(timezone.utc).isoformat()}
+
+            record["task_id"] = task_id
+            record["task_data"] = task_data
+            record.setdefault("assigned_at", datetime.now(timezone.utc).isoformat())
+
             # Update cache
-            self._assignments_cache[worker_id] = {
-                "task_id": task_id,
-                "assigned_at": datetime.now(timezone.utc).isoformat(),
-                "task_data": task_data,
-            }
+            self._assignments_cache[worker_id] = record
 
             # Persist to disk
+            await self._write_assignments()
+
+    async def update_assignment_fields(
+        self,
+        worker_id: str,
+        task_id: str,
+        fields: Dict[str, Any],
+        *,
+        create_if_absent: bool = True,
+    ) -> None:
+        """
+        Merge extra fields onto a worker's assignment record.
+
+        Used by :class:`~src.core.assignment_lease.AssignmentLeaseManager`
+        to durably record lease state (expiry, renewal count, progress,
+        and the ADR-0012 D11 ``lease_epoch``) alongside the assignment.
+
+        The record is **created when absent**. A lease is created before
+        the assignment row exists, so a method that skipped missing
+        records would silently drop the fencing token for every
+        freshly-claimed task.
+
+        Parameters
+        ----------
+            worker_id
+                ID of the worker whose record should be updated.
+            task_id
+                Task the fields describe. A mismatch against the stored
+                record means a new assignment, so stale lease fields from
+                the previous task are dropped rather than carried over.
+            fields
+                Key/value pairs merged onto the record.
+            create_if_absent
+                When True (default) a missing record is created — required
+                for a freshly-claimed lease, since ``create_lease`` runs
+                before the assignment row exists.
+
+                Callers pass **False** when the write may be racing a
+                removal. A renewal or merge-conflict extension already in
+                flight when a completion, recovery, or unassignment calls
+                ``remove_assignment`` would otherwise resurrect the
+                released row, leaving a TODO task falsely assigned on disk
+                and rehydrating a stale lease after a restart. With False,
+                a missing record — or a record now pointing at a different
+                task — is left untouched.
+        """
+        async with self.lock:
+            existing = self._assignments_cache.get(worker_id)
+            if existing is not None and existing.get("task_id") == task_id:
+                record: Dict[str, Any] = dict(existing)
+            elif create_if_absent:
+                record = {
+                    "assigned_at": datetime.now(timezone.utc).isoformat(),
+                    "task_data": {},
+                }
+            else:
+                # Released or reassigned: never resurrect or clobber.
+                return
+
+            record["task_id"] = task_id
+            record.update(fields)
+
+            self._assignments_cache[worker_id] = record
             await self._write_assignments()
 
     async def remove_assignment(self, worker_id: str) -> None:

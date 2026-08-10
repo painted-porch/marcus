@@ -692,7 +692,16 @@ class AssignmentLeaseManager:
             )
             now = datetime.now(timezone.utc)
             lease.last_renewed = now
-            lease.lease_expires = now + timedelta(seconds=lease_seconds)
+            # A heartbeat proves liveness; it must never SHORTEN the lease.
+            # ``calculate_adaptive_timeout`` returns the progressive-timeout
+            # window (minutes), while a lease created in conservative mode
+            # (``default_lease_hours >= 1.0`` — what the shipped example
+            # configs set) runs for hours. Assigning unconditionally meant
+            # every MCP call an agent made cut its own multi-hour lease down
+            # to the next few minutes.
+            extended_to = now + timedelta(seconds=lease_seconds)
+            expiry_advanced = extended_to > lease.lease_expires
+            lease.lease_expires = max(lease.lease_expires, extended_to)
 
             # Update timestamp for cadence tracking
             lease.update_timestamps.append(now)
@@ -702,7 +711,22 @@ class AssignmentLeaseManager:
                 f"(task {lease.task_id}, "
                 f"expires: {lease.lease_expires.isoformat()})"
             )
-            return True
+
+        # Persist only when the heartbeat actually bought more time.
+        # Otherwise a restart inside the extended window would restore
+        # the older expiry and recover work from an agent whose
+        # heartbeat had successfully extended its lease.
+        #
+        # Gated on ``expiry_advanced`` because ``touch_lease`` fires on
+        # every MCP call carrying an agent_id — the highest-frequency
+        # lease mutation in the codebase — and persisting rewrites the
+        # whole assignments file. When the expiry did not move there is
+        # nothing a restart could lose. Written outside the lock, as
+        # ``_try_extend_for_merge_conflict`` does.
+        if expiry_advanced:
+            await self._persist_lease(lease)
+
+        return True
 
     async def check_expired_leases(self) -> List[AssignmentLease]:
         """
@@ -1406,26 +1430,64 @@ class AssignmentLeaseManager:
         return expiring
 
     async def _persist_lease(self, lease: AssignmentLease) -> None:
-        """Persist lease information to assignment persistence."""
-        assignment = await self.assignment_persistence.get_assignment(lease.agent_id)
-        if assignment:
-            assignment["lease_expires"] = lease.lease_expires.isoformat()
-            assignment["lease_renewed_at"] = lease.last_renewed.isoformat()
-            assignment["renewal_count"] = lease.renewal_count
-            assignment["progress_percentage"] = lease.progress_percentage
-            assignment["last_progress_update"] = datetime.now(timezone.utc).isoformat()
-            assignment["update_timestamps"] = [
-                ts.isoformat() for ts in lease.update_timestamps
-            ]
-            # Persist merge-conflict extension counter so the cap
-            # survives a service restart during the extension window
-            # (Codex P1 on PR #350).
-            assignment["merge_conflict_extensions"] = lease.merge_conflict_extensions
-            await self.assignment_persistence.save_assignment(
-                lease.agent_id,
-                lease.task_id,
-                assignment.get("assigned_at", datetime.now(timezone.utc).isoformat()),
-            )
+        """
+        Persist lease information to assignment persistence.
+
+        Notes
+        -----
+        Writes through ``update_assignment_fields``, which merges onto the
+        worker's existing record.
+
+        This previously mutated the dict returned by ``get_assignment``
+        and then called ``save_assignment``, which rebuilt the record from
+        scratch — so every field written here was discarded before
+        reaching disk. Because ``load_active_leases`` defaults a missing
+        ``lease_expires`` to *now*, every lease rehydrated after a restart
+        was born already expiring, and the PR #350 merge-conflict
+        extension cap did not actually survive a restart.
+
+        The record is also created when absent: ``create_lease`` runs
+        before the assignment row exists, so the previous
+        ``if assignment:`` guard persisted nothing at all for a
+        freshly-claimed lease.
+
+        Creation is gated on the lease still being the live one for its
+        task. That old ``if assignment:`` check incidentally guarded
+        against resurrecting a released row; without a replacement, a
+        write already in flight when a completion, recovery, or
+        unassignment removes the record would recreate it — leaving a
+        TODO task falsely assigned on disk. This mirrors the liveness
+        re-check ``_try_extend_for_merge_conflict`` already performs
+        before mutating a lease.
+        """
+        # Reading the dict is safe without ``lease_lock``: there is no
+        # await between the lookup and its use, and callers already
+        # inside the lock (create_lease, renew_lease) would deadlock on
+        # re-entry.
+        is_live = self.active_leases.get(lease.task_id) is lease
+
+        await self.assignment_persistence.update_assignment_fields(
+            lease.agent_id,
+            lease.task_id,
+            {
+                "lease_expires": lease.lease_expires.isoformat(),
+                "lease_renewed_at": lease.last_renewed.isoformat(),
+                "renewal_count": lease.renewal_count,
+                "progress_percentage": lease.progress_percentage,
+                "last_progress_update": datetime.now(timezone.utc).isoformat(),
+                "update_timestamps": [ts.isoformat() for ts in lease.update_timestamps],
+                # Persist merge-conflict extension counter so the cap
+                # survives a service restart during the extension window
+                # (Codex P1 on PR #350).
+                "merge_conflict_extensions": lease.merge_conflict_extensions,
+                # Per-lease adaptive grace. ``check_expired_leases`` uses
+                # this when set and falls back to the global default
+                # otherwise, so dropping it on restart would recover
+                # tail-phase work earlier than the phase intended.
+                "grace_period_seconds": lease.grace_period_seconds,
+            },
+            create_if_absent=is_live,
+        )
 
     async def load_active_leases(self) -> None:
         """Load active leases from persistence on startup."""
@@ -1475,6 +1537,10 @@ class AssignmentLeaseManager:
                 merge_conflict_extensions=assignment.get(
                     "merge_conflict_extensions", 0
                 ),
+                # Restore the per-lease adaptive grace. Absent on legacy
+                # records, where None correctly falls back to the global
+                # default in ``check_expired_leases``.
+                grace_period_seconds=assignment.get("grace_period_seconds"),
             )
 
             self.active_leases[task_id] = lease
