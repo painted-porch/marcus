@@ -131,6 +131,7 @@ class TestAssignmentLeaseManager:
             }
         )
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
         return persistence
@@ -626,17 +627,26 @@ class TestUpdateTimestampPersistence:
 
     @pytest.mark.asyncio
     async def test_persist_lease_saves_update_timestamps(self):
-        """Test that _persist_lease includes update_timestamps."""
+        """_persist_lease hands update_timestamps to the persistence layer.
+
+        This previously asserted that ``_persist_lease`` mutated the dict
+        returned by ``get_assignment``. It did -- but ``save_assignment``
+        then replaced the cached record wholesale, so every field written
+        here was discarded before reaching disk. The test passed while
+        the behaviour it described did not work. Assert against the call
+        that actually persists instead.
+        """
         from src.core.assignment_persistence import AssignmentPersistence
 
         now = datetime.now(timezone.utc)
         mock_persistence = Mock(spec=AssignmentPersistence)
-        existing_assignment: dict[str, Any] = {
-            "task_id": "task-789",
-            "assigned_at": now.isoformat(),
-        }
-        mock_persistence.get_assignment = AsyncMock(return_value=existing_assignment)
-        mock_persistence.save_assignment = AsyncMock()
+        mock_persistence.get_assignment = AsyncMock(
+            return_value={
+                "task_id": "task-789",
+                "assigned_at": now.isoformat(),
+            }
+        )
+        mock_persistence.update_assignment_fields = AsyncMock()
 
         lease_manager = AssignmentLeaseManager(
             kanban_client=Mock(),
@@ -657,8 +667,13 @@ class TestUpdateTimestampPersistence:
 
         await lease_manager._persist_lease(lease)
 
-        assert "update_timestamps" in existing_assignment
-        assert len(existing_assignment["update_timestamps"]) == 2
+        mock_persistence.update_assignment_fields.assert_called_once()
+        agent_id, task_id, fields = (
+            mock_persistence.update_assignment_fields.call_args.args
+        )
+        assert agent_id == "agent-001"
+        assert task_id == "task-789"
+        assert len(fields["update_timestamps"]) == 2
 
 
 class TestRecoveryInfo:
@@ -764,6 +779,7 @@ class TestRecoveryHandoffDualWrite:
         persistence = Mock()
         persistence.get_assignment = AsyncMock(return_value=None)
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
         return persistence
@@ -1039,6 +1055,7 @@ class TestExpiredLeaseProgressCapture:
         persistence = Mock()
         persistence.get_assignment = AsyncMock(return_value=None)
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
         return persistence
@@ -1133,7 +1150,9 @@ class TestExpiredLeaseProgressCapture:
         )
 
         result = await lease_manager.renew_lease(
-            task_id="task-342", progress=30, message="out of order"
+            task_id="task-342",
+            progress=30,
+            message="out of order",
         )
 
         assert result is None
@@ -1237,6 +1256,7 @@ class TestMergeConflictExtension:
     def mock_persistence(self):
         persistence = Mock()
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
         # Default to returning an assignment dict so _persist_lease's
@@ -1536,14 +1556,32 @@ class TestMergeConflictExtension:
         ):
             await lease_manager.check_expired_leases()
 
-        # _persist_lease writes via assignment_persistence.save_assignment
-        mock_persistence.save_assignment.assert_called()
-        # The persisted assignment dict must include the new field
-        # so a restart can rehydrate the cap counter.
-        # Check the dict that get_assignment returned was mutated:
-        loaded = await mock_persistence.get_assignment(lease.agent_id)
-        assert loaded["merge_conflict_extensions"] == 1
-        assert "lease_expires" in loaded
+        # _persist_lease writes via update_assignment_fields, which merges
+        # onto the record instead of replacing it. The previous
+        # save_assignment path discarded merge_conflict_extensions before
+        # it reached disk, so the restart-safety guarantee this test
+        # describes did not actually hold.
+        mock_persistence.update_assignment_fields.assert_called()
+        persisted_counters = [
+            call.args[2].get("merge_conflict_extensions")
+            for call in mock_persistence.update_assignment_fields.call_args_list
+        ]
+        assert (
+            1 in persisted_counters
+        ), f"extension counter never persisted; saw {persisted_counters}"
+        # The persisted fields must also carry the expiry, so a restart
+        # rehydrates both the cap counter and the extended lease window.
+        #
+        # This previously asserted that the dict returned by
+        # ``get_assignment`` had been mutated in place. That dict never
+        # reached disk -- ``save_assignment`` replaced the cached record
+        # wholesale -- so the assertion described a guarantee the code
+        # did not provide.
+        persisted_fields = [
+            call.args[2]
+            for call in mock_persistence.update_assignment_fields.call_args_list
+        ]
+        assert any("lease_expires" in fields for fields in persisted_fields)
 
     @pytest.mark.asyncio
     async def test_extension_does_not_hold_lock_during_git_probe(
@@ -1886,6 +1924,7 @@ class TestExtendForValidation:
             }
         )
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
         return persistence
@@ -2055,6 +2094,7 @@ class TestSilentRecoveryCircuitBreaker:
         persistence = Mock()
         persistence.get_assignment = AsyncMock(return_value=None)
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
         return persistence

@@ -692,7 +692,16 @@ class AssignmentLeaseManager:
             )
             now = datetime.now(timezone.utc)
             lease.last_renewed = now
-            lease.lease_expires = now + timedelta(seconds=lease_seconds)
+            # A heartbeat proves liveness; it must never SHORTEN the lease.
+            # ``calculate_adaptive_timeout`` returns the progressive-timeout
+            # window (minutes), while a lease created in conservative mode
+            # (``default_lease_hours >= 1.0`` — what the shipped example
+            # configs set) runs for hours. Assigning unconditionally meant
+            # every MCP call an agent made cut its own multi-hour lease down
+            # to the next few minutes.
+            lease.lease_expires = max(
+                lease.lease_expires, now + timedelta(seconds=lease_seconds)
+            )
 
             # Update timestamp for cadence tracking
             lease.update_timestamps.append(now)
@@ -1406,26 +1415,43 @@ class AssignmentLeaseManager:
         return expiring
 
     async def _persist_lease(self, lease: AssignmentLease) -> None:
-        """Persist lease information to assignment persistence."""
-        assignment = await self.assignment_persistence.get_assignment(lease.agent_id)
-        if assignment:
-            assignment["lease_expires"] = lease.lease_expires.isoformat()
-            assignment["lease_renewed_at"] = lease.last_renewed.isoformat()
-            assignment["renewal_count"] = lease.renewal_count
-            assignment["progress_percentage"] = lease.progress_percentage
-            assignment["last_progress_update"] = datetime.now(timezone.utc).isoformat()
-            assignment["update_timestamps"] = [
-                ts.isoformat() for ts in lease.update_timestamps
-            ]
-            # Persist merge-conflict extension counter so the cap
-            # survives a service restart during the extension window
-            # (Codex P1 on PR #350).
-            assignment["merge_conflict_extensions"] = lease.merge_conflict_extensions
-            await self.assignment_persistence.save_assignment(
-                lease.agent_id,
-                lease.task_id,
-                assignment.get("assigned_at", datetime.now(timezone.utc).isoformat()),
-            )
+        """
+        Persist lease information to assignment persistence.
+
+        Notes
+        -----
+        Writes through ``update_assignment_fields``, which merges onto the
+        worker's existing record.
+
+        This previously mutated the dict returned by ``get_assignment``
+        and then called ``save_assignment``, which rebuilt the record from
+        scratch — so every field written here was discarded before
+        reaching disk. Because ``load_active_leases`` defaults a missing
+        ``lease_expires`` to *now*, every lease rehydrated after a restart
+        was born already expiring, and the PR #350 merge-conflict
+        extension cap did not actually survive a restart.
+
+        The record is also created when absent: ``create_lease`` runs
+        before the assignment row exists, so the previous
+        ``if assignment:`` guard persisted nothing at all for a
+        freshly-claimed lease.
+        """
+        await self.assignment_persistence.update_assignment_fields(
+            lease.agent_id,
+            lease.task_id,
+            {
+                "lease_expires": lease.lease_expires.isoformat(),
+                "lease_renewed_at": lease.last_renewed.isoformat(),
+                "renewal_count": lease.renewal_count,
+                "progress_percentage": lease.progress_percentage,
+                "last_progress_update": datetime.now(timezone.utc).isoformat(),
+                "update_timestamps": [ts.isoformat() for ts in lease.update_timestamps],
+                # Persist merge-conflict extension counter so the cap
+                # survives a service restart during the extension window
+                # (Codex P1 on PR #350).
+                "merge_conflict_extensions": lease.merge_conflict_extensions,
+            },
+        )
 
     async def load_active_leases(self) -> None:
         """Load active leases from persistence on startup."""
