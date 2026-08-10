@@ -2647,6 +2647,11 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     },
                 )
 
+                # ADR-0012 D11 fencing token. 0 means "no epoch" and never
+                # compares equal to a real claim, so a deployment without a
+                # lease manager simply never fences.
+                assigned_lease_epoch = 0
+
                 # Create lease for this assignment if lease manager available
                 if hasattr(state, "lease_manager") and state.lease_manager:
                     lease = await state.lease_manager.create_lease(
@@ -2654,8 +2659,14 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     )
                     logger.info(
                         f"Created lease for task {optimal_task.id} "
-                        f"(expires: {lease.lease_expires.isoformat()})"
+                        f"(expires: {lease.lease_expires.isoformat()}, "
+                        f"epoch: {lease.lease_epoch})"
                     )
+                    # ADR-0012 D11: hand the fencing token to the agent.
+                    # It carries this back on every report for this task,
+                    # which is how Marcus tells its reports apart from a
+                    # replacement claimant's after a false recovery.
+                    assigned_lease_epoch = lease.lease_epoch
 
                 # Remove from pending assignments
                 state.tasks_being_assigned.discard(optimal_task.id)
@@ -2701,6 +2712,9 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                 # Serialize the response properly
                 response: Dict[str, Any] = {
                     "success": True,
+                    # ADR-0012 D11: the agent carries this back on every
+                    # report_task_progress call for this task.
+                    "lease_epoch": assigned_lease_epoch,
                     "task": {
                         "id": optimal_task.id,
                         "name": optimal_task.name,
@@ -3933,6 +3947,55 @@ def _should_validate_completion(task: Task, board_tasks: List[Task]) -> bool:
     return should_validate_task(task)
 
 
+async def should_fence_stale_epoch(
+    lease_manager: Any, task_id: str, lease_epoch: Optional[int]
+) -> bool:
+    """
+    Decide whether a report should be fenced as a stale claim (ADR-0012 D11).
+
+    Enforcement is deliberately **lenient** during rollout (Simon
+    ``f38b0831``). ``prompts/Agent_prompt.md`` is the canonical worker
+    spec that ``README.md`` tells operators to copy into their own
+    projects — Marcus cannot update those copies. Fencing agents that
+    never learned to send an epoch would route every un-migrated
+    completion to a reconciliation card.
+
+    So the rule is: fence only agents that **did** supply a token and
+    whose token is superseded. An agent supplying no token falls through
+    to the ownership checks that exist today, leaving its behaviour
+    unchanged.
+
+    ``AssignmentLeaseManager.is_epoch_current`` stays strict — it fails
+    closed on a missing epoch — so flipping to strict-everywhere later is
+    a change here, at the call site, rather than a change to the
+    predicate's meaning.
+
+    Named residual risk: two-robots-one-chore remains reachable for
+    un-updated agents until that flip happens.
+
+    Parameters
+    ----------
+    lease_manager : Any
+        The server's lease manager, or None when leases are disabled.
+    task_id : str
+        Task the report concerns.
+    lease_epoch : Optional[int]
+        Epoch the agent supplied. None or 0 means "not supplied".
+
+    Returns
+    -------
+    bool
+        True only when the agent supplied an epoch that is not the live
+        one for this task.
+    """
+    if lease_manager is None:
+        return False
+    if not lease_epoch:
+        # Un-migrated agent: fall back to the pre-existing checks.
+        return False
+    return not await lease_manager.is_epoch_current(task_id, lease_epoch)
+
+
 async def report_task_progress(
     agent_id: str,
     task_id: str,
@@ -3944,6 +4007,7 @@ async def report_task_progress(
     readiness_probe: Optional[str] = None,
     verifications: Optional[List[Dict[str, Any]]] = None,
     evidence: Optional[Dict[str, Any]] = None,
+    lease_epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Agents report their task progress.

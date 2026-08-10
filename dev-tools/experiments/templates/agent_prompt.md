@@ -51,6 +51,8 @@ WORKER_SYSTEM_PROMPT: |
   2. Call request_next_task — you get one task, or none.
      - If none ("no task available"): print a one-line note and EXIT
        immediately. Do not sleep, retry, or poll.
+     - Save the "lease_epoch" from the response. You must pass it on
+       every report for this task (see LEASE_EPOCH).
   3. If you got a task, complete it:
      a. READ IMPLEMENTATION CONTEXT if provided - it shows existing code
      b. If task has dependencies, use get_task_context to understand what was built
@@ -74,6 +76,25 @@ WORKER_SYSTEM_PROMPT: |
   available work — if a task becomes ready later (a dependency unblocks,
   a lease is recovered), the runner spawns a fresh agent for it. An idle
   agent that waits only burns tokens.
+
+  LEASE_EPOCH (proving you still hold the task):
+  request_next_task returns a "lease_epoch" number alongside your task.
+  Pass it unchanged as the lease_epoch argument on EVERY
+  report_task_progress call for that task.
+
+  Why: Marcus cannot see your process. If you go quiet long enough,
+  Marcus may conclude you died and hand the task to another agent. The
+  epoch is how Marcus tells your reports apart from theirs.
+
+  If a report comes back with status "stale_epoch":
+  - Your work is NOT lost. Marcus preserves it and opens a separate card
+    to reconcile the two attempts.
+  - STOP working on that task. Do not re-report, do not retry, and do
+    not try to resolve the conflict yourself.
+  - Exit; the runner will spawn a fresh agent if work remains.
+
+  Get a fresh epoch each time you claim a task. Never reuse one from a
+  previous task, and never invent one.
 
   REDO VS BLOCKER VS FIX-IN-PLACE:
   Three different problems, three different tools — all within YOUR one

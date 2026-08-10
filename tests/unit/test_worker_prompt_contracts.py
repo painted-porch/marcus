@@ -98,3 +98,43 @@ class TestNoStaleTerminalWarning:
         text = prompt_path.read_text().lower()
         assert "whole project" not in text
         assert "will be missing" not in text
+
+
+@pytest.mark.parametrize("prompt_path", ALL_PROMPTS, ids=lambda p: p.name)
+class TestLeaseEpochContract:
+    """ADR-0012 D11: every prompt must teach the fencing token.
+
+    Marcus hands the agent a ``lease_epoch`` on ``request_next_task`` and
+    fences reports that carry a superseded one. An agent that never
+    learns to send it back is invisible to the fence, so this contract
+    has to hold in every prompt copy — the two drift silently otherwise,
+    which is the reason this module exists.
+    """
+
+    def test_names_the_lease_epoch(self, prompt_path: Path) -> None:
+        """The token is named, not merely implied."""
+        assert "lease_epoch" in prompt_path.read_text()
+
+    def test_instructs_passing_it_on_every_report(self, prompt_path: Path) -> None:
+        """The agent is told to carry it back on reports, not just save it."""
+        text = prompt_path.read_text().lower()
+        assert "every" in text
+        assert "report_task_progress" in text
+
+    def test_states_that_stale_work_is_preserved(self, prompt_path: Path) -> None:
+        """Preserve-not-discard must be explicit.
+
+        An agent that believes a stale report destroys its work will
+        retry under pressure — the #636 compliance-theater failure mode.
+        """
+        text = prompt_path.read_text().lower()
+        assert "stale_epoch" in text
+        assert "not lost" in text
+
+    def test_tells_the_agent_to_stop_rather_than_resolve(
+        self, prompt_path: Path
+    ) -> None:
+        """Reconciliation is a board card, never the agent's to settle."""
+        text = prompt_path.read_text().lower()
+        assert "do not retry" in text
+        assert "reconcile" in text
