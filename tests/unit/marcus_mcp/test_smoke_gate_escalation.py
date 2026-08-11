@@ -26,6 +26,24 @@ from src.marcus_mcp.tools.task import (
     _terminalize_escalated_smoke_task,
 )
 
+
+def _wire_release_lease(lease_manager) -> None:
+    """Make a mocked lease manager honour release_lease().
+
+    Production code now drops leases through
+    ``AssignmentLeaseManager.release_lease`` rather than deleting from
+    ``active_leases`` directly, so the fencing epoch stays behind the
+    same lock every other mutation takes (ADR-0012 D11). A bare
+    ``MagicMock`` would accept the call and leave the dict untouched,
+    which makes these tests assert against a fiction.
+    """
+
+    async def _release(task_id, reason="released"):
+        return lease_manager.active_leases.pop(task_id, None) is not None
+
+    lease_manager.release_lease = AsyncMock(side_effect=_release)
+
+
 pytestmark = pytest.mark.unit
 
 
@@ -127,6 +145,7 @@ def _state_with_lease(task_id: str, agent_id: str) -> Mock:
     state.assignment_persistence.remove_assignment = AsyncMock()
     state.lease_manager = Mock()
     state.lease_manager.active_leases = {task_id: object()}
+    _wire_release_lease(state.lease_manager)
     return state
 
 

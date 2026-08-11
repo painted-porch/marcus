@@ -497,7 +497,7 @@ async def _terminalize_escalated_smoke_task(
             await state.assignment_persistence.remove_assignment(agent_id)
         if getattr(state, "lease_manager", None):
             if task_id in state.lease_manager.active_leases:
-                del state.lease_manager.active_leases[task_id]
+                await state.lease_manager.release_lease(task_id, reason="escalated")
                 logger.info(
                     "Released lease for escalated (terminal) task %s (agent %s)",
                     task_id,
@@ -3947,6 +3947,107 @@ def _should_validate_completion(task: Task, board_tasks: List[Task]) -> bool:
     return should_validate_task(task)
 
 
+async def open_reconciliation_card(
+    state: Any,
+    task_id: str,
+    task_name: str,
+    late_agent_id: str,
+    late_epoch: Optional[int],
+    current_epoch: Optional[int],
+    message: str,
+) -> Optional[str]:
+    """
+    Open a board card to reconcile two completions of one task (D11 part 2).
+
+    A stale-epoch completion is fenced — never applied — but it is also
+    never *discarded*. The late agent's branch and evidence survive, and
+    this card makes the collision visible so an agent can compare the two
+    attempts, keep the verified better one or merge them, and record the
+    decision.
+
+    Deciding which implementation is better is implementation judgement,
+    which under Invariant #2 belongs to an agent working a card rather
+    than to Marcus core. Marcus's job here is to notice, preserve, and
+    surface. This reuses the D2 integrator-card pattern.
+
+    Parameters
+    ----------
+    state : Any
+        Server state, providing ``kanban_client``.
+    task_id : str
+        The contested task.
+    task_name : str
+        Human-readable name of the contested task, for the card title.
+    late_agent_id : str
+        The agent whose completion arrived under a superseded epoch.
+    late_epoch : Optional[int]
+        The epoch that agent carried.
+    current_epoch : Optional[int]
+        The epoch of the live claim that superseded it.
+    message : str
+        The completion message the late agent submitted.
+
+    Returns
+    -------
+    Optional[str]
+        The created card's id, or None if the card could not be created.
+        Failure is logged and swallowed: the completion is already
+        fenced, and a board outage must not crash the reporting path.
+    """
+    description = (
+        f"Two agents completed task `{task_id}` ({task_name}).\n\n"
+        f"**Nothing has been discarded.** Both attempts are preserved.\n\n"
+        f"- Late attempt: agent `{late_agent_id}` on branch "
+        f"`marcus/{late_agent_id}` (lease epoch {late_epoch}).\n"
+        f"  Its completion report said: {message!r}\n"
+        f"- Live claim at the time of that report: lease epoch "
+        f"{current_epoch}.\n\n"
+        f"This happens when Marcus concludes an agent has died — it went "
+        f"quiet past the silence timeout — and reassigns its task, but "
+        f"the first agent was in fact alive and finished the work. "
+        f"Marcus can take the lease away; it cannot take the process "
+        f"away. The epoch is how the two reports are told apart.\n\n"
+        f"**Your job on this card:**\n"
+        f"1. Compare both attempts. `git log marcus/{late_agent_id}` "
+        f"shows the late agent's work.\n"
+        f"2. Keep the one that verifiably works, or merge them.\n"
+        f"3. Call `log_decision` recording which you kept and why.\n\n"
+        f"Do not assume the later attempt is better — the fenced agent "
+        f"may have been further along."
+    )
+
+    try:
+        created = await state.kanban_client.create_task(
+            {
+                "name": f"Reconcile duplicate completion: {task_name}",
+                "description": description,
+                "priority": "high",
+                "labels": ["reconciliation", "type:reconciliation"],
+                "estimated_hours": 1,
+            }
+        )
+    except Exception as card_err:
+        # The completion is already fenced; failing to surface the
+        # conflict is bad but must not take down the reporting path.
+        logger.error(
+            f"D11: failed to open reconciliation card for task "
+            f"{task_id} (late agent {late_agent_id}, epoch "
+            f"{late_epoch}): {card_err}. The late agent's work is still "
+            f"preserved on branch marcus/{late_agent_id}, but the "
+            f"collision is NOT visible on the board."
+        )
+        return None
+
+    card_id = getattr(created, "id", None)
+    logger.warning(
+        f"D11: fenced a stale-epoch completion on task {task_id} from "
+        f"agent {late_agent_id} (epoch {late_epoch} vs live "
+        f"{current_epoch}). Work preserved; reconciliation card "
+        f"{card_id} opened."
+    )
+    return str(card_id) if card_id is not None else None
+
+
 async def should_fence_stale_epoch(
     lease_manager: Any, task_id: str, lease_epoch: Optional[int]
 ) -> bool:
@@ -4217,6 +4318,59 @@ async def report_task_progress(
         # contrast, write DONE to kanban and trigger branch merges
         # that cannot be undone cleanly.
         if status == "completed":
+            # ADR-0012 D11: the epoch verdict takes precedence over every
+            # heuristic below. This ordering is the whole point — the
+            # #667 Fix 2 uncontested check reads a *deleted* lease as
+            # "nothing else is touching this task", which is exactly what
+            # a recovered task looks like in the window before a
+            # replacement claims it. Left to run, it would wave through
+            # the very reports the fence exists to catch.
+            #
+            # Only agents that supplied a token are fenced; an epoch-less
+            # report falls through to the pre-existing behaviour, which
+            # is what keeps the rollout lenient (Simon f38b0831).
+            _lease_manager = getattr(state, "lease_manager", None)
+            if await should_fence_stale_epoch(_lease_manager, task_id, lease_epoch):
+                # should_fence_stale_epoch returns False when the
+                # manager is None, so reaching here implies one exists;
+                # the guard keeps mypy honest about that.
+                _live_lease = (
+                    _lease_manager.active_leases.get(task_id)
+                    if _lease_manager is not None
+                    else None
+                )
+                _task_obj = next(
+                    (
+                        t
+                        for t in getattr(state, "project_tasks", []) or []
+                        if getattr(t, "id", None) == task_id
+                    ),
+                    None,
+                )
+                await open_reconciliation_card(
+                    state=state,
+                    task_id=task_id,
+                    task_name=(getattr(_task_obj, "name", None) or task_id),
+                    late_agent_id=agent_id,
+                    late_epoch=lease_epoch,
+                    current_epoch=getattr(_live_lease, "lease_epoch", None),
+                    message=message,
+                )
+                return {
+                    "success": False,
+                    "status": "stale_epoch",
+                    "error": "task_reassigned",
+                    "message": (
+                        f"Cannot complete task {task_id}: your lease "
+                        f"epoch ({lease_epoch}) has been superseded — "
+                        f"Marcus concluded you had stopped and reassigned "
+                        f"the task. Your work is NOT lost: it is "
+                        f"preserved on branch marcus/{agent_id} and a "
+                        f"reconciliation card is now on the board. Stop "
+                        f"work on this task and request your next one."
+                    ),
+                }
+
             current_assignment = state.agent_tasks.get(agent_id)
             assignment_task_id = (
                 getattr(current_assignment, "task_id", None)
@@ -4782,7 +4936,9 @@ async def report_task_progress(
                 # Remove lease for completed task
                 if hasattr(state, "lease_manager") and state.lease_manager:
                     if task_id in state.lease_manager.active_leases:
-                        del state.lease_manager.active_leases[task_id]
+                        await state.lease_manager.release_lease(
+                            task_id, reason="completed"
+                        )
                         logger.info(f"Removed lease for completed task {task_id}")
 
             # Merge agent's worktree branch to main (GH-250).
@@ -5059,6 +5215,28 @@ async def report_task_progress(
                         f"Stale agent {agent_id} reported progress on "
                         f"task {task_id} which is already DONE. "
                         "Skipping lease recreation to prevent zombie."
+                    )
+                elif await should_fence_stale_epoch(
+                    state.lease_manager, task_id, lease_epoch
+                ):
+                    # ADR-0012 D11: this is the second, undocumented claim
+                    # site outside request_next_task — it hands the lease
+                    # to whoever reported, with no holder check. A
+                    # displaced session reporting intermediate progress
+                    # would take the card back from the recovery holder
+                    # and neither side would be told: the exact
+                    # two-robots-one-chore mechanism, reproducing through
+                    # the repair path.
+                    #
+                    # An agent carrying a superseded epoch does not get
+                    # the card back. Epoch-less reports still fall
+                    # through to the re-grant, keeping the rollout
+                    # lenient.
+                    logger.warning(
+                        f"Refusing lease re-grant on task {task_id} to "
+                        f"agent {agent_id}: lease epoch {lease_epoch} is "
+                        f"superseded. The agent is reporting progress on "
+                        f"a card it no longer owns (ADR-0012 D11)."
                     )
                 else:
                     new_lease = await state.lease_manager.create_lease(
@@ -5734,7 +5912,9 @@ async def report_blocker(
                     await state.assignment_persistence.remove_assignment(agent_id)
                 if hasattr(state, "lease_manager") and state.lease_manager:
                     if task_id in state.lease_manager.active_leases:
-                        del state.lease_manager.active_leases[task_id]
+                        await state.lease_manager.release_lease(
+                            task_id, reason="blocked"
+                        )
                         logger.info(
                             f"Released lease for blocked task {task_id} "
                             f"(agent {agent_id})"
@@ -6643,7 +6823,7 @@ async def unassign_task(
         # 6. Delete lease if exists
         if hasattr(state, "lease_manager") and state.lease_manager:
             if task_id in state.lease_manager.active_leases:
-                del state.lease_manager.active_leases[task_id]
+                await state.lease_manager.release_lease(task_id, reason="unassigned")
                 logger.info(f"Removed lease for task {task_id}")
 
         # 7. Update Kanban: Set status back to TODO, clear assigned_to

@@ -553,3 +553,61 @@ class TestStaleEpochDetection:
         await lease_manager.create_lease("task-123", "agent-1", _make_task())
 
         assert await lease_manager.is_epoch_current("task-123", 0) is False
+
+
+class TestSilenceCheckpointInvariant:
+    """ADR-0012 D11 part 3: pin the two dials apart.
+
+    D3's silence timeout must be at least twice D8's checkpoint cadence.
+    Otherwise false recovery is not a rare accident — it is designed in:
+    an agent obeying the checkpoint obligation exactly can still be
+    declared dead between two checkpoints, and parts 1 and 2 of D11 are
+    left carrying load they were never meant to carry alone.
+    """
+
+    def test_defaults_satisfy_the_invariant(self) -> None:
+        """The shipped defaults hold the >= 2x relationship."""
+        from src.core.lease_invariants import (
+            DEFAULT_CHECKPOINT_CADENCE_MINUTES,
+            DEFAULT_SILENCE_TIMEOUT_MINUTES,
+            validate_silence_checkpoint_invariant,
+        )
+
+        assert DEFAULT_SILENCE_TIMEOUT_MINUTES >= 2 * (
+            DEFAULT_CHECKPOINT_CADENCE_MINUTES
+        )
+        validate_silence_checkpoint_invariant(
+            DEFAULT_SILENCE_TIMEOUT_MINUTES, DEFAULT_CHECKPOINT_CADENCE_MINUTES
+        )
+
+    def test_exactly_two_times_is_allowed(self) -> None:
+        """The bound is inclusive: 2x is the documented minimum."""
+        from src.core.lease_invariants import validate_silence_checkpoint_invariant
+
+        validate_silence_checkpoint_invariant(40.0, 20.0)
+
+    def test_too_tight_a_timeout_is_rejected(self) -> None:
+        """A config that designs false recovery in must not start."""
+        from src.core.lease_invariants import validate_silence_checkpoint_invariant
+
+        with pytest.raises(ValueError, match="at least 2"):
+            validate_silence_checkpoint_invariant(30.0, 20.0)
+
+    def test_error_names_both_values_and_the_fix(self) -> None:
+        """An operator must be able to act on the message."""
+        from src.core.lease_invariants import validate_silence_checkpoint_invariant
+
+        with pytest.raises(ValueError) as excinfo:
+            validate_silence_checkpoint_invariant(25.0, 20.0)
+
+        text = str(excinfo.value)
+        assert "25" in text
+        assert "20" in text
+        assert "40" in text
+
+    def test_non_positive_cadence_is_rejected(self) -> None:
+        """A zero or negative cadence makes the invariant meaningless."""
+        from src.core.lease_invariants import validate_silence_checkpoint_invariant
+
+        with pytest.raises(ValueError, match="positive"):
+            validate_silence_checkpoint_invariant(45.0, 0.0)
