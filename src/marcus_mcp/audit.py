@@ -120,18 +120,22 @@ class AuditLogger:
         duration_ms: float,
         success: bool = True,
         error: Optional[str] = None,
+        task_count: Optional[int] = None,
     ) -> None:
         """Log a tool call event."""
+        details: Dict[str, Any] = {
+            "arguments": arguments,
+            "result": result if success else None,
+            "duration_ms": duration_ms,
+        }
+        if task_count is not None:
+            details["task_count"] = task_count
         await self.log_event(
             event_type="tool_call",
             client_id=client_id,
             client_type=client_type,
             tool_name=tool_name,
-            details={
-                "arguments": arguments,
-                "result": result if success else None,
-                "duration_ms": duration_ms,
-            },
+            details=details,
             success=success,
             error=error,
         )
@@ -142,12 +146,13 @@ class AuditLogger:
         client_type: Optional[str],
         tool_name: str,
         reason: str,
-        duration_ms: Optional[float] = None,
+        duration_ms: float,
+        task_count: Optional[int] = None,
     ) -> None:
         """Log an access denied event."""
-        details: Dict[str, Any] = {"reason": reason}
-        if duration_ms is not None:
-            details["duration_ms"] = duration_ms
+        details: Dict[str, Any] = {"reason": reason, "duration_ms": duration_ms}
+        if task_count is not None:
+            details["task_count"] = task_count
         await self.log_event(
             event_type="access_denied",
             client_id=client_id,

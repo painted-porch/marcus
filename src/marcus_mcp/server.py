@@ -457,6 +457,25 @@ class MarcusServer:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+    async def _call_tool_via_handler_as_dict(
+        self, name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Route a tool through the audited handler and decode the JSON result."""
+        response = await handle_tool_call(name, arguments, self)
+        if not response:
+            return {"error": "Empty response from tool handler"}
+
+        first_item = response[0]
+        if not isinstance(first_item, types.TextContent):
+            return {"error": f"Unsupported response type: {type(first_item).__name__}"}
+
+        try:
+            parsed = json.loads(first_item.text)
+        except json.JSONDecodeError:
+            return {"error": "Invalid JSON response format"}
+
+        return parsed if isinstance(parsed, dict) else {"result": parsed}
+
     def _sync_cleanup(self) -> None:
         """Clean up resources synchronously when event loop is not available."""
         if self._cleanup_done:
@@ -1422,10 +1441,9 @@ class MarcusServer:
         @self._fastmcp.tool()  # type: ignore[misc]
         async def request_next_task(agent_id: str) -> Dict[str, Any]:
             """Request the next optimal task assignment for an agent."""
-            from .tools.task import request_next_task as impl
-
-            result = await impl(agent_id=agent_id, state=server)
-            return result  # type: ignore[no-any-return]
+            return await server._call_tool_via_handler_as_dict(
+                "request_next_task", {"agent_id": agent_id}
+            )
 
         @self._fastmcp.tool()  # type: ignore[misc]
         async def report_task_progress(
@@ -1642,13 +1660,8 @@ class MarcusServer:
                 """Request the next optimal task assignment for an agent."""
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
 
-                from .tools.task import request_next_task as impl
-
-                result = await impl(agent_id=agent_id, state=server)
-                final_result = (
-                    dict(result)
-                    if isinstance(result, dict)
-                    else {"error": "Invalid response format"}
+                final_result = await server._call_tool_via_handler_as_dict(
+                    "request_next_task", {"agent_id": agent_id}
                 )
 
                 # Log MCP tool response

@@ -45,8 +45,12 @@ async def create_test_server() -> MarcusServer:
     os.environ["GITHUB_OWNER"] = "test-owner"
     os.environ["GITHUB_REPO"] = "test-repo"
     os.environ["MARCUS_TEST_MODE"] = "true"
+    os.environ["CLAUDE_API_KEY"] = "test-key"
 
-    with patch("src.core.context.Context._load_persisted_data"):
+    with (
+        patch("src.core.context.Context._load_persisted_data"),
+        patch("src.cost_tracking.cost_store.CostStore.load_seed_prices"),
+    ):
         server = MarcusServer()
 
     # Mock the kanban client
@@ -72,8 +76,12 @@ async def test_server_initialization():
     """Test server initializes correctly"""
     os.environ["KANBAN_PROVIDER"] = "planka"
     os.environ["MARCUS_TEST_MODE"] = "true"
+    os.environ["CLAUDE_API_KEY"] = "test-key"
 
-    with patch("src.core.context.Context._load_persisted_data"):
+    with (
+        patch("src.core.context.Context._load_persisted_data"),
+        patch("src.cost_tracking.cost_store.CostStore.load_seed_prices"),
+    ):
         server = MarcusServer()
 
     # Provider comes from config_marcus.json — assert it matches config
@@ -287,6 +295,86 @@ async def test_request_next_task_no_tasks():
     else:
         assert "message" in data
         assert "no suitable tasks" in data["message"].lower()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_request_next_task_audit_logs_zero_task_count_on_success():
+    """request_next_task audits task_count=0 when the board is empty."""
+    server = await create_test_server()
+    server.project_tasks = []
+    server._current_client_id = "test-client-006"
+    server._registered_clients = {
+        "test-client-006": {"client_type": "agent", "role": "developer"}
+    }
+
+    audit_logger = AsyncMock()
+
+    with (
+        patch("src.marcus_mcp.handlers.get_audit_logger", return_value=audit_logger),
+        patch(
+            "src.marcus_mcp.handlers.request_next_task",
+            AsyncMock(return_value={"success": True, "task": None}),
+        ),
+    ):
+        result = await handle_tool_call(
+            "request_next_task", {"agent_id": "test-001"}, server
+        )
+
+    data = json.loads(get_text_content(result[0]))
+    assert data == {"success": True, "task": None}
+    audit_logger.log_tool_call.assert_awaited_once()
+    assert audit_logger.log_tool_call.await_args.kwargs["task_count"] == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_request_next_task_access_denied_audit_logs_zero_task_count():
+    """Denied request_next_task audits task_count=0 when the board is empty."""
+    server = await create_test_server()
+    server.project_tasks = []
+
+    audit_logger = AsyncMock()
+
+    with patch("src.marcus_mcp.handlers.get_audit_logger", return_value=audit_logger):
+        result = await handle_tool_call(
+            "request_next_task", {"agent_id": "test-001"}, server
+        )
+
+    data = json.loads(get_text_content(result[0]))
+    assert "Access denied" in data["error"]
+    audit_logger.log_access_denied.assert_awaited_once()
+    assert audit_logger.log_access_denied.await_args.kwargs["task_count"] == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_fastmcp_request_next_task_delegates_through_handle_tool_call():
+    """FastMCP request_next_task should use the audited handler path."""
+    server = await create_test_server()
+    fastmcp = server._create_fastmcp()
+    tool_manager = fastmcp._tool_manager
+
+    expected = {"success": True, "task": None}
+    tool_response = [
+        types.TextContent(type="text", text=json.dumps(expected, indent=2))
+    ]
+
+    with (
+        patch(
+            "src.marcus_mcp.server.handle_tool_call",
+            AsyncMock(return_value=tool_response),
+        ) as mock_handle_tool_call,
+        patch("src.logging.mcp_tool_logger.log_mcp_tool_response"),
+    ):
+        result = await tool_manager.call_tool(
+            "request_next_task", {"agent_id": "test-001"}
+        )
+
+    assert result == expected
+    mock_handle_tool_call.assert_awaited_once_with(
+        "request_next_task", {"agent_id": "test-001"}, server
+    )
 
 
 @pytest.mark.anyio

@@ -98,6 +98,18 @@ from .tools.scheduling import (  # Scheduling tools
 logger = logging.getLogger(__name__)
 
 
+def _audit_task_count(tool_name: str, state: Any) -> Optional[int]:
+    """Return request_next_task board size for audit logging."""
+    if tool_name != "request_next_task" or not hasattr(state, "project_tasks"):
+        return None
+
+    project_tasks = state.project_tasks
+    if project_tasks is None:
+        return None
+
+    return len(project_tasks)
+
+
 def get_all_tool_definitions() -> Dict[str, types.Tool]:
     """
     Get all tool definitions as a mapping.
@@ -1169,6 +1181,7 @@ async def handle_tool_call(
     if name not in allowed_tools and "*" not in allowed_tools:
         # Audit access denied
         duration_ms = (time.time() - start_time) * 1000
+        _task_count = _audit_task_count(name, state)
         await audit_logger.log_access_denied(
             client_id=client_id,
             client_type=client_type,
@@ -1178,6 +1191,7 @@ async def handle_tool_call(
                 f"'{client_type or 'unregistered'}'"
             ),
             duration_ms=duration_ms,
+            task_count=_task_count,
         )
 
         return [
@@ -1704,6 +1718,7 @@ async def handle_tool_call(
 
         # Audit successful tool call
         duration_ms = (time.time() - start_time) * 1000
+        _task_count = _audit_task_count(name, state)
         await audit_logger.log_tool_call(
             client_id=client_id,
             client_type=client_type,
@@ -1712,6 +1727,7 @@ async def handle_tool_call(
             result=result,
             duration_ms=duration_ms,
             success=True,
+            task_count=_task_count,
         )
 
         return response
@@ -1719,6 +1735,7 @@ async def handle_tool_call(
     except Exception as e:
         # Audit failed tool call
         duration_ms = (time.time() - start_time) * 1000
+        _task_count = _audit_task_count(name, state)
         await audit_logger.log_tool_call(
             client_id=client_id,
             client_type=client_type,
@@ -1728,6 +1745,7 @@ async def handle_tool_call(
             duration_ms=duration_ms,
             success=False,
             error=str(e),
+            task_count=_task_count,
         )
 
         error_response: List[
