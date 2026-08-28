@@ -6439,10 +6439,15 @@ async def get_all_board_tasks(
     board_id: str, project_id: str, state: Any
 ) -> Dict[str, Any]:
     """
-    Get all tasks from a specific Planka board.
+    Get all tasks from the configured kanban board.
 
     This tool fetches all tasks directly from a Planka board,
     useful for validation and inspection purposes.
+
+    Uses the kanban client already configured on the server state,
+    supporting any provider (Planka, SQLite, Linear, GitHub, etc.).
+    The board_id and project_id parameters are kept for interface
+    compatibility but the active kanban client determines scope.
 
     Parameters
     ----------
@@ -6462,12 +6467,10 @@ async def get_all_board_tasks(
         - count: Number of tasks retrieved
     """
     try:
-        from src.integrations.providers.planka_kanban import PlankaKanban
+        if not hasattr(state, "kanban_client") or state.kanban_client is None:
+            raise RuntimeError("No kanban client configured on server state")
 
-        provider = PlankaKanban(config={})
-        await provider.connect()
-
-        tasks = await provider.get_all_tasks()
+        tasks = await state.kanban_client.get_all_tasks()
 
         return {
             "success": True,
