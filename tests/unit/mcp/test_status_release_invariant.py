@@ -28,6 +28,24 @@ import pytest
 
 from src.core.models import Priority, Task, TaskStatus
 
+
+def _wire_release_lease(lease_manager) -> None:
+    """Make a mocked lease manager honour release_lease().
+
+    Production code now drops leases through
+    ``AssignmentLeaseManager.release_lease`` rather than deleting from
+    ``active_leases`` directly, so the fencing epoch stays behind the
+    same lock every other mutation takes (ADR-0012 D11). A bare
+    ``MagicMock`` would accept the call and leave the dict untouched,
+    which makes these tests assert against a fiction.
+    """
+
+    async def _release(task_id, reason="released"):
+        return lease_manager.active_leases.pop(task_id, None) is not None
+
+    lease_manager.release_lease = AsyncMock(side_effect=_release)
+
+
 pytestmark = pytest.mark.unit
 
 
@@ -78,6 +96,7 @@ def _make_state(task: Task) -> Any:
     lease.agent_id = "agent-1"
     state.lease_manager = MagicMock()
     state.lease_manager.active_leases = {task.id: lease}
+    _wire_release_lease(state.lease_manager)
     # Issue #667 Fix 1: report_task_progress awaits extend_for_validation
     # on status=completed before the smoke gate runs. Mock as AsyncMock
     # so the await resolves cleanly in tests that exercise the completion
@@ -266,6 +285,7 @@ class TestCompletionReleasesLeaseEvenOnMergeFailure:
 
         state.lease_manager = MagicMock()
         state.lease_manager.active_leases = {task.id: MagicMock()}
+        _wire_release_lease(state.lease_manager)
         state.lease_manager.renew_lease = AsyncMock(return_value=None)
         # Issue #667 Fix 1: report_task_progress awaits this on completion.
         state.lease_manager.extend_for_validation = AsyncMock(return_value=None)

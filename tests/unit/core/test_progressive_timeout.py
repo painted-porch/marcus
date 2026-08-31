@@ -35,6 +35,8 @@ def mock_assignment_persistence():
     """Create mock assignment persistence."""
     persistence = AsyncMock()
     persistence.load_assignments = AsyncMock(return_value={})
+    persistence.record_task_epoch = AsyncMock()
+    persistence.load_task_epochs = AsyncMock(return_value={})
     persistence.save_assignment = AsyncMock()
     persistence.remove_assignment = AsyncMock()
     persistence.get_assignment = AsyncMock(return_value=None)
