@@ -1,6 +1,8 @@
 # ADR 0012: Session-Model Migration — Spawn-per-Task → Long-Lived Pull-Loop Sessions
 
-**Status:** Accepted (amended 2026-07-06: added D11 — false-recovery fencing, from advisory-panel review)
+**Status:** Accepted (amended 2026-07-06: added D11 — false-recovery fencing, from
+advisory-panel review; **D11 fencing deferred 2026-08-15 pending D3** — see the
+D11 amendment below)
 
 **Date:** 2026-07-05
 
@@ -209,11 +211,99 @@ false recovery was not rare; it was designed in.
   to a board card keeps resolution intelligent, audited, and consistent with
   Invariant #2.
 - **Consequences:** `AssignmentLease` gains `lease_epoch`; the stale-completion
-  guard (`task.py:3865-3960`) changes semantics from *reject-and-discard* to
+  guard (`task.py:4136-4308`) changes semantics from *reject-and-discard* to
   *fence-and-reconcile*; obligation **O3 is closed by this decision**. A
   Phase-3 verification scenario is added: falsely-recover a live session, let
   both report, assert exactly one completion, zero discarded work, one
   reconciliation card in the audit trail.
+
+#### D11 amendment (2026-08-15): the fence is deferred, and why
+
+An implementation attempt failed three adversarial review passes and was
+stopped under a pre-agreed rule.
+The passes found 7, then 6, then 1 critical defect; the worst finding of pass 2
+was caused by pass 1's fix, and pass 3's was caused by pass 2's.
+That is not an execution failure.
+D11 as written above under-specifies the mechanism in three ways, and each
+round was a different reading of the same gap.
+
+**1. The invariant was never stated.**
+
+"Stale" is doing all the work in the text above and is never defined.
+Three rounds produced three definitions: *not equal to the live lease*, then
+*not equal to the epoch high-water mark*, then *the high-water mark, except
+when preserved for a re-granted agent*.
+The last one broke the mechanism outright: preserving a token reissues a number
+already held, and **strict monotonicity is the property that makes an epoch a
+fencing token at all**.
+
+The invariant D11 requires, stated:
+
+> For each task, the epoch is strictly monotonic and **never reissued**.
+> Every grant advances the sequence; only a same-agent continuation of an
+> unbroken claim keeps its token.
+> A report is stale **iff** its epoch is lower than the highest ever issued for
+> that task.
+
+Anything that hands out an epoch already held violates this, however
+reasonable the local motivation.
+
+**2. The enforcement point was never named.**
+
+Canonical fencing tokens are enforced at the **resource**, not at the
+coordinator: the resource rejects any write carrying a token at or below the
+highest it has seen.
+D11 places the check in Marcus, which is the coordinator.
+The resources that actually need protecting are the board's DONE write and the
+merge into `main`.
+
+This is the same defect recorded separately as issue #730 (a session-scoped
+branch means a fenced agent's commits reach `main` on its next completion
+regardless).
+**#730 is not a separate problem — it is this one, observed from the other
+end.**
+A fence at the coordinator protects the completion *record* while leaving both
+resources unprotected.
+
+**3. It contradicts a mechanism Marcus already ships.**
+
+`docs/source/systems/coordination/34-agent-recovery-system.md` documents that
+*"the agent's next `report_task_progress` recreates the lease"* — an
+intentional compensation for false-positive lease recovery.
+
+That mechanism asserts *"recovery may have been wrong, let the agent back in."*
+D11 asserts *"recovery happened, this agent is displaced."*
+Both cannot be authoritative.
+Layering the fence on top of the re-grant relocates the contradiction rather
+than resolving it, which is precisely what each of the three rounds did.
+
+Supporting evidence that Marcus cannot currently arbitrate ownership: the
+cold-cache fallback in the completion guard exists because `agent_tasks` is
+never rehydrated on restart (obligation **O1**, still open), and issue #485
+documents three in-memory ownership buckets disagreeing and stranding real
+work.
+D11 would add a fourth ownership authority to a system that cannot keep three
+in sync.
+
+**Consequence — D11 depends on D3.**
+
+The fence is coherent only once recovery is trustworthy enough that the
+re-grant compensation can be **deleted** rather than fenced around.
+Making recovery trustworthy is D3's liveness retune.
+D11 must therefore be sequenced *after* D3 and after the session model exists,
+not as a gate before Phase 3 begins.
+
+**What shipped instead.**
+
+The ownership hardening that survived all three passes, plus the epoch
+**recorded and not enforced** (`_observe_epoch_collision`).
+Nothing is left unprotected by this deferral: under spawn-per-task, recovery
+kills the agent, so the two-live-completions failure cannot occur at all.
+The recorded collisions give the number nobody currently has — how often this
+actually happens — which is what the eventual design should be sized against.
+
+Kaia architecture review: Simon `f9c511c8`.
+Stop-rule record: Simon `07f37159`.
 
 ---
 
@@ -224,10 +314,10 @@ only *after* going session-based. Each is assigned a home by this ADR:
 
 | # | Obligation | Lands in |
 |---|---|---|
-| O1 | `agent_status` / `agent_project_map` are never rehydrated on restart (leases are) — a restart would orphan every registered session (`server.py:200-201`, `task.py:5150-5155`) | Phase 3 registration work (with D7's 1:1 scoping) |
-| O2 | Cost attribution is keyed to the spawn-registry file + per-agent cwd — both deleted. Re-home the `(session → agent/run/project)` binding at register/claim time (`worker_ingester.py:26,312-316`) | Phase 3, per D9 |
+| O1 | `agent_status` / `agent_project_map` are never rehydrated on restart (leases are) — a restart would orphan every registered session (`server.py:200-201`; the raise is `task.py:5817`, not the cited `5150-5155`, and it is swallowed by `request_next_task`'s `except` at `task.py:3015` — so it surfaces as an ordinary failed poll that a long-lived session retries forever) | Phase 3 registration work (with D7's 1:1 scoping) |
+| O2 | Cost attribution is keyed to the spawn-registry file + per-agent cwd — both deleted. Re-home the `(session → agent/run/project)` binding at register/claim time (`worker_ingester.py:24-27` and `:299-304`). **The spawn-registry half of this obligation does not exist** — no registry file is written anywhere, and `resolve_binding` has no in-repo implementation. The live consumer is **Cato** (`cato/backend/cost_ingest.py`), which requires the path shape `<experiment_dir>/worktrees/<agent_id>` and silently drops events otherwise. `task_id` is derived in-stream and is already session-safe; `run_id` is already `"unassigned"` on worker rows | Phase 3, per D9 |
 | O3 | The stale-completion guard assumes agents die on recovery; a falsely-recovered *live* session would have its coarse-task output discarded (`task.py:3865-3960`) | **Closed by D11** (epoch fencing + board-mediated reconciliation) |
-| O4 | `max_renewals=10` / `stuck_task_threshold_renewals=5` flag healthy long tasks as stuck | **Deleted** — replaced by D3's budget ceiling |
+| O4 | ~~`max_renewals=10` / `stuck_task_threshold_renewals=5` flag healthy long tasks as stuck~~ — **premise false.** `stuck_task_threshold_renewals` is read by nothing; `max_renewals` only logs a warning and renews anyway. Deleting both is free and changes nothing about premature recovery — the mechanism that actually reclaims healthy long tasks is the progressive-timeout curve (`assignment_lease.py:1573-1594`) plus a second renewal curve at `:129-176` | **Deleted** — replaced by D3's budget ceiling |
 | O5 | No session context management exists; context grows unboundedly across cards in one process | Session contract + harness loop (compaction/reset between cards), per D8's card boundaries |
 
 ---
