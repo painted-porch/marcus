@@ -164,11 +164,11 @@ def manager(tmp_path) -> AssignmentLeaseManager:
     )
 
 
-class TestLoneAgentIsNotFenced:
-    """No live lease means nobody else holds it — that is not a collision."""
+class TestLoneAgentCompletesNormally:
+    """A late completion with no rival claimant is accepted."""
 
     @pytest.mark.asyncio
-    async def test_no_rival_claimant_is_not_fenced(
+    async def test_no_rival_claimant_completes_normally(
         self, manager: AssignmentLeaseManager
     ) -> None:
         """A lone late completion after recovery is not fenced.
@@ -198,30 +198,6 @@ class TestLoneAgentIsNotFenced:
         assert result.get("status") != "stale_epoch"
         # No collision, so no card claiming there was one.
         assert len(state.created_cards) == 0
-
-    @pytest.mark.asyncio
-    async def test_no_false_reconciliation_card(
-        self, manager: AssignmentLeaseManager
-    ) -> None:
-        """A card must never assert two agents when there was one."""
-        task = _make_task()
-        lease = await manager.create_lease(task.id, "agent-a")
-        await manager.release_lease(task.id, reason="lease_expired")
-
-        state = _make_state(manager, task, agent_id=None)
-
-        await report_task_progress(
-            agent_id="agent-a",
-            task_id=task.id,
-            status="completed",
-            progress=100,
-            message="done",
-            state=state,
-            lease_epoch=lease.lease_epoch,
-        )
-
-        for card in state.created_cards:
-            assert "Two agents" not in card["description"]
 
 
 class TestHolderKeepsItsEpochAcrossALapse:
@@ -299,11 +275,11 @@ class TestHolderKeepsItsEpochAcrossALapse:
         assert len(state.created_cards) == 0
 
 
-class TestLenientRollout:
-    """An epoch-less agent behaves exactly as it did before D11."""
+class TestEpochlessAgentIsUnaffected:
+    """An un-migrated agent behaves exactly as it did before D11."""
 
     @pytest.mark.asyncio
-    async def test_epochless_completion_is_not_fenced(
+    async def test_epochless_completion_is_accepted(
         self, manager: AssignmentLeaseManager
     ) -> None:
         """An un-migrated agent is never fenced on the epoch path."""

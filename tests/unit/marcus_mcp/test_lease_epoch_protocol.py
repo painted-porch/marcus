@@ -16,18 +16,12 @@ removed because it contradicted Marcus's documented false-positive
 recovery compensation. What follows still matters: the token has to be
 issued, carried, and durable before any enforcement can be built on it.
 
-Historical note on the removed leniency:
-
-* A report carrying **no** epoch falls back to the ownership checks that
-  exist today. ``prompts/Agent_prompt.md`` is the canonical worker spec
-  that ``README.md`` tells operators to copy into their own projects;
-  Marcus cannot update those copies, so strict-from-day-one would route
-  every un-migrated agent's completion to a reconciliation card.
-* A report carrying an epoch is fenced strictly.
-
-Strict-everywhere becomes a config flag once the fleet has migrated. The
-named residual risk is that two-robots-one-chore stays reachable for
-un-updated agents until that flag flips.
+The class below is named for a leniency policy that no longer exists —
+there is nothing to be lenient *about* while nothing is enforced. It is
+kept because the predicate it pins (``is_epoch_current`` fails closed on
+a missing or superseded token) is the contract any future enforcement
+will be built on, and it should not silently change meaning in the
+meantime.
 """
 
 from datetime import datetime, timezone
@@ -100,8 +94,8 @@ class TestEpochIsHandedToTheAgent:
         assert second.lease_epoch > first.lease_epoch
 
 
-class TestLenientEnforcement:
-    """A report with no epoch behaves exactly as it does today."""
+class TestEpochComparisonContract:
+    """``is_epoch_current`` fails closed. Nothing acts on it yet."""
 
     @pytest.mark.asyncio
     async def test_missing_epoch_is_not_current(
