@@ -2019,14 +2019,24 @@ def build_tiered_instructions(
     return "\n".join(instructions_parts)
 
 
+# How long an agent waits before asking for work again when none is
+# available. A deliberate constant, not an ETA-derived value: PR #177
+# ("reduce agent retry wait times from 300s to 30s for better
+# parallelization") found that long waits left idle agents missing tasks
+# as they became ready. The blocking task's ETA is still reported for
+# humans; it just does not drive the cadence.
+RETRY_AFTER_SECONDS = 30
+
+
 async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     """
     Calculate intelligent wait time before next task request.
 
     Strategy:
-    - Prioritizes tasks that unlock parallel work for idle agents
-    - Uses 60% of ETA for early completion detection
-    - Caps at 5 minutes for regular re-polling
+    - Prioritizes tasks that unlock parallel work for idle agents, and
+      reports the soonest such task as ``blocking_task``
+    - Returns a FIXED wait of ``RETRY_AFTER_SECONDS``. The wait is
+      deliberately not ETA-proportional; see the constant's comment.
 
     Uses:
     - Current progress of IN_PROGRESS tasks
@@ -2043,7 +2053,7 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     -------
     Dict[str, Any]
         Dictionary with:
-        - retry_after_seconds: int (wait time in seconds, max 300s)
+        - retry_after_seconds: int (always ``RETRY_AFTER_SECONDS``)
         - reason: str (explanation for the wait time)
         - blocking_task: Optional[Dict] (task that's blocking progress)
     """
@@ -2059,7 +2069,7 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     # If no tasks in progress, use default wait time
     if not in_progress_tasks:
         return {
-            "retry_after_seconds": 30,
+            "retry_after_seconds": RETRY_AFTER_SECONDS,
             "reason": "No tasks currently in progress - check back soon",
             "blocking_task": None,
         }
@@ -2136,15 +2146,12 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     # Get the best task to wait for
     target_task = candidate_tasks[0]
 
-    # Use 60% of ETA for retry to catch early completions
-    # This accounts for tasks finishing faster than estimated
-    retry_after = int(target_task["eta_seconds"] * 0.6)
-
-    # Minimum 30 seconds to avoid excessive polling
-    retry_after = max(30, retry_after)
-
-    # Cap at 30 seconds for re-polling (catch unexpected early completions)
-    retry_after = min(retry_after, 30)
+    # The wait is the constant. This previously computed 60% of the ETA,
+    # floored it at 30 and then ceilinged it at 30 — arithmetically the
+    # constant, with the ETA discarded. The dead arithmetic read as though
+    # the wait scaled with the task, which is the opposite of the PR #177
+    # decision it implemented.
+    retry_after = RETRY_AFTER_SECONDS
 
     # Format reason
     eta_minutes = int(target_task["eta_seconds"] / 60)
