@@ -998,10 +998,15 @@ class AssignmentLeaseManager:
         """
         Check whether a report's epoch matches the live claim (ADR-0012 D11).
 
-        A report bearing a stale epoch must never be applied as a
-        completion. It must also never be *discarded* — the caller is
-        responsible for preserving the work and routing it to a
-        board-visible reconciliation card.
+        **Nothing acts on this today.** The D11 fence is deferred pending
+        D3 (see the D11 amendment in
+        ``docs/architecture/adr/0012-session-model-migration.md``), so no
+        report is refused for a superseded epoch. The predicate is kept
+        because it is the contract any future enforcement will be built
+        on, and it should not silently change meaning while unused.
+
+        It fails closed: a missing epoch, a superseded epoch, and a task
+        with no live lease all return False.
 
         Parameters
         ----------

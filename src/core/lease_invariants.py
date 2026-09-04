@@ -21,10 +21,14 @@ is precisely the state the ADR describes as the reason D11 was needed at
 all ("D3's timeout (15-30 min) overlapped D8's checkpoint cadence
 (~30 min), so false recovery was not rare; it was designed in").
 
-Epoch fencing and board-mediated reconciliation (D11 parts 1 and 2) make
-false recovery *safe*. This invariant is what keeps it *rare*. Shipping
-one without the other leaves the safety net carrying load it was never
-sized for.
+Epoch fencing and board-mediated reconciliation (D11 parts 1 and 2) would
+make false recovery *safe*; this invariant is what would keep it *rare*.
+
+**Neither half ships today.** The fence was deferred pending D3 (see the
+D11 amendment in the ADR), and this invariant is not enforced at startup
+either — see below. That is deliberate and consistent: the two halves are
+sized for each other, so shipping one alone leaves the survivor carrying
+load it was never designed for.
 
 Status: NOT YET ENFORCED AT STARTUP
 -----------------------------------

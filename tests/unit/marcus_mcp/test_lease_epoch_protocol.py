@@ -132,3 +132,54 @@ class TestEpochComparisonContract:
         assert (
             await lease_manager.is_epoch_current("task-1", first.lease_epoch) is False
         )
+
+
+class TestMcpSchemaIsHonest:
+    """The tool schema is a contract agents read at runtime.
+
+    It must not promise behaviour Marcus does not implement. This is the
+    same defect the prompt changes fix, in a third place: the prompts were
+    corrected, the test docstrings were corrected, and the MCP schema —
+    arguably the most load-bearing of the three, because it is what an
+    agent actually reads when deciding how to call the tool — was missed.
+    Caught by Codex review on PR #731.
+    """
+
+    def _lease_epoch_description(self) -> str:
+        """
+        Return the lease_epoch property description from the live schema.
+
+        Returns
+        -------
+        str
+            The description string as agents receive it.
+        """
+        from src.marcus_mcp.handlers import get_all_tool_definitions
+
+        tool = get_all_tool_definitions()["report_task_progress"]
+        return tool.inputSchema["properties"]["lease_epoch"]["description"]
+
+    def test_the_schema_exposes_lease_epoch(self) -> None:
+        """The parameter is advertised, so agents can supply it."""
+        assert self._lease_epoch_description()
+
+    def test_it_does_not_promise_reconciliation(self) -> None:
+        """No reconciliation card is created. Do not imply one is."""
+        text = self._lease_epoch_description().lower()
+        assert "reconciliation" not in text
+
+    def test_it_does_not_promise_the_completion_is_refused(self) -> None:
+        """A superseded completion is still applied today.
+
+        Promising otherwise lets an operator assume duplicate DONE writes
+        and merges are prevented when they are not.
+        """
+        text = self._lease_epoch_description().lower()
+        assert "rather than applied" not in text
+        assert "is preserved" not in text
+
+    def test_it_states_that_the_epoch_is_recorded_only(self) -> None:
+        """The honest contract has to be stated, not merely not-lied."""
+        text = self._lease_epoch_description().lower()
+        assert "records this" in text
+        assert "does not enforce" in text

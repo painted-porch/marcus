@@ -263,11 +263,13 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                         "description": (
                             "The lease_epoch returned by request_next_task "
                             "for THIS task. Pass it unchanged on every "
-                            "report. It proves you still hold the task: if "
-                            "Marcus concluded you had died and reassigned "
-                            "the task, your epoch is superseded and the "
-                            "report is preserved for reconciliation rather "
-                            "than applied as a completion. Omit only if you "
+                            "report. It identifies which claim on the task "
+                            "you hold, so Marcus can tell your reports "
+                            "apart from a replacement agent's. Marcus "
+                            "currently RECORDS this and does not enforce "
+                            "it — no report is rejected for a superseded "
+                            "epoch today. Carry it anyway: it is what "
+                            "makes the collision visible. Omit only if you "
                             "were not given one."
                         ),
                     },
