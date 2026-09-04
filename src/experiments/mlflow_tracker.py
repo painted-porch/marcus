@@ -513,7 +513,10 @@ class MarcusExperiment:
             if experiment is None:
                 logger.warning(f"Experiment '{self.experiment_name}' not found")
                 return {}
-            runs = self.client.search_runs(experiment.experiment_id)
+            # experiment_ids is list[str]. A bare string is iterable, so
+            # passing one made mlflow treat it as a sequence of
+            # single-character experiment ids.
+            runs = self.client.search_runs([experiment.experiment_id])
             run_ids = [run.info.run_id for run in runs]
 
         comparison = {}
