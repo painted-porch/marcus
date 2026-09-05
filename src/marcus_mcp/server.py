@@ -1438,6 +1438,7 @@ class MarcusServer:
             readiness_probe: Optional[str] = None,
             verifications: Optional[List[Dict[str, Any]]] = None,
             evidence: Optional[Dict[str, Any]] = None,
+            lease_epoch: Optional[int] = None,
         ) -> Dict[str, Any]:
             """Report progress on a task.
 
@@ -1474,6 +1475,7 @@ class MarcusServer:
                 readiness_probe=readiness_probe,
                 verifications=verifications,
                 evidence=evidence,
+                lease_epoch=lease_epoch,
             )
 
         @self._fastmcp.tool()  # type: ignore[misc]
@@ -1673,6 +1675,7 @@ class MarcusServer:
                 readiness_probe: Optional[str] = None,
                 verifications: Optional[List[Dict[str, Any]]] = None,
                 evidence: Optional[Dict[str, Any]] = None,
+                lease_epoch: Optional[int] = None,
             ) -> Dict[str, Any]:
                 """Report progress on a task.
 
@@ -1708,6 +1711,7 @@ class MarcusServer:
                     readiness_probe=readiness_probe,
                     verifications=verifications,
                     evidence=evidence,
+                    lease_epoch=lease_epoch,
                 )
 
                 # Log MCP tool response

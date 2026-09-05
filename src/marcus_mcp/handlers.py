@@ -258,6 +258,21 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "'curl -f http://localhost:8000/health'."
                         ),
                     },
+                    "lease_epoch": {
+                        "type": "integer",
+                        "description": (
+                            "The lease_epoch returned by request_next_task "
+                            "for THIS task. Pass it unchanged on every "
+                            "report. It identifies which claim on the task "
+                            "you hold, so Marcus can tell your reports "
+                            "apart from a replacement agent's. Marcus "
+                            "currently RECORDS this and does not enforce "
+                            "it — no report is rejected for a superseded "
+                            "epoch today. Carry it anyway: it is what "
+                            "makes the collision visible. Omit only if you "
+                            "were not given one."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "task_id", "status"],
             },
@@ -1307,6 +1322,7 @@ async def handle_tool_call(
                     state=state,
                     start_command=arguments.get("start_command"),
                     readiness_probe=arguments.get("readiness_probe"),
+                    lease_epoch=arguments.get("lease_epoch"),
                 )
 
         elif name == "report_blocker":

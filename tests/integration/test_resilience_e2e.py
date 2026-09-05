@@ -170,7 +170,9 @@ class TestLeaseLifecycle:
         lease = await lease_manager.create_lease("task-1", "agent-1", shared_task)
         original_expiry = lease.lease_expires
 
-        renewed = await lease_manager.renew_lease("task-1", 50, "Halfway done")
+        renewed = await lease_manager.renew_lease(
+            "task-1", 50, "Halfway done", agent_id="agent-1"
+        )
 
         assert renewed is not None
         assert renewed.lease_expires > original_expiry
@@ -889,7 +891,9 @@ class TestKillAndPickup:
         assert "task-1" not in manager.active_leases
 
         # Step 4: Agent tries to renew — returns None (no active lease)
-        renewed = await manager.renew_lease("task-1", 50, "Still working")
+        renewed = await manager.renew_lease(
+            "task-1", 50, "Still working", agent_id="agent-1"
+        )
         assert renewed is None
 
         # Step 5: System should recreate the lease

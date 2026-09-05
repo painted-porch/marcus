@@ -497,7 +497,7 @@ async def _terminalize_escalated_smoke_task(
             await state.assignment_persistence.remove_assignment(agent_id)
         if getattr(state, "lease_manager", None):
             if task_id in state.lease_manager.active_leases:
-                del state.lease_manager.active_leases[task_id]
+                await state.lease_manager.release_lease(task_id, reason="escalated")
                 logger.info(
                     "Released lease for escalated (terminal) task %s (agent %s)",
                     task_id,
@@ -2647,6 +2647,11 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     },
                 )
 
+                # ADR-0012 D11 fencing token. 0 means "no epoch" and never
+                # compares equal to a real claim, so a deployment without a
+                # lease manager simply never fences.
+                assigned_lease_epoch = 0
+
                 # Create lease for this assignment if lease manager available
                 if hasattr(state, "lease_manager") and state.lease_manager:
                     lease = await state.lease_manager.create_lease(
@@ -2654,8 +2659,14 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     )
                     logger.info(
                         f"Created lease for task {optimal_task.id} "
-                        f"(expires: {lease.lease_expires.isoformat()})"
+                        f"(expires: {lease.lease_expires.isoformat()}, "
+                        f"epoch: {lease.lease_epoch})"
                     )
+                    # ADR-0012 D11: hand the fencing token to the agent.
+                    # It carries this back on every report for this task,
+                    # which is how Marcus tells its reports apart from a
+                    # replacement claimant's after a false recovery.
+                    assigned_lease_epoch = lease.lease_epoch
 
                 # Remove from pending assignments
                 state.tasks_being_assigned.discard(optimal_task.id)
@@ -2701,6 +2712,9 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                 # Serialize the response properly
                 response: Dict[str, Any] = {
                     "success": True,
+                    # ADR-0012 D11: the agent carries this back on every
+                    # report_task_progress call for this task.
+                    "lease_epoch": assigned_lease_epoch,
                     "task": {
                         "id": optimal_task.id,
                         "name": optimal_task.name,
@@ -3933,6 +3947,106 @@ def _should_validate_completion(task: Task, board_tasks: List[Task]) -> bool:
     return should_validate_task(task)
 
 
+async def _observe_epoch_collision(
+    state: Any, task_id: str, agent_id: str, lease_epoch: Optional[int]
+) -> bool:
+    """
+    Record — but do not act on — a superseded-claim completion.
+
+    ADR-0012 D11 specifies fencing such completions. That is deliberately
+    NOT implemented here. Marcus already ships a documented compensation
+    for false-positive recovery: the agent's next ``report_task_progress``
+    recreates the lease (see
+    ``docs/source/systems/coordination/34-agent-recovery-system.md``).
+    That mechanism asserts *"recovery may have been wrong, let the agent
+    back in"*; a fence asserts *"recovery happened, this agent is
+    displaced"*. Both cannot be authoritative, and layering the fence on
+    top of the re-grant relocates the contradiction rather than resolving
+    it.
+
+    Resolving it belongs with D3's liveness retune, which is what makes
+    recovery reliable enough to *delete* the re-grant compensation instead
+    of fencing around it.
+
+    Meanwhile this gives us the number nobody has: how often a completion
+    actually arrives under a superseded epoch. Note the failure mode
+    cannot occur at all under spawn-per-task, where recovery kills the
+    agent — so a nonzero count here is itself informative.
+
+    Parameters
+    ----------
+    state : Any
+        Server state, providing ``lease_manager``.
+    task_id : str
+        The task being completed.
+    agent_id : str
+        The reporting agent.
+    lease_epoch : Optional[int]
+        The epoch the agent carried, if any.
+
+    Returns
+    -------
+    bool
+        True when a collision was observed. The caller ignores this; it
+        exists so tests can assert on the observation without parsing
+        logs.
+    """
+    lease_manager = getattr(state, "lease_manager", None)
+    if lease_manager is None or not lease_epoch:
+        return False
+
+    try:
+        highest = await lease_manager.get_highest_epoch(task_id)
+    except Exception:  # pragma: no cover - never break the report path
+        return False
+
+    if not highest or lease_epoch == highest:
+        return False
+
+    logger.warning(
+        f"D11 epoch collision (OBSERVED, NOT FENCED): agent {agent_id} "
+        f"completed task {task_id} carrying epoch {lease_epoch} while the "
+        f"newest claim is epoch {highest}. Under spawn-per-task this "
+        f"should be impossible — recovery kills the agent — so this "
+        f"indicates either a session-model deployment or a recovery that "
+        f"did not terminate its agent. The completion was ALLOWED; "
+        f"fencing is deferred to D3 (see ADR-0012 D11)."
+    )
+    return True
+
+
+def _live_lease_held_by_other(state: Any, task_id: str, agent_id: str) -> bool:
+    """
+    Report whether a live lease on this task belongs to a different agent.
+
+    Used to gate the ``report_task_progress`` re-grant, which is a second
+    claim site with no holder check of its own. Applies regardless of
+    whether the reporter supplied a D11 epoch, so epoch-less agents get
+    the same ownership protection as migrated ones.
+
+    Parameters
+    ----------
+    state : Any
+        Server state, providing ``lease_manager``.
+    task_id : str
+        The task being reported on.
+    agent_id : str
+        The reporting agent.
+
+    Returns
+    -------
+    bool
+        True only when a lease exists and is held by someone else.
+    """
+    lease_manager = getattr(state, "lease_manager", None)
+    if lease_manager is None:
+        return False
+    lease = lease_manager.active_leases.get(task_id)
+    if lease is None:
+        return False
+    return bool(getattr(lease, "agent_id", None) != agent_id)
+
+
 async def report_task_progress(
     agent_id: str,
     task_id: str,
@@ -3944,6 +4058,7 @@ async def report_task_progress(
     readiness_probe: Optional[str] = None,
     verifications: Optional[List[Dict[str, Any]]] = None,
     evidence: Optional[Dict[str, Any]] = None,
+    lease_epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Agents report their task progress.
@@ -4153,6 +4268,26 @@ async def report_task_progress(
         # contrast, write DONE to kanban and trigger branch merges
         # that cannot be undone cleanly.
         if status == "completed":
+            # ADR-0012 D11 epoch: RECORDED, NOT ENFORCED.
+            #
+            # The fence was removed deliberately. Marcus already ships a
+            # documented compensation for false-positive recovery — the
+            # agent's next report_task_progress recreates the lease (see
+            # docs/source/systems/coordination/34-agent-recovery-system.md).
+            # That mechanism asserts "recovery may have been wrong, let the
+            # agent back in"; a fence asserts "recovery happened, this agent
+            # is displaced". They have opposite polarity and cannot both be
+            # authoritative, so fencing on top of the re-grant moved the
+            # contradiction around rather than resolving it.
+            #
+            # Resolving it belongs with D3's liveness retune, which is what
+            # makes recovery reliable enough to DELETE the re-grant rather
+            # than fence around it. Until then we log the collision so the
+            # real rate is measurable instead of assumed — nobody currently
+            # knows how often this fires, and the failure mode cannot occur
+            # at all under spawn-per-task, where recovery kills the agent.
+            await _observe_epoch_collision(state, task_id, agent_id, lease_epoch)
+
             current_assignment = state.agent_tasks.get(agent_id)
             assignment_task_id = (
                 getattr(current_assignment, "task_id", None)
@@ -4718,7 +4853,9 @@ async def report_task_progress(
                 # Remove lease for completed task
                 if hasattr(state, "lease_manager") and state.lease_manager:
                     if task_id in state.lease_manager.active_leases:
-                        del state.lease_manager.active_leases[task_id]
+                        await state.lease_manager.release_lease(
+                            task_id, reason="completed"
+                        )
                         logger.info(f"Removed lease for completed task {task_id}")
 
             # Merge agent's worktree branch to main (GH-250).
@@ -4837,8 +4974,16 @@ async def report_task_progress(
 
         elif status == "in_progress":
             update_data["status"] = TaskStatus.IN_PROGRESS
-            # Include assigned_to for Planka provider compatibility
-            if agent_id:
+            # Include assigned_to for Planka provider compatibility.
+            #
+            # ADR-0012 D11: a displaced agent must not rewrite the board's
+            # assignee. The epoch fence sits on the completion path only,
+            # so without this a session carrying a superseded token still
+            # took the card's name on the board away from the live holder
+            # — visually stealing work it is not allowed to finish.
+            # Progress itself is still accepted; only the ownership field
+            # is withheld.
+            if agent_id and not _live_lease_held_by_other(state, task_id, agent_id):
                 update_data["assigned_to"] = agent_id
 
             # Handle subtask status update in unified storage
@@ -4970,7 +5115,7 @@ async def report_task_progress(
             and status != "completed"
         ):
             renewed_lease = await state.lease_manager.renew_lease(
-                task_id, progress, message
+                task_id, progress, message, agent_id=agent_id
             )
             if renewed_lease:
                 logger.info(
@@ -4987,7 +5132,13 @@ async def report_task_progress(
                     (t for t in state.project_tasks if t.id == task_id),
                     None,
                 )
-                if task_obj is not None and task_obj.status in {
+                # ``TaskStatus`` is a plain Enum, not a str-mixin, so
+                # comparing the member against string literals was always
+                # False and this zombie guard had never executed. Compare
+                # the value.
+                _task_status = getattr(task_obj, "status", None)
+                _status_value = getattr(_task_status, "value", _task_status)
+                if task_obj is not None and _status_value in {
                     "done",
                     "completed",
                 }:
@@ -4996,7 +5147,26 @@ async def report_task_progress(
                         f"task {task_id} which is already DONE. "
                         "Skipping lease recreation to prevent zombie."
                     )
+                elif _live_lease_held_by_other(state, task_id, agent_id):
+                    # Ownership check that applies to EVERY reporter, not
+                    # just epoch-carrying ones. Adding the holder check to
+                    # renew_lease made this branch reachable for
+                    # non-holders, and the epoch fence deliberately passes
+                    # epoch-less agents — so an un-migrated displaced
+                    # agent could overwrite the live holder's lease
+                    # outright. Leniency means "behaves as before", and
+                    # before D11 a non-holder could not take ownership.
+                    logger.warning(
+                        f"Refusing lease re-grant on task {task_id} to "
+                        f"agent {agent_id}: another agent holds the live "
+                        f"lease. Reporting on a card it does not own."
+                    )
                 else:
+                    # No preserve_epoch. Reissuing a token breaks the
+                    # monotonicity that makes an epoch a fencing token at
+                    # all — it was the mechanism by which an agent that
+                    # was never issued an epoch could present one and take
+                    # a card. Every grant advances the sequence.
                     new_lease = await state.lease_manager.create_lease(
                         task_id, agent_id, task_obj
                     )
@@ -5670,7 +5840,9 @@ async def report_blocker(
                     await state.assignment_persistence.remove_assignment(agent_id)
                 if hasattr(state, "lease_manager") and state.lease_manager:
                     if task_id in state.lease_manager.active_leases:
-                        del state.lease_manager.active_leases[task_id]
+                        await state.lease_manager.release_lease(
+                            task_id, reason="blocked"
+                        )
                         logger.info(
                             f"Released lease for blocked task {task_id} "
                             f"(agent {agent_id})"
@@ -6579,7 +6751,7 @@ async def unassign_task(
         # 6. Delete lease if exists
         if hasattr(state, "lease_manager") and state.lease_manager:
             if task_id in state.lease_manager.active_leases:
-                del state.lease_manager.active_leases[task_id]
+                await state.lease_manager.release_lease(task_id, reason="unassigned")
                 logger.info(f"Removed lease for task {task_id}")
 
         # 7. Update Kanban: Set status back to TODO, clear assigned_to
