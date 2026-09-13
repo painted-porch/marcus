@@ -421,6 +421,17 @@ class WorkerStatus:
         Days of week when worker is available
     performance_score : float, default=1.0
         Performance rating (0.0-2.0, where 1.0 is baseline)
+    vendor : str, default=""
+        Which vendor's model the worker runs on (e.g. "perplexity",
+        "google", "openai", "xai", "anthropic"). Issue #737: eligibility
+        refuses to offer a verify task to the claim author's vendor.
+        Empty for workers that never take find or verify tasks and for
+        human principals. Self-declared at registration; the report for
+        the Tow pilot states that limit.
+    principal : str, default="agent"
+        Who the worker is: "agent" or "human". Issue #737: an approve
+        task is offered only to a human principal, and every other task
+        type only to an agent principal.
 
     Examples
     --------
@@ -447,6 +458,12 @@ class WorkerStatus:
     skills: List[str]
     availability: Dict[str, bool]
     performance_score: float = 1.0
+
+    # System-of-record identity (issue #737): which vendor the worker
+    # runs on and whether it is an agent or a person. Both are read by
+    # the eligibility rule before a task is offered.
+    vendor: str = ""
+    principal: str = "agent"
 
 
 @dataclass

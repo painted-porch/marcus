@@ -1382,6 +1382,8 @@ class MarcusServer:
             role: str,
             skills: List[str] = [],
             project_id: str = "",
+            vendor: str = "",
+            principal: str = "agent",
         ) -> Dict[str, Any]:
             """Register a new agent with the Marcus system."""
             from src.logging.mcp_tool_logger import log_mcp_tool_response
@@ -1394,6 +1396,8 @@ class MarcusServer:
                 role=role,
                 skills=skills,
                 project_id=project_id,
+                vendor=vendor,
+                principal=principal,
                 state=server,
             )
 
@@ -1406,6 +1410,8 @@ class MarcusServer:
                     "role": role,
                     "skills": skills,
                     "project_id": project_id,
+                    "vendor": vendor,
+                    "principal": principal,
                 },
                 response=result,
             )
@@ -1598,6 +1604,8 @@ class MarcusServer:
                 role: str,
                 skills: List[str] = [],
                 project_id: str = "",
+                vendor: str = "",
+                principal: str = "agent",
             ) -> Dict[str, Any]:
                 """Register a new agent with the Marcus system."""
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
@@ -1610,6 +1618,8 @@ class MarcusServer:
                     role=role,
                     skills=skills,
                     project_id=project_id,
+                    vendor=vendor,
+                    principal=principal,
                     state=server,
                 )
 
@@ -1622,6 +1632,8 @@ class MarcusServer:
                         "role": role,
                         "skills": skills,
                         "project_id": project_id,
+                        "vendor": vendor,
+                        "principal": principal,
                     },
                     response=result,
                 )

@@ -12,6 +12,8 @@ from src.core.models import WorkerStatus
 from src.logging.agent_events import log_agent_event
 from src.logging.conversation_logger import conversation_logger, log_thinking
 
+VALID_PRINCIPALS = ("agent", "human")
+
 
 async def register_agent(
     agent_id: str,
@@ -20,6 +22,8 @@ async def register_agent(
     skills: List[str],
     state: Any,
     project_id: str = "",
+    vendor: str = "",
+    principal: str = "agent",
 ) -> Dict[str, Any]:
     """
     Register a new agent with the Marcus system.
@@ -40,6 +44,15 @@ async def register_agent(
         ID of the project this agent is working on.  Used to scope
         request_next_task results so agents from concurrent experiments
         cannot steal tasks across project boundaries (GH-388).
+    vendor : str, default=""
+        Which vendor's model the worker runs on (e.g. "perplexity",
+        "google", "openai").  Issue #737: eligibility refuses to offer
+        a verify task to the claim author's vendor.  Self-declared;
+        the identity layer beneath the record asserts it in production.
+    principal : str, default="agent"
+        Who the worker is: "agent" or "human".  Issue #737: an approve
+        task is offered only to a human principal.  Any other value is
+        rejected before any state mutation.
 
     Returns
     -------
@@ -75,6 +88,17 @@ async def register_agent(
                 ),
             }
 
+        # Validate principal before any state mutation, same atomicity
+        # rule as project_id above (issue #737).
+        if principal not in VALID_PRINCIPALS:
+            return {
+                "success": False,
+                "error": (
+                    f"Unknown principal '{principal}'. Valid values: "
+                    f"{', '.join(VALID_PRINCIPALS)}."
+                ),
+            }
+
         status = WorkerStatus(
             worker_id=agent_id,
             name=name,
@@ -94,6 +118,8 @@ async def register_agent(
                 "sunday": False,
             },
             performance_score=1.0,
+            vendor=vendor,
+            principal=principal,
         )
 
         state.agent_status[agent_id] = status
@@ -111,6 +137,8 @@ async def register_agent(
                 "name": name,
                 "role": role,
                 "skills": skills,
+                "vendor": vendor,
+                "principal": principal,
                 "source": "mcp_client",
                 "target": "marcus",
             },

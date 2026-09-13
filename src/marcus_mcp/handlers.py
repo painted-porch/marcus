@@ -171,6 +171,25 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "task theft (GH-388)."
                         ),
                     },
+                    "vendor": {
+                        "type": "string",
+                        "description": (
+                            "Vendor whose model the worker runs on (e.g. "
+                            "'perplexity', 'google', 'openai'). Eligibility "
+                            "never offers a verify task to the claim "
+                            "author's vendor (#737)."
+                        ),
+                        "default": "",
+                    },
+                    "principal": {
+                        "type": "string",
+                        "enum": ["agent", "human"],
+                        "description": (
+                            "Who the worker is. An approve task is offered "
+                            "only to a human principal (#737)."
+                        ),
+                        "default": "agent",
+                    },
                 },
                 "required": ["agent_id", "name", "role", "project_id"],
             },
@@ -1285,6 +1304,8 @@ async def handle_tool_call(
                     skills=arguments.get("skills", []),
                     state=state,
                     project_id=arguments.get("project_id", ""),
+                    vendor=arguments.get("vendor", ""),
+                    principal=arguments.get("principal", "agent"),
                 )
 
         elif name == "get_agent_status":
