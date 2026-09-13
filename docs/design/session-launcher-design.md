@@ -1,8 +1,9 @@
 # The Session Launcher — design, explained simply
 
-**Status:** Draft, revision 3.
+**Status:** Draft, revision 4. **Decision 0 is now settled: Option A.**
 Revision 2 absorbed the four Codex findings from review pass 1.
-Revision 3 absorbs a self-review pass that found the rev-2 fixes had introduced their own cracks — and that those cracks all trace to one root, now surfaced below as the central decision rather than patched over.
+Revision 3 surfaced the single root under those findings and posed it as a choice — Option A (trustworthy recovery first) or Option B (a throwaway measurement run first).
+Revision 4 records the choice: **Option A.** D3 — trustworthy recovery — is a launcher prerequisite, so it is now the *first* build step rather than a deferred one.
 Nothing is built yet.
 
 **Belongs to:** Epic #706 Phase 3 (session-model migration), ADR-0012 decisions D1, D3, D6, D7, D8, D11, and obligations O1 and O5.
@@ -16,10 +17,13 @@ We want workers who clock in once and keep taking chores until the work runs out
 
 ## What changed in this revision, and why it matters
 
-The first draft called the launcher a clean first step: "mostly deleting old code, the lease needs no change."
-Review pass 1 (Codex) showed that framing is wrong, and the reason is the single most important thing in this document:
+Revision 3 ended on an open question and a lean, not a decision.
+That question — *is trustworthy recovery (D3) a prerequisite for the launcher, or can it wait behind a throwaway measurement run?* — is now answered.
+The answer is **yes, it is a prerequisite**, which is Option A in section 6b.
 
-> **The launcher is not a small step. It is the switch that turns four sleeping bugs on at once.**
+The reasoning is the single most important thing in this document:
+
+> **The launcher is not a small step. It is the switch that turns four sleeping bugs on at once — and three of those four are bugs about telling a live worker from a dead one.**
 
 Every one of those four bugs is harmless *today* for the same reason: today a worker does one chore and is killed, so it cannot linger, cannot come back, cannot outlive anything.
 The launcher removes the killing.
@@ -30,9 +34,10 @@ The moment workers live all day, four things that "cannot happen" start happenin
 3. **Workers never go home.** A worker knows to stop today only because the runner kills it. Nothing else says "the board is empty." (Obligation in ADR line 69–84 / the D10 change removes the one signal that exists.)
 4. **A worker's memory fills up and never empties.** One all-day worker accumulates context across every chore with no reset, until it slows down or runs out. (Obligation O5.)
 
-So this document is no longer "ship the launcher, then tidy up."
-It is: **build the safety pieces the launcher needs before it can run at all.**
-*How many* of those pieces come first — in particular whether trustworthy recovery (D3) is a prerequisite or is deferred behind a throwaway measurement run — is the central open decision of this doc, posed in section **6b** and Decision **0**. Read those before treating the two-milestone order below as settled; the milestone split assumes the "defer D3" answer, which I no longer lean toward.
+Three of those four — bugs 1, 3, and the killed-worker cleanup problem in section 6b — are the *same* failure: Marcus cannot reliably tell a live worker from a dead one.
+That is precisely what D3 fixes.
+So the build order is no longer "ship the launcher, then tidy up," and it is no longer "run something unsafe and measure it."
+It is: **make liveness trustworthy first (D3), then build the launcher on top of a signal it can actually rely on.**
 
 ---
 
@@ -63,7 +68,7 @@ Marcus does not start them, does not watch them, and does not kill them.
 Marcus tracks each worker at exactly one level: **the lease** — which chore they hold, and when it was last touched.
 
 Several bugs disappear here rather than getting fixed, because the machinery that caused them is gone.
-But — per the section above — removing the killing also removes the thing that quietly prevented four *other* bugs. That is the real work.
+But — per the section above — removing the killing also removes the thing that quietly prevented four *other* bugs. That is the real work, and it starts with making the lease a trustworthy liveness signal.
 
 ---
 
@@ -107,8 +112,8 @@ Under the launcher, the lease has to answer a question it never had to answer be
 Today the answer was "the reassignment always wins, because the quiet worker was killed."
 Under the launcher, nobody was killed, so **both can win**, which means neither does — the same chore ships twice, and its code merges twice.
 
-Fixing that is the D3 → D11 work (piece 5).
-The lease layer is not "no change." It is the largest deferred change this launcher forces.
+Fixing that is the D3 → D11 work (piece 5), and D3 is now the first thing we build.
+The lease layer is not "no change." It is the foundation the launcher stands on.
 
 ### 4. The drain signal — a *server* change, not a prompt line
 
@@ -123,25 +128,24 @@ The first draft put this in the instruction sheet. That cannot work, and here is
 So after the migration, unless we build a replacement, a drained board leaves every worker polling until you kill them by hand.
 The replacement is a **board-computed condition** — *no claimable tasks and no live leases* — returned by `request_next_task`, decided by the server, not by a model remembering to call a tool.
 This is its own build item with its own test. It is not a prompt edit.
+Note this signal leans directly on "no live leases," which is only meaningful once D3 makes liveness trustworthy — which is why D3 comes first.
 
 ### 5. Trustworthy recovery, then the fence (D3 → D11)
 
-This is the lease change piece 3 pointed at, and it is the reason the launcher cannot simply ship.
+This is the lease change piece 3 pointed at, and under Option A it is the **first** build step, not the last.
 
 - **D3 — split "is it alive?" from "how long may it hold the chore?"** Today those are one dial, so detecting a dead worker is tied to how big its chore is. D3 makes "alive" a simple silence timeout and "how long" a separate budget. This is what makes recovery *trustworthy* — reliable enough that we can stop compensating for false alarms.
-- **Delete the re-grant compensation.** Today, when a quiet worker's lease is recovered, its *next report recreates the lease* — Marcus's built-in apology for false recovery. That apology and any fence are contradictory: one says "recovery might be wrong, let them back in," the other says "recovery happened, they're out." Both cannot be true. Once D3 makes recovery reliable, we delete the apology.
-- **Then D11 — the fence — enforced where it matters.** Not at the coordinator (the mistake that cost three review rounds in August) but at the *resource*: the DONE write and the merge into `main`. Note #730 below is the same fence seen from the merge side.
+- **Delete the re-grant compensation.** Today, when a quiet worker's lease is recovered, its *next report recreates the lease* — Marcus's built-in apology for false recovery. That apology and any fence are contradictory: one says "recovery might be wrong, let them back in," the other says "recovery happened, they're out." Both cannot be true. Once D3 makes recovery reliable, we delete the apology. (This contradiction is exactly why the fence failed three review rounds and was deferred; D3-first is what resolves it.)
+- **Then D11 — the fence — enforced where it matters.** Not at the coordinator (the mistake that cost three review rounds in August) but at the *resource*: the DONE write and the merge into `main`. Note #730 below is the same fence seen from the merge side. D11 lands in Milestone B, sized to whatever small residual collision rate remains after D3.
 
-Until this piece lands, two live workers *can* finish one chore. The first run handles that by **measuring, not preventing** (see Milestone A).
-
-**Why we cannot just "set a safe timeout" before D3 — the honest limit.**
-An earlier version of this doc claimed the first run could make false recovery "rare by construction" with a generous timeout.
+**Why D3 has to come first — the honest limit that settles Decision 0.**
+An earlier version of this doc imagined the first run could make false recovery "rare by construction" with a generous timeout, and skip D3.
 That is false, and it is worth being blunt about why, because it is exactly D3's reason to exist.
 Before D3 the lease is **one dial** that means both "is the worker alive?" and "how long may it hold the chore?" at once.
 Make that dial long and a genuinely-dead worker's chore sits unclaimed for the whole window — which directly breaks the acceptance-run test that a killed worker's chore is picked up promptly.
 Make it short and a worker doing focused work for a few quiet minutes trips recovery *while alive* — the collision.
 There is **no single value that avoids both.** That is precisely the knot D3 unties by splitting the one dial into two.
-So Milestone A does not pretend to avoid the collision. It uses the existing short lease (so reclaim is timely and the kill-test works), **expects collisions, and counts them.** The count is the deliverable.
+Because there is no safe single-dial setting, there is no safe way to run the launcher before D3 — which is the whole of Decision 0.
 
 ### 6. Safe merges before session-scoped workspaces (#730 → D1)
 
@@ -150,28 +154,24 @@ That is where "small, stable, no churn" comes from — but it is also what lets 
 
 So **#730 — merge only the commit range of *this* chore, not the whole branch — must land before D1**, not after.
 The first draft listed #730 as "related work." It is a prerequisite for session-scoped workspaces.
-Correcting the first draft's other claim: the launcher does **not** require D1. Milestone A keeps per-chore workspaces (which dodges #730 entirely); D1 and #730 move together into Milestone B.
+Correcting the first draft's other claim: the launcher does **not** require D1. The first run keeps per-chore workspaces (which dodges #730 entirely); D1 and #730 move together into Milestone B.
 
-### 6b. The one crack under everything — and the decision it forces
+### 6b. The one crack under everything — resolved by building D3 first
 
-Three separate problems keep surfacing every time this design is reviewed. They are the same problem wearing three coats, and the root is one sentence:
+Three separate problems kept surfacing every time this design was reviewed. They are the same problem wearing three coats, and the root is one sentence:
 
 > **Before D3, the lease is not a trustworthy "is this worker alive?" signal — yet the launcher leans on lease-liveness for three different jobs.**
 
-The three coats:
+The three coats, and how **Option A (D3 first)** settles each:
 
-1. **The drain signal leans on it.** Piece 4 defines "done, go home" as *no claimable tasks and no live leases.* But if a head-down worker on the final chore lets its short lease lapse while still working, the chore flips back to claimable and an idle worker grabs it — a collision — instead of the clean wait-then-drain we described. The drain signal is only as reliable as the liveness signal underneath it, which pre-D3 is not reliable.
-2. **Teardown of a *killed* worker's workspace has no owner.** Teardown-on-completion never fires for a worker that died mid-chore. The launcher is deliberately dumb (it does not watch or clean up), Marcus tracks only leases, and the dead worker cannot clean up after itself. So its worktree is orphaned — reviving #628 on exactly the kill path the acceptance run exercises.
-3. **Recovery salvage fights teardown.** The next worker takes the chore in its *own* fresh workspace (it must, to keep the #730 dodge), so it cannot see the dead worker's partial work or its checkpoint commits. As written, the partial work is discarded *and* orphaned — which also makes the checkpoint duty (D8) buy nothing in Milestone A, since nothing can reach those commits.
+1. **The drain signal leans on it.** Piece 4 defines "done, go home" as *no claimable tasks and no live leases.* Before D3, if a head-down worker on the final chore lets its short lease lapse while still working, the chore flips back to claimable and an idle worker grabs it — a collision — instead of the clean wait-then-drain we described. **With D3:** a live worker checkpoints within the silence timeout, so its lease does not lapse while it works. "No live leases" becomes trustworthy, and the clean drain holds. **Fixed outright.**
+2. **Teardown of a *killed* worker's workspace has no owner.** Teardown-on-completion never fires for a worker that died mid-chore. The launcher is deliberately dumb, Marcus tracks only leases, and the dead worker cannot clean up after itself — so its worktree is orphaned, reviving #628 on exactly the kill path the acceptance run exercises. **With D3:** a genuinely-dead worker is *detected* (silence timeout), so the recovery path is a real event that *something* can hang cleanup on. **Fixed** — the recovery path owns the teardown.
+3. **Recovery salvage fights teardown.** The next worker takes the chore in its *own* fresh workspace (it must, to keep the #730 dodge), so it cannot see the dead worker's partial work or its checkpoint commits. **With D3:** recovery is reliable, so saving a dead worker's partial work becomes a sensible thing to build — but the *salvage* itself still needs a stable workspace the next worker can inherit, which is D1. So D3 makes coat 3 **tractable**, and the checkpoint duty (D8) lands with D1 in Milestone B, not in the first run. The first run discards a dead worker's partial work; because recovery is now rare (D3), this is a small, bounded loss, not a routine one.
 
-**These do not have prose answers. They have a decision, and it is yours:**
+**The decision, recorded:**
 
-- **Option A — D3 is a launcher prerequisite after all.** This is what Codex's review pass 1 said in its first finding, and three rounds of trying to design around it have not held. A real silence-timeout (D3's two dials) makes liveness trustworthy, which fixes coat 1 outright and makes coats 2–3 tractable (a genuinely-dead worker is detected, so *something* can own its cleanup and salvage). Cost: Milestone A gets bigger; the launcher is no longer a near-term step.
-- **Option B — keep D3 in Milestone B, and accept all three as *stated* costs of an unsafe measurement run.** Then the doc must say, plainly, that the first run may: prematurely reclaim the final chore (not just mid-run chores); orphan the worktree of any worker killed mid-chore (so "no orphaned worktrees" is dropped from the acceptance criteria, or a one-off manual sweep owns it); and discard a killed worker's partial work on recovery (so the checkpoint duty is deferred out of Milestone A, because it is inert there). None of that is acceptable for real work — which is why Milestone A is throwaway-only.
-
-**My read, after three review rounds:** the recurring failure of the "defer D3" plan is itself the finding. Every attempt to keep D3 in Milestone B has produced a fresh contradiction, because the launcher's core jobs *are* liveness jobs. I now lean **Option A** — bring D3 forward — even though it makes the first step larger, because Option B's honest form is "run something we know is broken in three ways and watch." The counter-argument for B is real (we cannot size D3/D11 without a measured collision rate), but coats 2 and 3 are *not* about the collision rate; they are plain breakage that measurement does not inform.
-
-This is the decision I most need from you, and it supersedes the smaller build-order questions below.
+- **Option A — chosen.** D3 is a launcher prerequisite. This is what Codex's review pass 1 said in its first finding, and three rounds of trying to design around it did not hold. A real silence-timeout (D3's two dials) makes liveness trustworthy, which fixes coats 1 and 2 outright and makes coat 3 tractable. Cost: the first build step is D3, not the launcher — the launcher is no longer the near-term deliverable.
+- **Option B — rejected.** Option B kept D3 in Milestone B and ran a deliberately-unsafe measurement run first, accepting three stated breakages (premature reclaim of the final chore, orphaned worktrees on the kill path, and discarded partial work). The recurring failure of every "defer D3" draft *was itself the finding*: the launcher's core jobs *are* liveness jobs, so deferring the liveness fix produced a fresh contradiction each round. The one real argument for B — that we cannot size D11's fence without a measured collision rate — only defends the *collision* coat, not the orphaned-worktree or discarded-salvage coats, which no amount of measurement informs. That asymmetry is why B loses. Under A, we still get the collision rate: the first run records it (piece 9 of the build order), just on top of a trustworthy liveness signal rather than a broken one.
 
 ### 7. The two carry-over pieces from the first draft (still true)
 
@@ -183,59 +183,51 @@ This is the decision I most need from you, and it supersedes the smaller build-o
 
 ## The build order — two milestones
 
-The findings turn "what order?" from a preference into a safety requirement.
-Here is the honest sequence.
+Decision 0 (Option A) fixes the order: trustworthy recovery first, then the launcher on top of it, then full production hardening.
 
-### Milestone A — the instrumented first run *(explicitly NOT production-safe)*
+### Milestone A — the first session run, on a trustworthy liveness signal
 
-The goal of Milestone A is **one real measured run**, not a shippable product.
-It answers the two questions we currently guess at: how often does the two-workers collision actually fire, and does a worker's memory actually fill up on a real project?
+The goal of Milestone A is **one real run of the session model**, with recovery that Marcus can actually rely on.
+D3 leads, because every later piece leans on the liveness signal it provides.
 
-- [ ] **O1 — survive a restart.** Persist worker registration and rehydrate it on the *lazy* path (the first `request_next_task` after restart), because the startup path never runs in the mode Marcus deploys in. *Its own PR, first.*
-- [ ] **The drain signal (piece 4).** Board-computed "no claimable tasks and no live leases," returned by `request_next_task`. Server change, own test. *Required even for a first run — without it the run never ends.*
-- [ ] **Per-chore context reset (O5, minimum viable).** The reset happens in the harness loop (piece 2) at the chore boundary it already has: each chore runs in a fresh context, the worker identity persists. Minimum viable = a clean context per chore; smarter compaction *within* a long chore is Milestone B. This is where the finding said "there is nowhere to reset" — the answer is the loop, not the launcher, and the boundary is per-chore, not per-turn, so it does not reintroduce the supervision we deleted.
+- [ ] **D3 — trustworthy recovery.** Split the single lease dial into a silence timeout ("is it alive?", default 45 min, ≥2× the checkpoint cadence) and a budget ceiling ("how long may it hold the chore?", ~3× estimate). Then **delete the re-grant compensation**, which only existed to paper over false recovery. *First — everything below depends on liveness being trustworthy.*
+- [ ] **O1 — survive a restart.** Persist worker registration and rehydrate it on the *lazy* path (the first `request_next_task` after restart), because the startup path never runs in the mode Marcus deploys in. *Its own PR.*
+- [ ] **The drain signal (piece 4).** Board-computed "no claimable tasks and no live leases," returned by `request_next_task`. Server change, own test. Reliable now that D3 makes "no live leases" trustworthy. *Required even for a first run — without it the run never ends.*
 - [ ] **The launcher.** `run_experiment.py` minus the start-and-kill loop, plus `--sessions N`. Keeps writing the instruction files. Inverts the current "exit after one turn" behaviour so the loop stays alive.
-- [ ] **Per-chore workspace: create AND tear down.** Today a fresh workspace per chore is a side effect of the kill machinery we are deleting — and so is its cleanup. Milestone A must therefore *explicitly* create a fresh workspace + branch for each chore (reusing `run_experiment.py`'s existing worktree-creation) **and add teardown when the chore completes.** Without the teardown, long-lived workers reintroduce the #628 worktree explosion — the exact bug the migration exists to kill. Per-chore workspaces (not per-session) are also what let Milestone A dodge #730/D1; that dodge silently fails if a worker reuses one workspace across chores, so this item is load-bearing, not incidental.
-- [ ] **One instruction sheet.** Delete the one-chore copy, keep the loop copy, extend the drift-guard test to pin the loop contract. *(The checkpoint duty from D8 is deliberately NOT added here — see 6b coat 3: in Milestone A a recovering worker gets a fresh workspace and cannot reach a dead worker's checkpoint commits, so the duty buys nothing until the salvage path exists in Milestone B. Adding it now would be cargo-culting a rule whose mechanism does not yet exist.)*
+- [ ] **Per-chore context reset (O5, minimum viable).** The reset happens in the harness loop (piece 2) at the chore boundary it already has: each chore runs in a fresh context, the worker identity persists. Minimum viable = a clean context per chore; smarter compaction *within* a long chore is Milestone B. The boundary is per-chore, not per-turn, so it does not reintroduce the supervision we deleted.
+- [ ] **Per-chore workspace: create AND tear down.** Explicitly create a fresh workspace + branch for each chore (reusing `run_experiment.py`'s existing worktree-creation) **and add teardown when the chore completes** — and, now that D3 detects a dead worker (6b coat 2), wire the recovery path to tear down the *killed* worker's workspace too. Without teardown, long-lived workers reintroduce the #628 worktree explosion. Per-chore workspaces (not per-session) are also what let the first run dodge #730/D1; that dodge silently fails if a worker reuses one workspace across chores, so this item is load-bearing.
+- [ ] **One instruction sheet.** Delete the one-chore copy, keep the loop copy, extend the drift-guard test to pin the loop contract. *(The checkpoint duty from D8 is deliberately NOT added here — see 6b coat 3: salvage needs the stable workspace D1 provides, so D8 lands with D1 in Milestone B.)*
 - [ ] **Jitter** on the retry interval (now there is a loop to test it against).
-- [ ] **Short lease + record-only collision.** Keep the *existing* short lease so a genuinely-dead worker is reclaimed promptly (the acceptance kill-test needs this). Rely on the already-shipped record-only observation (`_observe_epoch_collision`, PR #731) to *count* collisions — it logs a stale completion but does not block it. Expect a nonzero count; that is the measurement, not a failure.
+- [ ] **Record-only collision counting.** Rely on the already-shipped record-only observation (`_observe_epoch_collision`, PR #731) to *count* any residual two-workers collision — it logs a stale completion but does not block it. With D3 in place a collision is now rare (liveness is trustworthy), but not yet impossible; the count that remains is what sizes D11's fence in Milestone B.
 
-**What Milestone A explicitly does NOT guarantee, and the bounded damage if it happens:** two live workers *can* finish one chore, and Milestone A does not prevent it. Because each chore has its *own* workspace and branch, the worst case is a **double DONE-write and a double-merge of the *same* chore** — messy, possibly a merge conflict, but bounded and observed. It is *not* the "rejected work rides into `main`" case (#730), which per-chore workspaces rule out. Milestone A runs only on throwaway projects, behind the standing "no large experiments until Phase 3 lands" rule, precisely so this bounded mess never touches real work.
-
-### Milestone B — production-safe sessions
-
-Only after Milestone A has run and we have the numbers:
-
-- [ ] **D3 — trustworthy recovery** (silence timeout + budget ceiling), then **delete the re-grant compensation**.
-- [ ] **D11 — the fence**, enforced at the DONE write and the merge, sized to the collision rate Milestone A measured.
-- [ ] **#730 — commit-range merge**, then **D1 — session-scoped workspaces**, in that order.
-- [ ] **O5 — full context compaction** if Milestone A showed it is needed.
-
----
-
-## The acceptance run (the end of Milestone A)
+### The acceptance run (the end of Milestone A)
 
 Start Marcus and three workers on a small project.
 
 - All three take chores and finish them, without Marcus starting anything.
-- Kill one worker mid-chore. Its lease expires and another worker picks the chore up.
+- Kill one worker mid-chore. Its silence timeout elapses and another worker picks the chore up promptly. Its workspace is torn down by the recovery path.
 - **Restart Marcus while all three are working.** They keep going. *(Fails today — this is O1.)*
-- The board empties. All three stop on their own. *(Requires the drain signal, piece 4 — not the prompt. **Conditional on 6b:** the clean "wait for the last lease, then all exit" path holds only if liveness is trustworthy. Under Option B's short lease, the final chore can be prematurely reclaimed instead — an accepted Milestone-A degradation, not a bug.)*
+- The board empties. All three stop on their own, cleanly: they wait for the last live lease to finish, then exit. *(Requires the drain signal, piece 4 — not the prompt. Holds because D3 makes liveness trustworthy.)*
 - Cost tracking still attributes spend to the right worker. *(Requires the workspace path shape, piece 7.)*
-- A completed worker's workspace is torn down; a *killed* worker's workspace is **6b coat 2** — its cleanup owner is the open decision, not a settled acceptance criterion.
-- Any two-workers collision is **logged** (not necessarily prevented — that is Milestone B). This run uses the short lease, so a collision is plausible; whatever the count, it is the measurement D3/D11 will be sized against, not a pass/fail.
+- A completed worker's workspace is torn down; a *killed* worker's workspace is torn down by the recovery path. No orphaned worktrees.
+- Any residual two-workers collision is **logged** (not yet prevented — the fence is Milestone B). With D3 in, this should be rare; whatever count remains sizes D11.
 
-Note how many of these bullets now carry a "conditional on 6b" caveat. That is the tell: the acceptance run cannot be fully specified until 6b is decided. That is the honest state of this design, not an omission.
+Under Option A the acceptance run is fully specifiable — no "conditional on the open decision" caveats remain, because the decision is made.
+
+### Milestone B — production-safe sessions
+
+Only after Milestone A has run and we have the residual numbers:
+
+- [ ] **#730 — commit-range merge**, then **D1 — session-scoped workspaces**, in that order.
+- [ ] **D8 — checkpoint salvage**, now that D1 gives a recovering worker a stable workspace to inherit the dead worker's checkpoint commits from.
+- [ ] **D11 — the fence**, enforced at the DONE write and the merge, sized to the residual collision rate Milestone A measured. Closes the rare-but-nonzero collision to zero.
+- [ ] **O5 — full context compaction** if Milestone A showed it is needed.
 
 ---
 
-## Decisions I still need from you
+## Decisions still open
 
-**0. The big one — Option A or Option B in section 6b: is D3 a launcher prerequisite?**
-This supersedes everything else here. Three review rounds say the "defer D3" plan keeps cracking because the launcher's core jobs are liveness jobs.
-I lean **Option A** (bring D3 forward). If you pick B, the acceptance run and Milestone A shrink to "measure the collision rate on a throwaway project and accept three known breakages," which is a legitimate but narrower goal.
-
-The three smaller choices below only matter once 0 is settled:
+Decision 0 is settled (Option A). Two small choices remain; neither blocks starting D3.
 
 **1. When the board is empty, do workers wait or go home?**
 Lean **go home** — smaller, and "wait forever" is hard to tell from "stuck."
@@ -244,27 +236,21 @@ Lean **go home** — smaller, and "wait forever" is hard to tell from "stuck."
 **2. If a worker dies, does the launcher start a replacement?**
 Lean **no** — a dumb launcher is the whole point; restart logic is what caused the deleted bugs. You notice and restart.
 
-**3. If — and only if — you pick Option B in Decision 0, is the two-milestone split the right risk trade?**
-*(If you pick Option A, this question dissolves: D3 comes first and there is no unsafe measurement milestone to weigh.)*
-Under Option B, Milestone A gets us a real measured run fast, at the stated cost that it is not production-safe.
-The fuller-safety alternative is to fold D3, D11, and #730 into the first launcher and ship nothing until it is fully safe.
-The pull toward measuring first is that we cannot size D11's fence without a real collision rate — but note that argument only defends the *collision* coat of 6b, not the orphaned-worktree or discarded-salvage coats, which measurement does not inform. That asymmetry is part of why Decision 0 now leans the other way.
-
 ---
 
 ## One thing I want to say plainly
 
 The last large piece of this migration took three review rounds to discover its design contradicted itself, because nobody wrote the contract down first.
-This document is that contract — and review pass 1 already did its job: it caught that the first draft's "clean first step" framing hid the fact that the launcher is what arms the very bug we deferred.
-That correction is this revision.
+This document is that contract — and it did its job twice: review pass 1 caught that the "clean first step" framing hid the fact that the launcher arms the very bug we deferred, and the self-review rounds that followed kept cracking on the *same* root until it was named, which is what forced Decision 0.
+That decision — D3 first — is this revision.
 If anything here is still vague, that vagueness is the risk. Say so, and I make it specific before any code.
 
 ---
 
 ## Related
 
-- Epic [#706](https://github.com/lwgray/marcus/issues/706) — Phase 3 plan and checklist
-- [ADR-0012](../architecture/adr/0012-session-model-migration.md) — D1 (workspaces), D3 (liveness), D6 (fixed worker count), D7 (one project per worker), D8 (checkpoints), D11 (the fence, deferred), obligations O1 (restart) and O5 (context)
-- Issue [#730](https://github.com/lwgray/marcus/issues/730) — commit-range merge; **prerequisite for D1**, and the merge-side view of the D11 fence
-- PR #731 — lease-ownership hardening; ships the record-only collision observation Milestone A relies on; the D11 amendment explains why the fence was deferred
+- Epic [#706](https://github.com/painted-porch/marcus/issues/706) — Phase 3 plan and checklist
+- [ADR-0012](../architecture/adr/0012-session-model-migration.md) — D1 (workspaces), D3 (liveness), D6 (fixed worker count), D7 (one project per worker), D8 (checkpoints), D11 (the fence, deferred to Milestone B), obligations O1 (restart) and O5 (context)
+- Issue [#730](https://github.com/painted-porch/marcus/issues/730) — commit-range merge; **prerequisite for D1**, and the merge-side view of the D11 fence
+- PR #731 — lease-ownership hardening; ships the record-only collision observation the first run relies on; the D11 amendment explains why the fence was deferred
 - PR #732 — `retry_after`, where the jitter question is recorded
