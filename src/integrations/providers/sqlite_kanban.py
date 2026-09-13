@@ -170,7 +170,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     requires TEXT,
     recovery_info TEXT,
     completed_at TEXT,
-    original_id TEXT
+    original_id TEXT,
+    task_type TEXT NOT NULL DEFAULT 'implement',
+    inputs TEXT,
+    output_schema TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status
@@ -513,7 +516,8 @@ class SQLiteKanban(KanbanInterface):
                         source_context, completion_criteria,
                         acceptance_criteria,
                         validation_spec, provides, requires,
-                        original_id
+                        original_id, task_type, inputs,
+                        output_schema
                     ) VALUES (
                         ?, ?, ?, ?, ?,
                         ?, ?, ?,
@@ -522,6 +526,7 @@ class SQLiteKanban(KanbanInterface):
                         ?,
                         ?, ?, ?,
                         ?, ?,
+                        ?, ?, ?,
                         ?, ?, ?,
                         ?
                     )
@@ -572,6 +577,23 @@ class SQLiteKanban(KanbanInterface):
                         task_data.get("provides"),
                         task_data.get("requires"),
                         task_data.get("original_id"),
+                        task_data.get("task_type", "implement"),
+                        (
+                            json.dumps(
+                                task_data["inputs"],
+                                default=_json_default,
+                            )
+                            if task_data.get("inputs")
+                            else None
+                        ),
+                        (
+                            json.dumps(
+                                task_data["output_schema"],
+                                default=_json_default,
+                            )
+                            if task_data.get("output_schema")
+                            else None
+                        ),
                     ),
                 )
 
@@ -1652,6 +1674,12 @@ class SQLiteKanban(KanbanInterface):
         """
         migrations = [
             "ALTER TABLE tasks ADD COLUMN acceptance_criteria TEXT",
+            # System-of-record fields (issue #737); the default keeps
+            # every board created before the change loading unchanged.
+            "ALTER TABLE tasks ADD COLUMN task_type TEXT "
+            "NOT NULL DEFAULT 'implement'",
+            "ALTER TABLE tasks ADD COLUMN inputs TEXT",
+            "ALTER TABLE tasks ADD COLUMN output_schema TEXT",
         ]
         for sql in migrations:
             try:
@@ -1806,6 +1834,37 @@ class SQLiteKanban(KanbanInterface):
         except (json.JSONDecodeError, TypeError, IndexError, KeyError):
             pass
 
+        # System-of-record fields (issue #737). _migrate_schema adds the
+        # columns on connect, so they exist on every board this provider
+        # has opened; the guards keep hydration total even on a corrupt
+        # or hand-edited row.
+        task_type = "implement"
+        try:
+            if row["task_type"]:
+                task_type = row["task_type"]
+        except (IndexError, KeyError):
+            pass
+
+        inputs: Dict[str, Any] = {}
+        try:
+            inputs_raw = row["inputs"]
+            if inputs_raw:
+                parsed_inputs = json.loads(inputs_raw)
+                if isinstance(parsed_inputs, dict):
+                    inputs = parsed_inputs
+        except (json.JSONDecodeError, TypeError, IndexError, KeyError):
+            pass
+
+        output_schema: Optional[Dict[str, Any]] = None
+        try:
+            schema_raw = row["output_schema"]
+            if schema_raw:
+                parsed_schema = json.loads(schema_raw)
+                if isinstance(parsed_schema, dict):
+                    output_schema = parsed_schema
+        except (json.JSONDecodeError, TypeError, IndexError, KeyError):
+            pass
+
         return Task(
             id=row["id"],
             name=row["name"],
@@ -1834,4 +1893,7 @@ class SQLiteKanban(KanbanInterface):
             subtask_index=row["subtask_index"],
             provides=row["provides"],
             requires=row["requires"],
+            task_type=task_type,
+            inputs=inputs,
+            output_schema=output_schema,
         )

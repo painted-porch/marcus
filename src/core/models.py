@@ -260,6 +260,22 @@ class Task:
         contract interface rather than a generic implementation task, and
         the agent is directed to read the contract artifact before writing
         code. None for tasks produced by the legacy feature-based decomposer.
+    task_type : str, default="implement"
+        What the task is (issue #737): ``"find"`` (produce a claim with
+        sources), ``"verify"`` (check a claim the agent did not make),
+        ``"approve"`` (a person accepts or rejects), ``"synthesize"``
+        (assemble the deliverable), or ``"implement"`` (the software-shaped
+        type Marcus has today). Defaults to ``"implement"`` so every
+        existing board and caller keeps working unchanged.
+    inputs : Dict[str, Any], optional
+        The typed payload the board hands the task — e.g. the claim a
+        verify task checks. Written by the board (never by another agent
+        directly); for a verify task it is the find task's schema-validated
+        evidence minus the ``raw`` field.
+    output_schema : Optional[Dict[str, Any]]
+        The contract the task's evidence must match before the board
+        accepts a completion. None means no typed-evidence requirement
+        (the implement type keeps the existing smoke gate instead).
 
     Notes
     -----
@@ -323,6 +339,15 @@ class Task:
 
     # Recovery information (if task was recovered from another agent)
     recovery_info: Optional["RecoveryInfo"] = None
+
+    # System-of-record fields (issue #737). task_type says what the task
+    # IS (find, verify, approve, synthesize, implement); inputs is the
+    # payload the board writes for the task (e.g. the claim a verify task
+    # checks, never the upstream agent's raw output); output_schema is the
+    # contract evidence must match before the task may close.
+    task_type: str = "implement"
+    inputs: Dict[str, Any] = field(default_factory=dict)
+    output_schema: Optional[Dict[str, Any]] = None
 
 
 @dataclass
