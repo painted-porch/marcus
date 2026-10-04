@@ -55,6 +55,19 @@ _LABEL_RES = {
 }
 _QUOTED_TITLE_RE = re.compile(r"[\"“]([^\"”]{10,200})[\"”]")
 
+# Prose fallbacks, shaped by real engine answers from the live smoke:
+# 'published on December 11, 2024, by The Boston Globe.' and an
+# italicized outlet name in an APA-style citation line.
+_PROSE_DATE_RE = re.compile(
+    r"(?:published|dated)(?:\s+on)?\s+([A-Z][a-z]+ \d{1,2},? \d{4})"
+)
+_BARE_DATE_RE = re.compile(r"\b([A-Z][a-z]+ \d{1,2}, \d{4})\b")
+_PROSE_PUBLISHER_RE = re.compile(
+    r"(?:published[^.\n]*?|written[^.\n]*?)\bby\s+(?:the\s+)?"
+    r"([A-Z][A-Za-z&'’. ]{2,50}?)(?=[.,;(\n])"
+)
+_ITALIC_OUTLET_RE = re.compile(r"\*([A-Z][^*\n]{2,60})\*")
+
 
 @dataclass
 class EngineAnswer:
@@ -163,6 +176,24 @@ def extract_claim_fields(text: str, citations: List[str]) -> Dict[str, str]:
         if quoted:
             claim["headline"] = _clean(quoted.group(1))
 
+    if not claim["date"]:
+        date_match = _PROSE_DATE_RE.search(text) or _BARE_DATE_RE.search(text)
+        if date_match:
+            claim["date"] = _clean(date_match.group(1)).replace("  ", " ")
+            if "," not in claim["date"]:
+                claim["date"] = re.sub(
+                    r"^([A-Z][a-z]+ \d{1,2}) (\d{4})$", r"\1, \2", claim["date"]
+                )
+
+    if not claim["publisher"]:
+        by_match = _PROSE_PUBLISHER_RE.search(text)
+        if by_match:
+            claim["publisher"] = _clean(by_match.group(1))
+        else:
+            italic = _ITALIC_OUTLET_RE.search(text)
+            if italic:
+                claim["publisher"] = _clean(italic.group(1))
+
     return claim
 
 
@@ -230,37 +261,72 @@ class BaseEngine:
         return self.parse_response(data)
 
 
+def _parse_responses_payload(data: Dict[str, Any]) -> tuple[str, List[str]]:
+    """Pull message text and url_citation URLs from a Responses body.
+
+    OpenAI, Perplexity's Agent API, and xAI's Agent Tools API all
+    answer in this shape: an ``output`` list whose ``message`` items
+    carry ``output_text`` parts with ``annotations`` (reasoning items
+    and tool-call items are skipped).
+
+    Parameters
+    ----------
+    data : Dict[str, Any]
+        The provider's JSON body.
+
+    Returns
+    -------
+    tuple[str, List[str]]
+        The joined message text and the citation URLs in order.
+    """
+    texts: List[str] = []
+    citations: List[str] = []
+    for item in data.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if part.get("text"):
+                texts.append(part["text"])
+            for annotation in part.get("annotations") or []:
+                if annotation.get("url"):
+                    citations.append(annotation["url"])
+    return "\n".join(texts), citations
+
+
 class PerplexityEngine(BaseEngine):
-    """Perplexity chat completions with built-in web search."""
+    """Perplexity Agent API (/v1/responses) with built-in search.
+
+    The legacy Sonar chat endpoint answers 403 with a migration
+    notice (found in the live smoke); the Agent API reports EXACT
+    cost in ``usage.cost.total_cost``, which replaces our estimate.
+    """
 
     name = "perplexity"
     env_key = "PERPLEXITY_API_KEY"
-    default_model = "sonar"
+    default_model = "perplexity/sonar"
 
     def build_request(self, query: str) -> EngineRequest:
-        """Build the Perplexity request."""
+        """Build the Agent API request."""
         return EngineRequest(
-            url="https://api.perplexity.ai/chat/completions",
+            url="https://api.perplexity.ai/v1/responses",
             headers={"Authorization": f"Bearer {self._api_key()}"},
             body={
                 "model": self.model,
-                "messages": [{"role": "user", "content": query}],
+                "input": query,
+                # Without the explicit tool the Agent API answers from
+                # the bare model with no live search (live smoke: "I
+                # don't have live web-search access here").
+                "tools": [{"type": "web_search"}],
             },
         )
 
     def parse_response(self, data: Dict[str, Any]) -> EngineAnswer:
-        """Parse content, citations, and usage."""
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        citations = list(data.get("citations") or [])
-        if not citations:
-            citations = [
-                item.get("url", "")
-                for item in data.get("search_results") or []
-                if item.get("url")
-            ]
+        """Parse the Responses body; cost comes from the provider."""
+        content, citations = _parse_responses_payload(data)
         usage = data.get("usage") or {}
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
+        prompt_tokens = int(usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("output_tokens") or 0)
+        provider_cost = float((usage.get("cost") or {}).get("total_cost") or 0.0)
         claim = extract_claim_fields(content, citations)
         return EngineAnswer(
             **claim,
@@ -268,7 +334,7 @@ class PerplexityEngine(BaseEngine):
             model=str(data.get("model") or self.model),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_usd=self._cost(prompt_tokens, completion_tokens),
+            cost_usd=provider_cost or self._cost(prompt_tokens, completion_tokens),
         )
 
 
@@ -293,18 +359,7 @@ class OpenAIEngine(BaseEngine):
 
     def parse_response(self, data: Dict[str, Any]) -> EngineAnswer:
         """Parse output messages and url_citation annotations."""
-        texts: List[str] = []
-        citations: List[str] = []
-        for item in data.get("output") or []:
-            if item.get("type") != "message":
-                continue
-            for part in item.get("content") or []:
-                if part.get("text"):
-                    texts.append(part["text"])
-                for annotation in part.get("annotations") or []:
-                    if annotation.get("url"):
-                        citations.append(annotation["url"])
-        content = "\n".join(texts)
+        content, citations = _parse_responses_payload(data)
         usage = data.get("usage") or {}
         prompt_tokens = int(usage.get("input_tokens") or 0)
         completion_tokens = int(usage.get("output_tokens") or 0)
@@ -324,7 +379,9 @@ class GeminiEngine(BaseEngine):
 
     name = "gemini"
     env_key = "GEMINI_API_KEY"
-    default_model = "gemini-2.0-flash"
+    # Pinned to the mainline stable flash model as of 2026-10 (the
+    # original study used 2.0 Flash; the replication uses today's).
+    default_model = "gemini-3.5-flash"
 
     def build_request(self, query: str) -> EngineRequest:
         """Build the generateContent request."""
@@ -371,27 +428,40 @@ class GrokEngine(BaseEngine):
 
     name = "grok"
     env_key = "XAI_API_KEY"
-    default_model = "grok-3"
+    # Pinned to the mainline stable model as of 2026-10 ("grok-3"
+    # returns HTTP 410 Gone).
+    default_model = "grok-4.7"
+
+    # xAI reports cost in "USD ticks"; 1e10 per dollar is the
+    # management-API convention, recorded here as an assumption. The
+    # usage log keeps tokens and source counts so the report can
+    # re-derive cost from real billing.
+    TICKS_PER_USD = 1e10
 
     def build_request(self, query: str) -> EngineRequest:
-        """Build the Grok request with search enabled."""
+        """Build the Agent Tools request with web search.
+
+        The chat-completions live search answers 410 Gone (found in
+        the live smoke); /v1/responses with a web_search tool is the
+        current path.
+        """
         return EngineRequest(
-            url="https://api.x.ai/v1/chat/completions",
+            url="https://api.x.ai/v1/responses",
             headers={"Authorization": f"Bearer {self._api_key()}"},
             body={
                 "model": self.model,
-                "messages": [{"role": "user", "content": query}],
-                "search_parameters": {"mode": "on"},
+                "input": query,
+                "tools": [{"type": "web_search"}],
             },
         )
 
     def parse_response(self, data: Dict[str, Any]) -> EngineAnswer:
-        """Parse choice content and citations."""
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        citations = list(data.get("citations") or [])
+        """Parse the Responses body; convert tick-denominated cost."""
+        content, citations = _parse_responses_payload(data)
         usage = data.get("usage") or {}
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
+        prompt_tokens = int(usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("output_tokens") or 0)
+        ticks = float(usage.get("cost_in_usd_ticks") or 0.0)
         claim = extract_claim_fields(content, citations)
         return EngineAnswer(
             **claim,
@@ -399,7 +469,8 @@ class GrokEngine(BaseEngine):
             model=str(data.get("model") or self.model),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_usd=self._cost(prompt_tokens, completion_tokens),
+            cost_usd=(ticks / self.TICKS_PER_USD)
+            or self._cost(prompt_tokens, completion_tokens),
         )
 
 
