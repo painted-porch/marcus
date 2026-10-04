@@ -182,7 +182,7 @@ class TestTypedEvidenceGate:
 
 
 class TestClaimHandoff:
-    """Test suite for _handoff_claim_to_dependents."""
+    """Test suite for _handoff_evidence_to_dependents."""
 
     def _board(self) -> tuple[Task, Task, Task, Mock]:
         """A find task with a dependent verify and an unrelated synthesize."""
@@ -212,7 +212,7 @@ class TestClaimHandoff:
         """The verify task's inputs gain the claim fields, never raw."""
         find, verify, _, state = self._board()
 
-        await task_module._handoff_claim_to_dependents(find, GOOD_EVIDENCE, state)
+        await task_module._handoff_evidence_to_dependents(find, GOOD_EVIDENCE, state)
 
         assert verify.inputs["headline"] == GOOD_EVIDENCE["headline"]
         assert verify.inputs["url"] == GOOD_EVIDENCE["url"]
@@ -223,7 +223,7 @@ class TestClaimHandoff:
         """The handoff merges into inputs; the seeded excerpt survives."""
         find, verify, _, state = self._board()
 
-        await task_module._handoff_claim_to_dependents(find, GOOD_EVIDENCE, state)
+        await task_module._handoff_evidence_to_dependents(find, GOOD_EVIDENCE, state)
 
         assert verify.inputs["excerpt"] == "Collectively, they provided..."
 
@@ -232,7 +232,7 @@ class TestClaimHandoff:
         """Only tasks that depend on the find task receive the claim."""
         find, _, synthesize, state = self._board()
 
-        await task_module._handoff_claim_to_dependents(find, GOOD_EVIDENCE, state)
+        await task_module._handoff_evidence_to_dependents(find, GOOD_EVIDENCE, state)
 
         assert synthesize.inputs == {}
 
@@ -241,13 +241,112 @@ class TestClaimHandoff:
         """The dependent's new inputs are written to the board, not memory only."""
         find, verify, _, state = self._board()
 
-        await task_module._handoff_claim_to_dependents(find, GOOD_EVIDENCE, state)
+        await task_module._handoff_evidence_to_dependents(find, GOOD_EVIDENCE, state)
 
         state.kanban_client.update_task.assert_awaited_once()
         call_args = state.kanban_client.update_task.await_args
         assert call_args.args[0] == verify.id
         assert call_args.args[1]["inputs"]["headline"] == GOOD_EVIDENCE["headline"]
         assert "raw" not in call_args.args[1]["inputs"]
+
+
+class TestGeneralizedHandoff:
+    """Test suite for the handoff at verify and approve closes.
+
+    Step 7 review decision (Simon 16c9a4b1): every evidence-recorded
+    close hands its evidence minus ``raw`` to dependents, so the
+    approve reviewer sees claim plus verdict in inputs and the
+    synthesize worker sees everything it renders.
+    """
+
+    def _chain(self) -> tuple[Task, Task, Task, Mock]:
+        """verify -> approve -> synthesize, verify holding the claim."""
+        verify = _make_task(
+            "verify-1",
+            task_type="verify",
+            status=TaskStatus.DONE,
+            assigned_to="verifier-gem-1",
+            inputs={"excerpt": "...", "url": GOOD_EVIDENCE["url"]},
+        )
+        approve = _make_task(
+            "approve-1", task_type="approve", dependencies=["verify-1"]
+        )
+        synthesize = _make_task(
+            "synth-1", task_type="synthesize", dependencies=["approve-1"]
+        )
+        state = Mock()
+        state.project_tasks = [verify, approve, synthesize]
+        state.kanban_client = Mock()
+        state.kanban_client.update_task = AsyncMock()
+        return verify, approve, synthesize, state
+
+    @pytest.mark.asyncio
+    async def test_verify_close_hands_verdict_to_the_approve_task(self) -> None:
+        """The reviewer's approve task receives the verdict in inputs."""
+        verify, approve, _, state = self._chain()
+        verdict_evidence = {
+            "verdict": "verified",
+            "checks": {"excerpt_found": True},
+            "claim": {"url": GOOD_EVIDENCE["url"]},
+        }
+
+        await task_module._handoff_evidence_to_dependents(
+            verify, verdict_evidence, state
+        )
+
+        assert approve.inputs["verdict"] == "verified"
+        assert approve.inputs["claim"] == {"url": GOOD_EVIDENCE["url"]}
+
+    @pytest.mark.asyncio
+    async def test_approve_close_hands_decision_to_synthesize(self) -> None:
+        """The synthesize task receives the decision in inputs."""
+        _, approve, synthesize, state = self._chain()
+        approve.status = TaskStatus.DONE
+
+        await task_module._handoff_evidence_to_dependents(
+            approve,
+            {"decision": "approved", "approved_by": "reviewer"},
+            state,
+        )
+
+        assert synthesize.inputs["decision"] == "approved"
+        assert synthesize.inputs["approved_by"] == "reviewer"
+
+    @pytest.mark.asyncio
+    async def test_handoff_accumulates_case_state_down_the_chain(self) -> None:
+        """Each close hands down its inputs plus its evidence.
+
+        A sampled case's synthesize task depends on approve, not
+        verify, so without accumulation it would see the decision but
+        never the claim or the verdict it must render.
+        """
+        _, approve, synthesize, state = self._chain()
+        approve.status = TaskStatus.DONE
+        approve.inputs = {
+            "verdict": "verified",
+            "claim": {"url": GOOD_EVIDENCE["url"]},
+        }
+
+        await task_module._handoff_evidence_to_dependents(
+            approve, {"decision": "approved"}, state
+        )
+
+        assert synthesize.inputs["decision"] == "approved"
+        assert synthesize.inputs["verdict"] == "verified"
+        assert synthesize.inputs["claim"] == {"url": GOOD_EVIDENCE["url"]}
+
+    @pytest.mark.asyncio
+    async def test_raw_is_stripped_at_every_handoff(self) -> None:
+        """The raw field never crosses a handoff, whatever the close."""
+        verify, approve, _, state = self._chain()
+
+        await task_module._handoff_evidence_to_dependents(
+            verify,
+            {"verdict": "verified", "raw": "verifier scratch output"},
+            state,
+        )
+
+        assert "raw" not in approve.inputs
 
 
 class TestStdioDispatchCarriesEvidence:

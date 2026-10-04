@@ -712,14 +712,19 @@ def _apply_approval_gate(
     }
 
 
-async def _handoff_claim_to_dependents(
+async def _handoff_evidence_to_dependents(
     task: Task, evidence: Dict[str, Any], state: Any
 ) -> None:
-    """Copy a closed find task's claim into its dependents' inputs.
+    """Copy a closed task's evidence minus ``raw`` into dependents' inputs.
 
-    Issue #737, step 4: this copy is the ONLY route by which a claim
-    reaches a verifier. The ``raw`` field (the engine's full response)
-    is stripped, so the verifier sees the claim and nothing else; the
+    Issue #737, step 4, generalized at the step 7 review (Simon
+    16c9a4b1): every evidence-recorded close hands off. This copy is
+    the ONLY route by which upstream results reach a downstream
+    worker: the verifier receives the find task's claim, the approve
+    reviewer receives the verdict beside the claim, and the
+    synthesize worker receives everything it renders. The ``raw``
+    field (an agent's full model output) is stripped at every
+    handoff, so no downstream party ever sees upstream reasoning; the
     audit bundle keeps ``raw`` via the completed task's own record.
     Both the in-memory tasks and the kanban rows are updated, so the
     handoff survives a restart.
@@ -727,18 +732,26 @@ async def _handoff_claim_to_dependents(
     Parameters
     ----------
     task : Task
-        The find task that just closed.
+        The task that just closed.
     evidence : Dict[str, Any]
         Its schema-validated evidence payload.
     state : Any
         Marcus server state with ``project_tasks`` and
         ``kanban_client``.
     """
-    claim = {k: v for k, v in evidence.items() if k != RAW_EVIDENCE_FIELD}
+    # Accumulative: the closing task's own inputs ride along with its
+    # evidence, so case state builds down the chain (a sampled case's
+    # synthesize task depends on approve, not verify, and still needs
+    # the claim and the verdict). ``raw`` is stripped at every hop.
+    payload = {
+        k: v
+        for k, v in {**(task.inputs or {}), **evidence}.items()
+        if k != RAW_EVIDENCE_FIELD
+    }
     for dependent in getattr(state, "project_tasks", None) or []:
         if task.id not in (dependent.dependencies or []):
             continue
-        dependent.inputs = {**(dependent.inputs or {}), **claim}
+        dependent.inputs = {**(dependent.inputs or {}), **payload}
         try:
             await state.kanban_client.update_task(
                 dependent.id, {"inputs": dependent.inputs}
@@ -3059,6 +3072,15 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                             if hasattr(optimal_task, "acceptance_criteria")
                             else []
                         ),
+                        # #737: typed tasks dispatch on task_type, work
+                        # from the board-written inputs (e.g. the claim
+                        # a verify task checks), and must satisfy
+                        # output_schema to close — all three belong in
+                        # the assignment itself, not behind a second
+                        # context call.
+                        "task_type": getattr(optimal_task, "task_type", "implement"),
+                        "inputs": dict(getattr(optimal_task, "inputs", {}) or {}),
+                        "output_schema": getattr(optimal_task, "output_schema", None),
                     },
                 }
 
@@ -5064,9 +5086,10 @@ async def report_task_progress(
 
             # Issue #737, step 4: the accepted evidence lands on the
             # record (the audit bundle reads it, raw included, from the
-            # task's source_context), and a find task's claim is handed
-            # to its dependents minus ``raw`` — the only route by which
-            # a claim reaches a verifier.
+            # task's source_context), and every evidence-recorded close
+            # hands its evidence minus ``raw`` to its dependents — the
+            # only route by which upstream results reach a downstream
+            # worker (generalized at the step 7 review, Simon 16c9a4b1).
             if (
                 task is not None
                 and task.task_type in EVIDENCE_RECORDED_TASK_TYPES
@@ -5074,8 +5097,7 @@ async def report_task_progress(
             ):
                 update_data["source_context"] = {"evidence": evidence}
                 _clear_smoke_attempts(task_id)
-                if task.task_type == "find":
-                    await _handoff_claim_to_dependents(task, evidence, state)
+                await _handoff_evidence_to_dependents(task, evidence, state)
 
             # Handle subtask completion
             if hasattr(state, "subtask_manager") and state.subtask_manager:

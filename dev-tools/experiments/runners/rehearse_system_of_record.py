@@ -348,6 +348,13 @@ async def drive(url: str, db_path: str, project_id: str) -> int:
             bool(verify_id) and "Cross-check" in verify_task.get("name", ""),
             f"got: {verify_task.get('name')!r}",
         )
+        c.check(
+            "assignment carries task_type and the handed-off inputs",
+            verify_task.get("task_type") == "verify"
+            and (verify_task.get("inputs") or {}).get("url") == FIND_EVIDENCE["url"],
+            f"got task_type={verify_task.get('task_type')!r} "
+            f"inputs keys={sorted((verify_task.get('inputs') or {}).keys())}",
+        )
 
         context = await _call_tool(client, "get_task_context", {"task_id": verify_id})
         context_text = json.dumps(context)
