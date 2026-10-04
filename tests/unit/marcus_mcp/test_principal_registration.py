@@ -146,6 +146,57 @@ class TestRegisterAgentPrincipals:
         assert "finder-pplx-1" not in state.agent_project_map
 
 
+class TestReRegistrationIdentityChanges:
+    """Test suite for recording identity churn at re-registration.
+
+    Identity is self-declared, so a worker could re-register under a
+    new vendor or principal to dodge eligibility. The pilot accepts
+    that limit, but the change must land on the record so the audit
+    bundle (step 8) can show it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_vendor_change_on_re_registration_is_recorded(self) -> None:
+        """Re-registering with a different vendor leaves an audit entry."""
+        state = _make_state()
+        state.identity_changes = []
+
+        await _register(state, vendor="perplexity")
+        await _register(state, vendor="google")
+
+        assert len(state.identity_changes) == 1
+        change = state.identity_changes[0]
+        assert change["agent_id"] == "finder-pplx-1"
+        assert change["old_vendor"] == "perplexity"
+        assert change["new_vendor"] == "google"
+        assert "timestamp" in change
+
+    @pytest.mark.asyncio
+    async def test_principal_change_on_re_registration_is_recorded(self) -> None:
+        """Re-registering with a different principal leaves an audit entry."""
+        state = _make_state()
+        state.identity_changes = []
+
+        await _register(state, principal="agent")
+        await _register(state, principal="human")
+
+        assert len(state.identity_changes) == 1
+        change = state.identity_changes[0]
+        assert change["old_principal"] == "agent"
+        assert change["new_principal"] == "human"
+
+    @pytest.mark.asyncio
+    async def test_unchanged_re_registration_records_nothing(self) -> None:
+        """Idempotent re-registration (same identity) is not churn."""
+        state = _make_state()
+        state.identity_changes = []
+
+        await _register(state, vendor="perplexity", principal="agent")
+        await _register(state, vendor="perplexity", principal="agent")
+
+        assert state.identity_changes == []
+
+
 class TestRegisterAgentToolSchema:
     """Test suite for the stdio tool schema declaration."""
 

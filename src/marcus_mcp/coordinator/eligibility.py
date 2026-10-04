@@ -127,8 +127,20 @@ def filter_eligible_tasks(
 
     The single choke point both assignment entry points draw from.
     Every refusal is logged with the worker, the task, and the reason,
-    and appended to ``state.eligibility_refusals`` so the audit bundle
+    and recorded on ``state.eligibility_refusals`` so the audit bundle
     (step 8) can show who was refused and why.
+
+    Workers poll roughly every 30 seconds, so the same refusal recurs
+    constantly; entries are deduplicated by (agent, task, reason) with
+    a count and first/last timestamps, which keeps the record bounded
+    and the export legible. The first occurrence logs at INFO, repeats
+    at DEBUG.
+
+    The refused worker itself receives nothing: both entry points
+    return the ordinary no-task result, so a refusal is
+    indistinguishable from an empty board on the agent's side. The
+    reason stays server-side by design, so an author cannot learn
+    what to game.
 
     Parameters
     ----------
@@ -146,37 +158,87 @@ def filter_eligible_tasks(
     List[Task]
         The tasks the worker is eligible for, in the caller's order.
     """
+    # Judge only identities this module understands. Registration
+    # always stores WorkerStatus; anything else (test doubles, legacy
+    # callers reaching here untyped) passes through unchanged, the
+    # same defensive posture as the vendor lookup in _claim_authors.
+    # mypy sees the annotation and calls this branch unreachable; the
+    # guard exists precisely for callers mypy cannot see.
+    if not isinstance(agent, WorkerStatus):
+        return list(tasks)  # type: ignore[unreachable]
+
     eligible: List[Task] = []
     for task in tasks:
         ok, reason = is_eligible(agent, task, state)
         if ok:
             eligible.append(task)
             continue
-
-        logger.info(
-            "[eligibility] refused %s task %s (%s) to %s: %s",
-            task.task_type,
-            task.id,
-            task.name,
-            agent.worker_id,
-            reason,
-        )
-        refusals = getattr(state, "eligibility_refusals", None)
-        if not isinstance(refusals, list):
-            refusals = []
-            try:
-                state.eligibility_refusals = refusals
-            except AttributeError:
-                # A read-only state still gets the log line above;
-                # refusal recording is best-effort by design.
-                continue
-        refusals.append(
-            {
-                "agent_id": agent.worker_id,
-                "task_id": task.id,
-                "task_type": task.task_type,
-                "reason": reason,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        _record_refusal(agent, task, reason, state)
     return eligible
+
+
+def _record_refusal(agent: WorkerStatus, task: Task, reason: str, state: Any) -> None:
+    """Log one refusal and dedup it into ``state.eligibility_refusals``.
+
+    Parameters
+    ----------
+    agent : WorkerStatus
+        The refused worker.
+    task : Task
+        The task that was not offered.
+    reason : str
+        The human-readable reason from :func:`is_eligible`.
+    state : Any
+        Marcus server state holding the refusal record.
+    """
+    refusals = getattr(state, "eligibility_refusals", None)
+    if not isinstance(refusals, list):
+        refusals = []
+        try:
+            state.eligibility_refusals = refusals
+        except AttributeError:
+            # A read-only state still gets the log line below;
+            # refusal recording is best-effort by design.
+            refusals = None
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    existing = None
+    if refusals is not None:
+        existing = next(
+            (
+                r
+                for r in refusals
+                if r["agent_id"] == agent.worker_id
+                and r["task_id"] == task.id
+                and r["reason"] == reason
+            ),
+            None,
+        )
+
+    log = logger.debug if existing else logger.info
+    log(
+        "[eligibility] refused %s task %s (%s) to %s: %s",
+        task.task_type,
+        task.id,
+        task.name,
+        agent.worker_id,
+        reason,
+    )
+
+    if refusals is None:
+        return
+    if existing:
+        existing["count"] += 1
+        existing["last_refused_at"] = now_iso
+        return
+    refusals.append(
+        {
+            "agent_id": agent.worker_id,
+            "task_id": task.id,
+            "task_type": task.task_type,
+            "reason": reason,
+            "count": 1,
+            "first_refused_at": now_iso,
+            "last_refused_at": now_iso,
+        }
+    )

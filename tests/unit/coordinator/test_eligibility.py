@@ -267,7 +267,54 @@ class TestFilterEligibleTasks:
         assert refusal["agent_id"] == "verifier-pplx-2"
         assert refusal["task_id"] == "verify-1"
         assert "vendor" in refusal["reason"]
-        assert "timestamp" in refusal
+        assert refusal["count"] == 1
+        assert "first_refused_at" in refusal
+        assert "last_refused_at" in refusal
+
+    def test_repeated_refusal_dedups_into_one_entry_with_count(self) -> None:
+        """Polling workers refuse the same way every ~30s; dedup bounds state.
+
+        The same (agent, task, reason) triple updates the existing
+        entry's count and last_refused_at instead of appending, so an
+        hour of polling is one row, not ~120.
+        """
+        _, verify, state = _tow_case()
+        state.eligibility_refusals = []
+        author = state.agent_status["finder-pplx-1"]
+
+        filter_eligible_tasks(author, [verify], state)
+        filter_eligible_tasks(author, [verify], state)
+
+        assert len(state.eligibility_refusals) == 1
+        refusal = state.eligibility_refusals[0]
+        assert refusal["count"] == 2
+        assert refusal["last_refused_at"] >= refusal["first_refused_at"]
+
+    def test_refusals_by_different_agents_stay_separate_entries(self) -> None:
+        """Dedup keys on (agent, task, reason); other agents get own rows."""
+        _, verify, state = _tow_case()
+        state.eligibility_refusals = []
+        author = state.agent_status["finder-pplx-1"]
+        same_vendor = state.agent_status["verifier-pplx-2"]
+
+        filter_eligible_tasks(author, [verify], state)
+        filter_eligible_tasks(same_vendor, [verify], state)
+
+        assert len(state.eligibility_refusals) == 2
+
+    def test_filter_passes_through_for_a_non_worker_status_agent(self) -> None:
+        """A non-WorkerStatus identity is not judged, only passed through.
+
+        Registration always stores WorkerStatus; test doubles and
+        legacy callers must keep their pre-#737 behavior instead of
+        being refused on attributes that are not real.
+        """
+        verify = _make_task("verify-1", task_type="verify")
+        state = _make_state([verify], [])
+
+        result = filter_eligible_tasks(Mock(), [verify], state)
+
+        assert result == [verify]
 
     def test_filter_passes_everything_for_an_unregistered_worker(self) -> None:
         """A worker object with plain defaults filters like any agent.

@@ -6509,6 +6509,15 @@ async def _find_optimal_task_original_logic(
             non_deployment_tasks if non_deployment_tasks else deployment_tasks
         )
 
+        # Issue #737: eligibility is the LAST filter before ranking, so
+        # the refusal log records only tasks this worker would actually
+        # have been offered. A refused worker gets the ordinary no-task
+        # response; the reason stays server-side (never tell an author
+        # why it was not offered its own verify task).
+        from src.marcus_mcp.coordinator.eligibility import filter_eligible_tasks
+
+        available_tasks = filter_eligible_tasks(agent, available_tasks, state)
+
         if not available_tasks:
             return None
 
