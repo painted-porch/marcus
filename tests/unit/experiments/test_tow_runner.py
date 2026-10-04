@@ -96,6 +96,56 @@ class TestLoadExcerpts:
         assert first.crawler == "Allowed"
 
 
+class TestStratifiedSelection:
+    """Test suite for publisher-stratified excerpt selection.
+
+    The dataset is ordered by publisher (10 articles each), so the
+    first N excerpts cover only N/10 publishers and whole-publisher
+    bot walls predetermine the pilot. Stratified selection takes
+    excerpts round-robin across publishers, deterministically.
+    """
+
+    def test_round_robin_across_publishers(self, tmp_path: Path) -> None:
+        """With limit 4 over 3 publishers: one each, then wrap."""
+        rows = []
+        for number in range(1, 7):
+            row = _row(number)
+            row["Publication"] = f"Publisher {((number - 1) % 3) + 1}"
+            rows.append(row)
+        dataset = _write_dataset(tmp_path / "tow.csv", rows)
+        excerpts = tow_runner.load_excerpts(str(dataset))
+
+        selected = tow_runner.select_excerpts(excerpts, limit=4, stratify=True)
+
+        publishers = [e.publication for e in selected]
+        assert publishers[:3] == ["Publisher 1", "Publisher 2", "Publisher 3"]
+        assert publishers[3] == "Publisher 1"
+
+    def test_unstratified_keeps_dataset_order(self, tmp_path: Path) -> None:
+        """Without the flag, selection is simply the first N."""
+        dataset = _write_dataset(tmp_path / "tow.csv", [_row(n) for n in (1, 2, 3)])
+        excerpts = tow_runner.load_excerpts(str(dataset))
+
+        selected = tow_runner.select_excerpts(excerpts, limit=2, stratify=False)
+
+        assert [e.number for e in selected] == [1, 2]
+
+    def test_stratified_is_deterministic(self, tmp_path: Path) -> None:
+        """Preregistration needs the same selection every run."""
+        rows = []
+        for number in range(1, 9):
+            row = _row(number)
+            row["Publication"] = f"Publisher {((number - 1) % 4) + 1}"
+            rows.append(row)
+        dataset = _write_dataset(tmp_path / "tow.csv", rows)
+        excerpts = tow_runner.load_excerpts(str(dataset))
+
+        first = [e.number for e in tow_runner.select_excerpts(excerpts, 6, True)]
+        second = [e.number for e in tow_runner.select_excerpts(excerpts, 6, True)]
+
+        assert first == second
+
+
 class TestApprovalSampling:
     """Test suite for the deterministic approval sample."""
 

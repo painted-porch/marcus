@@ -148,6 +148,62 @@ def load_excerpts(csv_path: str) -> List[Excerpt]:
     return [by_number[n] for n in sorted(by_number)]
 
 
+def select_excerpts(
+    excerpts: List[Excerpt], limit: int, stratify: bool
+) -> List[Excerpt]:
+    """Select which excerpts a run covers.
+
+    The dataset is ordered by publisher (10 articles each), so the
+    plain first-N selection covers only N/10 publishers, and a
+    whole-publisher bot wall then predetermines the run's decline
+    rate. Stratified selection takes excerpts round-robin across
+    publishers in dataset order, deterministically, so every
+    publisher's crawler posture is represented.
+
+    Parameters
+    ----------
+    excerpts : List[Excerpt]
+        All excerpts, sorted by prompt number.
+    limit : int
+        How many to select; 0 means all.
+    stratify : bool
+        True for round-robin across publishers; False for first-N.
+
+    Returns
+    -------
+    List[Excerpt]
+        The selected excerpts.
+    """
+    if not limit or limit >= len(excerpts):
+        return list(excerpts)
+    if not stratify:
+        return excerpts[:limit]
+
+    by_publisher: Dict[str, List[Excerpt]] = {}
+    publisher_order: List[str] = []
+    for excerpt in excerpts:
+        if excerpt.publication not in by_publisher:
+            by_publisher[excerpt.publication] = []
+            publisher_order.append(excerpt.publication)
+        by_publisher[excerpt.publication].append(excerpt)
+
+    selected: List[Excerpt] = []
+    round_index = 0
+    while len(selected) < limit:
+        added = False
+        for publisher in publisher_order:
+            pool = by_publisher[publisher]
+            if round_index < len(pool):
+                selected.append(pool[round_index])
+                added = True
+                if len(selected) == limit:
+                    break
+        if not added:
+            break
+        round_index += 1
+    return selected
+
+
 def sample_approvals(numbers: List[int], rate: float, seed: int) -> Set[int]:
     """Pick the deterministic approval sample.
 
@@ -294,6 +350,7 @@ async def seed_cases(
     approval_rate: float,
     seed: int,
     manifest_path: str,
+    stratify: bool = False,
 ) -> Dict[str, Any]:
     """Seed cases onto the board and write the grader's manifest.
 
@@ -315,15 +372,16 @@ async def seed_cases(
     manifest_path : str
         Where to write the manifest JSON (ground truth, task ids,
         approval flags). Keep it out of the repository.
+    stratify : bool
+        Select excerpts round-robin across publishers instead of
+        first-N, so every publisher's crawler posture is represented.
 
     Returns
     -------
     Dict[str, Any]
         The manifest that was written.
     """
-    excerpts = load_excerpts(csv_path)
-    if limit:
-        excerpts = excerpts[:limit]
+    excerpts = select_excerpts(load_excerpts(csv_path), limit, stratify)
     sampled = sample_approvals([e.number for e in excerpts], approval_rate, seed)
 
     board = SQLiteKanban(
@@ -367,6 +425,7 @@ async def seed_cases(
         "db_path": db_path,
         "seed": seed,
         "approval_rate": approval_rate,
+        "stratified": stratify,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "cases": cases,
     }
@@ -411,6 +470,14 @@ def main() -> None:
         required=True,
         help="Where to write the grader manifest (keep out of the repo)",
     )
+    parser.add_argument(
+        "--stratify",
+        action="store_true",
+        help=(
+            "Select excerpts round-robin across publishers instead of "
+            "first-N, so every publisher's crawler posture is represented"
+        ),
+    )
     args = parser.parse_args()
 
     manifest = asyncio.run(
@@ -422,6 +489,7 @@ def main() -> None:
             approval_rate=args.approval_rate,
             seed=args.seed,
             manifest_path=args.manifest,
+            stratify=args.stratify,
         )
     )
     total = len(manifest["cases"])
