@@ -827,6 +827,16 @@ class SQLiteKanban(KanbanInterface):
                             now_iso,
                         ),
                     )
+                elif key == "inputs":
+                    # Issue #737: the claim handoff writes a dependent
+                    # task's complete merged inputs, so this is a
+                    # replace, not a merge; None clears the field.
+                    set_clauses.append("inputs = ?")
+                    params.append(
+                        json.dumps(value, default=_json_default)
+                        if value is not None
+                        else None
+                    )
                 elif key == "source_context":
                     # Merge into existing source_context JSON, not
                     # replace. Codex P1 on PR #660: prior to this

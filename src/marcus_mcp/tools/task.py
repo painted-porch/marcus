@@ -444,6 +444,236 @@ def _escalate_behavior_evidence_response(
     return escalated
 
 
+# Task types whose completion requires typed evidence (issue #737).
+# The implement type is deliberately absent: it stays on the existing
+# smoke gate and behavior-evidence machinery above.
+EVIDENCE_REQUIRED_TASK_TYPES = frozenset({"find", "verify", "synthesize"})
+
+# The one evidence field the board never hands to dependents: the
+# upstream agent's raw output. The audit bundle keeps it; the
+# verifier's view never contains it.
+RAW_EVIDENCE_FIELD = "raw"
+
+
+def _typed_evidence_rejection(
+    *,
+    task: Task,
+    agent_id: str,
+    missing_fields: List[str],
+    evidence_missing: bool,
+) -> Dict[str, Any]:
+    """Build the rejection for a typed completion without valid evidence.
+
+    Issue #737: a find, verify, or synthesize task cannot close
+    without the typed payload its ``output_schema`` requires. This is
+    the structured refusal the agent receives, naming exactly the
+    fields that are missing so the correction is mechanical.
+
+    Parameters
+    ----------
+    task : Task
+        The typed task being completed.
+    agent_id : str
+        Agent reporting completion.
+    missing_fields : List[str]
+        The required fields absent from the submitted evidence.
+    evidence_missing : bool
+        True when no evidence payload was submitted at all.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A rejection dict the caller returns directly to the agent.
+    """
+    error = (
+        "typed_evidence_missing" if evidence_missing else "typed_evidence_incomplete"
+    )
+    required = sorted(missing_fields)
+    return {
+        "success": False,
+        "status": "evidence_rejected",
+        "error": error,
+        "agent_id": agent_id,
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "missing_fields": required,
+        "blocker": (
+            f"Marcus rejected this completion: a {task.task_type!r} task "
+            f"cannot close without evidence. "
+            + (
+                "No ``evidence`` payload was submitted. "
+                if evidence_missing
+                else "The submitted ``evidence`` is missing required fields. "
+            )
+            + f"Missing fields: {', '.join(required) if required else '(none)'}. "
+            f"Re-call report_task_progress with the SAME status and an "
+            f"``evidence`` dict containing every required field."
+        ),
+        "message": (
+            f"Completion rejected: evidence "
+            f"{'was not submitted' if evidence_missing else 'is incomplete'} "
+            f"for {task.task_type} task {task.id}. "
+            f"Missing fields: {', '.join(required) if required else '(none)'}."
+        ),
+    }
+
+
+def _escalate_typed_evidence_response(
+    rejection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Convert a repeated typed-evidence rejection into a terminal one.
+
+    Mirrors :func:`_escalate_behavior_evidence_response` (issue #677):
+    after ``MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS`` identical rejections
+    the agent is plainly not going to produce the evidence by
+    re-sending the same call, so the loop stops with a non-retryable
+    error while the remediation payload is preserved.
+
+    Parameters
+    ----------
+    rejection : Dict[str, Any]
+        The ``typed_evidence_missing`` / ``typed_evidence_incomplete``
+        rejection to escalate.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A new dict tagged terminal/escalated, remediation intact.
+    """
+    escalated = dict(rejection)
+    escalated["status"] = "evidence_rejection_escalated"
+    escalated["error"] = "typed_evidence_escalated"
+    escalated["terminal"] = True
+    escalated["escalated"] = True
+    escalated["message"] = (
+        "Marcus has rejected this completion "
+        f"{MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS} times for the same reason: "
+        "the typed evidence this task must return is missing or incomplete. "
+        "Do NOT retry the same call. This task is escalated for remediation "
+        "-- the required fields are listed in ``missing_fields`` and the fix "
+        "is in ``blocker``."
+    )
+    return escalated
+
+
+async def _apply_typed_evidence_gate(
+    task: Task,
+    agent_id: str,
+    evidence: Optional[Dict[str, Any]],
+    state: Any,
+) -> Optional[Dict[str, Any]]:
+    """Refuse a typed completion whose evidence fails its contract.
+
+    Issue #737, step 4: when a find, verify, or synthesize task
+    reports ``completed``, its ``evidence`` must contain every field
+    the task's ``output_schema`` requires (with no schema, any
+    non-empty dict passes). The rejection names the missing fields.
+    Repeated failure reuses the #677 retry ceiling
+    (:func:`_record_behavior_evidence_attempt`): after
+    ``MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS`` rejections the next one
+    terminalizes the task instead of looping to lease expiry.
+
+    Parameters
+    ----------
+    task : Task
+        The task being completed.
+    agent_id : str
+        Agent reporting completion.
+    evidence : Optional[Dict[str, Any]]
+        The typed payload submitted with the completion.
+    state : Any
+        Marcus server state (used only when terminalizing).
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        None when the completion may proceed; otherwise the rejection
+        or terminal escalation dict to return to the agent.
+    """
+    if task.task_type not in EVIDENCE_REQUIRED_TASK_TYPES:
+        return None
+
+    required = list((task.output_schema or {}).get("required", []))
+    evidence_missing = not evidence
+    if evidence_missing:
+        missing = required
+    else:
+        assert evidence is not None  # for mypy; guarded above
+        missing = [f for f in required if f not in evidence]
+    if not evidence_missing and not missing:
+        return None
+
+    rejection = _typed_evidence_rejection(
+        task=task,
+        agent_id=agent_id,
+        missing_fields=missing,
+        evidence_missing=evidence_missing,
+    )
+    attempts = _record_behavior_evidence_attempt(task.id)
+    if attempts > MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS:
+        logger.warning(
+            "Typed-evidence gate: task %s rejected %d times; escalating "
+            "to a terminal response (issue #737, #677 ceiling).",
+            task.id,
+            attempts,
+        )
+        escalated = _escalate_typed_evidence_response(rejection)
+        await _terminalize_escalated_smoke_task(
+            state,
+            task.id,
+            agent_id,
+            str(
+                escalated.get("blocker")
+                or escalated.get("message")
+                or "Typed-evidence gate escalated: evidence never met the schema."
+            ),
+        )
+        _clear_smoke_attempts(task.id)
+        return escalated
+    return rejection
+
+
+async def _handoff_claim_to_dependents(
+    task: Task, evidence: Dict[str, Any], state: Any
+) -> None:
+    """Copy a closed find task's claim into its dependents' inputs.
+
+    Issue #737, step 4: this copy is the ONLY route by which a claim
+    reaches a verifier. The ``raw`` field (the engine's full response)
+    is stripped, so the verifier sees the claim and nothing else; the
+    audit bundle keeps ``raw`` via the completed task's own record.
+    Both the in-memory tasks and the kanban rows are updated, so the
+    handoff survives a restart.
+
+    Parameters
+    ----------
+    task : Task
+        The find task that just closed.
+    evidence : Dict[str, Any]
+        Its schema-validated evidence payload.
+    state : Any
+        Marcus server state with ``project_tasks`` and
+        ``kanban_client``.
+    """
+    claim = {k: v for k, v in evidence.items() if k != RAW_EVIDENCE_FIELD}
+    for dependent in getattr(state, "project_tasks", None) or []:
+        if task.id not in (dependent.dependencies or []):
+            continue
+        dependent.inputs = {**(dependent.inputs or {}), **claim}
+        try:
+            await state.kanban_client.update_task(
+                dependent.id, {"inputs": dependent.inputs}
+            )
+        except Exception as handoff_err:  # noqa: BLE001 - keep memory copy
+            logger.warning(
+                "[#737] Claim handoff: kanban write failed for dependent "
+                "%s (%s); the in-memory copy is applied and the next "
+                "refresh may lose it.",
+                dependent.id,
+                handoff_err,
+            )
+
+
 async def _terminalize_escalated_smoke_task(
     state: Any, task_id: str, agent_id: str, blocker: str
 ) -> None:
@@ -4497,11 +4727,29 @@ async def report_task_progress(
                 f"found task object: {task is not None}"
             )
 
+            # TYPED-EVIDENCE GATE (issue #737, step 4). A find, verify,
+            # or synthesize task cannot close without the evidence its
+            # output_schema requires; the rejection names the missing
+            # fields and the #677 ceiling terminalizes a stuck agent.
+            # Runs BEFORE the LLM validation and smoke gates: those are
+            # the implement type's machinery and never see typed tasks.
+            if task is not None:
+                typed_gate_response = await _apply_typed_evidence_gate(
+                    task, agent_id, evidence, state
+                )
+                if typed_gate_response is not None:
+                    return typed_gate_response
+
             if task:
                 task_labels = task.labels if hasattr(task, "labels") else None
                 # #557: a subtask's validate/skip decision uses its
                 # parent's labels — see _should_validate_completion.
-                should_validate = _should_validate_completion(task, fresh_tasks)
+                # #737: only the implement type goes through the LLM
+                # validator; typed tasks were judged by their schema
+                # in the typed-evidence gate above.
+                should_validate = task.task_type == "implement" and (
+                    _should_validate_completion(task, fresh_tasks)
+                )
                 logger.info(
                     f"VALIDATION GATE: Task {task_id} ({task.name}) - "
                     f"labels={task_labels}, should_validate={should_validate}"
@@ -4725,6 +4973,21 @@ async def report_task_progress(
             # if this task is ever reopened (e.g. request_task_redo), it
             # starts with a fresh budget rather than a stale one.
             clear_repair_attempts(task_id)
+
+            # Issue #737, step 4: the accepted evidence lands on the
+            # record (the audit bundle reads it, raw included, from the
+            # task's source_context), and a find task's claim is handed
+            # to its dependents minus ``raw`` — the only route by which
+            # a claim reaches a verifier.
+            if (
+                task is not None
+                and task.task_type in EVIDENCE_REQUIRED_TASK_TYPES
+                and evidence
+            ):
+                update_data["source_context"] = {"evidence": evidence}
+                _clear_smoke_attempts(task_id)
+                if task.task_type == "find":
+                    await _handoff_claim_to_dependents(task, evidence, state)
 
             # Handle subtask completion
             if hasattr(state, "subtask_manager") and state.subtask_manager:

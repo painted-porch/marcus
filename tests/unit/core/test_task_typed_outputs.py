@@ -205,6 +205,25 @@ CREATE TABLE tasks (
 """
 
 
+class TestInputsUpdate:
+    """Test suite for updating a task's inputs through the provider."""
+
+    @pytest.mark.asyncio
+    async def test_update_task_persists_inputs(self, kanban: SQLiteKanban) -> None:
+        """The claim handoff (step 4) writes dependents' inputs durably."""
+        await kanban.connect()
+        created = await kanban.create_task(
+            _sample_task_data(task_type="verify", inputs={"excerpt": "..."})
+        )
+        new_inputs = {"excerpt": "...", "headline": "x", "url": "https://e.org"}
+
+        await kanban.update_task(created.id, {"inputs": new_inputs})
+        loaded = await kanban.get_task_by_id(created.id)
+
+        assert loaded is not None
+        assert loaded.inputs == new_inputs
+
+
 class TestLegacyBoardMigration:
     """Test suite for loading boards created before task_type existed."""
 
