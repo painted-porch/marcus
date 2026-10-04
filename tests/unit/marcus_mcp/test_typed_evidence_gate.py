@@ -250,6 +250,61 @@ class TestClaimHandoff:
         assert "raw" not in call_args.args[1]["inputs"]
 
 
+class TestStdioDispatchCarriesEvidence:
+    """Test suite for the stdio path's evidence plumbing (#735 divergence).
+
+    The typed-evidence gate reads the ``evidence`` argument, so the
+    stdio tool schema must declare it and the stdio dispatcher must
+    forward it; otherwise a stdio agent's evidence silently becomes
+    None and every typed completion is rejected until terminalized.
+    """
+
+    def test_schema_declares_evidence_and_verifications(self) -> None:
+        """MCP clients only send fields the tool schema declares."""
+        from src.marcus_mcp.handlers import get_tool_definitions
+
+        tools = {t.name: t for t in get_tool_definitions("agent")}
+        properties = tools["report_task_progress"].inputSchema["properties"]
+
+        assert "evidence" in properties
+        assert "verifications" in properties
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_forwards_evidence_and_verifications(self) -> None:
+        """The stdio dispatch passes both fields through to the tool."""
+        from src.marcus_mcp import handlers
+
+        state = Mock()
+        state._current_client_id = None
+        state._registered_clients = {}
+        verifications = [{"signal_id": "s1", "command": "true"}]
+
+        with (
+            patch.object(
+                handlers,
+                "report_task_progress",
+                new=AsyncMock(return_value={"success": True}),
+            ) as impl,
+            patch.object(handlers, "get_client_tools", return_value=["*"]),
+        ):
+            await handlers.handle_tool_call(
+                name="report_task_progress",
+                arguments={
+                    "agent_id": "finder-pplx-1",
+                    "task_id": "find-1",
+                    "status": "completed",
+                    "evidence": GOOD_EVIDENCE,
+                    "verifications": verifications,
+                },
+                state=state,
+            )
+
+        impl.assert_awaited_once()
+        kwargs = impl.await_args.kwargs
+        assert kwargs["evidence"] == GOOD_EVIDENCE
+        assert kwargs["verifications"] == verifications
+
+
 class TestVerifyTaskContext:
     """Test suite for the verifier's view through get_task_context."""
 

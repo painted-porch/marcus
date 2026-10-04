@@ -292,6 +292,29 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "were not given one."
                         ),
                     },
+                    "verifications": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": (
+                            "Issue #523: per-outcome verification list for "
+                            "integration completions. Each entry: signal_id "
+                            "(str), command (str), optional description and "
+                            "readiness_probe. Takes precedence over "
+                            "start_command when present."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "object",
+                        "description": (
+                            "Typed evidence payload. REQUIRED when "
+                            "completing a find, verify, or synthesize task "
+                            "(#737): every field the task's output_schema "
+                            "requires must be present or the completion is "
+                            "rejected with the missing fields named. Also "
+                            "carries behavior evidence for integration "
+                            "tasks (#677)."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "task_id", "status"],
             },
@@ -1343,6 +1366,11 @@ async def handle_tool_call(
                     state=state,
                     start_command=arguments.get("start_command"),
                     readiness_probe=arguments.get("readiness_probe"),
+                    # #735/#737: the stdio path must carry the same
+                    # payloads as the FastMCP paths or the evidence
+                    # gates judge a None an agent never sent.
+                    verifications=arguments.get("verifications"),
+                    evidence=arguments.get("evidence"),
                     lease_epoch=arguments.get("lease_epoch"),
                 )
 

@@ -436,7 +436,14 @@ class Inspector:
             return False
 
     async def register_agent(
-        self, agent_id: str, name: str, role: str, skills: List[str]
+        self,
+        agent_id: str,
+        name: str,
+        role: str,
+        skills: List[str],
+        project_id: str = "",
+        vendor: str = "",
+        principal: str = "agent",
     ) -> Dict[str, Any]:
         """
         Simulate agent registration for testing Marcus workflows.
@@ -455,6 +462,17 @@ class Inspector:
             Agent's role for testing (e.g., "Developer", "QA Engineer")
         skills : List[str]
             List of skills to test skill-based task assignment
+        project_id : str, default=""
+            Project the worker registers into (required by the server
+            since GH-388; empty keeps legacy callers compiling but the
+            server will reject the registration).
+        vendor : str, default=""
+            Which vendor's model the worker runs on (issue #737);
+            eligibility never offers a verify task to the claim
+            author's vendor.
+        principal : str, default="agent"
+            "agent" or "human" (issue #737); an approve task is
+            offered to and completable by a human principal only.
 
         Returns
         -------
@@ -499,6 +517,9 @@ class Inspector:
                 "name": name,
                 "role": role,
                 "skills": skills,
+                "project_id": project_id,
+                "vendor": vendor,
+                "principal": principal,
             },
         )
 
@@ -566,6 +587,7 @@ class Inspector:
         status: str,
         progress: int = 0,
         message: str = "",
+        evidence: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Test progress reporting workflow.
@@ -586,6 +608,11 @@ class Inspector:
             Completion percentage from 0 to 100, by default 0
         message : str, optional
             Descriptive message about progress, by default ""
+        evidence : Optional[Dict[str, Any]], optional
+            Typed evidence payload (issue #737). Required by the
+            server when completing a find, verify, or synthesize
+            task; also carries an approval decision. Omitted from the
+            call when None.
 
         Returns
         -------
@@ -623,15 +650,18 @@ class Inspector:
         if not self.session:
             raise RuntimeError("Not connected to Marcus")
 
+        arguments: Dict[str, Any] = {
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "status": status,
+            "progress": progress,
+            "message": message,
+        }
+        if evidence is not None:
+            arguments["evidence"] = evidence
         result = await self.session.call_tool(
             "report_task_progress",
-            arguments={
-                "agent_id": agent_id,
-                "task_id": task_id,
-                "status": status,
-                "progress": progress,
-                "message": message,
-            },
+            arguments=arguments,
         )
 
         text_content = _extract_text_from_result(result)

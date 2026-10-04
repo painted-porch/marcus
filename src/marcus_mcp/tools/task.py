@@ -18,7 +18,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from src.core.ai_powered_task_assignment import find_optimal_task_for_agent_ai_powered
-from src.core.models import Priority, RecoveryInfo, Task, TaskAssignment, TaskStatus
+from src.core.models import (
+    Priority,
+    RecoveryInfo,
+    Task,
+    TaskAssignment,
+    TaskStatus,
+    WorkerStatus,
+)
 
 # Issue #629: claimability rules live in src/core/task_claimability.py so
 # the availability filter here and the gridlock detector share one rule
@@ -631,6 +638,78 @@ async def _apply_typed_evidence_gate(
         _clear_smoke_attempts(task.id)
         return escalated
     return rejection
+
+
+APPROVE_TASK_TYPE = "approve"
+
+# Task types whose accepted evidence is written to the record (the
+# audit bundle reads it from the completed task's source_context).
+# Approve is recorded but not evidence-gated: the human's decision is
+# the approval; a payload is kept when provided.
+EVIDENCE_RECORDED_TASK_TYPES = EVIDENCE_REQUIRED_TASK_TYPES | {APPROVE_TASK_TYPE}
+
+
+def _apply_approval_gate(
+    task: Task, agent_id: str, state: Any
+) -> Optional[Dict[str, Any]]:
+    """Refuse an approve-task completion from anyone but a person.
+
+    Issue #737, step 5: an approve task closes only when
+    ``report_task_progress`` is called by a registered ``human``
+    principal. There is no new task status; dependents wait through
+    ordinary dependency resolution until the approval closes.
+    Eligibility already keeps approve tasks out of agents' hands at
+    offer time, so this gate is defense in depth at the close.
+
+    Parameters
+    ----------
+    task : Task
+        The task being completed.
+    agent_id : str
+        The caller reporting completion.
+    state : Any
+        Marcus server state; ``agent_status`` supplies the caller's
+        registered principal.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        None when the completion may proceed; otherwise the rejection
+        dict to return to the caller.
+    """
+    if task.task_type != APPROVE_TASK_TYPE:
+        return None
+
+    caller = getattr(state, "agent_status", {}).get(agent_id)
+    principal = caller.principal if isinstance(caller, WorkerStatus) else "unregistered"
+    if principal == "human":
+        return None
+
+    logger.info(
+        "[#737] Approval gate: refused completion of approve task %s by "
+        "%s (principal: %s).",
+        task.id,
+        agent_id,
+        principal,
+    )
+    return {
+        "success": False,
+        "status": "approval_rejected",
+        "error": "approval_requires_human",
+        "agent_id": agent_id,
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "blocker": (
+            "Marcus rejected this completion: an approve task can only be "
+            "completed by a human principal, and this caller is registered "
+            f"as {principal!r}. The approval waits for a person; dependent "
+            "tasks are held until it closes."
+        ),
+        "message": (
+            f"Completion rejected: approve task {task.id} requires a human "
+            f"principal; caller {agent_id} is {principal!r}."
+        ),
+    }
 
 
 async def _handoff_claim_to_dependents(
@@ -4740,6 +4819,15 @@ async def report_task_progress(
                 if typed_gate_response is not None:
                     return typed_gate_response
 
+            # APPROVAL GATE (issue #737, step 5). An approve task
+            # closes only for a registered human principal; everyone
+            # else is refused here even if eligibility was somehow
+            # bypassed at offer time.
+            if task is not None:
+                approval_response = _apply_approval_gate(task, agent_id, state)
+                if approval_response is not None:
+                    return approval_response
+
             if task:
                 task_labels = task.labels if hasattr(task, "labels") else None
                 # #557: a subtask's validate/skip decision uses its
@@ -4981,7 +5069,7 @@ async def report_task_progress(
             # a claim reaches a verifier.
             if (
                 task is not None
-                and task.task_type in EVIDENCE_REQUIRED_TASK_TYPES
+                and task.task_type in EVIDENCE_RECORDED_TASK_TYPES
                 and evidence
             ):
                 update_data["source_context"] = {"evidence": evidence}
