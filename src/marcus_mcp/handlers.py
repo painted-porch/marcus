@@ -41,7 +41,9 @@ from .tools.analytics import (  # Analytics tools
     get_task_metrics,
 )
 from .tools.audit_tools import (
+    EXPORT_CASE_TOOL,
     USAGE_REPORT_TOOL,
+    export_case,
     get_usage_report,
 )
 from .tools.auth import (
@@ -119,6 +121,7 @@ def get_all_tool_definitions() -> Dict[str, types.Tool]:
     all_tools["authenticate"] = AUTHENTICATE_TOOL
     all_tools["get_usage_report"] = USAGE_REPORT_TOOL
     all_tools["get_cost_summary"] = COST_SUMMARY_TOOL
+    all_tools["export_case"] = EXPORT_CASE_TOOL
 
     return all_tools
 
@@ -1425,6 +1428,13 @@ async def handle_tool_call(
         elif name == "get_usage_report":
             days = arguments.get("days", 7) if arguments else 7
             result = await get_usage_report(days=days, state=state)
+
+        elif name == "export_case":
+            case_id = arguments.get("case_id") if arguments else None
+            if not case_id:
+                result = {"error": "case_id is required"}
+            else:
+                result = await export_case(case_id=case_id, state=state)
 
         elif name == "get_cost_summary":
             args = arguments or {}

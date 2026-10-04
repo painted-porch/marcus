@@ -1485,6 +1485,20 @@ class MarcusServer:
             )
 
         @self._fastmcp.tool()  # type: ignore[misc]
+        async def export_case(case_id: str) -> Dict[str, Any]:
+            """Export one case's complete audit bundle (#737).
+
+            Operator-facing. Evidence in the bundle includes ``raw``,
+            so in multi-endpoint deployments this tool belongs on the
+            human endpoint only; the single-endpoint pilot exposes it
+            to every connected client, which the report states as a
+            limit alongside self-declared identity.
+            """
+            from .tools.audit_tools import export_case as impl
+
+            return await impl(case_id=case_id, state=server)
+
+        @self._fastmcp.tool()  # type: ignore[misc]
         async def get_task_context(task_id: str) -> Dict[str, Any]:
             """Get the full context for a specific task.
 
@@ -2156,6 +2170,19 @@ class MarcusServer:
                     days=7,
                     state=server,
                 )
+
+        if "export_case" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def export_case(case_id: str) -> Dict[str, Any]:
+                """Export one case's complete audit bundle (#737).
+
+                Human and analytics endpoints only: the bundle keeps
+                ``raw`` evidence, which agents must never see.
+                """
+                from .tools.audit_tools import export_case as impl
+
+                return await impl(case_id=case_id, state=server)
 
         # Experiment tracking tools
         if "start_experiment" in allowed_tools:

@@ -37,5 +37,8 @@ class TestCoreToolSurface:
             "request_next_task",
             "report_task_progress",
             "get_task_context",
+            # #737 step 8: the operator exports audit bundles over the
+            # same endpoint in single-endpoint deployments.
+            "export_case",
         ):
             assert required in tools, f"{required} missing from core surface"
