@@ -1485,6 +1485,20 @@ class MarcusServer:
             )
 
         @self._fastmcp.tool()  # type: ignore[misc]
+        async def get_task_context(task_id: str) -> Dict[str, Any]:
+            """Get the full context for a specific task.
+
+            Issue #737: on the core agent surface because a verify
+            worker reads the claim it must check through this tool
+            (the task's board-written ``inputs``, never the upstream
+            agent's raw output), and the worker instructions have
+            always told agents to call it before starting work.
+            """
+            from .tools.context import get_task_context as impl
+
+            return await impl(task_id=task_id, state=server)
+
+        @self._fastmcp.tool()  # type: ignore[misc]
         async def report_blocker(
             agent_id: str,
             task_id: str,
