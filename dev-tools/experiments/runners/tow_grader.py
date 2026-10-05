@@ -506,13 +506,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="tow_grader")
     parser.add_argument("--manifest", required=True, help="Runner manifest")
     parser.add_argument("--a-responses", default=None, help="Condition A JSONL")
-    parser.add_argument("--bundles", default=None, help="Condition B bundle dir")
     parser.add_argument(
-        "--b-engine", default="", help="Finder engine label for the B board"
+        "--bundles",
+        action="append",
+        default=[],
+        help="Condition B bundle dir; repeat once per finder-vendor board",
+    )
+    parser.add_argument(
+        "--b-engine",
+        action="append",
+        default=[],
+        help="Finder engine label; one per --bundles, same order",
     )
     parser.add_argument("--c-responses", default=None, help="Condition C JSONL")
     parser.add_argument(
-        "--usage-logs", nargs="*", default=[], help="Worker usage JSONLs (B costs)"
+        "--usage-log",
+        action="append",
+        default=[],
+        help="Finder usage JSONL; one per --bundles, same order",
     )
     parser.add_argument("--cache-dir", default=None, help="Shared fetch cache")
     parser.add_argument("--seed", type=int, default=737)
@@ -533,11 +544,13 @@ def main() -> None:
     records: List[AnswerRecord] = []
     if args.a_responses:
         records.extend(load_condition_a(Path(args.a_responses)))
-    if args.bundles:
-        b_records = load_condition_b(Path(args.bundles), engine=args.b_engine)
-        case_costs = load_usage_costs([Path(p) for p in args.usage_logs])
-        for record in b_records:
-            record.cost_usd = case_costs.get(record.case_id, record.cost_usd)
+    for index, bundles_dir in enumerate(args.bundles):
+        engine = args.b_engine[index] if index < len(args.b_engine) else ""
+        b_records = load_condition_b(Path(bundles_dir), engine=engine)
+        if index < len(args.usage_log):
+            case_costs = load_usage_costs([Path(args.usage_log[index])])
+            for record in b_records:
+                record.cost_usd = case_costs.get(record.case_id, record.cost_usd)
         records.extend(b_records)
     if args.c_responses:
         records.extend(load_condition_c(Path(args.c_responses)))

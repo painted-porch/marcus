@@ -34,7 +34,11 @@ for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
         sys.path.insert(0, entry)
 
 from runners.tow_engines import ENGINES, EngineAnswer  # noqa: E402
-from runners.tow_runner import QUERY_FORMAT, load_excerpts  # noqa: E402
+from runners.tow_runner import (  # noqa: E402
+    QUERY_FORMAT,
+    load_excerpts,
+    select_excerpts,
+)
 
 
 def build_a_row(case_id: str, engine_name: str, answer: EngineAnswer) -> Dict[str, Any]:
@@ -85,6 +89,14 @@ def main() -> None:
         action="store_true",
         help="Required: confirms the cost estimate was approved (#737 rule 5)",
     )
+    parser.add_argument(
+        "--stratify",
+        action="store_true",
+        help=(
+            "Select excerpts round-robin across publishers; MUST match "
+            "the selection the condition B boards were seeded with"
+        ),
+    )
     args = parser.parse_args()
 
     paid_engines = [e for e in args.engines if e != "fake"]
@@ -97,9 +109,7 @@ def main() -> None:
         )
         sys.exit(2)
 
-    excerpts = load_excerpts(args.dataset)
-    if args.limit:
-        excerpts = excerpts[: args.limit]
+    excerpts = select_excerpts(load_excerpts(args.dataset), args.limit, args.stratify)
 
     engines = {name: ENGINES[name]() for name in args.engines}
     out_path = Path(args.out)
