@@ -125,6 +125,113 @@ class TestSiteAndDates:
         assert date_within_tolerance(d, None) is None
 
 
+class TestCanonicalUrl:
+    """Test suite for the canonical-URL check (the pilot's gate-2 fix).
+
+    The 2026-10-05 pilot's only verified-but-wrong cases were
+    syndicated copies (Yahoo carrying the LA Times, KCUR carrying
+    Missouri Independent, CT Mirror carrying ProPublica): the excerpt
+    genuinely appears, but the page is a republication, not the
+    source. Most republished pages declare their original through
+    ``rel=canonical`` or ``og:url``; a canonical pointing off-domain
+    means the page verifies the content but not the attribution.
+    """
+
+    def test_reads_rel_canonical_link(self) -> None:
+        """The link tag is the primary signal."""
+        from runners.tow_checks import canonical_url_from_html
+
+        html = '<link rel="canonical" href="https://www.latimes.com/environment/story/2022-07-31/original"/>'
+        assert (
+            canonical_url_from_html(html, "https://www.yahoo.com/news/copy")
+            == "https://www.latimes.com/environment/story/2022-07-31/original"
+        )
+
+    def test_falls_back_to_og_url(self) -> None:
+        """og:url stands in when no link tag exists."""
+        from runners.tow_checks import canonical_url_from_html
+
+        html = '<meta property="og:url" content="https://missouriindependent.com/2024/04/29/original/"/>'
+        assert (
+            canonical_url_from_html(html, "https://www.kcur.org/copy")
+            == "https://missouriindependent.com/2024/04/29/original/"
+        )
+
+    def test_relative_canonical_resolves_against_the_page(self) -> None:
+        """A relative href is same-site by construction."""
+        from runners.tow_checks import canonical_url_from_html
+
+        html = '<link rel="canonical" href="/2024/12/11/metro/storm/"/>'
+        assert (
+            canonical_url_from_html(html, "https://www.bostonglobe.com/some/page")
+            == "https://www.bostonglobe.com/2024/12/11/metro/storm/"
+        )
+
+    def test_absent_canonical_is_empty(self) -> None:
+        """No declaration, no signal."""
+        from runners.tow_checks import canonical_url_from_html
+
+        assert canonical_url_from_html("<p>hello</p>", "https://x.org/a") == ""
+
+
+class TestSyndicationVerdict:
+    """Test suite for the verdict with the canonical check wired in."""
+
+    EXCERPT = "California banned the sale of kangaroo leather years ago"
+    SYNDICATED_PAGE = (
+        '<link rel="canonical" href="https://www.latimes.com/environment/story/2022-07-31/original"/>'
+        '<meta property="og:site_name" content="Yahoo News"/>'
+    )
+
+    def _claim(self) -> dict:
+        return {
+            "publisher": "Yahoo News",
+            "date": "",
+            "url": "https://www.yahoo.com/news/california-banned-kangaroo",
+        }
+
+    def test_offdomain_canonical_contradicts_despite_excerpt(self) -> None:
+        """A syndicated copy verifies the content, not the attribution."""
+        verdict, checks = decide_verdict(
+            _fetch(
+                html=self.SYNDICATED_PAGE,
+                text=f"intro {self.EXCERPT} outro",
+                final_url="https://www.yahoo.com/news/california-banned-kangaroo",
+            ),
+            self.EXCERPT,
+            self._claim(),
+        )
+
+        assert verdict == "contradicted"
+        assert checks["syndicated_copy"] is True
+        assert "latimes.com" in checks["canonical_url"]
+
+    def test_same_domain_canonical_still_verifies(self) -> None:
+        """A normal self-canonical page is untouched by the check."""
+        page = (
+            '<link rel="canonical" href="https://www.bostonglobe.com/2024/12/11/metro/storm/"/>'
+            '<meta property="og:site_name" content="The Boston Globe"/>'
+            '<meta property="article:published_time" content="2024-12-11T09:00:00-05:00"/>'
+        )
+        excerpt = "Some good news is that this storm"
+        verdict, checks = decide_verdict(
+            _fetch(
+                html=page,
+                text=f"intro {excerpt} outro",
+                final_url="https://www.bostonglobe.com/2024/12/11/metro/storm/",
+            ),
+            excerpt,
+            {
+                "publisher": "Boston Globe",
+                "date": "12/11/2024",
+                "url": "https://www.bostonglobe.com/2024/12/11/metro/storm/",
+            },
+        )
+
+        assert verdict == "verified"
+        assert checks["syndicated_copy"] is False
+
+
 class TestDomainMatch:
     """Test suite for the publisher-versus-domain check."""
 

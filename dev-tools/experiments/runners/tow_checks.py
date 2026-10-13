@@ -226,6 +226,65 @@ def _compact(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
+def canonical_url_from_html(html: str, page_url: str) -> str:
+    """Read the page's own declaration of where its original lives.
+
+    The gate-2 fix from the 2026-10-05 pilot: syndicated copies carry
+    the excerpt but are not the source, and most declare the original
+    through ``rel=canonical`` (primary) or ``og:url`` (fallback).
+
+    Parameters
+    ----------
+    html : str
+        Raw page HTML.
+    page_url : str
+        The fetched page's final URL, for resolving relative hrefs.
+
+    Returns
+    -------
+    str
+        The absolute canonical URL, or "" when the page declares none.
+    """
+    from urllib.parse import urljoin
+
+    link = re.search(
+        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
+    ) or re.search(
+        r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']canonical["\']',
+        html,
+        re.IGNORECASE,
+    )
+    if link:
+        return urljoin(page_url, link.group(1).strip())
+
+    og = re.search(
+        r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']',
+        html,
+        re.IGNORECASE,
+    ) or re.search(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:url["\']',
+        html,
+        re.IGNORECASE,
+    )
+    if og:
+        return urljoin(page_url, og.group(1).strip())
+    return ""
+
+
+def _registrable_label(url: str) -> str:
+    """Extract the main domain label for page-versus-canonical compare."""
+    host = urlsplit(url).netloc.lower()
+    labels = [p for p in host.split(".") if p and p != "www"]
+    # Drop the public suffix (com, org, co.uk's uk, etc.) by taking
+    # the label before the suffix; a two-label heuristic suffices for
+    # the news domains in this dataset.
+    if len(labels) >= 2:
+        return labels[-2]
+    return labels[0] if labels else ""
+
+
 def domain_matches_publisher(publisher: str, final_url: str, html: str) -> bool:
     """Check the claimed publisher against the page's identity.
 
@@ -311,6 +370,16 @@ def decide_verdict(
     found = excerpt_on_page(excerpt, fetch.text)
     checks["excerpt_found"] = found
 
+    # Gate-2 fix (pilot 2026-10-05): a page whose declared canonical
+    # lives on another domain is a syndicated copy; it verifies the
+    # content but not the attribution, so the claim is contradicted.
+    canonical = canonical_url_from_html(fetch.html, fetch.final_url)
+    checks["canonical_url"] = canonical
+    syndicated = bool(canonical) and (
+        _registrable_label(canonical) != _registrable_label(fetch.final_url)
+    )
+    checks["syndicated_copy"] = syndicated
+
     domain_ok = domain_matches_publisher(
         str(claim.get("publisher") or ""), fetch.final_url, fetch.html
     )
@@ -323,6 +392,8 @@ def decide_verdict(
     checks["page_date"] = declared_date.isoformat() if declared_date else None
 
     if not found:
+        return "contradicted", checks
+    if syndicated:
         return "contradicted", checks
     if not domain_ok:
         return "contradicted", checks
