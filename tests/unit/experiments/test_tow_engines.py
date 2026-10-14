@@ -341,15 +341,20 @@ class TestClaudeAdapter:
         # 5000 * $2/M + 300 * $10/M + 2 searches * $10/1k.
         assert answer.cost_usd == pytest.approx(0.01 + 0.003 + 0.02)
 
-    def test_search_results_stand_in_when_text_has_no_citation(self) -> None:
-        """Without text citations, search-result URLs are the fallback."""
+    def test_refusal_without_citations_stays_an_honest_decline(self) -> None:
+        """Search-result URLs are what the engine read, not claimed.
+
+        The live smoke showed Claude refusing honestly while the
+        search results still carried URLs; stamping one onto the
+        claim would score the refusal as a wrong answer.
+        """
         data = self._fixture()
         data["content"][2]["citations"] = []
-        data["content"][2]["text"] = "I could not find a labeled URL for this."
+        data["content"][2]["text"] = "I was unable to find this excerpt."
 
         answer = ClaudeEngine().parse_response(data)
 
-        assert answer.url == "https://www.cjr.org/tow_center/other-result.php"
+        assert answer.url == ""
 
     def test_search_error_object_is_skipped(self) -> None:
         """An errored search returns an object, not a list; no crash."""
@@ -364,7 +369,7 @@ class TestClaudeAdapter:
         assert answer.raw == "Search failed."
 
     def test_build_request_shape_and_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Messages endpoint, version header, web_search_20260209 tool."""
+        """Messages endpoint, version header, basic web_search tool."""
         monkeypatch.setenv("CLAUDE_API_KEY", "ck-test")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         request = ClaudeEngine().build_request("THE QUERY")
@@ -374,7 +379,7 @@ class TestClaudeAdapter:
         assert request.headers["anthropic-version"] == "2023-06-01"
         assert request.body["model"] == "claude-sonnet-5"
         assert request.body["tools"] == [
-            {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
         ]
         assert request.body["messages"] == [{"role": "user", "content": "THE QUERY"}]
         assert request.body["max_tokens"] > 0

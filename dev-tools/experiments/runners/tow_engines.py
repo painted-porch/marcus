@@ -495,6 +495,9 @@ class ClaudeEngine(BaseEngine):
     env_key = "CLAUDE_API_KEY"
     fallback_env_key = "ANTHROPIC_API_KEY"
     default_model = "claude-sonnet-5"
+    # Sonnet 5 thinks adaptively before answering; the live smoke
+    # outran the shared 90s default, so this adapter waits longer.
+    timeout = 300.0
 
     # Marcus's configured planner model family; see config_marcus.json.
     MARCUS_MODEL_PREFIX = "claude-haiku-4-5"
@@ -531,11 +534,18 @@ class ClaudeEngine(BaseEngine):
             },
             body={
                 "model": self.model,
-                "max_tokens": 2048,
+                # Adaptive thinking tokens count against max_tokens;
+                # headroom keeps a thinking-heavy call from truncating
+                # the answer and unfairly blanking Claude's claim.
+                "max_tokens": 8192,
                 "messages": [{"role": "user", "content": query}],
+                # The 20260209 variant (dynamic filtering) stalled
+                # past 240s on buffered requests in the live smoke;
+                # the basic variant answers in seconds and matches
+                # the other engines' plain-search semantics.
                 "tools": [
                     {
-                        "type": "web_search_20260209",
+                        "type": "web_search_20250305",
                         "name": "web_search",
                         "max_uses": 3,
                     }
@@ -546,28 +556,23 @@ class ClaudeEngine(BaseEngine):
     def parse_response(self, data: Dict[str, Any]) -> EngineAnswer:
         """Parse text blocks, citation URLs, and the per-search fee.
 
-        Citations attached to the answer's text blocks are the
-        engine's own attribution and come first; bare search-result
-        URLs are a weaker fallback. An errored search returns an
-        object where results would be a list, so the list guard
-        skips it.
+        Only citations attached to the answer's text blocks count as
+        the engine's attribution. Bare search-result URLs are what
+        the engine READ, not what it CLAIMED; the live smoke showed
+        that treating them as a fallback stamps a URL onto an honest
+        refusal and turns Claude's declines into scored wrong
+        answers, biasing the condition against the engine.
         """
         texts: List[str] = []
         citations: List[str] = []
-        result_urls: List[str] = []
         for block in data.get("content") or []:
-            if block.get("type") == "text":
-                if block.get("text"):
-                    texts.append(block["text"])
-                for citation in block.get("citations") or []:
-                    if citation.get("url"):
-                        citations.append(citation["url"])
-            elif block.get("type") == "web_search_tool_result":
-                results = block.get("content")
-                if isinstance(results, list):
-                    result_urls.extend(
-                        r.get("url", "") for r in results if r.get("url")
-                    )
+            if block.get("type") != "text":
+                continue
+            if block.get("text"):
+                texts.append(block["text"])
+            for citation in block.get("citations") or []:
+                if citation.get("url"):
+                    citations.append(citation["url"])
         content = "\n".join(texts)
         usage = data.get("usage") or {}
         prompt_tokens = int(usage.get("input_tokens") or 0)
@@ -575,7 +580,7 @@ class ClaudeEngine(BaseEngine):
         searches = int(
             (usage.get("server_tool_use") or {}).get("web_search_requests") or 0
         )
-        claim = extract_claim_fields(content, citations or result_urls)
+        claim = extract_claim_fields(content, citations)
         return EngineAnswer(
             **claim,
             raw=content,
