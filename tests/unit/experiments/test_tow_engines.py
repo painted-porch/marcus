@@ -17,6 +17,7 @@ import pytest
 from runners.tow_engines import (
     ENGINES,
     ClaudeEngine,
+    ClaudeHaikuEngine,
     FakeEngine,
     GeminiEngine,
     GrokEngine,
@@ -395,9 +396,39 @@ class TestClaudeAdapter:
         assert request.headers["x-api-key"] == "ak-test"
 
     def test_refuses_marcus_planner_model(self) -> None:
-        """The engine under test must never be Marcus's own model."""
+        """The sonnet engine must never silently run Marcus's model."""
         with pytest.raises(ValueError, match="claude-haiku-4-5"):
             ClaudeEngine(model="claude-haiku-4-5-20251001")
+
+
+class TestClaudeHaikuAdapter:
+    """Test suite for the tier-matched Haiku engine.
+
+    The user's 2026-10-14 decision added Haiku 4.5 as the arm whose
+    price tier matches the other tested engines (gpt-4o-mini, Gemini
+    Flash, Sonar). Haiku is also the model Marcus's planner is
+    configured with, so this entry is an explicit, documented
+    exception to the sonnet adapter's guard; it is only defensible
+    because the pilot boards run with Marcus's AI fully disabled
+    (zero coordinator model calls).
+    """
+
+    def test_default_model_is_haiku_and_permitted(self) -> None:
+        """The explicit haiku entry constructs without the guard."""
+        engine = ClaudeHaikuEngine()
+
+        assert engine.model == "claude-haiku-4-5"
+        assert engine.name == "claude-haiku"
+
+    def test_build_request_carries_haiku_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The request body names the haiku model."""
+        monkeypatch.setenv("CLAUDE_API_KEY", "ck-test")
+        request = ClaudeHaikuEngine().build_request("THE QUERY")
+
+        assert request.body["model"] == "claude-haiku-4-5"
+        assert request.url == "https://api.anthropic.com/v1/messages"
 
 
 class TestFakeEngine:
@@ -432,5 +463,6 @@ class TestFakeEngine:
             "gemini",
             "grok",
             "claude",
+            "claude-haiku",
             "fake",
         }

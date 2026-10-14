@@ -37,6 +37,7 @@ _PRICES = {
     "gemini": (0.10, 0.40),
     "grok": (2.0, 10.0),
     "claude": (2.0, 10.0),
+    "claude-haiku": (1.0, 5.0),
     "fake": (0.0, 0.0),
 }
 
@@ -502,10 +503,15 @@ class ClaudeEngine(BaseEngine):
     # Marcus's configured planner model family; see config_marcus.json.
     MARCUS_MODEL_PREFIX = "claude-haiku-4-5"
     SEARCH_FEE_USD = 10.0 / 1000.0
+    # Only the explicit claude-haiku registry entry may run Marcus's
+    # model family; see ClaudeHaikuEngine for the rationale.
+    allow_marcus_model = False
 
     def __init__(self, model: Optional[str] = None) -> None:
         super().__init__(model)
-        if self.model.startswith(self.MARCUS_MODEL_PREFIX):
+        if not self.allow_marcus_model and self.model.startswith(
+            self.MARCUS_MODEL_PREFIX
+        ):
             raise ValueError(
                 f"model {self.model!r} is Marcus's own planner model "
                 f"({self.MARCUS_MODEL_PREFIX}); the tested engine must "
@@ -592,6 +598,26 @@ class ClaudeEngine(BaseEngine):
         )
 
 
+class ClaudeHaikuEngine(ClaudeEngine):
+    """Haiku 4.5: the price-tier match for the other tested engines.
+
+    The user's 2026-10-14 decision added this arm after the sonnet
+    run showed a tier mismatch: the other engines are budget-tier
+    (gpt-4o-mini, Gemini Flash, Sonar) and Anthropic's nearest price
+    point is Haiku 4.5. Haiku is also the model Marcus's planner is
+    configured with, so this entry deliberately bypasses the sonnet
+    adapter's guard. That is defensible only because the pilot
+    boards run with Marcus's AI fully disabled (``ai.enabled``
+    false, keys stripped from the server environment), so the
+    coordinator makes zero model calls and no runtime overlap
+    exists; the report must state this.
+    """
+
+    name = "claude-haiku"
+    default_model = "claude-haiku-4-5"
+    allow_marcus_model = True
+
+
 _DEFAULT_FAKE_CLAIM = {
     "headline": "A Made Up Headline About A Storm",
     "publisher": "Example News",
@@ -652,5 +678,6 @@ ENGINES: Dict[str, Type[BaseEngine]] = {
     "gemini": GeminiEngine,
     "grok": GrokEngine,
     "claude": ClaudeEngine,
+    "claude-haiku": ClaudeHaikuEngine,
     "fake": FakeEngine,
 }
