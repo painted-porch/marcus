@@ -2,7 +2,8 @@
 
 One adapter per API-reachable engine from the protocol (Perplexity,
 OpenAI with web search, Gemini with search grounding, Grok with
-search), plus a fake engine for free end-to-end shakeouts.
+search, Claude with the web_search server tool), plus a fake engine
+for free end-to-end shakeouts.
 Each adapter is a pure pair: ``build_request`` produces the HTTP
 request, ``parse_response`` turns the provider's JSON into an
 ``EngineAnswer``. The network send is one thin method that unit
@@ -35,6 +36,7 @@ _PRICES = {
     "openai": (0.15, 0.60),
     "gemini": (0.10, 0.40),
     "grok": (2.0, 10.0),
+    "claude": (2.0, 10.0),
     "fake": (0.0, 0.0),
 }
 
@@ -474,6 +476,117 @@ class GrokEngine(BaseEngine):
         )
 
 
+class ClaudeEngine(BaseEngine):
+    """Anthropic Messages API with the web_search server tool.
+
+    Claude joins the tested engines on the user's instruction, with
+    one preregistered constraint the constructor enforces: the model
+    under test must differ from the model Marcus's own planner is
+    configured with (claude-haiku-4-5 in ``config_marcus.json``), so
+    the record-keeping condition can never be confounded with the
+    coordinator testing its own vendor's model variant.
+
+    Web search is billed per request ($10 per thousand) on top of
+    tokens, so the cost estimate adds the search fee from
+    ``usage.server_tool_use.web_search_requests``.
+    """
+
+    name = "claude"
+    env_key = "CLAUDE_API_KEY"
+    fallback_env_key = "ANTHROPIC_API_KEY"
+    default_model = "claude-sonnet-5"
+
+    # Marcus's configured planner model family; see config_marcus.json.
+    MARCUS_MODEL_PREFIX = "claude-haiku-4-5"
+    SEARCH_FEE_USD = 10.0 / 1000.0
+
+    def __init__(self, model: Optional[str] = None) -> None:
+        super().__init__(model)
+        if self.model.startswith(self.MARCUS_MODEL_PREFIX):
+            raise ValueError(
+                f"model {self.model!r} is Marcus's own planner model "
+                f"({self.MARCUS_MODEL_PREFIX}); the tested engine must "
+                "use a different model (#737 constraint)."
+            )
+
+    def _api_key(self) -> str:
+        key = os.environ.get(self.env_key, "") or os.environ.get(
+            self.fallback_env_key, ""
+        )
+        if not key:
+            raise RuntimeError(
+                f"Neither {self.env_key} nor {self.fallback_env_key} is "
+                f"set; the {self.name} adapter cannot make live calls "
+                "(and should not outside the approved pilot)."
+            )
+        return key
+
+    def build_request(self, query: str) -> EngineRequest:
+        """Build the Messages API request with server-side web search."""
+        return EngineRequest(
+            url="https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": self._api_key(),
+                "anthropic-version": "2023-06-01",
+            },
+            body={
+                "model": self.model,
+                "max_tokens": 2048,
+                "messages": [{"role": "user", "content": query}],
+                "tools": [
+                    {
+                        "type": "web_search_20260209",
+                        "name": "web_search",
+                        "max_uses": 3,
+                    }
+                ],
+            },
+        )
+
+    def parse_response(self, data: Dict[str, Any]) -> EngineAnswer:
+        """Parse text blocks, citation URLs, and the per-search fee.
+
+        Citations attached to the answer's text blocks are the
+        engine's own attribution and come first; bare search-result
+        URLs are a weaker fallback. An errored search returns an
+        object where results would be a list, so the list guard
+        skips it.
+        """
+        texts: List[str] = []
+        citations: List[str] = []
+        result_urls: List[str] = []
+        for block in data.get("content") or []:
+            if block.get("type") == "text":
+                if block.get("text"):
+                    texts.append(block["text"])
+                for citation in block.get("citations") or []:
+                    if citation.get("url"):
+                        citations.append(citation["url"])
+            elif block.get("type") == "web_search_tool_result":
+                results = block.get("content")
+                if isinstance(results, list):
+                    result_urls.extend(
+                        r.get("url", "") for r in results if r.get("url")
+                    )
+        content = "\n".join(texts)
+        usage = data.get("usage") or {}
+        prompt_tokens = int(usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("output_tokens") or 0)
+        searches = int(
+            (usage.get("server_tool_use") or {}).get("web_search_requests") or 0
+        )
+        claim = extract_claim_fields(content, citations or result_urls)
+        return EngineAnswer(
+            **claim,
+            raw=content,
+            model=str(data.get("model") or self.model),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=self._cost(prompt_tokens, completion_tokens)
+            + searches * self.SEARCH_FEE_USD,
+        )
+
+
 _DEFAULT_FAKE_CLAIM = {
     "headline": "A Made Up Headline About A Storm",
     "publisher": "Example News",
@@ -533,5 +646,6 @@ ENGINES: Dict[str, Type[BaseEngine]] = {
     "openai": OpenAIEngine,
     "gemini": GeminiEngine,
     "grok": GrokEngine,
+    "claude": ClaudeEngine,
     "fake": FakeEngine,
 }

@@ -16,6 +16,7 @@ from typing import Any, Dict
 import pytest
 from runners.tow_engines import (
     ENGINES,
+    ClaudeEngine,
     FakeEngine,
     GeminiEngine,
     GrokEngine,
@@ -273,6 +274,127 @@ class TestGrokAdapter:
         assert request.body["tools"] == [{"type": "web_search"}]
 
 
+class TestClaudeAdapter:
+    """Test suite for the Anthropic Messages API adapter.
+
+    Claude joins the tested engines at the user's request. The model
+    must differ from the one Marcus's own planner is configured with
+    (claude-haiku-4-5), so condition results can never be confounded
+    with the coordinator's internals; the adapter enforces that
+    constraint instead of leaving it to convention. Web search is a
+    server tool: the response interleaves server_tool_use and
+    web_search_tool_result blocks with text blocks whose citations
+    carry the URLs, and usage reports search counts separately
+    because searches are billed per request, not per token.
+    """
+
+    def _fixture(self) -> Dict[str, Any]:
+        return {
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_1",
+                    "name": "web_search",
+                    "input": {"query": "who published this excerpt"},
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_1",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://www.cjr.org/tow_center/other-result.php",
+                            "title": "Another result",
+                        }
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": LABELED_ANSWER,
+                    "citations": [
+                        {
+                            "type": "web_search_result_location",
+                            "url": "https://www.cjr.org/tow_center/example.php",
+                            "title": "AI Search Has a Citation Problem",
+                            "cited_text": "a cited sentence",
+                        }
+                    ],
+                },
+            ],
+            "usage": {
+                "input_tokens": 5000,
+                "output_tokens": 300,
+                "server_tool_use": {"web_search_requests": 2},
+            },
+            "model": "claude-sonnet-5",
+            "stop_reason": "end_turn",
+        }
+
+    def test_parse_response(self) -> None:
+        """Text blocks, citation URLs, tokens, and the search fee land."""
+        answer = ClaudeEngine().parse_response(self._fixture())
+
+        assert answer.headline == "AI Search Has a Citation Problem"
+        assert answer.url == "https://www.cjr.org/tow_center/example.php"
+        assert answer.prompt_tokens == 5000
+        assert answer.completion_tokens == 300
+        # 5000 * $2/M + 300 * $10/M + 2 searches * $10/1k.
+        assert answer.cost_usd == pytest.approx(0.01 + 0.003 + 0.02)
+
+    def test_search_results_stand_in_when_text_has_no_citation(self) -> None:
+        """Without text citations, search-result URLs are the fallback."""
+        data = self._fixture()
+        data["content"][2]["citations"] = []
+        data["content"][2]["text"] = "I could not find a labeled URL for this."
+
+        answer = ClaudeEngine().parse_response(data)
+
+        assert answer.url == "https://www.cjr.org/tow_center/other-result.php"
+
+    def test_search_error_object_is_skipped(self) -> None:
+        """An errored search returns an object, not a list; no crash."""
+        data = self._fixture()
+        data["content"][1]["content"] = {"error_code": "max_uses_exceeded"}
+        data["content"][2]["citations"] = []
+        data["content"][2]["text"] = "Search failed."
+
+        answer = ClaudeEngine().parse_response(data)
+
+        assert answer.url == ""
+        assert answer.raw == "Search failed."
+
+    def test_build_request_shape_and_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Messages endpoint, version header, web_search_20260209 tool."""
+        monkeypatch.setenv("CLAUDE_API_KEY", "ck-test")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        request = ClaudeEngine().build_request("THE QUERY")
+
+        assert request.url == "https://api.anthropic.com/v1/messages"
+        assert request.headers["x-api-key"] == "ck-test"
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        assert request.body["model"] == "claude-sonnet-5"
+        assert request.body["tools"] == [
+            {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
+        ]
+        assert request.body["messages"] == [{"role": "user", "content": "THE QUERY"}]
+        assert request.body["max_tokens"] > 0
+
+    def test_anthropic_key_is_the_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ANTHROPIC_API_KEY works when CLAUDE_API_KEY is absent."""
+        monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "ak-test")
+        request = ClaudeEngine().build_request("THE QUERY")
+
+        assert request.headers["x-api-key"] == "ak-test"
+
+    def test_refuses_marcus_planner_model(self) -> None:
+        """The engine under test must never be Marcus's own model."""
+        with pytest.raises(ValueError, match="claude-haiku-4-5"):
+            ClaudeEngine(model="claude-haiku-4-5-20251001")
+
+
 class TestFakeEngine:
     """Test suite for the free shakeout engine."""
 
@@ -299,4 +421,11 @@ class TestFakeEngine:
 
     def test_registry_names_all_engines(self) -> None:
         """The registry is the single source of engine names."""
-        assert set(ENGINES) == {"perplexity", "openai", "gemini", "grok", "fake"}
+        assert set(ENGINES) == {
+            "perplexity",
+            "openai",
+            "gemini",
+            "grok",
+            "claude",
+            "fake",
+        }

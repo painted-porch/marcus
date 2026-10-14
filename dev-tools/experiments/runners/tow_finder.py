@@ -54,7 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vendor",
         required=True,
-        help="Declared vendor (perplexity, openai, google, xai, fakevendor)",
+        help=(
+            "Declared vendor (perplexity, openai, google, xai, "
+            "anthropic, fakevendor)"
+        ),
     )
     parser.add_argument(
         "--engine",
