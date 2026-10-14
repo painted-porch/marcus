@@ -54,6 +54,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.core.project_registry import (  # noqa: E402
+    ProjectConfig,
+    ProjectRegistry,
+)
 from src.integrations.providers.sqlite_kanban import SQLiteKanban  # noqa: E402
 
 # The study's query, verbatim from the Tow Center README, so the
@@ -435,6 +439,65 @@ async def seed_cases(
     return manifest
 
 
+async def register_board(
+    project_id: str, db_path: str, registry: "ProjectRegistry | None" = None
+) -> str:
+    """Register a seeded board in Marcus's project registry.
+
+    Seeding writes tasks straight into the SQLite board, which
+    bypasses ``create_project``, the normal path that introduces a
+    project to Marcus (``ProjectRegistry.add_project``). Without this
+    step the registry, and every consumer of it such as the Cato
+    dashboard's project list, never learns the board exists, and a
+    server in ``single_project_mode`` stays bound to whatever project
+    was already active. Registration is idempotent on the pair of
+    project name and absolute db path, so re-seeding never duplicates
+    an entry, and ``add_project`` only claims the active slot when no
+    project was active before, so registering never disturbs a
+    running server.
+
+    Parameters
+    ----------
+    project_id : str
+        The board's project id, which seeding also uses as the kanban
+        project name (e.g. ``tow-b-claude``).
+    db_path : str
+        SQLite board file; stored absolute so the entry stays valid
+        from any working directory.
+    registry : ProjectRegistry | None
+        Injected in tests; defaults to Marcus's file-backed registry
+        under the package root.
+
+    Returns
+    -------
+    str
+        The registry project id (the existing one when the board was
+        already registered).
+    """
+    absolute = str(Path(db_path).resolve())
+    registry = registry or ProjectRegistry()
+    await registry.initialize()
+
+    for existing in await registry.list_projects(provider="sqlite"):
+        cfg = existing.provider_config
+        if cfg.get("project_name") == project_id and cfg.get("db_path") == absolute:
+            return existing.id
+
+    config = ProjectConfig(
+        id="",
+        name=f"{project_id} - Main Board",
+        provider="sqlite",
+        provider_config={
+            "db_path": absolute,
+            "project_name": project_id,
+            "attachments_dir": str(Path(absolute).parent / "attachments"),
+            "project_id": project_id,
+        },
+        tags=["auto-created", "sqlite", "tow-experiment"],
+    )
+    return await registry.add_project(config)
+
+
 def main() -> None:
     """Parse arguments and seed the cases."""
     parser = argparse.ArgumentParser(prog="tow_runner")
@@ -478,6 +541,15 @@ def main() -> None:
             "first-N, so every publisher's crawler posture is represented"
         ),
     )
+    parser.add_argument(
+        "--no-register",
+        action="store_true",
+        help=(
+            "Skip registering the board in Marcus's project registry "
+            "(registration is the default so the board shows up in "
+            "registry consumers such as Cato)"
+        ),
+    )
     args = parser.parse_args()
 
     manifest = asyncio.run(
@@ -498,6 +570,12 @@ def main() -> None:
         f"Seeded {total} cases ({approvals} with human approval) into "
         f"{args.db} as project {args.project}; manifest at {args.manifest}"
     )
+    if not args.no_register:
+        registry_id = asyncio.run(register_board(args.project, args.db))
+        print(
+            f"Registered {args.project} in Marcus's project registry "
+            f"as {registry_id}"
+        )
 
 
 if __name__ == "__main__":

@@ -340,3 +340,57 @@ class TestSeeding:
         assert truth["source_url"] == "https://example-1.org/article"
         assert truth["publication"] == "Publisher 1"
         assert truth["date"] == "1/1/2024"
+
+
+class TestRegisterBoard:
+    """Test suite for registering seeded boards with Marcus.
+
+    Seeding writes tasks straight into the SQLite board, bypassing
+    create_project, the normal path that introduces a project to
+    Marcus's ProjectRegistry. Consumers of the registry (the Cato
+    dashboard's project list, single_project_mode's binding) never
+    learn a bypassed board exists, so the runner registers each board
+    it seeds, idempotently, under the board's real name.
+    """
+
+    @pytest.fixture
+    def registry(self, tmp_path: Path) -> Any:
+        """Create a file-backed registry in a temporary directory."""
+        from src.core.persistence import FilePersistence, Persistence
+        from src.core.project_registry import ProjectRegistry
+
+        backend = FilePersistence(storage_dir=tmp_path / "state")
+        return ProjectRegistry(persistence=Persistence(backend=backend))
+
+    @pytest.mark.asyncio
+    async def test_registers_board_under_its_real_name(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """The entry carries the board's name and absolute db path."""
+        db = tmp_path / "kanban-claude.db"
+
+        project_id = await tow_runner.register_board(
+            "tow-b-claude", str(db), registry=registry
+        )
+
+        stored = await registry.get_project(project_id)
+        assert stored is not None
+        assert stored.name == "tow-b-claude - Main Board"
+        assert stored.provider == "sqlite"
+        assert stored.provider_config["project_name"] == "tow-b-claude"
+        assert Path(stored.provider_config["db_path"]).is_absolute()
+        assert "auto-created" in stored.tags
+        assert "sqlite" in stored.tags
+
+    @pytest.mark.asyncio
+    async def test_registration_is_idempotent(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """Re-seeding the same board never duplicates the entry."""
+        db = str(tmp_path / "kanban-claude.db")
+
+        first = await tow_runner.register_board("tow-b-claude", db, registry=registry)
+        second = await tow_runner.register_board("tow-b-claude", db, registry=registry)
+
+        assert first == second
+        assert len(await registry.list_projects(provider="sqlite")) == 1
