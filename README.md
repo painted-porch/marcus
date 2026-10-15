@@ -115,6 +115,26 @@ See [Architecture Docs](https://marcus-ai.dev) for deep dives.
 
 ---
 
+## On the Record: the citation experiment
+
+In 2025, Columbia Journalism Review's Tow Center showed that AI search engines fabricate citations ("AI Search Has a Citation Problem").
+We re-ran their protocol live in October 2026 and added the thing their study did not have: the same engines working through Marcus, where an answer is not accepted without evidence, no claim is checked by its author (or the author's model vendor), and only humans approve.
+The experiment was preregistered: the pass/fail gates were committed before any data existed, the first pilot failed one publicly, and the named fix passed the re-run.
+
+| Engine | Wrong among delivered answers, alone | Wrong, through Marcus | Fabricated links, alone → through Marcus |
+|---|---|---|---|
+| OpenAI gpt-4o-mini | 87.2% | 0.0% | 70.2% → 0% |
+| Perplexity Sonar | 47.6% | 6.7% | 28.6% → 0% |
+| Claude Sonnet 5 | 50.0% | 6.7% | 37.5% → 0% |
+| Claude Haiku 4.5 | 48.8% | 10.0% | 24.4% → 0% |
+
+The engines did not get smarter; the caught lies arrived as labeled declines with fetch receipts instead of as answers, at 1.42x cost in fractions of a cent per answer.
+Those are the preregistered 50-question pilot numbers; a full 200-question run is completing and its readout will supersede this table if the numbers move.
+The dated, numbers-only readouts live in [docs/design/research/](docs/design/research/), the reproduction guide is [docs/design/research/REPRODUCING.md](docs/design/research/REPRODUCING.md), and the redacted audit bundles ship with the `on-the-record-v1` release.
+The dataset itself never enters this repository: the Tow Center distributes its excerpts encrypted to keep them out of AI training crawlers, and we honor that.
+
+---
+
 ## What Marcus does
 
 The board-mediated model gives you four properties that conversation-based
