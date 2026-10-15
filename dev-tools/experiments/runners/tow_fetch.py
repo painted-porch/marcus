@@ -18,7 +18,9 @@ Three rules:
 """
 
 import hashlib
+import ipaddress
 import json
+import socket
 import urllib.error
 import urllib.request
 import urllib.robotparser
@@ -143,13 +145,61 @@ class FetchCache:
         opener: Optional[Callable[..., Any]] = None,
         timeout: float = DEFAULT_TIMEOUT,
         user_agent: str = USER_AGENT,
+        resolver: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.opener = opener or urllib.request.urlopen
         self.timeout = timeout
         self.user_agent = user_agent
+        self.resolver = resolver or socket.getaddrinfo
         self._robots: Dict[str, urllib.robotparser.RobotFileParser] = {}
+
+    def _address_block_reason(self, url: str) -> Optional[str]:
+        """Refuse untrusted URLs before any connection is made.
+
+        Claimed URLs originate in model output (Codex P1 on PR #739):
+        without this guard a claim of ``file:///etc/passwd``, a
+        loopback service, or the cloud metadata address makes the
+        verifier fetch it. Non-http(s) schemes and hosts resolving to
+        private, loopback, link-local, or reserved addresses are
+        refused; an unresolvable host is left to fail in the fetch
+        itself so DNS errors stay ordinary results.
+
+        Parameters
+        ----------
+        url : str
+            The URL under consideration.
+
+        Returns
+        -------
+        Optional[str]
+            A block reason, or None when fetching may proceed.
+        """
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            return f"blocked: scheme {parts.scheme!r} is not http(s)"
+        host = parts.hostname
+        if not host:
+            return "blocked: no host"
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                infos = self.resolver(host, parts.port or 0)
+                addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
+            except Exception:  # noqa: BLE001 - DNS failure is a fetch error
+                return None
+        bad = any(
+            a.is_private
+            or a.is_loopback
+            or a.is_link_local
+            or a.is_reserved
+            or a.is_multicast
+            or a.is_unspecified
+            for a in addresses
+        )
+        return "blocked: private or local address" if bad else None
 
     def fetch(self, url: str) -> FetchResult:
         """Fetch one URL, replaying from the cache when possible.
@@ -182,6 +232,18 @@ class FetchCache:
 
     def _fetch_fresh(self, url: str) -> FetchResult:
         now = datetime.now(timezone.utc).isoformat()
+        block = self._address_block_reason(url)
+        if block:
+            return FetchResult(
+                url=url,
+                final_url=url,
+                status=None,
+                html="",
+                text="",
+                robots_blocked=False,
+                error=block,
+                fetched_at=now,
+            )
         if not self._robots_allowed(url):
             return FetchResult(
                 url=url,
@@ -199,9 +261,39 @@ class FetchCache:
             with self.opener(request, timeout=self.timeout) as response:
                 body = response.read(MAX_BYTES)
                 html = body.decode("utf-8", errors="replace")
+                final_url = response.geturl()
+                # Cross-origin redirect (Codex P2 on PR #739): urllib
+                # followed it before we could look, so re-check the
+                # landing origin's address and robots policy after the
+                # fact and discard the body when either refuses. One
+                # transfer has happened; nothing of it is kept or used.
+                if urlsplit(final_url).netloc != urlsplit(url).netloc:
+                    landing_block = self._address_block_reason(final_url)
+                    if landing_block:
+                        return FetchResult(
+                            url=url,
+                            final_url=final_url,
+                            status=None,
+                            html="",
+                            text="",
+                            robots_blocked=False,
+                            error=landing_block + " (after redirect)",
+                            fetched_at=now,
+                        )
+                    if not self._robots_allowed(final_url):
+                        return FetchResult(
+                            url=url,
+                            final_url=final_url,
+                            status=None,
+                            html="",
+                            text="",
+                            robots_blocked=True,
+                            error="",
+                            fetched_at=now,
+                        )
                 return FetchResult(
                     url=url,
-                    final_url=response.geturl(),
+                    final_url=final_url,
                     status=getattr(response, "status", 200),
                     html=html,
                     text=html_to_text(html),

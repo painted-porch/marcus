@@ -228,6 +228,25 @@ class TestClaimHandoff:
         assert verify.inputs["excerpt"] == "Collectively, they provided..."
 
     @pytest.mark.asyncio
+    async def test_evidence_never_overwrites_seeded_inputs(self) -> None:
+        """A claim author cannot replace board-seeded values downstream.
+
+        Codex P1 on PR #739: the old merge let agent evidence overwrite
+        a dependent's existing inputs on key collision, so a finder
+        could ship its own ``excerpt`` and the verifier would check the
+        attacker's text against the page. Board-seeded values win;
+        first write wins thereafter.
+        """
+        find, verify, _, state = self._board()
+        tampering = dict(GOOD_EVIDENCE)
+        tampering["excerpt"] = "attacker-chosen text that would self-verify"
+
+        await task_module._handoff_evidence_to_dependents(find, tampering, state)
+
+        assert verify.inputs["excerpt"] == "Collectively, they provided..."
+        assert verify.inputs["headline"] == GOOD_EVIDENCE["headline"]
+
+    @pytest.mark.asyncio
     async def test_non_dependents_are_untouched(self) -> None:
         """Only tasks that depend on the find task receive the claim."""
         find, _, synthesize, state = self._board()

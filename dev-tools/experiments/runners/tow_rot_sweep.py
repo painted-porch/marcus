@@ -114,19 +114,26 @@ def summarize(classes: List[str]) -> Dict[str, Any]:
 
 def main() -> None:
     """Sweep the pilot's ground-truth URLs and write the baseline."""
-    from runners.tow_runner import load_excerpts
+    from runners.tow_runner import load_excerpts, select_excerpts
 
     parser = argparse.ArgumentParser(prog="tow_rot_sweep")
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument(
+        "--stratify",
+        action="store_true",
+        help=(
+            "Select excerpts round-robin across publishers; MUST match "
+            "the selection the experiment run uses, or a limited sweep "
+            "measures the first publishers only (Codex P1 on PR #739)"
+        ),
+    )
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--out", required=True, help="Summary JSON path")
     parser.add_argument("--details", default=None, help="Per-URL JSONL path (optional)")
     args = parser.parse_args()
 
-    excerpts = load_excerpts(args.dataset)
-    if args.limit:
-        excerpts = excerpts[: args.limit]
+    excerpts = select_excerpts(load_excerpts(args.dataset), args.limit, args.stratify)
 
     cache = FetchCache(cache_dir=args.cache_dir)
     classes: List[str] = []

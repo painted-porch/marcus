@@ -179,3 +179,97 @@ class TestHtmlToText:
         assert "storm" in text
         assert "ignore me" not in text
         assert "<p>" not in text
+
+
+def _public_resolver(host: str, port: int = 0, **kwargs: Any) -> List[Any]:
+    """Resolve every hostname to a public address, no network."""
+    return [(None, None, None, "", ("93.184.216.34", port))]
+
+
+class TestAddressGuard:
+    """Test suite for the untrusted-URL guard (Codex P1 on PR #739).
+
+    Claimed URLs originate in model output. Without a guard, a claim
+    of file:///etc/passwd, a loopback service, or the cloud metadata
+    address 169.254.169.254 would make the verifier fetch it.
+    """
+
+    def test_non_http_scheme_is_blocked_without_network(self, tmp_path: Path) -> None:
+        """file:// and friends never reach the opener."""
+        opener = FakeOpener({})
+        cache = FetchCache(
+            cache_dir=str(tmp_path / "c"), opener=opener, resolver=_public_resolver
+        )
+
+        result = cache.fetch("file:///etc/passwd")
+
+        assert result.status is None
+        assert "scheme" in result.error
+        assert opener.calls == []
+
+    def test_private_loopback_and_linklocal_ips_are_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        """Literal internal addresses are refused before any connection."""
+        opener = FakeOpener({})
+        cache = FetchCache(
+            cache_dir=str(tmp_path / "c"), opener=opener, resolver=_public_resolver
+        )
+
+        for url in (
+            "http://127.0.0.1/x",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.8/x",
+        ):
+            result = cache.fetch(url)
+            assert "private or local address" in result.error
+        assert opener.calls == []
+
+    def test_hostname_resolving_to_private_address_is_blocked(
+        self, tmp_path: Path
+    ) -> None:
+        """A public-looking name that resolves internally is refused."""
+
+        def private_resolver(host: str, port: int = 0, **kwargs: Any) -> List[Any]:
+            return [(None, None, None, "", ("192.168.1.5", port))]
+
+        opener = FakeOpener({})
+        cache = FetchCache(
+            cache_dir=str(tmp_path / "c"), opener=opener, resolver=private_resolver
+        )
+
+        result = cache.fetch("https://internal.example.org/x")
+
+        assert "private or local address" in result.error
+        assert opener.calls == []
+
+
+class TestRedirectReCheck:
+    """Test suite for the cross-origin redirect re-check (Codex P2)."""
+
+    def test_redirect_to_robots_blocked_origin_discards_content(
+        self, tmp_path: Path
+    ) -> None:
+        """A page that redirects to a disallowing origin records a block."""
+        opener = FakeOpener(
+            {
+                "https://a.example.org/robots.txt": urllib.error.HTTPError(
+                    "https://a.example.org/robots.txt", 404, "nf", None, None
+                ),
+                "https://a.example.org/page": FakeResponse(
+                    PAGE_HTML, url="https://b.example.net/landed"
+                ),
+                "https://b.example.net/robots.txt": FakeResponse(
+                    "User-agent: *\nDisallow: /", "https://b.example.net/robots.txt"
+                ),
+            }
+        )
+        cache = FetchCache(
+            cache_dir=str(tmp_path / "c"), opener=opener, resolver=_public_resolver
+        )
+
+        result = cache.fetch("https://a.example.org/page")
+
+        assert result.robots_blocked is True
+        assert result.html == ""
+        assert result.final_url == "https://b.example.net/landed"

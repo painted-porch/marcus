@@ -751,7 +751,13 @@ async def _handoff_evidence_to_dependents(
     for dependent in getattr(state, "project_tasks", None) or []:
         if task.id not in (dependent.dependencies or []):
             continue
-        dependent.inputs = {**(dependent.inputs or {}), **payload}
+        # Existing keys win (Codex P1 on PR #739): a dependent's
+        # board-seeded inputs must never be overwritten by a claim
+        # author's evidence, or a finder could ship its own excerpt
+        # and the verifier would check the attacker's text against
+        # the page. First write wins thereafter; legitimate chain
+        # keys never collide by construction.
+        dependent.inputs = {**payload, **(dependent.inputs or {})}
         try:
             await state.kanban_client.update_task(
                 dependent.id, {"inputs": dependent.inputs}
