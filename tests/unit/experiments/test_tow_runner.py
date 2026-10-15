@@ -394,3 +394,100 @@ class TestRegisterBoard:
 
         assert first == second
         assert len(await registry.list_projects(provider="sqlite")) == 1
+
+
+class TestProjectPrefixedTaskIds:
+    """Test suite for Cato-visible task ids.
+
+    Cato associates a task with a registered project when the task id
+    starts with the registry id plus an underscore (the exact-match
+    fallback in its matcher); the kanban provider always generates
+    opaque hex ids. The seeder therefore rewrites its own rows after
+    creation when given a prefix, so every downstream event carries a
+    project-attributable id, with no change to Marcus or Cato.
+    """
+
+    @pytest.mark.asyncio
+    async def test_task_ids_carry_prefix_and_dependencies_follow(
+        self, tmp_path: Path
+    ) -> None:
+        """Every seeded id gets the prefix; dependency rows stay wired."""
+        import sqlite3
+
+        dataset = _write_dataset(tmp_path / "data.csv", [_row(1), _row(2)])
+        db = str(tmp_path / "kanban.db")
+
+        manifest = await tow_runner.seed_cases(
+            csv_path=str(dataset),
+            db_path=db,
+            project_id="tow-x",
+            limit=2,
+            approval_rate=0.0,
+            seed=737,
+            manifest_path=str(tmp_path / "m.json"),
+            id_prefix="reg-123",
+        )
+
+        con = sqlite3.connect(db)
+        ids = [r[0] for r in con.execute("SELECT id FROM tasks")]
+        assert ids and all(i.startswith("reg-123_") for i in ids)
+        deps = con.execute(
+            "SELECT task_id, depends_on_id FROM task_dependencies"
+        ).fetchall()
+        assert deps and all(
+            a.startswith("reg-123_") and b.startswith("reg-123_") for a, b in deps
+        )
+        known = set(ids)
+        assert all(a in known and b in known for a, b in deps)
+        for case in manifest["cases"].values():
+            assert all(t.startswith("reg-123_") for t in case["tasks"].values())
+
+
+class TestSeededTaskMetadata:
+    """Test suite for task_metadata persistence at seed time.
+
+    Cato's task universe is Marcus's ``task_metadata`` persistence
+    collection; tasks created through the NLP pipeline land there,
+    tasks seeded straight onto a kanban board do not, so a seeded
+    board renders empty. The seeder therefore persists one honest
+    metadata row per task it creates, through Marcus's own
+    Persistence API, keyed by the prefixed task id and carrying the
+    registry project id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_metadata_rows_written_with_prefixed_ids(
+        self, tmp_path: Path
+    ) -> None:
+        """Each seeded task gets a task_metadata row Cato can read."""
+        import json as jsonlib
+        import sqlite3
+
+        dataset = _write_dataset(tmp_path / "data.csv", [_row(1), _row(2)])
+        meta_db = tmp_path / "marcus.db"
+
+        await tow_runner.seed_cases(
+            csv_path=str(dataset),
+            db_path=str(tmp_path / "kanban.db"),
+            project_id="tow-x",
+            limit=2,
+            approval_rate=0.0,
+            seed=737,
+            manifest_path=str(tmp_path / "m.json"),
+            id_prefix="reg-123",
+            metadata_db=str(meta_db),
+        )
+
+        con = sqlite3.connect(meta_db)
+        rows = [
+            jsonlib.loads(r[0])
+            for r in con.execute(
+                "SELECT data FROM persistence WHERE collection='task_metadata'"
+            )
+        ]
+        assert len(rows) == 6  # 2 cases x (find, verify, synthesize)
+        assert all(r["task_id"].startswith("reg-123_") for r in rows)
+        assert all(r["project_id"] == "reg-123" for r in rows)
+        assert all(r["name"] for r in rows)
+        deps = [d for r in rows for d in r.get("dependencies", [])]
+        assert deps and all(d.startswith("reg-123_") for d in deps)

@@ -346,6 +346,49 @@ def build_case_spec(
     return spec
 
 
+def _apply_id_prefix(db_path: str, prefix: str, cases: Dict[str, Any]) -> None:
+    """Rewrite seeded task ids to ``<prefix>_<original>`` in place.
+
+    Cato associates a task with a registered project when the task id
+    starts with the project's registry id plus an underscore (the
+    exact-match fallback in its matcher), and the kanban provider
+    always generates opaque hex ids. The seeder rewrites its own rows
+    after creation so every downstream event carries an attributable
+    id; experiment tooling only, no provider or Cato change.
+
+    Parameters
+    ----------
+    db_path : str
+        The seeded SQLite board file.
+    prefix : str
+        The registry project id to prefix.
+    cases : Dict[str, Any]
+        The manifest cases; their task ids are rewritten in place.
+    """
+    import sqlite3
+
+    mapping = {
+        old: f"{prefix}_{old}"
+        for case in cases.values()
+        for old in case["tasks"].values()
+    }
+    con = sqlite3.connect(db_path)
+    with con:
+        for old, new in mapping.items():
+            con.execute("UPDATE tasks SET id=? WHERE id=?", (new, old))
+            con.execute(
+                "UPDATE task_dependencies SET task_id=? WHERE task_id=?",
+                (new, old),
+            )
+            con.execute(
+                "UPDATE task_dependencies SET depends_on_id=? " "WHERE depends_on_id=?",
+                (new, old),
+            )
+    con.close()
+    for case in cases.values():
+        case["tasks"] = {role: mapping[tid] for role, tid in case["tasks"].items()}
+
+
 async def seed_cases(
     csv_path: str,
     db_path: str,
@@ -355,6 +398,8 @@ async def seed_cases(
     seed: int,
     manifest_path: str,
     stratify: bool = False,
+    id_prefix: "str | None" = None,
+    metadata_db: "str | None" = None,
 ) -> Dict[str, Any]:
     """Seed cases onto the board and write the grader's manifest.
 
@@ -379,6 +424,16 @@ async def seed_cases(
     stratify : bool
         Select excerpts round-robin across publishers instead of
         first-N, so every publisher's crawler posture is represented.
+    id_prefix : str | None
+        When set (normally the registry project id), every seeded
+        task id is rewritten to ``<prefix>_<original>`` so registry
+        consumers such as Cato can attribute the tasks to the board.
+    metadata_db : str | None
+        Marcus persistence database to write ``task_metadata`` rows
+        into (requires ``id_prefix``). Cato's task universe is this
+        collection; tasks created through the NLP pipeline land there
+        and directly seeded boards do not, so the seeder persists one
+        honest row per task it creates.
 
     Returns
     -------
@@ -398,6 +453,7 @@ async def seed_cases(
     await board.connect()
 
     cases: Dict[str, Any] = {}
+    seeded_rows: List[Dict[str, Any]] = []
     for excerpt in excerpts:
         approval_sampled = excerpt.number in sampled
         spec = build_case_spec(excerpt, approval_sampled, project_id)
@@ -407,6 +463,18 @@ async def seed_cases(
             task_data["dependencies"] = [ids_by_role[r] for r in depends_on]
             created = await board.create_task(task_data)
             ids_by_role[role] = created.id
+            seeded_rows.append(
+                {
+                    "task_id": created.id,
+                    "name": task_data.get("name", ""),
+                    "description": str(task_data.get("description", ""))[:400],
+                    "priority": str(task_data.get("priority", "medium")),
+                    "estimated_hours": 0.5,
+                    "labels": [task_data.get("task_type", "")],
+                    "dependencies": list(task_data["dependencies"]),
+                    "source_type": "tow_experiment_seed",
+                }
+            )
         cases[excerpt.case_id] = {
             "prompt_number": excerpt.number,
             "excerpt": excerpt.excerpt,
@@ -424,6 +492,15 @@ async def seed_cases(
 
     await board.disconnect()
 
+    if id_prefix:
+        _apply_id_prefix(db_path, id_prefix, cases)
+        for row in seeded_rows:
+            row["task_id"] = f"{id_prefix}_{row['task_id']}"
+            row["dependencies"] = [f"{id_prefix}_{d}" for d in row["dependencies"]]
+            row["project_id"] = id_prefix
+        if metadata_db:
+            await _persist_task_metadata(metadata_db, seeded_rows)
+
     manifest = {
         "project_id": project_id,
         "db_path": db_path,
@@ -437,6 +514,31 @@ async def seed_cases(
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
     return manifest
+
+
+async def _persist_task_metadata(metadata_db: str, rows: List[Dict[str, Any]]) -> None:
+    """Write one ``task_metadata`` row per seeded task.
+
+    Cato renders tasks from Marcus's ``task_metadata`` persistence
+    collection; the NLP pipeline writes it and direct seeding does
+    not, so a seeded board is invisible without these rows. The rows
+    are honest copies of what seeding just created, written through
+    Marcus's own Persistence API.
+
+    Parameters
+    ----------
+    metadata_db : str
+        Path to the persistence SQLite database (normally
+        ``<marcus root>/data/marcus.db``).
+    rows : List[Dict[str, Any]]
+        One prepared metadata row per seeded task, ids already
+        prefixed.
+    """
+    from src.core.persistence import Persistence, SQLitePersistence
+
+    store = Persistence(backend=SQLitePersistence(db_path=Path(metadata_db)))
+    for row in rows:
+        await store.store("task_metadata", row["task_id"], row)
 
 
 async def register_board(
@@ -542,6 +644,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--metadata-db",
+        default=str(REPO_ROOT / "data" / "marcus.db"),
+        help=(
+            "Marcus persistence db for task_metadata rows, which Cato "
+            "renders tasks from (default: %(default)s)"
+        ),
+    )
+    parser.add_argument(
         "--no-register",
         action="store_true",
         help=(
@@ -551,6 +661,14 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+
+    registry_id = None
+    if not args.no_register:
+        registry_id = asyncio.run(register_board(args.project, args.db))
+        print(
+            f"Registered {args.project} in Marcus's project registry "
+            f"as {registry_id}"
+        )
 
     manifest = asyncio.run(
         seed_cases(
@@ -562,6 +680,8 @@ def main() -> None:
             seed=args.seed,
             manifest_path=args.manifest,
             stratify=args.stratify,
+            id_prefix=registry_id,
+            metadata_db=args.metadata_db if registry_id else None,
         )
     )
     total = len(manifest["cases"])
@@ -570,12 +690,6 @@ def main() -> None:
         f"Seeded {total} cases ({approvals} with human approval) into "
         f"{args.db} as project {args.project}; manifest at {args.manifest}"
     )
-    if not args.no_register:
-        registry_id = asyncio.run(register_board(args.project, args.db))
-        print(
-            f"Registered {args.project} in Marcus's project registry "
-            f"as {registry_id}"
-        )
 
 
 if __name__ == "__main__":
