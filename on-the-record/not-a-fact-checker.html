@@ -37,7 +37,7 @@
 
   /* ---------- header ---------- */
   .eyebrow {
-    font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em;
+    font-family: var(--mono); font-size: 13px; letter-spacing: 0.18em;
     color: var(--blue); text-transform: uppercase; margin-bottom: 18px;
   }
   h1 {
@@ -57,16 +57,16 @@
     display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px;
   }
   .zoom .mag {
-    font-family: var(--mono); font-weight: 700; font-size: 14px;
+    font-family: var(--mono); font-weight: 700; font-size: 15px;
     color: var(--bg); background: linear-gradient(90deg, var(--blue), var(--violet));
     padding: 3px 10px; border-radius: 4px; letter-spacing: 0.04em; white-space: nowrap;
   }
   .zoom .frame {
-    font-family: var(--mono); font-size: 12px; letter-spacing: 0.14em;
+    font-family: var(--mono); font-size: 13px; letter-spacing: 0.14em;
     text-transform: uppercase; color: var(--faint);
   }
   h2 { font-size: clamp(24px, 4vw, 32px); margin: 0 0 12px; letter-spacing: -0.01em; text-wrap: balance; }
-  .tier > p { color: var(--muted); max-width: 660px; margin: 0 0 8px; }
+  .tier > p { color: var(--muted); max-width: 660px; margin: 0 0 14px; }
   .tier > p b { color: var(--ink); font-weight: 600; }
   .diagram { margin-top: 26px; }
   .takeaway {
@@ -79,11 +79,11 @@
   .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; }
   .chip {
     background: var(--card); border: 1px solid var(--edge); border-radius: 8px;
-    padding: 10px 14px; font-size: 14.5px; line-height: 1.4; min-width: 0;
+    padding: 10px 14px; font-size: 15px; line-height: 1.4; min-width: 0;
     flex: 1 1 130px; display: flex; flex-direction: column; justify-content: center;
   }
   .chip .who {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 3px;
   }
   .chip.engine { border-color: #475569; }
@@ -92,11 +92,11 @@
   .chip.out   { border-color: rgba(52,211,153,.55); }
   .arrow {
     align-self: center; color: var(--faint); font-family: var(--mono);
-    font-size: 16px; flex: 0 0 auto;
+    font-size: 16.5px; flex: 0 0 auto;
   }
   .fail {
     margin-top: 12px; display: flex; gap: 10px; align-items: baseline;
-    font-size: 14.5px; color: var(--muted); max-width: 660px;
+    font-size: 15px; color: var(--muted); max-width: 660px;
   }
   .fail .x { color: var(--red); font-family: var(--mono); font-weight: 700; }
   .fail b { color: var(--red); font-weight: 600; }
@@ -109,7 +109,7 @@
   }
   .num .big { font-family: var(--mono); font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .num .big.bad { color: var(--red); } .num .big.good { color: var(--green); }
-  .num .lbl { font-size: 13.5px; color: var(--muted); margin-top: 2px; }
+  .num .lbl { font-size: 14.5px; color: var(--muted); margin-top: 2px; }
 
   /* ---------- tier 2: the room ---------- */
   .room {
@@ -117,7 +117,7 @@
     padding: 20px; position: relative;
   }
   .room-title {
-    font-family: var(--mono); font-size: 12px; letter-spacing: 0.16em;
+    font-family: var(--mono); font-size: 13px; letter-spacing: 0.16em;
     text-transform: uppercase; color: var(--blue); margin-bottom: 14px;
   }
   .mini-flow {
@@ -125,57 +125,57 @@
     background: rgba(15,23,42,.6); margin-bottom: 18px;
   }
   .mini-flow .cap {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 8px;
   }
   .mini-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .mini-chip {
-    font-size: 12px; background: var(--card); border: 1px solid var(--edge-soft);
+    font-size: 13px; background: var(--card); border: 1px solid var(--edge-soft);
     border-radius: 5px; padding: 3px 8px; color: var(--muted); white-space: nowrap;
   }
-  .mini-arrow { color: var(--faint); font-size: 12px; font-family: var(--mono); }
+  .mini-arrow { color: var(--faint); font-size: 13px; font-family: var(--mono); }
   .room-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
   .laws { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
   .laws li {
-    display: flex; gap: 10px; font-size: 14.5px; color: var(--muted); line-height: 1.5;
+    display: flex; gap: 10px; font-size: 15px; color: var(--muted); line-height: 1.6;
   }
   .laws .n {
-    font-family: var(--mono); font-size: 12px; color: var(--violet);
+    font-family: var(--mono); font-size: 13px; color: var(--violet);
     font-weight: 700; flex: 0 0 18px; padding-top: 2px;
   }
   .laws b { color: var(--ink); font-weight: 600; }
   .sockets { display: flex; flex-direction: column; gap: 10px; }
   .socket {
     border: 1px dashed var(--edge); border-radius: 8px; padding: 10px 14px;
-    font-size: 14px; color: var(--faint); background: rgba(30,41,59,.35);
+    font-size: 15px; color: var(--faint); background: rgba(30,41,59,.35);
   }
   .socket.live {
     border: 1px solid rgba(96,165,250,.6); color: var(--ink);
     background: rgba(96,165,250,.08);
   }
   .socket .tag {
-    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
     text-transform: uppercase; display: inline-block; margin-left: 8px;
     color: var(--green);
   }
   .panel-label {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 10px;
   }
 
   /* ---------- tier 3: claim cards ---------- */
   .claims {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
   }
   .claim {
     background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
-    padding: 16px; display: flex; flex-direction: column; gap: 8px;
+    padding: 18px; display: flex; flex-direction: column; gap: 9px;
   }
   .claim.proven { border-color: rgba(52,211,153,.6); background: rgba(52,211,153,.05); }
-  .claim h3 { margin: 0; font-size: 16px; font-weight: 600; }
-  .claim .q { font-size: 13.5px; color: var(--muted); line-height: 1.5; flex: 1; }
+  .claim h3 { margin: 0; font-size: 16.5px; font-weight: 600; }
+  .claim .q { font-size: 14.5px; color: var(--muted); line-height: 1.6; flex: 1; }
   .claim .status {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em;
     text-transform: uppercase; color: var(--faint);
     display: flex; align-items: center; gap: 6px;
   }
@@ -187,7 +187,7 @@
   .economy { display: flex; flex-direction: column; gap: 0; }
   .parties, .consumers { display: flex; flex-wrap: wrap; gap: 8px; }
   .party {
-    font-size: 13.5px; background: var(--card); border: 1px solid var(--edge);
+    font-size: 14.5px; background: var(--card); border: 1px solid var(--edge);
     border-radius: 999px; padding: 6px 14px; color: var(--muted);
   }
   .party.human { border-color: rgba(251,191,36,.5); color: var(--ink); }
@@ -195,23 +195,23 @@
     font-family: var(--mono); color: var(--faint); font-size: 15px;
     padding: 10px 0 10px 26px;
   }
-  .rooms-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .rooms-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .mini-room {
     border: 1.5px solid var(--edge); border-radius: 10px; background: var(--panel);
     padding: 12px 14px;
   }
   .mini-room .rt {
-    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--blue); margin-bottom: 6px;
   }
-  .mini-room .rb { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .mini-room .rb { font-size: 14px; color: var(--muted); line-height: 1.6; }
   .bundle-note {
-    font-size: 13.5px; color: var(--muted); border: 1px dashed var(--edge);
+    font-size: 14.5px; color: var(--muted); border: 1px dashed var(--edge);
     border-radius: 8px; padding: 10px 14px; background: rgba(15,23,42,.6);
   }
   .bundle-note b { color: var(--ink); }
   .lane-label {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 8px;
   }
 
@@ -220,15 +220,15 @@
     background: transparent; color: var(--violet);
     border: 1px solid var(--violet);
   }
-  .forcings { display: flex; flex-direction: column; gap: 12px; }
+  .forcings { display: flex; flex-direction: column; gap: 14px; }
   .forcing {
     display: grid; grid-template-columns: 1fr 1.25fr 1.1fr;
     background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
     overflow: hidden;
   }
-  .forcing > div { padding: 14px 16px; font-size: 14px; line-height: 1.55; min-width: 0; }
+  .forcing > div { padding: 16px 18px; font-size: 15px; line-height: 1.6; min-width: 0; }
   .forcing .cell-label {
-    display: block; font-family: var(--mono); font-size: 9.5px;
+    display: block; font-family: var(--mono); font-size: 11px;
     letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 5px;
   }
   .fdemand { background: rgba(96,165,250,.06); color: var(--ink); font-weight: 600; }
@@ -246,10 +246,10 @@
     border: 1px dashed var(--edge); border-radius: 8px; padding: 12px 14px;
     background: rgba(15,23,42,.6);
   }
-  .alt .an { font-size: 14px; font-weight: 600; color: var(--ink); }
-  .alt .aw { font-size: 12.5px; color: var(--faint); margin-top: 3px; line-height: 1.5; }
+  .alt .an { font-size: 15px; font-weight: 600; color: var(--ink); }
+  .alt .aw { font-size: 13.5px; color: var(--muted); margin-top: 3px; line-height: 1.6; }
   .pedigree {
-    margin-top: 18px; font-size: 13px; color: var(--faint); max-width: 660px;
+    margin-top: 18px; font-size: 14px; color: var(--faint); max-width: 660px;
     line-height: 1.6;
   }
   .convergence-line {
@@ -277,13 +277,13 @@
     padding: 16px 18px;
   }
   .inst .it {
-    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 6px;
   }
   .inst h3 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
-  .inst .safe { font-size: 14.5px; color: var(--ink); }
+  .inst .safe { font-size: 15px; color: var(--ink); }
   .inst .safe b { font-weight: 700; }
-  .inst .how { font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.55; }
+  .inst .how { font-size: 14px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
   .inst.marcus {
     border-color: rgba(167,139,250,.65);
     background: linear-gradient(135deg, rgba(96,165,250,.08), rgba(167,139,250,.08));
@@ -301,12 +301,12 @@
   .coda p.small { color: var(--muted); max-width: 640px; margin: 0; }
   .coda-actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 26px; }
   .coda-link {
-    font-family: var(--mono); font-size: 13.5px; color: var(--blue); text-decoration: none;
+    font-family: var(--mono); font-size: 14.5px; color: var(--blue); text-decoration: none;
     border: 1px solid var(--edge); border-radius: 6px; padding: 7px 12px;
   }
   .coda-link:hover { border-color: var(--blue); }
   .credit {
-    margin-top: 40px; font-size: 13px; color: var(--faint); max-width: 640px;
+    margin-top: 40px; font-size: 14px; color: var(--faint); max-width: 640px;
     line-height: 1.6;
   }
 
@@ -702,7 +702,7 @@
       "AI Search Has a Citation Problem," Tow Center for Digital Journalism,
       Columbia Journalism Review, March 2025 — extended by running the same engines
       through Marcus's enforcement. Full method, code, and redacted audit bundles
-      ship with the <a href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1" style="font-family: var(--mono); font-size: 12px; color: var(--blue);">on-the-record-v1</a> release.
+      ship with the <a href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1" style="font-family: var(--mono); font-size: 13px; color: var(--blue);">on-the-record-v1</a> release.
     </p>
   </div>
 </div>
