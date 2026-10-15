@@ -439,6 +439,8 @@ class TestProjectPrefixedTaskIds:
         )
         known = set(ids)
         assert all(a in known and b in known for a, b in deps)
+        labels = con.execute("SELECT task_id FROM task_labels").fetchall()
+        assert labels and all(t.startswith("reg-123_") for (t,) in labels)
         for case in manifest["cases"].values():
             assert all(t.startswith("reg-123_") for t in case["tasks"].values())
 

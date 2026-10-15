@@ -384,6 +384,13 @@ def _apply_id_prefix(db_path: str, prefix: str, cases: Dict[str, Any]) -> None:
                 "UPDATE task_dependencies SET depends_on_id=? " "WHERE depends_on_id=?",
                 (new, old),
             )
+            # Labels live in their own table keyed by task id; the
+            # case:<id> label is how export_case finds a case's tasks,
+            # so an orphaned label row means an empty audit bundle.
+            con.execute(
+                "UPDATE task_labels SET task_id=? WHERE task_id=?",
+                (new, old),
+            )
     con.close()
     for case in cases.values():
         case["tasks"] = {role: mapping[tid] for role, tid in case["tasks"].items()}
