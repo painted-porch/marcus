@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not a Fact Checker</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+  :root {
+    --bg: #0b1120;
+    --panel: #0f172a;
+    --card: #1e293b;
+    --edge: #334155;
+    --edge-soft: #24324a;
+    --ink: #e2e8f0;
+    --muted: #94a3b8;
+    --faint: #64748b;
+    --blue: #60a5fa;
+    --violet: #a78bfa;
+    --green: #34d399;
+    --red: #f87171;
+    --amber: #fbbf24;
+    --sans: "IBM Plex Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.65;
+    padding-inline: 20px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding-block: 56px 80px; }
+
+  /* ---------- header ---------- */
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.18em;
+    color: var(--blue); text-transform: uppercase; margin-bottom: 18px;
+  }
+  h1 {
+    font-size: clamp(34px, 6vw, 54px); line-height: 1.08; margin: 0 0 20px;
+    font-weight: 700; letter-spacing: -0.02em; text-wrap: balance;
+  }
+  h1 .grad, .takeaway strong, .coda .grad {
+    background: linear-gradient(90deg, var(--blue), var(--violet));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .dek { font-size: 19px; color: var(--muted); max-width: 640px; margin: 0; }
+  .dek b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- tier scaffolding ---------- */
+  .tier { margin-top: 72px; }
+  .zoom {
+    display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px;
+  }
+  .zoom .mag {
+    font-family: var(--mono); font-weight: 700; font-size: 14px;
+    color: var(--bg); background: linear-gradient(90deg, var(--blue), var(--violet));
+    padding: 3px 10px; border-radius: 4px; letter-spacing: 0.04em; white-space: nowrap;
+  }
+  .zoom .frame {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--faint);
+  }
+  h2 { font-size: clamp(24px, 4vw, 32px); margin: 0 0 12px; letter-spacing: -0.01em; text-wrap: balance; }
+  .tier > p { color: var(--muted); max-width: 660px; margin: 0 0 8px; }
+  .tier > p b { color: var(--ink); font-weight: 600; }
+  .diagram { margin-top: 26px; }
+  .takeaway {
+    margin-top: 26px; font-size: 20px; font-weight: 600; line-height: 1.45;
+    border-left: 3px solid var(--violet); padding-left: 16px; max-width: 640px;
+    text-wrap: balance;
+  }
+
+  /* ---------- tier 1: the flow ---------- */
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; }
+  .chip {
+    background: var(--card); border: 1px solid var(--edge); border-radius: 8px;
+    padding: 10px 14px; font-size: 14.5px; line-height: 1.4; min-width: 0;
+    flex: 1 1 130px; display: flex; flex-direction: column; justify-content: center;
+  }
+  .chip .who {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 3px;
+  }
+  .chip.engine { border-color: #475569; }
+  .chip.check { border-color: rgba(96,165,250,.55); }
+  .chip.human { border-color: rgba(251,191,36,.55); }
+  .chip.out   { border-color: rgba(52,211,153,.55); }
+  .arrow {
+    align-self: center; color: var(--faint); font-family: var(--mono);
+    font-size: 16px; flex: 0 0 auto;
+  }
+  .fail {
+    margin-top: 12px; display: flex; gap: 10px; align-items: baseline;
+    font-size: 14.5px; color: var(--muted); max-width: 660px;
+  }
+  .fail .x { color: var(--red); font-family: var(--mono); font-weight: 700; }
+  .fail b { color: var(--red); font-weight: 600; }
+  .numbers {
+    margin-top: 22px; display: flex; flex-wrap: wrap; gap: 12px;
+  }
+  .num {
+    background: var(--panel); border: 1px solid var(--edge-soft); border-radius: 10px;
+    padding: 14px 18px; flex: 1 1 220px;
+  }
+  .num .big { font-family: var(--mono); font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .num .big.bad { color: var(--red); } .num .big.good { color: var(--green); }
+  .num .lbl { font-size: 13.5px; color: var(--muted); margin-top: 2px; }
+
+  /* ---------- tier 2: the room ---------- */
+  .room {
+    border: 2px solid var(--edge); border-radius: 14px; background: var(--panel);
+    padding: 20px; position: relative;
+  }
+  .room-title {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--blue); margin-bottom: 14px;
+  }
+  .mini-flow {
+    border: 1px dashed var(--edge); border-radius: 10px; padding: 12px 14px;
+    background: rgba(15,23,42,.6); margin-bottom: 18px;
+  }
+  .mini-flow .cap {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 8px;
+  }
+  .mini-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .mini-chip {
+    font-size: 12px; background: var(--card); border: 1px solid var(--edge-soft);
+    border-radius: 5px; padding: 3px 8px; color: var(--muted); white-space: nowrap;
+  }
+  .mini-arrow { color: var(--faint); font-size: 12px; font-family: var(--mono); }
+  .room-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .laws { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  .laws li {
+    display: flex; gap: 10px; font-size: 14.5px; color: var(--muted); line-height: 1.5;
+  }
+  .laws .n {
+    font-family: var(--mono); font-size: 12px; color: var(--violet);
+    font-weight: 700; flex: 0 0 18px; padding-top: 2px;
+  }
+  .laws b { color: var(--ink); font-weight: 600; }
+  .sockets { display: flex; flex-direction: column; gap: 10px; }
+  .socket {
+    border: 1px dashed var(--edge); border-radius: 8px; padding: 10px 14px;
+    font-size: 14px; color: var(--faint); background: rgba(30,41,59,.35);
+  }
+  .socket.live {
+    border: 1px solid rgba(96,165,250,.6); color: var(--ink);
+    background: rgba(96,165,250,.08);
+  }
+  .socket .tag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; display: inline-block; margin-left: 8px;
+    color: var(--green);
+  }
+  .panel-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 10px;
+  }
+
+  /* ---------- tier 3: claim cards ---------- */
+  .claims {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  }
+  .claim {
+    background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 16px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .claim.proven { border-color: rgba(52,211,153,.6); background: rgba(52,211,153,.05); }
+  .claim h3 { margin: 0; font-size: 16px; font-weight: 600; }
+  .claim .q { font-size: 13.5px; color: var(--muted); line-height: 1.5; flex: 1; }
+  .claim .status {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--faint);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .claim.proven .status { color: var(--green); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+  .claim.proven .dot { background: var(--green); }
+
+  /* ---------- tier 4: the economy ---------- */
+  .economy { display: flex; flex-direction: column; gap: 0; }
+  .parties, .consumers { display: flex; flex-wrap: wrap; gap: 8px; }
+  .party {
+    font-size: 13.5px; background: var(--card); border: 1px solid var(--edge);
+    border-radius: 999px; padding: 6px 14px; color: var(--muted);
+  }
+  .party.human { border-color: rgba(251,191,36,.5); color: var(--ink); }
+  .down {
+    font-family: var(--mono); color: var(--faint); font-size: 15px;
+    padding: 10px 0 10px 26px;
+  }
+  .rooms-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .mini-room {
+    border: 1.5px solid var(--edge); border-radius: 10px; background: var(--panel);
+    padding: 12px 14px;
+  }
+  .mini-room .rt {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--blue); margin-bottom: 6px;
+  }
+  .mini-room .rb { font-size: 13px; color: var(--muted); line-height: 1.5; }
+  .bundle-note {
+    font-size: 13.5px; color: var(--muted); border: 1px dashed var(--edge);
+    border-radius: 8px; padding: 10px 14px; background: rgba(15,23,42,.6);
+  }
+  .bundle-note b { color: var(--ink); }
+  .lane-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 8px;
+  }
+
+  /* ---------- interlude: necessity ---------- */
+  .mag.alt {
+    background: transparent; color: var(--violet);
+    border: 1px solid var(--violet);
+  }
+  .forcings { display: flex; flex-direction: column; gap: 12px; }
+  .forcing {
+    display: grid; grid-template-columns: 1fr 1.25fr 1.1fr;
+    background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
+    overflow: hidden;
+  }
+  .forcing > div { padding: 14px 16px; font-size: 14px; line-height: 1.55; min-width: 0; }
+  .forcing .cell-label {
+    display: block; font-family: var(--mono); font-size: 9.5px;
+    letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 5px;
+  }
+  .fdemand { background: rgba(96,165,250,.06); color: var(--ink); font-weight: 600; }
+  .fdemand .cell-label { color: var(--blue); }
+  .fforce { color: var(--muted); border-left: 1px solid var(--edge-soft); }
+  .fforce .cell-label { color: var(--violet); }
+  .fforce b { color: var(--ink); font-weight: 600; }
+  .fbroke { color: var(--muted); border-left: 1px solid var(--edge-soft); background: rgba(248,113,113,.04); }
+  .fbroke .cell-label { color: var(--red); }
+  .fbroke b { color: var(--red); font-weight: 600; }
+  .alt-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px;
+  }
+  .alt {
+    border: 1px dashed var(--edge); border-radius: 8px; padding: 12px 14px;
+    background: rgba(15,23,42,.6);
+  }
+  .alt .an { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .alt .aw { font-size: 12.5px; color: var(--faint); margin-top: 3px; line-height: 1.5; }
+  .pedigree {
+    margin-top: 18px; font-size: 13px; color: var(--faint); max-width: 660px;
+    line-height: 1.6;
+  }
+  .convergence-line {
+    margin-top: 22px; font-size: 15px; color: var(--muted); max-width: 660px;
+    line-height: 1.6;
+  }
+  .convergence-line b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- answer: what Marcus is ---------- */
+  .defline {
+    font-size: clamp(22px, 3.6vw, 30px); font-weight: 700; line-height: 1.35;
+    letter-spacing: -0.01em; max-width: 720px; text-wrap: balance;
+    margin: 26px 0;
+  }
+  .defline .grad {
+    background: linear-gradient(90deg, var(--blue), var(--violet));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .inst-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+    margin: 26px 0;
+  }
+  .inst {
+    background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .inst .it {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--faint); margin-bottom: 6px;
+  }
+  .inst h3 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+  .inst .safe { font-size: 14.5px; color: var(--ink); }
+  .inst .safe b { font-weight: 700; }
+  .inst .how { font-size: 13px; color: var(--muted); margin-top: 6px; line-height: 1.55; }
+  .inst.marcus {
+    border-color: rgba(167,139,250,.65);
+    background: linear-gradient(135deg, rgba(96,165,250,.08), rgba(167,139,250,.08));
+  }
+  .inst.marcus .it { color: var(--violet); }
+
+  /* ---------- coda ---------- */
+  .coda {
+    margin-top: 80px; border-top: 1px solid var(--edge-soft); padding-top: 40px;
+  }
+  .coda p.big {
+    font-size: clamp(22px, 3.6vw, 30px); font-weight: 700; line-height: 1.35;
+    margin: 0 0 18px; letter-spacing: -0.01em; max-width: 720px; text-wrap: balance;
+  }
+  .coda p.small { color: var(--muted); max-width: 640px; margin: 0; }
+  .coda-actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 26px; }
+  .coda-link {
+    font-family: var(--mono); font-size: 13.5px; color: var(--blue); text-decoration: none;
+    border: 1px solid var(--edge); border-radius: 6px; padding: 7px 12px;
+  }
+  .coda-link:hover { border-color: var(--blue); }
+  .credit {
+    margin-top: 40px; font-size: 13px; color: var(--faint); max-width: 640px;
+    line-height: 1.6;
+  }
+
+  @media (max-width: 720px) {
+    .room-grid { grid-template-columns: 1fr; }
+    .claims { grid-template-columns: 1fr 1fr; }
+    .rooms-row { grid-template-columns: 1fr; }
+    .forcing { grid-template-columns: 1fr; }
+    .fforce, .fbroke { border-left: none; border-top: 1px solid var(--edge-soft); }
+    .alt-grid { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 560px) {
+    .inst-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 480px) {
+    .claims { grid-template-columns: 1fr; }
+    .alt-grid { grid-template-columns: 1fr; }
+    .flow { flex-direction: column; }
+    .arrow { align-self: flex-start; transform: rotate(90deg); padding-left: 8px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .tier { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="eyebrow">Marcus · On the Record</div>
+  <h1>Marcus is <span class="grad">not a fact checker</span></h1>
+  <p class="dek">
+    The citation study is one case running through a much bigger machine.
+    Zoom out four times and you can see what the machine actually is —
+    and why the fact checker was the <b>least</b> interesting part.
+  </p>
+
+  <!-- ================= TIER 1 ================= -->
+  <section class="tier">
+    <div class="zoom"><span class="mag">ZOOM ×1</span><span class="frame">Frame 1 of 4</span></div>
+    <h2>The story you read: one answer, checked</h2>
+    <p>
+      We asked AI search engines 200 news questions.
+      Alone, they delivered a wrong answer about <b>7 times in 10</b>.
+      Then we made the same engines work inside Marcus: a checker fetched every
+      cited page, and a person signed off before anything shipped.
+    </p>
+    <div class="diagram">
+      <div class="flow">
+        <div class="chip"><span class="who">Input</span>Question goes in</div>
+        <span class="arrow">→</span>
+        <div class="chip engine"><span class="who">AI engine</span>Answers with a source link</div>
+        <span class="arrow">→</span>
+        <div class="chip check"><span class="who">Checker</span>Actually fetches the page it cites</div>
+        <span class="arrow">→</span>
+        <div class="chip human"><span class="who">Person</span>Signs off</div>
+        <span class="arrow">→</span>
+        <div class="chip out"><span class="who">Output</span>Answer ships with its receipts</div>
+      </div>
+      <div class="fail">
+        <span class="x">✗</span>
+        <span>If the page doesn't exist or doesn't match, the answer <b>never ships</b> —
+        it becomes a labeled decline, with the failed fetch attached as proof.</span>
+      </div>
+      <div class="numbers">
+        <div class="num"><div class="big bad">7 in 10</div><div class="lbl">answers wrong when engines run alone</div></div>
+        <div class="num"><div class="big good">1 in 20</div><div class="lbl">wrong among answers that reached you through Marcus</div></div>
+        <div class="num"><div class="big good">0</div><div class="lbl">fabricated links delivered, across every run</div></div>
+      </div>
+    </div>
+    <p class="takeaway">If this frame is all you saw, <strong>"fact checker" is a fair guess.</strong> Now zoom out.</p>
+  </section>
+
+  <!-- ================= TIER 2 ================= -->
+  <section class="tier">
+    <div class="zoom"><span class="mag">ZOOM ×10</span><span class="frame">Frame 2 of 4</span></div>
+    <h2>What actually did the work: the room</h2>
+    <p>
+      The checker was about 300 lines of ordinary Python.
+      It fetches a URL and compares what it finds.
+      <b>Anyone could write it in an afternoon — and that's the point.</b>
+      What made it matter is the room it ran in: a shared board with rules
+      no participant can bend, not even the one who wrote the answer.
+    </p>
+    <div class="diagram">
+      <div class="room">
+        <div class="room-title">The room — the Marcus board</div>
+        <div class="mini-flow">
+          <div class="cap">Frame 1, running inside</div>
+          <div class="mini-row">
+            <span class="mini-chip">question</span><span class="mini-arrow">→</span>
+            <span class="mini-chip">engine answers</span><span class="mini-arrow">→</span>
+            <span class="mini-chip">checker fetches</span><span class="mini-arrow">→</span>
+            <span class="mini-chip">person signs</span><span class="mini-arrow">→</span>
+            <span class="mini-chip">ships with receipts</span>
+          </div>
+        </div>
+        <div class="room-grid">
+          <div>
+            <div class="panel-label">House rules — enforced by the room, not by goodwill</div>
+            <ul class="laws">
+              <li><span class="n">1</span><span><b>No work is handed out.</b> Everyone asks for work, and the room decides what each asker is even allowed to see.</span></li>
+              <li><span class="n">2</span><span><b>Nothing closes without evidence.</b> "Trust me" is not an accepted file format.</span></li>
+              <li><span class="n">3</span><span><b>No one checks their own work.</b> The author of an answer never sees the task that verifies it — it's invisible to them, so it can't be gamed.</span></li>
+              <li><span class="n">4</span><span><b>A person holds the final signature.</b> Software prepares the decision; a human makes it.</span></li>
+              <li><span class="n">5</span><span><b>The room remembers everything.</b> It's the only channel, so the audit trail is complete by construction — not by someone remembering to log.</span></li>
+            </ul>
+          </div>
+          <div>
+            <div class="panel-label">Plug-in sockets — where checkers attach</div>
+            <div class="sockets">
+              <div class="socket live">Citation checker — fetches cited pages<span class="tag">● proven, Oct 2026</span></div>
+              <div class="socket">Empty socket — any deterministic check plugs in here</div>
+              <div class="socket">Empty socket</div>
+              <div class="socket">Empty socket</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="takeaway">The checker is replaceable. <strong>The room is what made it unskippable.</strong></p>
+  </section>
+
+  <!-- ================= INTERLUDE: NECESSITY ================= -->
+  <section class="tier">
+    <div class="zoom"><span class="mag alt">WHY</span><span class="frame">Interlude — before you zoom further</span></div>
+    <h2>The room isn't a design choice. It's the minimum.</h2>
+    <p>
+      A fair objection: "fine, rules are nice — but why this board thing?
+      Couldn't you do the same with a pipeline, a chat, a queue?"
+      No — and not as a matter of taste.
+      A shared board with those five rules is the <b>smallest data structure that can
+      hold asynchronous, multi-party work you can trust</b>.
+      Each demand of the problem forces one piece of it.
+      Take any piece away, and the problem you started with comes back.
+    </p>
+    <div class="diagram">
+      <div class="forcings">
+        <div class="forcing">
+          <div class="fdemand"><span class="cell-label">The problem demands</span>
+            Workers run at different times — and they crash.</div>
+          <div class="fforce"><span class="cell-label">So the structure must</span>
+            Keep the work's state <b>in the medium, not in any worker</b>.
+            Anyone can stop, die, or be replaced mid-job; the work doesn't care.</div>
+          <div class="fbroke"><span class="cell-label">Take it away and</span>
+            <b>A crash loses the work.</b> Ours didn't: mid-experiment the coordinator
+            process died, and the run resumed from board state alone.</div>
+        </div>
+        <div class="forcing">
+          <div class="fdemand"><span class="cell-label">The problem demands</span>
+            A check only counts if the author can't touch it.</div>
+          <div class="fforce"><span class="cell-label">So the structure must</span>
+            Make workers <b>ask</b> for work, and let the medium decide who may even
+            see each task. The author never learns the check on their work exists.</div>
+          <div class="fbroke"><span class="cell-label">Take it away and</span>
+            Hand work out instead, and the gate is visible — and <b>visible gates get
+            probed and gamed</b>. We watched an agent do exactly that before this rule existed.</div>
+        </div>
+        <div class="forcing">
+          <div class="fdemand"><span class="cell-label">The problem demands</span>
+            "Done" has to mean something.</div>
+          <div class="fforce"><span class="cell-label">So the structure must</span>
+            <b>Refuse to close any claim without evidence attached</b> —
+            acceptance is a property of the record, not a feeling.</div>
+          <div class="fbroke"><span class="cell-label">Take it away and</span>
+            Done becomes an assertion. <b>That's the 7-in-10 world</b> this
+            experiment started in.</div>
+        </div>
+        <div class="forcing">
+          <div class="fdemand"><span class="cell-label">The problem demands</span>
+            The record must be complete — not mostly complete.</div>
+          <div class="fforce"><span class="cell-label">So the structure must</span>
+            Be <b>the only channel</b>. Nothing can happen anywhere else,
+            so the audit trail exists by construction, not by diligence.</div>
+          <div class="fbroke"><span class="cell-label">Take it away and</span>
+            Side channels put <b>holes in the record you can't even enumerate</b>.
+            "Did anyone forget to log it?" is already the failure.</div>
+        </div>
+        <div class="forcing">
+          <div class="fdemand"><span class="cell-label">The problem demands</span>
+            Rivals must be able to check each other.</div>
+          <div class="fforce"><span class="cell-label">So the structure must</span>
+            <b>Belong to no participant.</b> It's a venue, not a vendor —
+            its rulings aren't anyone's marketing.</div>
+          <div class="fbroke"><span class="cell-label">Take it away and</span>
+            Verification collapses back into <b>"trust us"</b> —
+            one company grading its own homework.</div>
+        </div>
+      </div>
+
+      <p class="convergence-line">
+        And here's the test that this is a <b>minimum</b> and not just one option:
+        try to name an alternative. Every candidate turns out to be a board
+        missing one of the pieces above.
+      </p>
+      <div class="alt-grid">
+        <div class="alt"><div class="an">Email thread</div><div class="aw">a board with no rules and no state machine</div></div>
+        <div class="alt"><div class="an">Group chat</div><div class="aw">a board that forgets and enforces nothing</div></div>
+        <div class="alt"><div class="an">Message queue</div><div class="aw">a board with no memory of who did what</div></div>
+        <div class="alt"><div class="an">CI pipeline</div><div class="aw">a board hardcoded for exactly one claim type: code</div></div>
+        <div class="alt"><div class="an">Workflow engine</div><div class="aw">hands work to named workers — the gate is visible, so it's gameable</div></div>
+        <div class="alt"><div class="an">Shared doc + goodwill</div><div class="aw">a board where the rules are vibes</div></div>
+      </div>
+      <p class="convergence-line">
+        People who already run high-stakes asynchronous work converged on this shape
+        long before AI did: <b>court dockets, hospital charts, air-traffic strips,
+        kanban itself</b>. Marcus is that structure with the rules enforced by
+        software instead of discipline.
+      </p>
+      <p class="pedigree">
+        Computer science keeps rediscovering it too — blackboard systems in the 1970s,
+        tuple spaces in 1985, contract nets in 1980. The shape recurs because the
+        problem forces it, not because anyone keeps choosing it.
+      </p>
+    </div>
+    <p class="takeaway">Not one way to coordinate work you can trust — <strong>the smallest thing that can.</strong></p>
+  </section>
+
+  <!-- ================= TIER 3 ================= -->
+  <section class="tier">
+    <div class="zoom"><span class="mag">ZOOM ×100</span><span class="frame">Frame 3 of 4</span></div>
+    <h2>Fill the sockets: any claim, same room</h2>
+    <p>
+      Every AI output is a claim somebody has to trust before acting on it.
+      Each kind of claim needs a different checker — but <b>the same five rules</b>,
+      so the room doesn't change. Swap the plug-in, keep the room.
+    </p>
+    <div class="diagram">
+      <div class="claims">
+        <div class="claim proven">
+          <h3>News citations</h3>
+          <div class="q">Does the link actually go where the AI says it does?</div>
+          <div class="status"><span class="dot"></span>Proven — this study</div>
+        </div>
+        <div class="claim">
+          <h3>Code</h3>
+          <div class="q">Does the AI's code pass tests its author never saw?</div>
+          <div class="status"><span class="dot"></span>Same room, new plug-in</div>
+        </div>
+        <div class="claim">
+          <h3>Numbers in reports</h3>
+          <div class="q">Does the figure match the source document it cites?</div>
+          <div class="status"><span class="dot"></span>Same room, new plug-in</div>
+        </div>
+        <div class="claim">
+          <h3>Legal citations</h3>
+          <div class="q">Does the cited case exist — and does it say that?</div>
+          <div class="status"><span class="dot"></span>Same room, new plug-in</div>
+        </div>
+        <div class="claim">
+          <h3>Medical claims</h3>
+          <div class="q">Does the recommendation match the literature it points to?</div>
+          <div class="status"><span class="dot"></span>Same room, new plug-in</div>
+        </div>
+        <div class="claim">
+          <h3>Financial figures</h3>
+          <div class="q">Does the stated number match the actual filing?</div>
+          <div class="status"><span class="dot"></span>Same room, new plug-in</div>
+        </div>
+      </div>
+    </div>
+    <p class="takeaway">We proved one socket. <strong>The architecture proves them all the same way.</strong></p>
+  </section>
+
+  <!-- ================= TIER 4 ================= -->
+  <section class="tier">
+    <div class="zoom"><span class="mag">ZOOM ×1000</span><span class="frame">Frame 4 of 4</span></div>
+    <h2>Many rooms, every vendor: trust becomes a lookup</h2>
+    <p>
+      The room belongs to no AI vendor, so rivals can work — and check each other —
+      inside it as equals. An OpenAI agent's claim verified by an independent fetcher
+      and signed by your employee is worth more than any one company's "trust us."
+    </p>
+    <div class="diagram economy">
+      <div>
+        <div class="lane-label">Who works in the rooms — peers, no favorites</div>
+        <div class="parties">
+          <span class="party">OpenAI agents</span>
+          <span class="party">Anthropic agents</span>
+          <span class="party">Google agents</span>
+          <span class="party">a 300-line Python script</span>
+          <span class="party human">your own people</span>
+        </div>
+      </div>
+      <div class="down">↓</div>
+      <div>
+        <div class="lane-label">The rooms — one per kind of work</div>
+        <div class="rooms-row">
+          <div class="mini-room"><div class="rt">Newsroom</div><div class="rb">Citations checked before publication</div></div>
+          <div class="mini-room"><div class="rt">Engineering</div><div class="rb">AI code verified before merge</div></div>
+          <div class="mini-room"><div class="rt">Legal / finance</div><div class="rb">Filings checked against the record</div></div>
+        </div>
+      </div>
+      <div class="down">↓</div>
+      <div>
+        <div class="lane-label">What comes out — receipts, not vibes</div>
+        <div class="bundle-note">
+          Every delivered answer carries a <b>complete, exportable record</b>:
+          who claimed it, what the check found, who signed.
+          Your boss, your auditor, your customer, or a regulator can look it up —
+          months later, without trusting anyone's memory.
+        </div>
+      </div>
+    </div>
+    <p class="takeaway">Trust stops being a feeling and <strong>becomes a lookup.</strong></p>
+  </section>
+
+  <!-- ================= ANSWER ================= -->
+  <section class="tier">
+    <div class="zoom"><span class="mag alt">ANSWER</span><span class="frame">What the four frames add up to</span></div>
+    <h2>So what is Marcus?</h2>
+    <p>
+      The tempting answer: "a place that lets agents coordinate work."
+      Close — but a group chat is that.
+      That definition names the mechanism and leaves out the product.
+      Coordination is how Marcus works; it is not what Marcus <b>is</b>.
+    </p>
+    <p class="defline">
+      Marcus is a venue whose rules make work trustworthy —
+      <span class="grad">no matter who, or what, did the work.</span>
+    </p>
+    <p>
+      Untrusted workers go in. Trusted work comes out.
+      You never have to trust a single worker in the building,
+      because the building is the thing you trust.
+      That makes Marcus the software version of a very old kind of thing —
+      an <b>institution</b>. Civilization already built one for every other
+      kind of dealing with strangers:
+    </p>
+    <div class="inst-grid">
+      <div class="inst">
+        <div class="it">The institution</div>
+        <h3>Stock exchange</h3>
+        <div class="safe">Makes it safe to <b>trade</b> with strangers.</div>
+        <div class="how">Clearing and settlement carry the trust — not the traders' honesty.</div>
+      </div>
+      <div class="inst">
+        <div class="it">The institution</div>
+        <h3>Escrow</h3>
+        <div class="safe">Makes it safe to <b>pay</b> strangers.</div>
+        <div class="how">The money moves only when the condition is met — not when someone promises.</div>
+      </div>
+      <div class="inst">
+        <div class="it">The institution</div>
+        <h3>Court</h3>
+        <div class="safe">Makes it safe to <b>disagree</b> with strangers.</div>
+        <div class="how">The outcome binds because of procedure and record — not goodwill.</div>
+      </div>
+      <div class="inst marcus">
+        <div class="it">The missing one</div>
+        <h3>Marcus</h3>
+        <div class="safe">Makes it safe to <b>accept work</b> from strangers.</div>
+        <div class="how">Evidence to close, checks the author can't touch, a human signature, a complete record — human or AI, any vendor.</div>
+      </div>
+    </div>
+    <p>
+      And AI just filled the workplace with strangers: brilliant, tireless, cheap —
+      and confidently wrong about seven times in ten.
+      Smarter models don't fix that, because a stranger getting smarter
+      doesn't make them accountable.
+      Trades got the exchange. Payments got escrow. Disputes got the court.
+      <b>Work from strangers never got its institution. That's what Marcus is.</b>
+    </p>
+    <p class="takeaway">Not a fact checker. Not an agent framework. <strong>The institution for accepting strangers' work.</strong></p>
+  </section>
+
+  <!-- ================= CODA ================= -->
+  <div class="coda">
+    <p class="big">
+      Anyone can hire a fact-checker.
+      <span class="grad">Marcus is the courthouse.</span>
+    </p>
+    <p class="small">
+      AI work you can act on without re-checking it yourself is the only AI work
+      that actually saves you time. That takes asynchronous, multi-party,
+      mutually-checked work — and the board is the smallest structure that can hold it.
+      The citation study is the first case tried in the courthouse,
+      not the reason the courthouse exists.
+    </p>
+    <div class="coda-actions">
+      <a class="github-button" href="https://github.com/painted-porch/marcus"
+         data-icon="octicon-star" data-size="large" data-show-count="true"
+         data-color-scheme="no-preference: dark; light: dark; dark: dark;"
+         aria-label="Star painted-porch/marcus on GitHub">Star Marcus</a>
+      <a class="coda-link" data-goatcounter-click="nafc-receipts"
+         href="index.html">Read the case files: The Receipts →</a>
+      <a class="coda-link" data-goatcounter-click="nafc-release"
+         href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1">Reproduce it yourself ↗</a>
+    </div>
+    <p class="credit">
+      Numbers from a replication of Jaźwińska &amp; Chandrasekar,
+      "AI Search Has a Citation Problem," Tow Center for Digital Journalism,
+      Columbia Journalism Review, March 2025 — extended by running the same engines
+      through Marcus's enforcement. Full method, code, and redacted audit bundles
+      ship with the <a href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1" style="font-family: var(--mono); font-size: 12px; color: var(--blue);">on-the-record-v1</a> release.
+    </p>
+  </div>
+</div>
+
+<script data-goatcounter="https://graylabs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
+<script async defer src="https://buttons.github.io/buttons.js"></script>
+</body>
+</html>

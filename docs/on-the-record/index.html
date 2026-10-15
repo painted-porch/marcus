@@ -1,3 +1,8 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The Receipts</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
 <style>
@@ -70,6 +75,10 @@
     border-radius:14px;padding:20px 22px;}
   .cta p{margin:0;font-size:16px;line-height:1.65;color:#c7d2fe;}
   .cta .repo{font-family:var(--mono);color:#93c5fd;font-size:14px;}
+  .cta-actions{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:18px;}
+  .cta-link{font-family:var(--mono);font-size:13.5px;color:#93c5fd;text-decoration:none;
+    border:1px solid var(--line2);border-radius:6px;padding:7px 12px;}
+  .cta-link:hover{border-color:#93c5fd;}
   .dots{position:fixed;right:10px;top:50%;transform:translateY(-50%);display:flex;
     flex-direction:column;gap:8px;z-index:5;}
   .dots a{width:8px;height:8px;border-radius:50%;background:var(--line);display:block;}
@@ -78,6 +87,8 @@
   .count{transition:none;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;} #scroller{scroll-behavior:auto;} }
 </style>
+</head>
+<body>
 
 <div id="scroller">
 
@@ -269,8 +280,19 @@
     full audit bundle: who claimed, who checked, the evidence, who signed, what it cost. And nothing
     in it is citation-specific. The checkpoint works for any claim a script can check: a number
     against its source, code against its tests, a legal citation against the record. News citations were
-    simply the demo with a published baseline to replicate.<br><br>
-    <span class="repo">github.com/lwgray/marcus</span></p></div>
+    simply the demo with a published baseline to replicate.</p>
+    <div class="cta-actions">
+      <a class="github-button" href="https://github.com/painted-porch/marcus"
+         data-icon="octicon-star" data-size="large" data-show-count="true"
+         data-color-scheme="no-preference: dark; light: dark; dark: dark;"
+         aria-label="Star painted-porch/marcus on GitHub">Star Marcus</a>
+      <a class="cta-link" data-goatcounter-click="receipts-release"
+         href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1">Audit bundles &amp; method ↗</a>
+      <a class="cta-link" data-goatcounter-click="receipts-nafc"
+         href="not-a-fact-checker.html">Why this isn't a fact checker →</a>
+      <a class="cta-link" data-goatcounter-click="receipts-bench"
+         href="bench.html">Run the verifier bench →</a>
+    </div></div>
     <p class="foot">About the excerpts: the Tow Center distributes its 200 excerpts encrypted so the
     text stays out of AI training crawlers. We keep that promise here, which is why excerpt text
     appears only as short fragments drawn into an image, never as copyable text. Study: Jaźwińska
@@ -343,3 +365,9 @@
   panels.forEach(function(p){ io.observe(p); });
 })();
 </script>
+
+<script data-goatcounter="https://graylabs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
+<script async defer src="https://buttons.github.io/buttons.js"></script>
+</body>
+</html>
