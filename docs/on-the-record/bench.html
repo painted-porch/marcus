@@ -1,0 +1,364 @@
+<title>Verifier Bench</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --inner:#111b33; --line:#334155; --line2:#475569;
+    --ink:#e2e8f0; --body:#cbd5e1; --mute:#94a3b8; --dim:#64748b;
+    --red:#ef4444; --green:#10b981; --amber:#f59e0b; --blue:#3b82f6; --violet:#8b5cf6;
+    --sans:'IBM Plex Sans',Arial,sans-serif; --mono:'JetBrains Mono','Courier New',monospace;
+  }
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       padding-block:32px;padding-inline:16px;}
+  .wrap{max-width:860px;margin:0 auto;}
+  h1{font-size:30px;font-weight:700;margin:0;}
+  h1 .grad{background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
+           background-clip:text;-webkit-text-fill-color:transparent;}
+  .tagline{color:var(--mute);font-size:15px;margin:8px 0 0;max-width:62ch;line-height:1.55;}
+
+  .stepper{display:flex;gap:8px;margin:26px 0 18px;flex-wrap:wrap;}
+  .step{font-size:13px;font-weight:600;color:var(--dim);border:1px solid var(--line);
+        border-radius:999px;padding:7px 16px;background:var(--inner);}
+  .step.now{color:var(--ink);border-color:var(--violet);background:#1b1536;}
+  .step.done{color:var(--green);border-color:#0b6e4f;}
+
+  .act{display:none;}
+  .act.open{display:block;animation:rise .4s ease;}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;}
+  .lead{font-size:16px;line-height:1.6;color:var(--body);margin:0 0 16px;max-width:62ch;}
+  .lead b{color:var(--ink);}
+
+  .qcard{background:var(--inner);border:1px solid var(--line);border-radius:10px;
+         padding:14px 18px;font-size:14.5px;color:var(--body);line-height:1.55;}
+  .qcard .k{font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
+  .answer{margin-top:14px;border:1px solid var(--line);border-left:4px solid var(--blue);
+          border-radius:10px;padding:16px 18px;background:var(--inner);position:relative;}
+  .answer h3{margin:4px 0 4px;font-size:17px;}
+  .answer .meta{font-size:13.5px;color:var(--mute);}
+  .answer .url{font-family:var(--mono);font-size:12.5px;color:#60a5fa;word-break:break-all;margin-top:6px;}
+  .answer.dead{border-left-color:var(--red);}
+  .stamp{position:absolute;right:16px;top:14px;transform:rotate(-9deg);font-family:var(--mono);
+         font-weight:700;font-size:17px;color:var(--red);border:2px solid var(--red);
+         border-radius:6px;padding:3px 10px;background:rgba(239,68,68,.08);opacity:0;
+         transition:opacity .4s ease, transform .4s ease;}
+  .stamp.on{opacity:1;}
+  .fetchlog{font-family:var(--mono);font-size:13px;color:var(--mute);margin-top:12px;min-height:20px;}
+  .verdictline{font-size:15px;color:var(--body);line-height:1.6;margin-top:14px;display:none;}
+  .verdictline.on{display:block;}
+  .verdictline b{color:var(--red);}
+
+  button{font-family:var(--sans);font-size:15px;font-weight:600;color:#fff;
+         background:linear-gradient(135deg,var(--blue),var(--violet));border:none;border-radius:9px;
+         padding:11px 22px;cursor:pointer;margin-top:18px;}
+  button.quiet{background:var(--panel);border:1px solid var(--line2);color:var(--ink);}
+  button:hover{filter:brightness(1.12);}
+  button:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
+  button[disabled]{opacity:.45;cursor:default;filter:none;}
+
+  .checklist{margin:0 0 6px;padding:0;list-style:none;}
+  .checklist li{display:flex;gap:12px;align-items:flex-start;padding:10px 0;
+                border-bottom:1px solid var(--line);}
+  .checklist li:last-child{border-bottom:none;}
+  .cnum{font-family:var(--mono);font-size:12px;color:var(--violet);padding-top:2px;}
+  .checklist b{font-size:14.5px;display:block;}
+  .checklist small{font-size:12.5px;color:var(--mute);line-height:1.45;}
+  .checklist .mono{font-family:var(--mono);color:var(--dim);font-size:11px;}
+  .checklist input{accent-color:#8b5cf6;width:17px;height:17px;margin-top:4px;cursor:pointer;}
+  .checklist li.off b, .checklist li.off small{opacity:.4;text-decoration:line-through;}
+
+  .queue{margin-top:16px;}
+  .row{border:1px solid var(--line);border-left:4px solid var(--line2);border-radius:10px;
+       background:var(--inner);padding:12px 16px;margin-top:10px;transition:border-color .3s;}
+  .row h4{margin:0;font-size:14.5px;font-weight:600;}
+  .row .sub{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:3px;word-break:break-all;}
+  .row .why{font-size:12.5px;color:var(--mute);margin-top:6px;line-height:1.45;display:none;}
+  .row.done .why{display:block;}
+  .row .chip{float:right;font-family:var(--mono);font-size:11px;letter-spacing:1px;
+             text-transform:uppercase;padding:4px 10px;border-radius:999px;
+             border:1px solid var(--line2);color:var(--dim);}
+  .row.ok{border-left-color:var(--green);} .row.ok .chip{color:var(--green);border-color:#0b6e4f;}
+  .row.no{border-left-color:var(--amber);} .row.no .chip{color:var(--amber);border-color:#7c5806;}
+  .row.bad{border-left-color:var(--red);box-shadow:0 0 0 1px var(--red);}
+  .row.bad .chip{color:#fecaca;border-color:var(--red);background:rgba(239,68,68,.15);}
+  .row.busy{border-left-color:var(--blue);}
+  .ticks{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:7px;min-height:16px;}
+  .ticks .p{color:var(--green);} .ticks .f{color:var(--red);}
+
+  .tally{display:flex;gap:12px;margin-top:18px;flex-wrap:wrap;}
+  .tile{flex:1;min-width:200px;background:var(--panel);border:1px solid var(--line);
+        border-radius:12px;padding:14px 18px;}
+  .tile .n{font-family:var(--mono);font-size:38px;font-weight:700;font-variant-numeric:tabular-nums;}
+  .tile .l{font-size:13px;color:var(--mute);margin-top:2px;line-height:1.4;}
+  #tBad .n{color:var(--red);} #tOk .n{color:var(--green);}
+  .sabnote{display:none;margin-top:14px;background:rgba(245,158,11,.08);border:1px solid #7c5806;
+           border-radius:10px;padding:13px 16px;font-size:14px;color:#fcd34d;line-height:1.6;}
+  .sabnote.show{display:block;}
+
+  .cta{margin-top:26px;background:linear-gradient(135deg,#1e3a8a,#312e81);
+       border:1px solid var(--line2);border-radius:14px;padding:22px 24px;display:none;}
+  .cta.show{display:block;}
+  .cta p{margin:0;font-size:15.5px;line-height:1.65;color:#c7d2fe;max-width:68ch;}
+  .cta b{color:#fff;} .cta .repo{font-family:var(--mono);color:#93c5fd;}
+  footer{margin-top:16px;font-size:12px;color:var(--dim);line-height:1.6;max-width:80ch;}
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
+</style>
+
+<div class="wrap">
+  <h1><span class="grad">Verifier Bench</span></h1>
+  <p class="tagline">In a live replication of Columbia’s Tow Center study, AI search engines handed us
+  wrong answers 73.8% of the time, with fabricated citations. This bench shows how a verifier they
+  can’t skip catches them. Three steps, two minutes.</p>
+
+  <div class="stepper">
+    <span class="step now" id="st1">1 · Catch one lie</span>
+    <span class="step" id="st2">2 · Run the verifier</span>
+    <span class="step" id="st3">3 · Now break it</span>
+  </div>
+
+  <section class="act open" id="act1">
+    <div class="panel">
+      <p class="lead">We gave an AI search engine a sentence from a real news article and asked:
+      <b>where is this from?</b> Here is its answer.</p>
+      <div class="qcard"><span class="k">the question</span><br>
+        “Some good news is that this storm should make a lasting impact…”
+        — which article is this from? <span style="color:#64748b;font-size:12px">(fragment only;
+        the dataset’s excerpts stay protected)</span></div>
+      <div class="answer" id="a1">
+        <span class="k" style="color:#60a5fa">confident answer</span>
+        <span class="stamp" id="stamp">404 NOT FOUND</span>
+        <h3>“New England storm brings flooding rain”</h3>
+        <div class="meta">The Boston Globe · December 11, 2024</div>
+        <div class="url">bostonglobe.com/2024/12/11/metro/storm-flooding-rain-drought/</div>
+      </div>
+      <div class="fetchlog" id="flog"></div>
+      <p class="verdictline" id="v1">The page <b>does not exist</b>. The engine didn’t say “I’m not sure”;
+      it invented a plausible link. In our test, <b>54.6% of cited URLs</b> failed this one fetch.
+      Nobody clicks every link. That’s the problem.</p>
+      <button id="fetchBtn">Fetch that link</button>
+      <button id="to2" class="quiet" style="display:none">So how do you catch these? →</button>
+    </div>
+  </section>
+
+  <section class="act" id="act2">
+    <div class="panel">
+      <p class="lead">You catch them with a <b>verifier</b>: five dumb, deterministic checks, run on every
+      answer by someone who is <b>never the answer’s author</b>. No AI judging AI. Just receipts.</p>
+      <ul class="checklist" id="cl2"></ul>
+      <p class="lead" style="margin-top:14px">Here are six AI answers, including the one you just caught.
+      Run them all.</p>
+      <div class="queue" id="q2"></div>
+      <div class="tally">
+        <div class="tile" id="tBad"><div class="n">–</div><div class="l">wrong answers that reached you<br>(without the verifier: 4 of 6)</div></div>
+        <div class="tile" id="tOk"><div class="n">–</div><div class="l">delivered, verified correct</div></div>
+      </div>
+      <p class="lead" id="declNote" style="display:none;margin-top:14px">The declines are not failures.
+      Each one says <b>“could not verify”</b> and attaches its receipts: the fetch log, the 404, the real
+      source. One was even a true answer whose page has died; against two-year-old articles, nearly half
+      the web already has. An honest “can’t confirm” beats a confident lie.</p>
+      <button id="runBtn">▶ Run all six</button>
+      <button id="to3" class="quiet" style="display:none">Now try to break it →</button>
+    </div>
+  </section>
+
+  <section class="act" id="act3">
+    <div class="panel">
+      <p class="lead"><b>You run the verifier now.</b> Untick a check. The bench re-runs instantly.
+      Start with <b>“Is this the original?”</b> and watch what ships.</p>
+      <ul class="checklist" id="cl3"></ul>
+      <div class="queue" id="q3"></div>
+      <div class="tally">
+        <div class="tile" id="tBad3"><div class="n">–</div><div class="l">wrong answers that reached you</div></div>
+        <div class="tile" id="tOk3"><div class="n">–</div><div class="l">delivered, verified correct</div></div>
+      </div>
+      <div class="sabnote" id="sabnote"></div>
+    </div>
+  </section>
+
+  <div class="cta" id="cta">
+    <p><b>Every check you just toggled is real.</b> They’re the verifier from Marcus, an open-source board
+    where an AI agent’s answer is not accepted without evidence, is never checked by its own author, and only
+    humans approve. Same engines, on the record: wrong answers reaching you fell from <b>73.8% to 4.8%</b>;
+    fabricated citations fell to <b>zero</b>; cost rose 1.42x, in fractions of a cent.<br><br>
+    <span class="repo">github.com/lwgray/marcus</span></p>
+  </div>
+  <footer>Fetches on this bench are simulated so it can run anywhere; the production verifier fetches live
+  pages, respects robots.txt, and attaches its logs to every verdict. Sample answers mirror real cases from
+  the October 2026 preregistered pilot, including the syndicated copy that fooled the first run.</footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const CHECKS = [
+    {id:"resolves", t:"Fetch the link", d:"A fabricated URL dies here. Most do.", m:"url_resolves", on:true},
+    {id:"quote", t:"Is the quote on the page?", d:"Real page, invented words: caught.", m:"quote_on_page", on:true},
+    {id:"domain", t:"Does the site match the claimed publisher?", d:"Right article, wrong outlet: caught.", m:"domain_matches_publisher", on:true},
+    {id:"canon", t:"Is this the original, not a reprint?", d:"Reprints carry the quote but credit the wrong source. This check failed our first pilot until we added it.", m:"canonical_source", on:true},
+    {id:"date", t:"Does the page’s date match?", d:"Off by months, stated with confidence: caught.", m:"date_within_1_day", on:true}
+  ];
+  const ANSWERS = [
+    {id:"good", label:"The straight answer", truth:true,
+     sub:"Boston Globe · bostonglobe.com/2024/12/11/metro/storm/",
+     r:{resolves:true,quote:true,domain:true,canon:true,date:true},
+     why:"Every check holds. Delivered, with its receipts attached."},
+    {id:"fab", label:"The fabricated link (the one you fetched)", truth:false,
+     sub:"Boston Globe · bostonglobe.com/…/storm-flooding-rain-drought/",
+     r:{resolves:false,quote:false,domain:true,canon:true,date:true},
+     why:"The page does not exist. Declined at the first check."},
+    {id:"syn", label:"The syndicated copy", truth:false,
+     sub:"claimed: Yahoo News · yahoo.com/news/california-kangaroo/",
+     r:{resolves:true,quote:true,domain:true,canon:false,date:true},
+     why:"The quote IS on the page, but Yahoo reprinted the LA Times. Right words, wrong credit."},
+    {id:"quoteless", label:"The invented quote", truth:false,
+     sub:"Seattle Times · seattletimes.com/2025/01/20/transit/",
+     r:{resolves:true,quote:false,domain:true,canon:true,date:true},
+     why:"The page is real. The quoted sentence appears nowhere on it."},
+    {id:"dated", label:"The date drift", truth:false,
+     sub:"Chicago Tribune · claimed 2025-03-02, page says 2024-11-18",
+     r:{resolves:true,quote:true,domain:true,canon:true,date:false},
+     why:"Real article, invented date, stated with total confidence."},
+    {id:"rot", label:"True, but the page is gone", truth:true,
+     sub:"LA Times · latimes.com/environment/2023/02/14/rivers/",
+     r:{resolves:false,quote:false,domain:true,canon:true,date:true},
+     why:"A correct answer whose source has died. The only honest verdict left is “can’t confirm.”"}
+  ];
+  const $ = id => document.getElementById(id);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---------- act 1 ---------- */
+  $("fetchBtn").addEventListener("click", () => {
+    $("fetchBtn").disabled = true;
+    const log = $("flog");
+    const lines = ["GET bostonglobe.com/2024/12/11/metro/storm-flooding-rain-drought/", "… 404 Not Found"];
+    let i = 0;
+    (function next(){
+      log.textContent = lines.slice(0, ++i).join("   ");
+      if (i < lines.length) setTimeout(next, reduce?0:800);
+      else {
+        $("stamp").classList.add("on");
+        $("a1").classList.add("dead");
+        $("v1").classList.add("on");
+        $("to2").style.display = "inline-block";
+      }
+    })();
+  });
+  $("to2").addEventListener("click", () => {
+    $("act2").classList.add("open");
+    $("st1").classList.replace("now","done");
+    $("st2").classList.add("now");
+    $("act2").scrollIntoView({behavior: reduce?"auto":"smooth"});
+  });
+
+  /* ---------- checklists ---------- */
+  function renderChecks(ulId, toggles){
+    $(ulId).innerHTML = CHECKS.map((c,i) => `
+      <li class="${c.on?'':'off'}">
+        ${toggles?`<input type="checkbox" data-c="${c.id}" ${c.on?'checked':''} aria-label="${c.t}">`
+                 :`<span class="cnum">${i+1}</span>`}
+        <span><b>${c.t}</b><small>${c.d} <span class="mono">· ${c.m}</span></small></span>
+      </li>`).join("");
+  }
+
+  /* ---------- evaluation ---------- */
+  function evaluate(a){
+    const on = id => CHECKS.find(c=>c.id===id).on;
+    const steps = [];
+    let verdict = "ok", reason = "verified · delivered";
+    const order = ["resolves","quote","domain","canon","date"];
+    const names = {resolves:"fetch",quote:"quote",domain:"site",canon:"original",date:"date"};
+    for (const id of order){
+      if (!on(id)) continue;
+      if (["quote","canon","date"].includes(id) && !a.r.resolves && !on("resolves")) continue;
+      const pass = a.r[id];
+      steps.push({n:names[id], pass});
+      if (!pass){
+        verdict = "no";
+        reason = id==="resolves" ? "declined · link dead" :
+                 id==="quote" ? "declined · quote not on page" :
+                 id==="domain" ? "declined · wrong site" :
+                 id==="canon" ? "declined · reprint, not the source" : "declined · date mismatch";
+        break;
+      }
+    }
+    return {steps, verdict, reason};
+  }
+  function rowHtml(a){
+    return `<div class="row" id="r-${a.id}">
+      <span class="chip">waiting</span><h4>${a.label}</h4>
+      <div class="sub">${a.sub}</div><div class="ticks"></div>
+      <div class="why">${a.why}</div></div>`;
+  }
+  function runQueue(qId, tallyBadId, tallyOkId, done){
+    ANSWERS.forEach(a => { const r = $(qId).querySelector("#r-"+a.id);
+      r.className = "row"; r.querySelector(".chip").textContent = "waiting";
+      r.querySelector(".ticks").textContent = ""; });
+    let bad = 0, ok = 0;
+    ANSWERS.forEach((a, idx) => setTimeout(() => {
+      const row = $(qId).querySelector("#r-"+a.id);
+      row.classList.add("busy");
+      const res = evaluate(a);
+      const ticks = row.querySelector(".ticks");
+      res.steps.forEach((s, j) => setTimeout(() => {
+        ticks.innerHTML += ` <span class="${s.pass?'p':'f'}">${s.n} ${s.pass?'✓':'✗'}</span>`;
+      }, reduce?0:j*180));
+      setTimeout(() => {
+        row.classList.remove("busy");
+        const delivered = res.verdict === "ok";
+        if (delivered && !a.truth){ row.classList.add("bad","done");
+          row.querySelector(".chip").textContent = "lie delivered"; bad++; }
+        else if (delivered){ row.classList.add("ok","done");
+          row.querySelector(".chip").textContent = "delivered ✓"; ok++; }
+        else { row.classList.add("no","done");
+          row.querySelector(".chip").textContent = res.reason; }
+        $(tallyBadId).querySelector(".n").textContent = bad;
+        $(tallyOkId).querySelector(".n").textContent = ok;
+        if (idx === ANSWERS.length-1 && done) done(bad);
+      }, reduce?0:res.steps.length*180+240);
+    }, reduce?0:idx*650));
+  }
+
+  /* ---------- act 2 ---------- */
+  renderChecks("cl2", false);
+  $("q2").innerHTML = ANSWERS.map(rowHtml).join("");
+  $("runBtn").addEventListener("click", () => {
+    $("runBtn").disabled = true;
+    runQueue("q2","tBad","tOk", () => {
+      $("declNote").style.display = "block";
+      $("to3").style.display = "inline-block";
+    });
+  });
+  $("to3").addEventListener("click", () => {
+    $("act3").classList.add("open");
+    $("st2").classList.replace("now","done");
+    $("st3").classList.add("now");
+    $("cta").classList.add("show");
+    renderChecks("cl3", true);
+    $("q3").innerHTML = ANSWERS.map(rowHtml).join("");
+    runQueue("q3","tBad3","tOk3", null);
+    $("act3").scrollIntoView({behavior: reduce?"auto":"smooth"});
+  });
+
+  /* ---------- act 3 sabotage ---------- */
+  document.addEventListener("change", e => {
+    const c = e.target.closest("[data-c]");
+    if (!c) return;
+    CHECKS.find(x=>x.id===c.dataset.c).on = c.checked;
+    renderChecks("cl3", true);
+    runQueue("q3","tBad3","tOk3", bad => {
+      const syn = ANSWERS.find(a=>a.id==="syn");
+      const synShipped = evaluate(syn).verdict==="ok";
+      const note = $("sabnote");
+      if (synShipped){
+        note.textContent = "That reprint you just shipped fooled our first pilot too: 15.8% wrong delivered, against a 10% pass gate. The preregistration had named this exact check as the remedy. We added it, re-ran everything, and passed at 4.8%. Turn it back on.";
+        note.classList.add("show");
+      } else if (bad > 0){
+        note.textContent = bad + " wrong answer" + (bad>1?"s":"") + " just reached someone who will act on " + (bad>1?"them":"it") + ". Every check you turn off is a failure mode you chose to ship.";
+        note.classList.add("show");
+      } else {
+        note.textContent = "Zero lies delivered. That’s the whole product.";
+        note.classList.add("show");
+      }
+    });
+  });
+})();
+</script>
