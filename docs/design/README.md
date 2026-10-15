@@ -5,6 +5,8 @@
 These documents were written between 5 and 13 September 2026 as a full review of Marcus and a proposal for what it becomes next.
 They are the context for the `feat/system-of-record` branch and the issue that tracks it.
 Read them in the order below; each one builds on the one before it.
+If you have ten minutes, read [system-of-record-brief.md](system-of-record-brief.md) first: it is the short version of document 5.
+The same brief with the first pilot result added is [system-of-record-brief-with-pilot-result.md](system-of-record-brief-with-pilot-result.md); the readout itself is in [research/](research/).
 
 | Order | Document | What it is | Published page |
 |---|---|---|---|
