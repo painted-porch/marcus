@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>On the Record</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --panel2:#16213a; --line:#334155; --line2:#475569;
+    --ink:#e2e8f0; --body:#cbd5e1; --mute:#94a3b8; --dim:#64748b;
+    --red:#ef4444; --green:#10b981; --amber:#f59e0b; --blue:#3b82f6; --violet:#8b5cf6;
+    --sans:'IBM Plex Sans',Arial,sans-serif; --mono:'JetBrains Mono','Courier New',monospace;
+  }
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       padding-block:24px;padding-inline:16px;}
+  .wrap{max-width:1240px;margin:0 auto;}
+  header.top{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:14px;}
+  .brand{font-size:22px;font-weight:700;background:linear-gradient(135deg,#60a5fa,#a78bfa);
+         -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+  .sub{color:var(--mute);font-size:14px;}
+  .stagebox{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;
+            background:linear-gradient(135deg,#131c33,#0f172a);}
+  #scaler{position:relative;transform-origin:top left;width:1200px;height:600px;}
+  .scene{position:absolute;inset:0;opacity:0;visibility:hidden;transition:opacity .5s ease;}
+  .scene.live{opacity:1;visibility:visible;}
+  .el{position:absolute;transition:opacity .5s ease,transform .6s ease,left .7s ease,top .7s ease,
+      border-color .4s ease,background .4s ease;}
+  [data-st="hidden"]{opacity:0;visibility:hidden;}
+  [data-st]:not([data-st="hidden"]){opacity:1;visibility:visible;}
+  [data-st="dim"]{opacity:.22;}
+
+  /* shared pieces */
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;}
+  .k{font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:1px;
+        text-transform:uppercase;padding:3px 10px;border-radius:999px;border:1px solid var(--line2);
+        color:var(--mute);transition:all .4s ease;}
+  .pill.todo{color:var(--amber);border-color:#7c5806;}
+  .pill.prog{color:var(--blue);border-color:#1e4fa3;}
+  .pill.done{color:var(--green);border-color:#0b6e4f;}
+  .agent{display:flex;align-items:center;gap:10px;background:var(--panel);
+         border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-size:14px;}
+  .agent .dot{width:9px;height:9px;border-radius:50%;}
+  .agent b{font-weight:600;}
+  .agent small{color:var(--dim);font-family:var(--mono);font-size:11px;}
+  .bubble{background:#0b1222;border:1px solid var(--line2);border-radius:10px;
+          font-family:var(--mono);font-size:12px;color:var(--body);padding:8px 12px;}
+  .bubble:after{content:"";position:absolute;left:24px;bottom:-6px;width:10px;height:10px;
+                background:#0b1222;border-right:1px solid var(--line2);border-bottom:1px solid var(--line2);
+                transform:rotate(45deg);}
+  .toast{font-family:var(--mono);font-size:12px;padding:8px 14px;border-radius:8px;}
+  .big{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;}
+
+  /* ---- scene A ---- */
+  #excerpt{left:70px;top:60px;width:440px;}
+  #excerpt p.q{font-size:17px;line-height:1.55;color:var(--body);margin:8px 0 10px;}
+  #excerpt .src{font-size:12px;color:var(--dim);}
+  #engine{left:70px;top:330px;}
+  #engine .dot{background:var(--blue);box-shadow:0 0 10px rgba(59,130,246,.8);}
+  #arrowA{left:330px;top:338px;color:var(--dim);font-size:26px;}
+  #answer{left:600px;top:70px;width:470px;border-left:4px solid var(--blue);}
+  #answer.bad{border-left-color:var(--red);border-color:#7f1d1d;}
+  #answer h3{margin:6px 0 4px;font-size:19px;font-weight:600;}
+  #answer .meta{font-size:14px;color:var(--mute);margin-bottom:8px;}
+  #answer .url{font-family:var(--mono);font-size:13px;color:#60a5fa;word-break:break-all;}
+  #probe{left:600px;top:330px;width:470px;font-family:var(--mono);font-size:13px;color:var(--mute);}
+  #stamp{left:860px;top:150px;transform:rotate(-12deg) scale(1);font-family:var(--mono);
+         font-weight:700;font-size:26px;color:var(--red);border:3px solid var(--red);
+         border-radius:8px;padding:6px 16px;background:rgba(239,68,68,.08);}
+  [data-st="hidden"]#stamp{transform:rotate(-12deg) scale(2.2);}
+  #tallyA{left:70px;top:420px;width:1060px;display:flex;gap:28px;}
+  #tallyA .tile{flex:1;background:var(--panel);border:1px solid var(--line);
+                border-left:4px solid var(--red);border-radius:12px;padding:18px 24px;}
+  #tallyA .n{font-size:52px;color:var(--red);}
+  #tallyA .cap2{color:var(--mute);font-size:14px;margin-top:4px;}
+
+  /* ---- scene B ---- */
+  .task{width:244px;padding:14px 16px;}
+  .task h4{margin:6px 0 8px;font-size:15px;font-weight:600;line-height:1.3;}
+  .task .note{font-family:var(--mono);font-size:10.5px;color:var(--dim);line-height:1.5;}
+  #tFind{left:48px;top:52px;}
+  #tVerify{left:356px;top:52px;}
+  #tApprove{left:664px;top:52px;}
+  #tSynth{left:926px;top:52px;width:226px;}
+  .task.flash{border-color:var(--red);box-shadow:0 0 0 2px var(--red);}
+  .task.glow{border-color:var(--blue);box-shadow:0 0 14px rgba(59,130,246,.45);}
+  .task.ok{border-color:#0b6e4f;}
+  .darrow{top:120px;color:var(--dim);font-size:22px;}
+  #d1{left:300px;} #d2{left:608px;} #d3{left:912px;}
+  #lock{left:470px;top:20px;font-size:17px;color:var(--violet);}
+  #packet{left:150px;top:210px;background:#0b1222;border:1px solid var(--violet);
+          border-radius:8px;font-family:var(--mono);font-size:11px;color:#c4b5fd;padding:7px 11px;}
+  #packet[data-st="atverify"]{left:420px;top:210px;}
+  #bounce{left:120px;top:250px;background:rgba(239,68,68,.12);border:1px solid var(--red);color:#fca5a5;}
+  #notask{left:120px;top:250px;background:rgba(148,163,184,.1);border:1px solid var(--line2);color:var(--mute);}
+  #checks{left:356px;top:230px;width:250px;font-size:13px;color:var(--body);}
+  #checks div{display:flex;gap:9px;align-items:center;margin:7px 0;opacity:.25;transition:opacity .4s ease;}
+  #checks .t{color:var(--green);font-family:var(--mono);}
+  #checks.run div{opacity:1;}
+  #checks.run div:nth-child(1){transition-delay:.1s;} #checks.run div:nth-child(2){transition-delay:.7s;}
+  #checks.run div:nth-child(3){transition-delay:1.3s;} #checks.run div:nth-child(4){transition-delay:1.9s;}
+  #decline{left:640px;top:226px;width:320px;border-left:4px solid var(--amber);}
+  #decline .k{color:var(--amber);}
+  #decline p{font-size:13.5px;color:var(--body);margin:7px 0 0;line-height:1.5;}
+  #audit{left:926px;top:330px;width:226px;border-left:4px solid var(--green);}
+  #audit ul{margin:8px 0 0;padding-left:16px;font-size:12px;color:var(--mute);line-height:1.7;}
+  .agents{left:48px;top:470px;width:1104px;display:flex;gap:22px;}
+  #bubFind{left:60px;top:392px;}
+  #bubVerify{left:430px;top:392px;}
+  #bubHuman{left:800px;top:392px;}
+
+  /* ---- scene C ---- */
+  #resA{left:120px;top:80px;width:420px;text-align:center;}
+  #resB{left:660px;top:80px;width:420px;text-align:center;border-left:4px solid var(--green);}
+  #resA{border-left:4px solid var(--red);}
+  .res .n{font-size:78px;}
+  #resA .n{color:var(--red);} #resB .n{color:var(--green);}
+  .res .lbl{font-size:15px;color:var(--mute);margin-top:2px;}
+  .res .fab{margin-top:14px;font-size:15px;color:var(--body);}
+  .res .fab b{font-family:var(--mono);}
+  #vsArrow{left:565px;top:160px;font-size:34px;color:var(--dim);}
+  #closing{left:120px;top:380px;width:960px;text-align:center;}
+  #closing p{font-size:26px;line-height:1.5;color:var(--ink);margin:0;}
+  #closing .u{background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
+              background-clip:text;-webkit-text-fill-color:transparent;font-weight:700;}
+  #costchip{left:470px;top:500px;font-size:13px;color:var(--mute);border:1px solid var(--line2);
+            border-radius:999px;padding:8px 18px;font-family:var(--mono);}
+
+  /* ---- chrome ---- */
+  .caption{min-height:66px;display:flex;align-items:center;gap:14px;margin-top:14px;
+           background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 18px;}
+  .caption .num{font-family:var(--mono);font-size:12px;color:var(--dim);white-space:nowrap;}
+  .caption p{margin:0;font-size:16px;line-height:1.5;color:var(--body);}
+  .controls{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap;}
+  button{font-family:var(--sans);font-size:14px;font-weight:600;color:var(--ink);
+         background:var(--panel);border:1px solid var(--line2);border-radius:8px;
+         padding:9px 16px;cursor:pointer;}
+  button:hover{background:var(--line);}
+  button:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
+  #play{background:linear-gradient(135deg,var(--blue),var(--violet));border:none;}
+  .dots{display:flex;gap:6px;margin-left:6px;flex-wrap:wrap;}
+  .dots i{width:9px;height:9px;border-radius:50%;background:var(--line);cursor:pointer;}
+  .dots i.on{background:#a78bfa;}
+  .legend{margin-top:10px;font-size:12px;color:var(--dim);}
+  @media (prefers-reduced-motion: reduce){
+    .el,.scene,.pill,#checks div{transition:none !important;}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="top">
+    <span class="brand">On the Record</span>
+    <span class="sub">What four AI search engines did alone, and what happened inside Marcus</span>
+  </header>
+
+  <div class="stagebox" id="stagebox">
+    <div id="scaler">
+
+      <section class="scene" id="scA">
+        <div class="el card" id="excerpt" data-st="hidden">
+          <span class="k">Real excerpt · case tow-0001</span>
+          <p class="q">“Some good news is that this storm should make a lasting impact…”</p>
+          <span class="src">Excerpt shown as a fragment only, honoring the Tow Center’s dataset protection. Ground truth: Boston Globe, Dec 11 2024. The engine is asked: where is this from?</span>
+        </div>
+        <div class="el agent" id="engine" data-st="hidden"><span class="dot"></span>
+          <span><b>AI search engine</b> <small>consumer defaults, live web search</small></span></div>
+        <div class="el" id="arrowA" data-st="hidden">→</div>
+        <div class="el card" id="answer" data-st="hidden">
+          <span class="k">Confident answer</span>
+          <h3>“New England storm brings flooding rain”</h3>
+          <div class="meta">The Boston Globe · December 11, 2024</div>
+          <div class="url">bostonglobe.com/2024/12/11/metro/storm-flooding-rain-drought/</div>
+        </div>
+        <div class="el" id="probe" data-st="hidden">GET /2024/12/11/metro/storm-flooding-rain-drought/ …</div>
+        <div class="el" id="stamp" data-st="hidden">404 · NOT FOUND</div>
+        <div class="el" id="tallyA" data-st="hidden">
+          <div class="tile"><div class="n big" id="n1" data-target="73.8" data-suffix="%">0%</div>
+            <div class="cap2">of confident answers were wrong (200 live answers, 4 engines)</div></div>
+          <div class="tile"><div class="n big" id="n2" data-target="54.6" data-suffix="%">0%</div>
+            <div class="cap2">of cited URLs fabricated, dead, or not the source</div></div>
+        </div>
+      </section>
+
+      <section class="scene" id="scB">
+        <div class="el card task" id="tFind" data-st="hidden">
+          <span class="k">find</span><span class="pill todo" id="pFind" style="float:right">todo</span>
+          <h4>Find the source of tow-0001</h4>
+          <div class="note">not accepted without evidence:<br>{headline, publisher, date, url}</div>
+        </div>
+        <div class="el" id="d1" data-st="hidden"><span class="darrow">→</span></div>
+        <div class="el card task" id="tVerify" data-st="hidden">
+          <span class="k">verify</span><span class="pill todo" id="pVerify" style="float:right">todo</span>
+          <h4>Check the claim against the page</h4>
+          <div class="note">never offered to the claim’s author,<br>nor to the author’s vendor</div>
+        </div>
+        <div class="el" id="d2" data-st="hidden"><span class="darrow">→</span></div>
+        <div class="el card task" id="tApprove" data-st="hidden">
+          <span class="k">approve</span><span class="pill todo" id="pApprove" style="float:right">todo</span>
+          <h4>Sign off</h4>
+          <div class="note">principal: human only</div>
+        </div>
+        <div class="el" id="d3" data-st="hidden"><span class="darrow">→</span></div>
+        <div class="el card task" id="tSynth" data-st="hidden">
+          <span class="k">synthesize</span><span class="pill todo" id="pSynth" style="float:right">todo</span>
+          <h4>Deliver the answer</h4>
+          <div class="note">carries verified evidence only</div>
+        </div>
+        <div class="el" id="lock" data-st="hidden">🔒</div>
+
+        <div class="el" id="packet" data-st="hidden">{headline, publisher, date, url}</div>
+        <div class="el toast" id="bounce" data-st="hidden">CLOSE REJECTED · typed evidence required</div>
+        <div class="el toast" id="notask" data-st="hidden">no task available</div>
+        <div class="el" id="checks" data-st="hidden">
+          <div><span class="t">✓</span> quote is on the fetched page</div>
+          <div><span class="t">✓</span> domain matches the publisher</div>
+          <div><span class="t">✓</span> date within one day</div>
+          <div><span class="t">✓</span> canonical source, not a syndicated copy</div>
+        </div>
+        <div class="el card" id="decline" data-st="hidden">
+          <span class="k">the other outcome</span>
+          <p>Checks fail → <b>“could not verify”</b>, receipts attached: the fetch log, the 404,
+          the robots rule. An honest decline, never a confident guess.</p>
+        </div>
+        <div class="el card" id="audit" data-st="hidden">
+          <span class="k">audit bundle</span>
+          <ul><li>who claimed</li><li>who checked</li><li>the evidence</li><li>who signed</li><li>what it cost</li></ul>
+        </div>
+
+        <div class="el agents" id="agentRow" data-st="hidden">
+          <div class="agent" id="agFind"><span class="dot" style="background:var(--blue)"></span>
+            <span><b>finder</b> <small>agent · vendor: anthropic</small></span></div>
+          <div class="agent" id="agVerify"><span class="dot" style="background:var(--violet)"></span>
+            <span><b>verifier</b> <small>deterministic script · vendor: fetchcheck</small></span></div>
+          <div class="agent" id="agHuman"><span class="dot" style="background:var(--green)"></span>
+            <span><b>reviewer</b> <small>principal: human</small></span></div>
+        </div>
+        <div class="el bubble" id="bubFind" data-st="hidden">request_next_task</div>
+        <div class="el bubble" id="bubVerify" data-st="hidden">request_next_task</div>
+        <div class="el bubble" id="bubHuman" data-st="hidden">approved ✓</div>
+      </section>
+
+      <section class="scene" id="scC">
+        <div class="el card res" id="resA" data-st="hidden">
+          <span class="k">engines alone</span>
+          <div class="n big" id="n3" data-target="73.8" data-suffix="%">0%</div>
+          <div class="lbl">of delivered answers wrong</div>
+          <div class="fab">fabricated URLs: <b style="color:var(--red)">54.6%</b></div>
+        </div>
+        <div class="el" id="vsArrow" data-st="hidden">→</div>
+        <div class="el card res" id="resB" data-st="hidden">
+          <span class="k">same engines, on the record</span>
+          <div class="n big" id="n4" data-target="4.8" data-suffix="%">0%</div>
+          <div class="lbl">of delivered answers wrong; the rest decline, with receipts</div>
+          <div class="fab">fabricated URLs: <b style="color:var(--green)">0.0%</b></div>
+        </div>
+        <div class="el" id="closing" data-st="hidden">
+          <p>No retraining. No bigger model.<br>
+          <span class="u">The environment stopped accepting unverified claims.</span></p>
+        </div>
+        <div class="el" id="costchip" data-st="hidden">cost of the record: 1.42x · fractions of a cent per case</div>
+      </section>
+
+    </div>
+  </div>
+
+  <div class="caption"><span class="num" id="stepnum">1 / 15</span><p id="cap"></p></div>
+
+  <div class="controls">
+    <button id="prev" aria-label="Previous step">← Back</button>
+    <button id="play" aria-label="Play or pause">▶ Play</button>
+    <button id="next" aria-label="Next step">Next →</button>
+    <div class="dots" id="dots"></div>
+  </div>
+  <p class="legend">Preregistered pilot, 50 excerpts stratified from the Tow Center’s 200, October 2026.
+  Arrow keys step; space plays. Marcus’s internal AI was disabled for every run shown.</p>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const CAPS = [
+    "The test: hand an AI search engine a sentence from a real news article, and ask where it came from. We know the answer. The engine doesn’t.",
+    "The engine alone answers instantly, and confidently: headline, publisher, date, and a link.",
+    "Click the link. The page does not exist. The engine didn’t say “I’m not sure”; it invented a plausible-looking URL.",
+    "Across 200 live answers from four engines: 73.8% of confident answers were wrong, and more than half of all cited URLs were fabricated, dead, or not the source.",
+    "Inside Marcus, the same question becomes a chain of typed tasks on a shared board. Ground truth never touches the board.",
+    "Nothing is assigned. The finder agent asks the board for work, and pulls the find task.",
+    "It answers, then tries to hand the answer in without receipts. The board refuses to accept it. Not a reviewer. The board itself.",
+    "With every receipt attached, the answer is accepted, and the evidence rides forward to the verify task.",
+    "The finder asks for more work. The verify task exists, but the board never offers it: no one checks their own claim, or their own vendor’s. The refusal is silent; you can’t game a gate you can’t see.",
+    "A verifier from a different vendor pulls it. It’s a deterministic script, not another AI: fetch the URL, check the quote, the domain, the date, and whether this page is the original.",
+    "Checks pass: verified. The approve task unlocks, and only a human can take it. A reviewer signs.",
+    "And when checks fail? The claim never becomes a confident answer. It becomes an honest decline, with the fetch log attached as receipts.",
+    "The synthesize task delivers only what survived. Every case can export its audit bundle: who claimed, who checked, the evidence, who signed, what it cost.",
+    "The result, same engines, same 50 questions. The engines are as wrong as ever; what changes is what reaches you. Alone, 73.8% of delivered answers were wrong. On the record, 4.8%: the caught lies arrive as labeled declines, not as answers. Fabricated URLs reaching you: zero.",
+    "No retraining. No bigger model. The environment stopped accepting unverified claims. That is what Marcus is for."
+  ];
+  const SCENES = ["a","a","a","a","b","b","b","b","b","b","b","b","b","c","c"];
+  // Per-step element state overrides; folded cumulatively from step 0.
+  const S = [
+    {excerpt:"on"},
+    {engine:"on", arrowA:"on", answer:"on"},
+    {probe:"on", stamp:"on", answerBad:1},
+    {tallyA:"on", excerpt:"dim", engine:"dim", arrowA:"dim"},
+    {tFind:"on", d1:"on", tVerify:"on", d2:"on", tApprove:"on", d3:"on", tSynth:"on",
+     agentRow:"on", lock:"on"},
+    {bubFind:"on", pFind:"prog", tFindGlow:1},
+    {bubFind:"hidden", bounce:"on", tFindFlash:1},
+    {bounce:"hidden", tFindFlash:0, tFindGlow:0, pFind:"done", tFindOk:1,
+     packet:"atverify", pVerify:"todo"},
+    {bubFind:"on", notask:"on"},
+    {bubFind:"hidden", notask:"hidden", bubVerify:"on", pVerify:"prog", checks:"run"},
+    {bubVerify:"hidden", pVerify:"done", tVerifyOk:1, bubHuman:"on", pApprove:"done", tApproveOk:1},
+    {decline:"on"},
+    {audit:"on", pSynth:"done", tSynthOk:1, bubHuman:"hidden"},
+    {resA:"on", vsArrow:"on", resB:"on"},
+    {closing:"on", costchip:"on"}
+  ];
+  const el = id => document.getElementById(id);
+  const DYNAMIC = ["excerpt","engine","arrowA","answer","probe","stamp","tallyA",
+    "tFind","d1","tVerify","d2","tApprove","d3","tSynth","agentRow","lock","packet",
+    "bounce","notask","checks","decline","audit","bubFind","bubVerify","bubHuman",
+    "resA","vsArrow","resB","closing","costchip"];
+  let cur = 0, playing = false, timer = null;
+  const counted = {};
+
+  function fold(i){
+    const st = {};
+    for (let k = 0; k <= i; k++) Object.assign(st, S[k]);
+    return st;
+  }
+  function countUp(id){
+    const node = el(id), target = parseFloat(node.dataset.target);
+    const suffix = node.dataset.suffix || "";
+    const t0 = performance.now(), dur = 1300;
+    function tick(t){
+      const p = Math.min(1, (t - t0) / dur);
+      node.textContent = (target * (1 - Math.pow(1 - p, 3))).toFixed(1) + suffix;
+      if (p < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+  function apply(i){
+    cur = i;
+    const st = fold(i);
+    document.querySelectorAll(".scene").forEach(s => s.classList.remove("live"));
+    el("sc" + SCENES[i].toUpperCase()).classList.add("live");
+    DYNAMIC.forEach(id => { el(id).dataset.st = st[id] || "hidden"; });
+    el("answer").classList.toggle("bad", !!st.answerBad);
+    el("tFind").classList.toggle("glow", !!st.tFindGlow);
+    el("tFind").classList.toggle("flash", !!st.tFindFlash);
+    el("tFind").classList.toggle("ok", !!st.tFindOk);
+    el("tVerify").classList.toggle("ok", !!st.tVerifyOk);
+    el("tApprove").classList.toggle("ok", !!st.tApproveOk);
+    el("tSynth").classList.toggle("ok", !!st.tSynthOk);
+    el("checks").classList.toggle("run", st.checks === "run");
+    [["pFind", st.pFind], ["pVerify", st.pVerify], ["pApprove", st.pApprove], ["pSynth", st.pSynth]]
+      .forEach(([id, v]) => {
+        const p = el(id);
+        p.className = "pill " + (v === "prog" ? "prog" : v === "done" ? "done" : "todo");
+        p.textContent = v === "prog" ? "in progress" : v === "done" ? "done" : "todo";
+      });
+    if (st.tallyA === "on" && !counted.a){ counted.a = 1; countUp("n1"); countUp("n2"); }
+    if (st.resA === "on" && !counted.c){ counted.c = 1; countUp("n3"); countUp("n4"); }
+    if (st.tallyA !== "on") counted.a = 0;
+    if (st.resA !== "on") counted.c = 0;
+    el("cap").textContent = CAPS[i];
+    el("stepnum").textContent = (i + 1) + " / " + CAPS.length;
+    document.querySelectorAll(".dots i").forEach((d, k) => d.classList.toggle("on", k === i));
+  }
+  function schedule(){
+    clearTimeout(timer);
+    if (!playing) return;
+    const ms = Math.max(3800, CAPS[cur].length * 52);
+    timer = setTimeout(() => {
+      if (cur < CAPS.length - 1) { apply(cur + 1); schedule(); }
+      else { setPlaying(false); }
+    }, ms);
+  }
+  function setPlaying(v){
+    playing = v;
+    el("play").textContent = v ? "⏸ Pause" : (cur === CAPS.length - 1 ? "↺ Replay" : "▶ Play");
+    if (v) schedule(); else clearTimeout(timer);
+  }
+  el("next").addEventListener("click", () => { setPlaying(false); if (cur < CAPS.length - 1) apply(cur + 1); });
+  el("prev").addEventListener("click", () => { setPlaying(false); if (cur > 0) apply(cur - 1); });
+  el("play").addEventListener("click", () => {
+    if (cur === CAPS.length - 1 && !playing) apply(0);
+    setPlaying(!playing);
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") el("next").click();
+    else if (e.key === "ArrowLeft") el("prev").click();
+    else if (e.key === " ") { e.preventDefault(); el("play").click(); }
+  });
+  const dots = el("dots");
+  CAPS.forEach((_, k) => {
+    const d = document.createElement("i");
+    d.addEventListener("click", () => { setPlaying(false); apply(k); });
+    dots.appendChild(d);
+  });
+  function rescale(){
+    const box = el("stagebox");
+    const s = Math.min(1, box.clientWidth / 1200);
+    el("scaler").style.transform = "scale(" + s + ")";
+    box.style.height = (600 * s) + "px";
+  }
+  window.addEventListener("resize", rescale);
+  rescale();
+  apply(0);
+})();
+</script>
+
+<script data-goatcounter="https://graylabs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
+<script async defer src="https://buttons.github.io/buttons.js"></script>
+</body>
+</html>

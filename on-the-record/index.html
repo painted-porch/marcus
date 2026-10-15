@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Receipts</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --inner:#111b33; --line:#334155; --line2:#475569;
+    --ink:#e2e8f0; --body:#cbd5e1; --mute:#94a3b8; --dim:#64748b;
+    --red:#ef4444; --green:#10b981; --amber:#f59e0b; --blue:#60a5fa; --violet:#a78bfa;
+    --sans:'IBM Plex Sans',Arial,sans-serif; --mono:'JetBrains Mono','Courier New',monospace;
+  }
+  html,body{height:100%;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);}
+  #scroller{height:100%;overflow-y:auto;scroll-snap-type:y mandatory;scroll-behavior:smooth;}
+  section.panel{min-height:100svh;scroll-snap-align:start;display:flex;align-items:center;
+    justify-content:center;padding-block:48px;padding-inline:20px;box-sizing:border-box;}
+  .inner{width:100%;max-width:640px;display:flex;flex-direction:column;gap:18px;}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:3px;text-transform:uppercase;
+    color:var(--blue);}
+  h1,h2{margin:0;font-weight:700;line-height:1.08;text-wrap:balance;}
+  h1{font-size:clamp(38px,8.5vw,68px);}
+  h2{font-size:clamp(28px,6.5vw,46px);}
+  .grad{background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
+    background-clip:text;-webkit-text-fill-color:transparent;}
+  p.lead{margin:0;font-size:clamp(16px,2.6vw,19px);line-height:1.6;color:var(--body);max-width:58ch;}
+  p.foot{margin:0;font-size:13.5px;line-height:1.55;color:var(--dim);max-width:60ch;}
+  .big{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;
+    font-size:clamp(64px,16vw,120px);line-height:1;}
+  .big.red{color:var(--red);} .big.green{color:var(--green);}
+  .biglabel{font-size:15px;color:var(--mute);line-height:1.4;}
+
+  .claim{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--blue);
+    border-radius:12px;padding:16px 18px;}
+  .claim.dead{border-left-color:var(--red);}
+  .k{font-family:var(--mono);font-size:10.5px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
+  .claim h3{margin:6px 0 4px;font-size:16.5px;line-height:1.35;font-weight:600;}
+  .claim .meta{font-size:13.5px;color:var(--mute);}
+  .claim .url{font-family:var(--mono);font-size:12px;color:#60a5fa;word-break:break-all;margin-top:6px;}
+  .stamp{display:inline-block;transform:rotate(-7deg);font-family:var(--mono);font-weight:700;
+    font-size:15px;color:var(--red);border:2px solid var(--red);border-radius:6px;
+    padding:2px 10px;background:rgba(239,68,68,.08);margin-top:10px;
+    opacity:0;transition:opacity .5s ease .3s;}
+  .live .stamp{opacity:1;}
+
+  .receipt{background:#0b1222;border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;font-family:var(--mono);font-size:12.5px;line-height:1.9;color:var(--body);
+    overflow-wrap:anywhere;word-break:break-word;}
+  .receipt .ok{color:var(--green);} .receipt .no{color:var(--red);} .receipt .wait{color:var(--amber);}
+  .receipt .dim{color:var(--dim);}
+  .verdict{display:inline-block;font-family:var(--mono);font-size:11.5px;letter-spacing:1.5px;
+    text-transform:uppercase;padding:5px 12px;border-radius:999px;margin-top:4px;}
+  .verdict.bad{color:#fecaca;border:1px solid var(--red);background:rgba(239,68,68,.12);}
+  .verdict.warn{color:var(--amber);border:1px solid #7c5806;}
+  .verdict.good{color:var(--green);border:1px solid #0b6e4f;}
+  .rules{display:flex;flex-direction:column;gap:12px;}
+  .rule{display:flex;gap:14px;align-items:baseline;background:var(--panel);
+    border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
+  .rule b{font-size:16px;} .rule small{display:block;font-size:13px;color:var(--mute);margin-top:3px;line-height:1.5;}
+  .rule .n{font-family:var(--mono);color:var(--violet);font-size:13px;}
+  .vs{display:flex;gap:16px;align-items:stretch;flex-wrap:wrap;}
+  .vs .side{flex:1;min-width:220px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:6px;}
+  .vs .side.l{border-top:3px solid var(--red);} .vs .side.r{border-top:3px solid var(--green);}
+  .vs .n{font-family:var(--mono);font-weight:700;font-size:clamp(44px,9vw,64px);font-variant-numeric:tabular-nums;}
+  .vs .l .n{color:var(--red);} .vs .r .n{color:var(--green);}
+  .vs .lbl{font-size:13px;color:var(--mute);line-height:1.45;}
+  .fragment{background:var(--inner);border:1px dashed var(--line2);border-radius:10px;padding:10px 14px;}
+  .fragment canvas{display:block;max-width:100%;}
+  .fragment small{font-size:11px;color:var(--dim);}
+  .cue{font-family:var(--mono);font-size:12px;color:var(--dim);letter-spacing:2px;}
+  .cta{background:linear-gradient(135deg,#1e3a8a,#312e81);border:1px solid var(--line2);
+    border-radius:14px;padding:20px 22px;}
+  .cta p{margin:0;font-size:16px;line-height:1.65;color:#c7d2fe;}
+  .cta .repo{font-family:var(--mono);color:#93c5fd;font-size:14px;}
+  .cta-actions{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:18px;}
+  .cta-link{font-family:var(--mono);font-size:13.5px;color:#93c5fd;text-decoration:none;
+    border:1px solid var(--line2);border-radius:6px;padding:7px 12px;}
+  .cta-link:hover{border-color:#93c5fd;}
+  .dots{position:fixed;right:10px;top:50%;transform:translateY(-50%);display:flex;
+    flex-direction:column;gap:8px;z-index:5;}
+  .dots a{width:8px;height:8px;border-radius:50%;background:var(--line);display:block;}
+  .dots a.on{background:var(--violet);}
+  .dots a:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
+  .count{transition:none;}
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important;} #scroller{scroll-behavior:auto;} }
+</style>
+</head>
+<body>
+
+<div id="scroller">
+
+<section class="panel" id="p0">
+  <div class="inner">
+    <span class="eyebrow">On the Record · a Marcus experiment</span>
+    <h1>The AI gave you a source. <span class="grad">We clicked it.</span></h1>
+    <p class="lead">We gave four AI search engines a sentence from each of 200 real news articles
+    and asked the same question every time: which article is this from? Each engine answered with a
+    citation: a headline, a publisher, a date, and a link. That gave us 800 answers. We knew which
+    article every sentence really came from, so we graded each answer against the truth, and then we
+    clicked every link the engines cited to see whether it even exists.</p>
+    <div>
+      <div class="big red count" id="c0" data-target="69.5" data-suffix="%">69.5%</div>
+      <div class="biglabel">of the answers they delivered were wrong, and 51.2% of all cited links
+      were fabricated, dead, or not the source.</div>
+    </div>
+    <p class="lead" style="color:var(--ink)">And citations are only the version of this problem
+    that is easy to measure. The same failure hides in every AI answer anyone acts on without a way
+    to check it: numbers in a report, legal references, medical claims, code.</p>
+    <p class="foot">The test is a re-run of the Tow Center’s famous 2025 study, “AI Search Has a
+    Citation Problem,” with one addition of our own. The evidence follows as four exhibits,
+    pulled straight from the run’s audit
+    records: a perfect-looking fabrication, a reprint wearing the wrong byline, an honest decline,
+    and an answer that earned a human signature.</p>
+    <span class="cue">scroll ↓</span>
+  </div>
+</section>
+
+<section class="panel" id="p1">
+  <div class="inner">
+    <span class="eyebrow">Exhibit A · case tow-0026</span>
+    <h2>This answer looks perfect.</h2>
+    <p class="lead">We gave the engine this sentence from a real news article and asked: <b style="color:var(--ink)">which article is this from?</b></p>
+    <div class="fragment"><span class="k">what we gave the engine</span><canvas id="frag" height="34" aria-label="Excerpt fragment, rendered as image to keep the dataset out of crawlers"></canvas>
+      <small>excerpt fragment, drawn not typed — see the note at the end</small></div>
+    <div class="claim dead">
+      <span class="k">what it answered · gemini-3.6-flash</span>
+      <h3>“ ‘The Bachelor’ producers acknowledge ‘vicious cycle’ of racism…”</h3>
+      <div class="meta">Los Angeles Times · June 26, 2024</div>
+      <div class="url">latimes.com/entertainment-arts/tv/story/2024-06-26/the-bachelor-racism-produ…</div>
+      <span class="stamp">404 · NOT FOUND</span>
+    </div>
+    <p class="foot">The page does not exist. The real source was Entertainment Weekly. Full headline,
+    confident date, invented link. Half the citations in our test died exactly here.</p>
+  </div>
+</section>
+
+<section class="panel" id="p2">
+  <div class="inner">
+    <span class="eyebrow">The fix isn’t a smarter model</span>
+    <h2>So we made them <span class="grad">show their work.</span></h2>
+    <p class="lead">An answer that might be confidently wrong is an answer you cannot use: someone
+    has to re-check it by hand, which cancels the point of asking an AI at all. So we changed the
+    rules instead of the model. Same engines, same questions, now passing through Marcus:
+    open-source software that works as a checkpoint between the AI and you, enforcing three
+    rules nobody can skip.</p>
+    <div class="rules">
+      <div class="rule"><span class="n">1</span><span><b>Evidence, or it doesn’t count.</b>
+        <small>An answer is not accepted until every receipt is present: headline, publisher, date, link.</small></span></div>
+      <div class="rule"><span class="n">2</span><span><b>Every claim is checked. Never by its author.</b>
+        <small>All claims must be verified, and the check runs as a deterministic script from a
+        different vendor. The author is never even shown the checking task, because an author who
+        knows how it will be graded can shape its answer to pass the check instead of to be true.
+        Hidden from the author, the only winning move is honesty.</small></span></div>
+      <div class="rule"><span class="n">3</span><span><b>People hold the final signature.</b>
+        <small>Not at every step: the scripts do the checking, at a scale no reviewer could
+        (800 link fetches in this study). A person signs at the end, on a sampled set of
+        already-verified cases, and that signature can only belong to a human. Software can
+        never wave its own work through, and someone is always answerable for what shipped.</small></span></div>
+    </div>
+    <p class="foot">No retraining. No prompt begging for honesty. The environment simply stopped
+    letting unverified claims ship. Exhibits B, C, and D show each rule catching a real case from
+    the run.</p>
+  </div>
+</section>
+
+<section class="panel" id="p3">
+  <div class="inner">
+    <span class="eyebrow">Exhibit B · case tow-0012</span>
+    <h2>This one even loads.</h2>
+    <div class="claim">
+      <span class="k">what it answered</span>
+      <h3>Parker Solar Probe findings</h3>
+      <div class="meta">Live Science · August 13, 2024</div>
+      <div class="url">livescience.com/space/the-sun/nasa-s-parker-solar-probe-finds-fresh-clues…</div>
+    </div>
+    <div class="receipt">
+      <span class="dim">$ verify --fetch</span><br>
+      HTTP 200 <span class="ok">✓ page is live</span><br>
+      quote on page <span class="no">✗ not found</span><br>
+      rel=canonical → <b>space.com</b>/sun-parker-solar-probe-switchbacks… <span class="no">✗ reprint</span><br>
+      <span class="verdict bad">contradicted · wrong source</span>
+    </div>
+    <p class="foot">A syndicated copy wearing the wrong byline. Humans fall for this one too, and the
+    trap is subtle enough that it slipped past our first pilot, which is exactly why the preregistered
+    fix added this canonical check. Receipts from the live run, October 2026.</p>
+  </div>
+</section>
+
+<section class="panel" id="p4">
+  <div class="inner">
+    <span class="eyebrow">Exhibit C · case tow-0063</span>
+    <h2>And when the page is simply gone?</h2>
+    <div class="receipt">
+      <span class="dim">$ verify --fetch</span><br>
+      GET theguardian.com/environment/article/2024/may/15/climate-scientists-baff…<br>
+      HTTP 404 <span class="no">✗ page not found</span><br>
+      <span class="verdict warn">could not verify · declined, log attached</span>
+    </div>
+    <p class="lead">No guess. No confident filler. A labeled decline, receipts attached.</p>
+    <p class="foot">Against a dataset of two-year-old articles, 47% of pages are already dead or
+    closed to robots. An honest “can’t confirm” beats a confident lie every time someone acts on
+    the answer.</p>
+  </div>
+</section>
+
+<section class="panel" id="p5">
+  <div class="inner">
+    <span class="eyebrow">Exhibit D · case tow-0001</span>
+    <h2>What survives, <span class="grad">a person signs.</span></h2>
+    <div class="claim">
+      <span class="k">what it answered</span>
+      <h3>New England rainfall totals from storm as flooding persists</h3>
+      <div class="meta">The Boston Globe · December 11, 2024</div>
+      <div class="url">bostonglobe.com/2024/12/11/metro/new-england-rain-storm-flash-flooding/</div>
+    </div>
+    <div class="receipt">
+      HTTP 200 <span class="ok">✓</span> · quote on page <span class="ok">✓</span> ·
+      original source <span class="ok">✓</span> · date <span class="ok">✓</span><br>
+      <span class="verdict good">verified</span><br>
+      <span class="dim">approved · reviewer: larry · 2026-10-14 01:08 UTC</span>
+    </div>
+    <p class="foot">Every delivered answer carries this chain: who claimed it, the script that checked
+    it, the fetch it survived, and the human signature at the bottom. One command exports the whole
+    audit bundle.</p>
+  </div>
+</section>
+
+<section class="panel" id="p5b">
+  <div class="inner">
+    <span class="eyebrow">What you actually gain</span>
+    <h2>Before, wrong links were <span class="grad">invisible.</span></h2>
+    <p class="lead">Until now you had two options with an AI’s citation: accept it blindly, or
+    re-check every one yourself. And when one was wrong, nothing anywhere recorded that it was
+    wrong, or why.</p>
+    <div class="rules">
+      <div class="rule"><span class="n">then</span><span><b>Blind trust, or check everything by hand.</b>
+        <small>A citation arrived as bare text. Wrong ones looked identical to right ones, and when
+        one burned you, no record existed of what was claimed or why it failed.</small></span></div>
+      <div class="rule"><span class="n">now</span><span><b>Every answer leaves a record, especially the wrong ones.</b>
+        <small>Exhibits A through D are not reconstructions; they are the captured evidence itself.
+        The claim, the fetch, the 404, the canonical mismatch, the human signature: the reason an
+        answer was not trusted is on file, case by case.</small></span></div>
+    </div>
+    <p class="foot">That is the trade. You accept fewer answers, and in exchange every answer you do
+    accept has survived its checks, and every answer you refuse comes with the documented reason why.
+    Trust stops being a feeling and becomes a lookup.</p>
+  </div>
+</section>
+
+<section class="panel" id="p6">
+  <div class="inner">
+    <span class="eyebrow">Same engines, two worlds</span>
+    <h2>The lies stopped shipping as answers.</h2>
+    <div class="vs">
+      <div class="side l"><div class="n count" id="c1" data-target="69.5" data-suffix="%">69.5%</div>
+        <div class="lbl">of delivered answers wrong · engines alone, full 200-question run</div>
+        <div class="lbl" style="color:var(--red)">51.2% of links fabricated or dead</div></div>
+      <div class="side r"><div class="n count" id="c2" data-target="4.8" data-suffix="%">4.8%</div>
+        <div class="lbl">of delivered answers wrong · on the record, preregistered pilot (full run completing now)</div>
+        <div class="lbl" style="color:var(--green)">0.0% fabricated · every decline carries receipts</div></div>
+    </div>
+    <p class="lead">Say that plainly: once a verification step exists and the caught claims are
+    declined with receipts, <b style="color:var(--ink)">only about 1 in 20 answers that actually
+    reached you was false</b>. Without it, 7 in 10 were.</p>
+    <p class="foot">The engines are exactly as wrong as before; the caught claims arrive as labeled
+    declines instead of answers. Cost of the record: 1.42x, in fractions of a cent per answer. The
+    effect held across every vendor and price tier tested, frontier models included.</p>
+  </div>
+</section>
+
+<section class="panel" id="p7">
+  <div class="inner">
+    <span class="eyebrow">Don’t trust claims. Demand the record.</span>
+    <h2><span class="grad">Every number here has receipts.</span></h2>
+    <div class="cta"><p>Marcus is open source. The preregistration, the gates, the failed first pilot
+    and the passing re-run are all in the repository history, and every case shown above exports its
+    full audit bundle: who claimed, who checked, the evidence, who signed, what it cost. And nothing
+    in it is citation-specific. The checkpoint works for any claim a script can check: a number
+    against its source, code against its tests, a legal citation against the record. News citations were
+    simply the demo with a published baseline to replicate.</p>
+    <div class="cta-actions">
+      <a class="github-button" href="https://github.com/painted-porch/marcus"
+         data-icon="octicon-star" data-size="large" data-show-count="true"
+         data-color-scheme="no-preference: dark; light: dark; dark: dark;"
+         aria-label="Star painted-porch/marcus on GitHub">Star Marcus</a>
+      <a class="cta-link" data-goatcounter-click="receipts-release"
+         href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1">Audit bundles &amp; method ↗</a>
+      <a class="cta-link" data-goatcounter-click="receipts-nafc"
+         href="not-a-fact-checker.html">Why this isn't a fact checker →</a>
+      <a class="cta-link" data-goatcounter-click="receipts-bench"
+         href="bench.html">Run the verifier bench →</a>
+    </div></div>
+    <p class="foot">About the excerpts: the Tow Center distributes its 200 excerpts encrypted so the
+    text stays out of AI training crawlers. We keep that promise here, which is why excerpt text
+    appears only as short fragments drawn into an image, never as copyable text. Study: Jaźwińska
+    &amp; Chandrasekar, “AI Search Has a Citation Problem,” Tow Center for Digital Journalism, CJR,
+    March 2025. Replication: October 2026, preregistered, graded blind.</p>
+  </div>
+</section>
+
+</div>
+
+<nav class="dots" id="dots" aria-label="Sections"></nav>
+
+<script>
+(function(){
+  "use strict";
+  var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // Excerpt fragment: decoded at view time and drawn into canvas, so the
+  // dataset text never exists as crawlable DOM text on this page.
+  try {
+    var frag = atob("VGhlIHByb2R1Y2VycyBwcm9taXNlZCB0aGF0IGl0J3MgYSAicHJpb3JpdHkiIHRvIGNhc3TigKY=");
+    var canvas = document.getElementById("frag");
+    var dpr = Math.min(2, window.devicePixelRatio || 1);
+    function draw(){
+      var w = Math.min(600, canvas.parentElement.clientWidth - 8);
+      canvas.width = w * dpr; canvas.height = 34 * dpr;
+      canvas.style.width = w + "px"; canvas.style.height = "34px";
+      var ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.font = "italic 15px Georgia, serif";
+      ctx.fillStyle = "#cbd5e1";
+      ctx.fillText("“" + decodeURIComponent(escape(frag)) + "”", 2, 22);
+    }
+    draw();
+    window.addEventListener("resize", draw);
+  } catch (e) { /* fragment withheld */ }
+
+  var panels = Array.prototype.slice.call(document.querySelectorAll(".panel"));
+  var dots = document.getElementById("dots");
+  panels.forEach(function(p, i){
+    var a = document.createElement("a");
+    a.href = "#" + p.id;
+    a.setAttribute("aria-label", "Section " + (i + 1));
+    dots.appendChild(a);
+  });
+  var links = Array.prototype.slice.call(dots.children);
+
+  function countUp(el){
+    if (el.dataset.done || reduce) { return; }
+    el.dataset.done = "1";
+    var target = parseFloat(el.dataset.target), suffix = el.dataset.suffix || "";
+    var t0 = performance.now(), dur = 1100;
+    function tick(t){
+      var p = Math.min(1, (t - t0) / dur);
+      el.textContent = (target * (1 - Math.pow(1 - p, 3))).toFixed(1) + suffix;
+      if (p < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(entry){
+      if (!entry.isIntersecting) { return; }
+      entry.target.classList.add("live");
+      var i = panels.indexOf(entry.target);
+      links.forEach(function(l, k){ l.classList.toggle("on", k === i); });
+      entry.target.querySelectorAll(".count").forEach(countUp);
+    });
+  }, {threshold: 0.55});
+  panels.forEach(function(p){ io.observe(p); });
+})();
+</script>
+
+<script data-goatcounter="https://graylabs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
+<script async defer src="https://buttons.github.io/buttons.js"></script>
+</body>
+</html>
