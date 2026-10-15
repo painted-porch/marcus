@@ -62,6 +62,12 @@ class WorkerConfig:
         retry interval.
     usage_log : Optional[str]
         JSONL file where per-call usage rows are appended.
+    handler_retries : int
+        Attempts per task before a handler failure becomes a blocker;
+        transient provider errors (rate limits, flaky fetches) retry
+        with exponential backoff instead of stranding the task.
+    retry_backoff : float
+        Base seconds of backoff; attempt N waits ``backoff * 2**(N-1)``.
     """
 
     marcus_url: str
@@ -73,6 +79,8 @@ class WorkerConfig:
     idle_exits: int = 10
     poll_floor: float = 1.0
     usage_log: Optional[str] = None
+    handler_retries: int = 3
+    retry_backoff: float = 10.0
 
 
 def render_case_answer(inputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -252,14 +260,29 @@ async def _loop_with_client(
             stats["blocked"] += 1
             continue
 
-        try:
-            evidence = handler(task)
-        except Exception as work_err:  # noqa: BLE001 - block, don't die
-            print(f"[{cfg.agent_id}] handler failed on {task_id}: {work_err}")
+        evidence = None
+        failure: Optional[Exception] = None
+        for attempt in range(1, max(1, cfg.handler_retries) + 1):
+            try:
+                evidence = handler(task)
+                failure = None
+                break
+            except Exception as work_err:  # noqa: BLE001 - retry, then block
+                failure = work_err
+                if attempt < max(1, cfg.handler_retries):
+                    wait = cfg.retry_backoff * (2 ** (attempt - 1))
+                    print(
+                        f"[{cfg.agent_id}] handler error on {task_id} "
+                        f"(attempt {attempt}/{cfg.handler_retries}): "
+                        f"{work_err}; retrying in {wait:.0f}s"
+                    )
+                    await asyncio.sleep(wait)
+        if failure is not None:
+            print(f"[{cfg.agent_id}] handler failed on {task_id}: {failure}")
             await client.report_blocker(
                 agent_id=cfg.agent_id,
                 task_id=task_id,
-                blocker_description=(f"{task_type} handler failed: {work_err}"),
+                blocker_description=(f"{task_type} handler failed: {failure}"),
             )
             stats["blocked"] += 1
             continue

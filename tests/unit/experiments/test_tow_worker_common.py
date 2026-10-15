@@ -148,6 +148,57 @@ class TestWorkLoop:
         assert client.reports == []
 
     @pytest.mark.asyncio
+    async def test_transient_handler_failure_retries_then_completes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rate-limited call retries with backoff instead of blocking.
+
+        The full-200 run's first Perplexity 429 turned into a blocker,
+        which left the task assigned, starved the agent of further
+        offers, and idle-exited the worker 190 finds early. Transient
+        provider errors get bounded retries with backoff; only
+        exhausted retries declare a blocker.
+        """
+        sleeps: List[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        client = FakeClient(
+            offers=[
+                {
+                    "id": "find-1",
+                    "task_type": "find",
+                    "inputs": {"query": "Q", "case_id": "tow-0001"},
+                },
+                None,
+                None,
+            ]
+        )
+        calls = {"n": 0}
+
+        def flaky(task: Dict[str, Any]) -> Dict[str, Any]:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("HTTP Error 429: Too Many Requests")
+            return {
+                "headline": "H",
+                "publisher": "P",
+                "date": "D",
+                "url": "U",
+                "raw": "R",
+            }
+
+        stats = await work_loop(_config(), {"find": flaky}, client=client)
+
+        assert calls["n"] == 3
+        assert stats["completed"] == 1
+        assert stats["blocked"] == 0
+        assert not client.blockers
+        assert any(s >= 10 for s in sleeps)
+
+    @pytest.mark.asyncio
     async def test_handler_failure_reports_a_blocker_and_continues(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
