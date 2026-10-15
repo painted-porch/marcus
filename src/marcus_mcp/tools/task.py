@@ -18,7 +18,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from src.core.ai_powered_task_assignment import find_optimal_task_for_agent_ai_powered
-from src.core.models import Priority, RecoveryInfo, Task, TaskAssignment, TaskStatus
+from src.core.models import (
+    Priority,
+    RecoveryInfo,
+    Task,
+    TaskAssignment,
+    TaskStatus,
+    WorkerStatus,
+)
 
 # Issue #629: claimability rules live in src/core/task_claimability.py so
 # the availability filter here and the gridlock detector share one rule
@@ -442,6 +449,327 @@ def _escalate_behavior_evidence_response(
         "``blocker``."
     )
     return escalated
+
+
+# Task types whose completion requires typed evidence (issue #737).
+# The implement type is deliberately absent: it stays on the existing
+# smoke gate and behavior-evidence machinery above.
+EVIDENCE_REQUIRED_TASK_TYPES = frozenset({"find", "verify", "synthesize"})
+
+# The one evidence field the board never hands to dependents: the
+# upstream agent's raw output. The audit bundle keeps it; the
+# verifier's view never contains it.
+RAW_EVIDENCE_FIELD = "raw"
+
+
+def _typed_evidence_rejection(
+    *,
+    task: Task,
+    agent_id: str,
+    missing_fields: List[str],
+    evidence_missing: bool,
+) -> Dict[str, Any]:
+    """Build the rejection for a typed completion without valid evidence.
+
+    Issue #737: a find, verify, or synthesize task cannot close
+    without the typed payload its ``output_schema`` requires. This is
+    the structured refusal the agent receives, naming exactly the
+    fields that are missing so the correction is mechanical.
+
+    Parameters
+    ----------
+    task : Task
+        The typed task being completed.
+    agent_id : str
+        Agent reporting completion.
+    missing_fields : List[str]
+        The required fields absent from the submitted evidence.
+    evidence_missing : bool
+        True when no evidence payload was submitted at all.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A rejection dict the caller returns directly to the agent.
+    """
+    error = (
+        "typed_evidence_missing" if evidence_missing else "typed_evidence_incomplete"
+    )
+    required = sorted(missing_fields)
+    return {
+        "success": False,
+        "status": "evidence_rejected",
+        "error": error,
+        "agent_id": agent_id,
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "missing_fields": required,
+        "blocker": (
+            f"Marcus rejected this completion: a {task.task_type!r} task "
+            f"cannot close without evidence. "
+            + (
+                "No ``evidence`` payload was submitted. "
+                if evidence_missing
+                else "The submitted ``evidence`` is missing required fields. "
+            )
+            + f"Missing fields: {', '.join(required) if required else '(none)'}. "
+            f"Re-call report_task_progress with the SAME status and an "
+            f"``evidence`` dict containing every required field."
+        ),
+        "message": (
+            f"Completion rejected: evidence "
+            f"{'was not submitted' if evidence_missing else 'is incomplete'} "
+            f"for {task.task_type} task {task.id}. "
+            f"Missing fields: {', '.join(required) if required else '(none)'}."
+        ),
+    }
+
+
+def _escalate_typed_evidence_response(
+    rejection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Convert a repeated typed-evidence rejection into a terminal one.
+
+    Mirrors :func:`_escalate_behavior_evidence_response` (issue #677):
+    after ``MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS`` identical rejections
+    the agent is plainly not going to produce the evidence by
+    re-sending the same call, so the loop stops with a non-retryable
+    error while the remediation payload is preserved.
+
+    Parameters
+    ----------
+    rejection : Dict[str, Any]
+        The ``typed_evidence_missing`` / ``typed_evidence_incomplete``
+        rejection to escalate.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A new dict tagged terminal/escalated, remediation intact.
+    """
+    escalated = dict(rejection)
+    escalated["status"] = "evidence_rejection_escalated"
+    escalated["error"] = "typed_evidence_escalated"
+    escalated["terminal"] = True
+    escalated["escalated"] = True
+    escalated["message"] = (
+        "Marcus has rejected this completion "
+        f"{MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS} times for the same reason: "
+        "the typed evidence this task must return is missing or incomplete. "
+        "Do NOT retry the same call. This task is escalated for remediation "
+        "-- the required fields are listed in ``missing_fields`` and the fix "
+        "is in ``blocker``."
+    )
+    return escalated
+
+
+async def _apply_typed_evidence_gate(
+    task: Task,
+    agent_id: str,
+    evidence: Optional[Dict[str, Any]],
+    state: Any,
+) -> Optional[Dict[str, Any]]:
+    """Refuse a typed completion whose evidence fails its contract.
+
+    Issue #737, step 4: when a find, verify, or synthesize task
+    reports ``completed``, its ``evidence`` must contain every field
+    the task's ``output_schema`` requires (with no schema, any
+    non-empty dict passes). The rejection names the missing fields.
+    Repeated failure reuses the #677 retry ceiling
+    (:func:`_record_behavior_evidence_attempt`): after
+    ``MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS`` rejections the next one
+    terminalizes the task instead of looping to lease expiry.
+
+    Parameters
+    ----------
+    task : Task
+        The task being completed.
+    agent_id : str
+        Agent reporting completion.
+    evidence : Optional[Dict[str, Any]]
+        The typed payload submitted with the completion.
+    state : Any
+        Marcus server state (used only when terminalizing).
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        None when the completion may proceed; otherwise the rejection
+        or terminal escalation dict to return to the agent.
+    """
+    if task.task_type not in EVIDENCE_REQUIRED_TASK_TYPES:
+        return None
+
+    required = list((task.output_schema or {}).get("required", []))
+    evidence_missing = not evidence
+    if evidence_missing:
+        missing = required
+    else:
+        assert evidence is not None  # for mypy; guarded above
+        missing = [f for f in required if f not in evidence]
+    if not evidence_missing and not missing:
+        return None
+
+    rejection = _typed_evidence_rejection(
+        task=task,
+        agent_id=agent_id,
+        missing_fields=missing,
+        evidence_missing=evidence_missing,
+    )
+    attempts = _record_behavior_evidence_attempt(task.id)
+    if attempts > MAX_SMOKE_BEHAVIOR_EVIDENCE_ATTEMPTS:
+        logger.warning(
+            "Typed-evidence gate: task %s rejected %d times; escalating "
+            "to a terminal response (issue #737, #677 ceiling).",
+            task.id,
+            attempts,
+        )
+        escalated = _escalate_typed_evidence_response(rejection)
+        await _terminalize_escalated_smoke_task(
+            state,
+            task.id,
+            agent_id,
+            str(
+                escalated.get("blocker")
+                or escalated.get("message")
+                or "Typed-evidence gate escalated: evidence never met the schema."
+            ),
+        )
+        _clear_smoke_attempts(task.id)
+        return escalated
+    return rejection
+
+
+APPROVE_TASK_TYPE = "approve"
+
+# Task types whose accepted evidence is written to the record (the
+# audit bundle reads it from the completed task's source_context).
+# Approve is recorded but not evidence-gated: the human's decision is
+# the approval; a payload is kept when provided.
+EVIDENCE_RECORDED_TASK_TYPES = EVIDENCE_REQUIRED_TASK_TYPES | {APPROVE_TASK_TYPE}
+
+
+def _apply_approval_gate(
+    task: Task, agent_id: str, state: Any
+) -> Optional[Dict[str, Any]]:
+    """Refuse an approve-task completion from anyone but a person.
+
+    Issue #737, step 5: an approve task closes only when
+    ``report_task_progress`` is called by a registered ``human``
+    principal. There is no new task status; dependents wait through
+    ordinary dependency resolution until the approval closes.
+    Eligibility already keeps approve tasks out of agents' hands at
+    offer time, so this gate is defense in depth at the close.
+
+    Parameters
+    ----------
+    task : Task
+        The task being completed.
+    agent_id : str
+        The caller reporting completion.
+    state : Any
+        Marcus server state; ``agent_status`` supplies the caller's
+        registered principal.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        None when the completion may proceed; otherwise the rejection
+        dict to return to the caller.
+    """
+    if task.task_type != APPROVE_TASK_TYPE:
+        return None
+
+    caller = getattr(state, "agent_status", {}).get(agent_id)
+    principal = caller.principal if isinstance(caller, WorkerStatus) else "unregistered"
+    if principal == "human":
+        return None
+
+    logger.info(
+        "[#737] Approval gate: refused completion of approve task %s by "
+        "%s (principal: %s).",
+        task.id,
+        agent_id,
+        principal,
+    )
+    return {
+        "success": False,
+        "status": "approval_rejected",
+        "error": "approval_requires_human",
+        "agent_id": agent_id,
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "blocker": (
+            "Marcus rejected this completion: an approve task can only be "
+            "completed by a human principal, and this caller is registered "
+            f"as {principal!r}. The approval waits for a person; dependent "
+            "tasks are held until it closes."
+        ),
+        "message": (
+            f"Completion rejected: approve task {task.id} requires a human "
+            f"principal; caller {agent_id} is {principal!r}."
+        ),
+    }
+
+
+async def _handoff_evidence_to_dependents(
+    task: Task, evidence: Dict[str, Any], state: Any
+) -> None:
+    """Copy a closed task's evidence minus ``raw`` into dependents' inputs.
+
+    Issue #737, step 4, generalized at the step 7 review (Simon
+    16c9a4b1): every evidence-recorded close hands off. This copy is
+    the ONLY route by which upstream results reach a downstream
+    worker: the verifier receives the find task's claim, the approve
+    reviewer receives the verdict beside the claim, and the
+    synthesize worker receives everything it renders. The ``raw``
+    field (an agent's full model output) is stripped at every
+    handoff, so no downstream party ever sees upstream reasoning; the
+    audit bundle keeps ``raw`` via the completed task's own record.
+    Both the in-memory tasks and the kanban rows are updated, so the
+    handoff survives a restart.
+
+    Parameters
+    ----------
+    task : Task
+        The task that just closed.
+    evidence : Dict[str, Any]
+        Its schema-validated evidence payload.
+    state : Any
+        Marcus server state with ``project_tasks`` and
+        ``kanban_client``.
+    """
+    # Accumulative: the closing task's own inputs ride along with its
+    # evidence, so case state builds down the chain (a sampled case's
+    # synthesize task depends on approve, not verify, and still needs
+    # the claim and the verdict). ``raw`` is stripped at every hop.
+    payload = {
+        k: v
+        for k, v in {**(task.inputs or {}), **evidence}.items()
+        if k != RAW_EVIDENCE_FIELD
+    }
+    for dependent in getattr(state, "project_tasks", None) or []:
+        if task.id not in (dependent.dependencies or []):
+            continue
+        # Existing keys win (Codex P1 on PR #739): a dependent's
+        # board-seeded inputs must never be overwritten by a claim
+        # author's evidence, or a finder could ship its own excerpt
+        # and the verifier would check the attacker's text against
+        # the page. First write wins thereafter; legitimate chain
+        # keys never collide by construction.
+        dependent.inputs = {**payload, **(dependent.inputs or {})}
+        try:
+            await state.kanban_client.update_task(
+                dependent.id, {"inputs": dependent.inputs}
+            )
+        except Exception as handoff_err:  # noqa: BLE001 - keep memory copy
+            logger.warning(
+                "[#737] Claim handoff: kanban write failed for dependent "
+                "%s (%s); the in-memory copy is applied and the next "
+                "refresh may lose it.",
+                dependent.id,
+                handoff_err,
+            )
 
 
 async def _terminalize_escalated_smoke_task(
@@ -2750,6 +3078,15 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                             if hasattr(optimal_task, "acceptance_criteria")
                             else []
                         ),
+                        # #737: typed tasks dispatch on task_type, work
+                        # from the board-written inputs (e.g. the claim
+                        # a verify task checks), and must satisfy
+                        # output_schema to close — all three belong in
+                        # the assignment itself, not behind a second
+                        # context call.
+                        "task_type": getattr(optimal_task, "task_type", "implement"),
+                        "inputs": dict(getattr(optimal_task, "inputs", {}) or {}),
+                        "output_schema": getattr(optimal_task, "output_schema", None),
                     },
                 }
 
@@ -4497,11 +4834,38 @@ async def report_task_progress(
                 f"found task object: {task is not None}"
             )
 
+            # TYPED-EVIDENCE GATE (issue #737, step 4). A find, verify,
+            # or synthesize task cannot close without the evidence its
+            # output_schema requires; the rejection names the missing
+            # fields and the #677 ceiling terminalizes a stuck agent.
+            # Runs BEFORE the LLM validation and smoke gates: those are
+            # the implement type's machinery and never see typed tasks.
+            if task is not None:
+                typed_gate_response = await _apply_typed_evidence_gate(
+                    task, agent_id, evidence, state
+                )
+                if typed_gate_response is not None:
+                    return typed_gate_response
+
+            # APPROVAL GATE (issue #737, step 5). An approve task
+            # closes only for a registered human principal; everyone
+            # else is refused here even if eligibility was somehow
+            # bypassed at offer time.
+            if task is not None:
+                approval_response = _apply_approval_gate(task, agent_id, state)
+                if approval_response is not None:
+                    return approval_response
+
             if task:
                 task_labels = task.labels if hasattr(task, "labels") else None
                 # #557: a subtask's validate/skip decision uses its
                 # parent's labels — see _should_validate_completion.
-                should_validate = _should_validate_completion(task, fresh_tasks)
+                # #737: only the implement type goes through the LLM
+                # validator; typed tasks were judged by their schema
+                # in the typed-evidence gate above.
+                should_validate = task.task_type == "implement" and (
+                    _should_validate_completion(task, fresh_tasks)
+                )
                 logger.info(
                     f"VALIDATION GATE: Task {task_id} ({task.name}) - "
                     f"labels={task_labels}, should_validate={should_validate}"
@@ -4725,6 +5089,21 @@ async def report_task_progress(
             # if this task is ever reopened (e.g. request_task_redo), it
             # starts with a fresh budget rather than a stale one.
             clear_repair_attempts(task_id)
+
+            # Issue #737, step 4: the accepted evidence lands on the
+            # record (the audit bundle reads it, raw included, from the
+            # task's source_context), and every evidence-recorded close
+            # hands its evidence minus ``raw`` to its dependents — the
+            # only route by which upstream results reach a downstream
+            # worker (generalized at the step 7 review, Simon 16c9a4b1).
+            if (
+                task is not None
+                and task.task_type in EVIDENCE_RECORDED_TASK_TYPES
+                and evidence
+            ):
+                update_data["source_context"] = {"evidence": evidence}
+                _clear_smoke_attempts(task_id)
+                await _handoff_evidence_to_dependents(task, evidence, state)
 
             # Handle subtask completion
             if hasattr(state, "subtask_manager") and state.subtask_manager:
@@ -6508,6 +6887,15 @@ async def _find_optimal_task_original_logic(
         available_tasks = (
             non_deployment_tasks if non_deployment_tasks else deployment_tasks
         )
+
+        # Issue #737: eligibility is the LAST filter before ranking, so
+        # the refusal log records only tasks this worker would actually
+        # have been offered. A refused worker gets the ordinary no-task
+        # response; the reason stays server-side (never tell an author
+        # why it was not offered its own verify task).
+        from src.marcus_mcp.coordinator.eligibility import filter_eligible_tasks
+
+        available_tasks = filter_eligible_tasks(agent, available_tasks, state)
 
         if not available_tasks:
             return None

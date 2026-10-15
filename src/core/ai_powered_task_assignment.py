@@ -12,6 +12,7 @@ from src.ai.core.ai_engine import MarcusAIEngine
 from src.ai.types import AssignmentContext
 from src.core.models import Priority, Task, TaskStatus
 from src.integrations.ai_analysis_engine import AIAnalysisEngine
+from src.intelligence.dependency_inferer import DependencyGraph
 from src.intelligence.dependency_inferer_hybrid import HybridDependencyInferer
 
 logger = logging.getLogger(__name__)
@@ -117,14 +118,56 @@ class AITaskAssignmentEngine:
 
         return safe_tasks
 
+    def _build_explicit_graph(self) -> DependencyGraph:
+        """Build the dependency graph from declared task dependencies.
+
+        Inference exists to fill in MISSING dependencies; on a board
+        whose tasks declare their edges it is pure overhead, and its
+        O(n^2) pattern sweep on the request path pins the event loop
+        for minutes per request at a few hundred tasks (the #737 full
+        run hit client timeouts at 620 tasks; Simon 44db8b8b).
+
+        Returns
+        -------
+        DependencyGraph
+            The graph of declared edges, in the same shape the
+            inferer produces, sufficient for critical-path scoring.
+        """
+        nodes = {t.id: t for t in self.project_tasks}
+        adjacency: Dict[str, List[str]] = {}
+        reverse: Dict[str, List[str]] = {}
+        for task in self.project_tasks:
+            for dep_id in task.dependencies or []:
+                if dep_id in nodes:
+                    adjacency.setdefault(dep_id, []).append(task.id)
+                    reverse.setdefault(task.id, []).append(dep_id)
+        graph = DependencyGraph(
+            nodes=nodes,
+            edges=[],
+            adjacency_list=adjacency,
+            reverse_adjacency=reverse,
+        )
+        # Declared edges are user input and may contain a cycle, which
+        # would spin get_critical_path's reconstruction forever; a
+        # cyclic board forfeits the critical-path bonus, nothing more.
+        if graph.has_cycle():
+            return DependencyGraph(
+                nodes=nodes, edges=[], adjacency_list={}, reverse_adjacency={}
+            )
+        return graph
+
     async def _analyze_dependencies(self, tasks: List[Task]) -> Dict[str, float]:
         """Phase 2: Analyze task dependencies and prioritize unblocking tasks."""
         dependency_scores = {}
 
-        # Build dependency graph
-        dependency_graph = await self.dependency_inferer.infer_dependencies(
-            self.project_tasks
-        )
+        # Build dependency graph: from declared edges when the board
+        # is explicitly wired; inference only fills in missing ones.
+        if any(t.dependencies for t in self.project_tasks):
+            dependency_graph = self._build_explicit_graph()
+        else:
+            dependency_graph = await self.dependency_inferer.infer_dependencies(
+                self.project_tasks
+            )
 
         for task in tasks:
             # Count how many tasks this would unblock

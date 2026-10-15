@@ -1382,6 +1382,8 @@ class MarcusServer:
             role: str,
             skills: List[str] = [],
             project_id: str = "",
+            vendor: str = "",
+            principal: str = "agent",
         ) -> Dict[str, Any]:
             """Register a new agent with the Marcus system."""
             from src.logging.mcp_tool_logger import log_mcp_tool_response
@@ -1394,6 +1396,8 @@ class MarcusServer:
                 role=role,
                 skills=skills,
                 project_id=project_id,
+                vendor=vendor,
+                principal=principal,
                 state=server,
             )
 
@@ -1406,6 +1410,8 @@ class MarcusServer:
                     "role": role,
                     "skills": skills,
                     "project_id": project_id,
+                    "vendor": vendor,
+                    "principal": principal,
                 },
                 response=result,
             )
@@ -1477,6 +1483,34 @@ class MarcusServer:
                 evidence=evidence,
                 lease_epoch=lease_epoch,
             )
+
+        @self._fastmcp.tool()  # type: ignore[misc]
+        async def export_case(case_id: str) -> Dict[str, Any]:
+            """Export one case's complete audit bundle (#737).
+
+            Operator-facing. Evidence in the bundle includes ``raw``,
+            so in multi-endpoint deployments this tool belongs on the
+            human endpoint only; the single-endpoint pilot exposes it
+            to every connected client, which the report states as a
+            limit alongside self-declared identity.
+            """
+            from .tools.audit_tools import export_case as impl
+
+            return await impl(case_id=case_id, state=server)
+
+        @self._fastmcp.tool()  # type: ignore[misc]
+        async def get_task_context(task_id: str) -> Dict[str, Any]:
+            """Get the full context for a specific task.
+
+            Issue #737: on the core agent surface because a verify
+            worker reads the claim it must check through this tool
+            (the task's board-written ``inputs``, never the upstream
+            agent's raw output), and the worker instructions have
+            always told agents to call it before starting work.
+            """
+            from .tools.context import get_task_context as impl
+
+            return await impl(task_id=task_id, state=server)
 
         @self._fastmcp.tool()  # type: ignore[misc]
         async def report_blocker(
@@ -1598,6 +1632,8 @@ class MarcusServer:
                 role: str,
                 skills: List[str] = [],
                 project_id: str = "",
+                vendor: str = "",
+                principal: str = "agent",
             ) -> Dict[str, Any]:
                 """Register a new agent with the Marcus system."""
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
@@ -1610,6 +1646,8 @@ class MarcusServer:
                     role=role,
                     skills=skills,
                     project_id=project_id,
+                    vendor=vendor,
+                    principal=principal,
                     state=server,
                 )
 
@@ -1622,6 +1660,8 @@ class MarcusServer:
                         "role": role,
                         "skills": skills,
                         "project_id": project_id,
+                        "vendor": vendor,
+                        "principal": principal,
                     },
                     response=result,
                 )
@@ -2130,6 +2170,19 @@ class MarcusServer:
                     days=7,
                     state=server,
                 )
+
+        if "export_case" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def export_case(case_id: str) -> Dict[str, Any]:
+                """Export one case's complete audit bundle (#737).
+
+                Human and analytics endpoints only: the bundle keeps
+                ``raw`` evidence, which agents must never see.
+                """
+                from .tools.audit_tools import export_case as impl
+
+                return await impl(case_id=case_id, state=server)
 
         # Experiment tracking tools
         if "start_experiment" in allowed_tools:

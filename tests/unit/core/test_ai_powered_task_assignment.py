@@ -13,12 +13,11 @@ to ensure fast, isolated unit tests.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from typing import List
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from src.ai.types import AssignmentContext
 from src.core.ai_powered_task_assignment import (
     AITaskAssignmentEngine,
     find_optimal_task_for_agent_ai_powered,
@@ -965,3 +964,85 @@ class TestEdgeCasesAndErrorHandling:
             )
 
         assert str(exc_info.value) == "'worker_id'"
+
+
+class TestExplicitDependencyGraph:
+    """Test suite for the explicit-graph fast path in dependency analysis.
+
+    Hybrid dependency inference exists to fill in MISSING dependencies.
+    Running it on the request path over a board whose dependencies are
+    all explicit is pure overhead, and at several hundred tasks the
+    O(n^2) pattern sweep pins the event loop for tens of minutes per
+    request_next_task (Simon 44db8b8b; it blocked the #737 full run).
+    When any task declares explicit dependencies, the scorer builds the
+    graph from those declared edges and never invokes the inferer.
+    """
+
+    def _task(self, task_id: str, deps: List[str]) -> Task:
+        now = datetime.now(timezone.utc)
+        return Task(
+            id=task_id,
+            name=f"Task {task_id}",
+            description="",
+            status=TaskStatus.TODO,
+            priority=Priority.MEDIUM,
+            assigned_to=None,
+            created_at=now,
+            updated_at=now,
+            due_date=None,
+            estimated_hours=1.0,
+            dependencies=deps,
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_deps_skip_inference(self) -> None:
+        """A wired board never calls the inferer; scores still compute."""
+        tasks = [
+            self._task("find-1", []),
+            self._task("verify-1", ["find-1"]),
+            self._task("synth-1", ["verify-1"]),
+        ]
+        engine = AITaskAssignmentEngine(Mock(), tasks)
+        engine.dependency_inferer = Mock()
+        engine.dependency_inferer.infer_dependencies = AsyncMock()
+
+        scores = await engine._analyze_dependencies(tasks)
+
+        engine.dependency_inferer.infer_dependencies.assert_not_called()
+        assert set(scores) == {"find-1", "verify-1", "synth-1"}
+        assert scores["find-1"] > scores["synth-1"]
+
+    @pytest.mark.asyncio
+    async def test_unwired_board_still_infers(self) -> None:
+        """A board with no declared dependencies keeps the inferer."""
+        tasks = [self._task("a", []), self._task("b", [])]
+        engine = AITaskAssignmentEngine(Mock(), tasks)
+        engine.dependency_inferer = Mock()
+        engine.dependency_inferer.infer_dependencies = AsyncMock(
+            return_value=DependencyGraph(
+                nodes={t.id: t for t in tasks},
+                edges=[],
+                adjacency_list={},
+                reverse_adjacency={},
+            )
+        )
+
+        await engine._analyze_dependencies(tasks)
+
+        engine.dependency_inferer.infer_dependencies.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cyclic_explicit_deps_terminate(self) -> None:
+        """A dependency cycle forfeits the critical-path bonus, not the run."""
+        tasks = [
+            self._task("a", ["b"]),
+            self._task("b", ["a"]),
+        ]
+        engine = AITaskAssignmentEngine(Mock(), tasks)
+        engine.dependency_inferer = Mock()
+        engine.dependency_inferer.infer_dependencies = AsyncMock()
+
+        scores = await engine._analyze_dependencies(tasks)
+
+        engine.dependency_inferer.infer_dependencies.assert_not_called()
+        assert set(scores) == {"a", "b"}

@@ -24,6 +24,7 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "create_tasks",  # Create tasks on existing project/board
         "add_feature",  # NLP feature addition
         "get_usage_report",
+        "export_case",  # #737 audit bundle; carries raw evidence, human-only
         "unassign_task",  # Manually unassign stuck tasks
         # Scheduling
         "get_optimal_agent_count",  # Calculate optimal agent count using CPM
@@ -70,6 +71,7 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "ping",
         "authenticate",
         "get_usage_report",
+        "export_case",  # #737 audit bundle; carries raw evidence
         # Project management
         "get_project_status",
         "list_projects",

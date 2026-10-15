@@ -253,6 +253,30 @@ async def get_task_context(task_id: str, state: Any) -> Dict[str, Any]:
 
                 return {"success": True, "context": context_dict}
 
+        # Issue #737: a verify task sees the claim and nothing else.
+        # Its context is the ``inputs`` the board wrote when the find
+        # task closed — never the dependency's evidence, reasoning, or
+        # raw response — and it works without the Context system, so
+        # the independence invariant cannot be eroded by context
+        # enrichment added elsewhere.
+        sor_task = next(
+            (
+                t
+                for t in (getattr(state, "project_tasks", None) or [])
+                if t.id == task_id
+            ),
+            None,
+        )
+        if sor_task is not None and sor_task.task_type == "verify":
+            return {
+                "success": True,
+                "context": {
+                    "is_subtask": False,
+                    "task_type": "verify",
+                    "inputs": dict(sor_task.inputs or {}),
+                },
+            }
+
         # Standard task context (not a subtask)
         # Check if Context system is available
         if not hasattr(state, "context") or not state.context:

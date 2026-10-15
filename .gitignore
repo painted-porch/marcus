@@ -68,3 +68,7 @@ skills/council/
 
 # Machine-specific workspace binding — never commit (Codex P1 on PR #725)
 .marcus_workspace.json
+
+# Local experiment configs and exports (never commit; may hold credentials)
+config_marcus.openai.json
+marcus-issues.json

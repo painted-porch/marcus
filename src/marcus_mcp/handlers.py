@@ -41,7 +41,9 @@ from .tools.analytics import (  # Analytics tools
     get_task_metrics,
 )
 from .tools.audit_tools import (
+    EXPORT_CASE_TOOL,
     USAGE_REPORT_TOOL,
+    export_case,
     get_usage_report,
 )
 from .tools.auth import (
@@ -119,6 +121,7 @@ def get_all_tool_definitions() -> Dict[str, types.Tool]:
     all_tools["authenticate"] = AUTHENTICATE_TOOL
     all_tools["get_usage_report"] = USAGE_REPORT_TOOL
     all_tools["get_cost_summary"] = COST_SUMMARY_TOOL
+    all_tools["export_case"] = EXPORT_CASE_TOOL
 
     return all_tools
 
@@ -170,6 +173,25 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "Scopes task assignment to prevent cross-experiment "
                             "task theft (GH-388)."
                         ),
+                    },
+                    "vendor": {
+                        "type": "string",
+                        "description": (
+                            "Vendor whose model the worker runs on (e.g. "
+                            "'perplexity', 'google', 'openai'). Eligibility "
+                            "never offers a verify task to the claim "
+                            "author's vendor (#737)."
+                        ),
+                        "default": "",
+                    },
+                    "principal": {
+                        "type": "string",
+                        "enum": ["agent", "human"],
+                        "description": (
+                            "Who the worker is. An approve task is offered "
+                            "only to a human principal (#737)."
+                        ),
+                        "default": "agent",
                     },
                 },
                 "required": ["agent_id", "name", "role", "project_id"],
@@ -271,6 +293,29 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "epoch today. Carry it anyway: it is what "
                             "makes the collision visible. Omit only if you "
                             "were not given one."
+                        ),
+                    },
+                    "verifications": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": (
+                            "Issue #523: per-outcome verification list for "
+                            "integration completions. Each entry: signal_id "
+                            "(str), command (str), optional description and "
+                            "readiness_probe. Takes precedence over "
+                            "start_command when present."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "object",
+                        "description": (
+                            "Typed evidence payload. REQUIRED when "
+                            "completing a find, verify, or synthesize task "
+                            "(#737): every field the task's output_schema "
+                            "requires must be present or the completion is "
+                            "rejected with the missing fields named. Also "
+                            "carries behavior evidence for integration "
+                            "tasks (#677)."
                         ),
                     },
                 },
@@ -1285,6 +1330,8 @@ async def handle_tool_call(
                     skills=arguments.get("skills", []),
                     state=state,
                     project_id=arguments.get("project_id", ""),
+                    vendor=arguments.get("vendor", ""),
+                    principal=arguments.get("principal", "agent"),
                 )
 
         elif name == "get_agent_status":
@@ -1322,6 +1369,11 @@ async def handle_tool_call(
                     state=state,
                     start_command=arguments.get("start_command"),
                     readiness_probe=arguments.get("readiness_probe"),
+                    # #735/#737: the stdio path must carry the same
+                    # payloads as the FastMCP paths or the evidence
+                    # gates judge a None an agent never sent.
+                    verifications=arguments.get("verifications"),
+                    evidence=arguments.get("evidence"),
                     lease_epoch=arguments.get("lease_epoch"),
                 )
 
@@ -1376,6 +1428,13 @@ async def handle_tool_call(
         elif name == "get_usage_report":
             days = arguments.get("days", 7) if arguments else 7
             result = await get_usage_report(days=days, state=state)
+
+        elif name == "export_case":
+            case_id = arguments.get("case_id") if arguments else None
+            if not case_id:
+                result = {"error": "case_id is required"}
+            else:
+                result = await export_case(case_id=case_id, state=state)
 
         elif name == "get_cost_summary":
             args = arguments or {}
