@@ -6,6 +6,7 @@ Phase 1-4 AI capabilities for intelligent task selection.
 """
 
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set
 
 from src.ai.core.ai_engine import MarcusAIEngine
@@ -169,18 +170,21 @@ class AITaskAssignmentEngine:
                 self.project_tasks
             )
 
-        for task in tasks:
-            # Count how many tasks this would unblock
-            unblocked_count = 0
-            for other_task in self.project_tasks:
-                if (
-                    task.id in other_task.dependencies
-                    and other_task.status == TaskStatus.TODO
-                ):
-                    unblocked_count += 1
+        # The critical path is a property of the graph, not of any one
+        # task, so compute it once (not once per task) and look up
+        # membership in O(1). Likewise, count how many TODO tasks each
+        # task unblocks in a single pass over the board rather than a
+        # nested scan per task. Both were O(n^2) in task count on the
+        # request path and froze large boards (issue #743).
+        critical_path = set(dependency_graph.get_critical_path())
+        unblock_counts: Dict[str, int] = defaultdict(int)
+        for other_task in self.project_tasks:
+            if other_task.status == TaskStatus.TODO:
+                for dep_id in other_task.dependencies:
+                    unblock_counts[dep_id] += 1
 
-            # Check if task is on critical path
-            critical_path = dependency_graph.get_critical_path()
+        for task in tasks:
+            unblocked_count = unblock_counts.get(task.id, 0)
             is_critical = task.id in critical_path
 
             # Calculate dependency score

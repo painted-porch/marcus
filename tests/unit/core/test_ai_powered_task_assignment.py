@@ -344,6 +344,28 @@ class TestAITaskAssignmentEngine:
 
         assert scores == {}
 
+    @pytest.mark.asyncio
+    async def test_analyze_dependencies_computes_critical_path_once(
+        self, assignment_engine, sample_tasks
+    ):
+        """Critical path is computed once per request, not once per task.
+
+        The critical path is a property of the dependency graph, not of
+        any single task, so recomputing it inside the per-task loop is
+        pure O(n^2) waste that froze the request path on large boards
+        (issue #743). Guard that it is computed exactly once regardless
+        of how many tasks are scored.
+        """
+        mock_graph = Mock(spec=DependencyGraph)
+        mock_graph.get_critical_path = Mock(return_value=["task-1"])
+        # sample_tasks declares dependencies, so the explicit-graph
+        # branch runs; make it return our spyable graph.
+        assignment_engine._build_explicit_graph = Mock(return_value=mock_graph)
+
+        await assignment_engine._analyze_dependencies(sample_tasks)
+
+        assert mock_graph.get_critical_path.call_count == 1
+
     # Test _get_ai_recommendations
     @pytest.mark.asyncio
     async def test_get_ai_recommendations_calculates_scores(

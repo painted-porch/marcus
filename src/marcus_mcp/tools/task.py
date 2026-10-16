@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.core.ai_powered_task_assignment import find_optimal_task_for_agent_ai_powered
 from src.core.models import (
@@ -6379,6 +6379,46 @@ def _scope_tasks_to_project(tasks: List[Task], project_id: str) -> List[Task]:
     return [t for t in tasks if t.project_id is None or t.project_id == project_id]
 
 
+def _classify_task_cached(
+    task: Task,
+    classifier: Any,
+    cache: Dict[Tuple[str, str, Tuple[str, ...]], Any],
+) -> Any:
+    """Return a task's TaskType, memoized by task content (issue #743).
+
+    Classification is a pure function of a task's name, description, and
+    labels, none of which change after the task is created. The
+    assignment path nonetheless reclassified every available task on
+    every ``request_next_task`` call, and classifying a task with long
+    text (the Tow experiment embeds excerpts and answers in task text)
+    costs on the order of a second, so on a large board this dominated
+    request latency and froze the single-threaded server. Memoizing by a
+    content signature classifies each distinct task at most once while
+    still reclassifying a task whose text actually changed.
+
+    Parameters
+    ----------
+    task : Task
+        The task to classify.
+    classifier : Any
+        An object exposing ``classify(task) -> TaskType``.
+    cache : Dict[Tuple[str, str, Tuple[str, ...]], Any]
+        Mutable cache mapping a content signature to the classification;
+        callers persist it (e.g. on server state) across requests.
+
+    Returns
+    -------
+    Any
+        The ``TaskType`` the classifier assigns to the task.
+    """
+    signature = (task.name, task.description or "", tuple(task.labels or []))
+    cached = cache.get(signature)
+    if cached is None:
+        cached = classifier.classify(task)
+        cache[signature] = cached
+    return cached
+
+
 async def find_optimal_task_for_agent(agent_id: str, state: Any) -> Optional[Task]:
     """
     Find the best task for an agent, prioritizing subtasks.
@@ -6752,10 +6792,18 @@ async def _find_optimal_task_original_logic(
             t.id for t in scoped_tasks if t.status == TaskStatus.IN_PROGRESS
         }
 
-        # Further filter available tasks based on phase constraints
+        # Further filter available tasks based on phase constraints.
+        # Classification is memoized per task content across requests
+        # (issue #743): it is a pure function of task text that never
+        # changes after creation, and recomputing it for every task on
+        # every request dominated request latency on large boards.
+        classify_cache = getattr(state, "_task_type_cache", None)
+        if classify_cache is None:
+            classify_cache = {}
+            state._task_type_cache = classify_cache
         phase_eligible_tasks = []
         for task in available_tasks:
-            task_type = classifier.classify(task)
+            task_type = _classify_task_cached(task, classifier, classify_cache)
             task_phase = phase_enforcer._get_task_phase(task_type)
 
             # Check if this phase is allowed given current in-progress tasks
@@ -6763,9 +6811,9 @@ async def _find_optimal_task_original_logic(
 
             # First check against in-progress tasks
             for ip_task_id in in_progress_task_ids:
-                ip_task = next((t for t in scoped_tasks if t.id == ip_task_id), None)
+                ip_task = tasks_by_id.get(ip_task_id)
                 if ip_task:
-                    ip_type = classifier.classify(ip_task)
+                    ip_type = _classify_task_cached(ip_task, classifier, classify_cache)
                     ip_phase = phase_enforcer._get_task_phase(ip_type)
 
                     # Check if tasks share the same FEATURE (by labels).
@@ -6817,7 +6865,9 @@ async def _find_optimal_task_original_logic(
                     # Check which phases have been completed
                     completed_phases = set()
                     for comp_task in feature_completed_tasks:
-                        comp_type = classifier.classify(comp_task)
+                        comp_type = _classify_task_cached(
+                            comp_task, classifier, classify_cache
+                        )
                         comp_phase = phase_enforcer._get_task_phase(comp_type)
                         completed_phases.add(comp_phase)
 
@@ -6831,7 +6881,9 @@ async def _find_optimal_task_original_logic(
                         if req_phase not in completed_phases:
                             # Check if there are any tasks of this phase
                             phase_exists = any(
-                                phase_enforcer._get_task_phase(classifier.classify(t))
+                                phase_enforcer._get_task_phase(
+                                    _classify_task_cached(t, classifier, classify_cache)
+                                )
                                 == req_phase
                                 for t in scoped_tasks
                                 if t.labels
