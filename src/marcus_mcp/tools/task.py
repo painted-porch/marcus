@@ -6805,10 +6805,15 @@ async def _find_optimal_task_original_logic(
         # (issue #743): it is a pure function of task text that never
         # changes after creation, and recomputing it for every task on
         # every request dominated request latency on large boards.
+        # isinstance(dict) rather than ``is None`` so a test double whose
+        # attribute access auto-creates a Mock still yields a real dict.
         classify_cache = getattr(state, "_task_type_cache", None)
-        if classify_cache is None:
+        if not isinstance(classify_cache, dict):
             classify_cache = {}
-            state._task_type_cache = classify_cache
+            try:
+                state._task_type_cache = classify_cache
+            except Exception:
+                pass
         phase_eligible_tasks = []
         for task in available_tasks:
             task_type = _classify_task_cached(task, classifier, classify_cache)
