@@ -102,6 +102,12 @@ a{ color:var(--blue); }
   .ledger .col:first-child{ border-top:none; padding-top:2px; }
 }
 
+/* single-column problem statement (opening screen): the ledger's language, one
+   side only — states the problem without spending the payoff. */
+.problem{ border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); padding:20px 0 22px; }
+.problem .ledg-stat{ flex-direction:row; align-items:baseline; gap:16px; flex-wrap:wrap; }
+.problem .ledg-sub{ font-size:16.5px; max-width:62ch; line-height:1.4; }
+
 /* exhibit "record" caption + double rule */
 .record-cap{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; }
 .rc-title{ font-family:var(--sans); font-weight:600; font-size:clamp(26px,5vw,32px); letter-spacing:.01em; }
