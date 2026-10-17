@@ -4,47 +4,42 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Verifier Bench</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="otr.css">
 <style>
-  :root{
-    --bg:#0f172a; --panel:#1e293b; --inner:#111b33; --line:#334155; --line2:#475569;
-    --ink:#e2e8f0; --body:#cbd5e1; --mute:#94a3b8; --dim:#64748b;
-    --red:#ef4444; --green:#10b981; --amber:#f59e0b; --blue:#3b82f6; --violet:#8b5cf6;
-    --sans:'IBM Plex Sans',Arial,sans-serif; --mono:'JetBrains Mono','Courier New',monospace;
-  }
   body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
        padding-block:32px;padding-inline:16px;}
   .wrap{max-width:860px;margin:0 auto;}
   h1{font-size:30px;font-weight:700;margin:0;}
-  h1 .grad{background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
-           background-clip:text;-webkit-text-fill-color:transparent;}
   .tagline{color:var(--mute);font-size:15px;margin:8px 0 0;max-width:62ch;line-height:1.55;}
 
   .stepper{display:flex;gap:8px;margin:26px 0 18px;flex-wrap:wrap;}
   .step{font-size:14px;font-weight:600;color:var(--dim);border:1px solid var(--line);
         border-radius:999px;padding:7px 16px;background:var(--inner);}
-  .step.now{color:var(--ink);border-color:var(--violet);background:#1b1536;}
-  .step.done{color:var(--green);border-color:#0b6e4f;}
+  .step.now{color:var(--ink);border-color:var(--violet);background:rgba(107,79,42,.12);}
+  .step.done{color:var(--green);border-color:var(--green);}
 
   .act{display:none;}
   .act.open{display:block;animation:rise .4s ease;}
   @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:22px;}
   .lead{font-size:16px;line-height:1.6;color:var(--body);margin:0 0 16px;max-width:62ch;}
   .lead b{color:var(--ink);}
 
-  .qcard{background:var(--inner);border:1px solid var(--line);border-radius:10px;
+  .qcard{background:var(--inner);border:1px solid var(--line);border-radius:4px;
          padding:14px 18px;font-size:15px;color:var(--body);line-height:1.55;}
-  .qcard .k{font-family:var(--mono);font-size:11.5px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
-  .answer{margin-top:14px;border:1px solid var(--line);border-left:4px solid var(--blue);
-          border-radius:10px;padding:16px 18px;background:var(--inner);position:relative;}
+  .qcard .k{font-family:var(--mono);font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
+  .answer{margin-top:14px;border:1px solid var(--line);border-left:4px solid var(--line2);
+          border-radius:4px;padding:16px 18px;background:var(--inner);position:relative;}
   .answer h3{margin:4px 0 4px;font-size:17px;}
   .answer .meta{font-size:14.5px;color:var(--mute);}
-  .answer .url{font-family:var(--mono);font-size:13.5px;color:#60a5fa;word-break:break-all;margin-top:6px;}
+  .answer .url{font-family:var(--mono);font-size:13.5px;color:var(--mute);word-break:break-all;margin-top:6px;}
   .answer.dead{border-left-color:var(--red);}
   .stamp{position:absolute;right:16px;top:14px;transform:rotate(-9deg);font-family:var(--mono);
          font-weight:700;font-size:17px;color:var(--red);border:2px solid var(--red);
-         border-radius:6px;padding:3px 10px;background:rgba(239,68,68,.08);opacity:0;
+         border-radius:4px;padding:3px 10px;background:rgba(156,43,37,.08);opacity:0;
          transition:opacity .4s ease, transform .4s ease;}
   .stamp.on{opacity:1;}
   .fetchlog{font-family:var(--mono);font-size:14px;color:var(--mute);margin-top:12px;min-height:20px;}
@@ -52,12 +47,13 @@
   .verdictline.on{display:block;}
   .verdictline b{color:var(--red);}
 
-  button{font-family:var(--sans);font-size:15px;font-weight:600;color:#fff;
-         background:linear-gradient(135deg,var(--blue),var(--violet));border:none;border-radius:9px;
+  button{font-family:var(--sans);font-size:15px;font-weight:600;color:var(--bg);
+         background:var(--ink);border:none;border-radius:4px;
          padding:11px 22px;cursor:pointer;margin-top:18px;}
-  button.quiet{background:var(--panel);border:1px solid var(--line2);color:var(--ink);}
-  button:hover{filter:brightness(1.12);}
-  button:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
+  button.quiet{background:transparent;border:1px solid var(--line2);color:var(--ink);}
+  button:hover{background:#3a3326;filter:none;}
+  button.quiet:hover{border-color:var(--ink);background:var(--panel);}
+  button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
   button[disabled]{opacity:.45;cursor:default;filter:none;}
 
   .checklist{margin:0 0 6px;padding:0;list-style:none;}
@@ -66,56 +62,65 @@
   .checklist li:last-child{border-bottom:none;}
   .cnum{font-family:var(--mono);font-size:12.5px;color:var(--violet);padding-top:2px;}
   .checklist b{font-size:15px;display:block;}
-  .checklist small{font-size:13.5px;color:var(--mute);line-height:1.55;}
-  .checklist .mono{font-family:var(--mono);color:var(--dim);font-size:11.5px;}
-  .checklist input{accent-color:#8b5cf6;width:17px;height:17px;margin-top:4px;cursor:pointer;}
+  .checklist small{font-size:14px;color:var(--mute);line-height:1.55;}
+  .checklist .mono{font-family:var(--mono);color:var(--dim);font-size:12px;}
+  .checklist input{accent-color:#9c2b25;width:17px;height:17px;margin-top:4px;cursor:pointer;}
   .checklist li.off b, .checklist li.off small{opacity:.4;text-decoration:line-through;}
 
   .queue{margin-top:16px;}
-  .row{border:1px solid var(--line);border-left:4px solid var(--line2);border-radius:10px;
+  .row{border:1px solid var(--line);border-left:4px solid var(--line2);border-radius:4px;
        background:var(--inner);padding:14px 18px;margin-top:10px;transition:border-color .3s;}
   .row h4{margin:0;font-size:15px;font-weight:600;}
   .row .sub{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:3px;word-break:break-all;}
-  .row .why{font-size:13.5px;color:var(--mute);margin-top:6px;line-height:1.55;display:none;}
+  .row .why{font-size:14px;color:var(--mute);margin-top:6px;line-height:1.55;display:none;}
   .row.done .why{display:block;}
-  .row .chip{float:right;font-family:var(--mono);font-size:11.5px;letter-spacing:1px;
+  .row .chip{float:right;font-family:var(--mono);font-size:12px;letter-spacing:1px;
              text-transform:uppercase;padding:4px 10px;border-radius:999px;
              border:1px solid var(--line2);color:var(--dim);}
-  .row.ok{border-left-color:var(--green);} .row.ok .chip{color:var(--green);border-color:#0b6e4f;}
-  .row.no{border-left-color:var(--amber);} .row.no .chip{color:var(--amber);border-color:#7c5806;}
+  .row.ok{border-left-color:var(--green);} .row.ok .chip{color:var(--green);border-color:var(--green);}
+  .row.no{border-left-color:var(--amber);} .row.no .chip{color:var(--amber);border-color:var(--amber);}
   .row.bad{border-left-color:var(--red);box-shadow:0 0 0 1px var(--red);}
-  .row.bad .chip{color:#fecaca;border-color:var(--red);background:rgba(239,68,68,.15);}
+  .row.bad .chip{color:var(--red);border-color:var(--red);background:rgba(156,43,37,.08);}
   .row.busy{border-left-color:var(--blue);}
-  .ticks{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:7px;min-height:16px;}
+  .ticks{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:7px;min-height:16px;}
   .ticks .p{color:var(--green);} .ticks .f{color:var(--red);}
 
   .tally{display:flex;gap:12px;margin-top:18px;flex-wrap:wrap;}
   .tile{flex:1;min-width:200px;background:var(--panel);border:1px solid var(--line);
-        border-radius:12px;padding:14px 18px;}
+        border-radius:4px;padding:14px 18px;}
   .tile .n{font-family:var(--mono);font-size:38px;font-weight:700;font-variant-numeric:tabular-nums;}
   .tile .l{font-size:14px;color:var(--mute);margin-top:3px;line-height:1.5;}
   #tBad .n{color:var(--red);} #tOk .n{color:var(--green);}
-  .sabnote{display:none;margin-top:14px;background:rgba(245,158,11,.08);border:1px solid #7c5806;
-           border-radius:10px;padding:13px 16px;font-size:14.5px;color:#fcd34d;line-height:1.6;}
+  .sabnote{display:none;margin-top:14px;background:rgba(138,90,22,.10);border:1px solid var(--amber);
+           border-radius:4px;padding:13px 16px;font-size:14.5px;color:var(--ink);line-height:1.6;}
   .sabnote.show{display:block;}
 
-  .cta{margin-top:26px;background:linear-gradient(135deg,#1e3a8a,#312e81);
-       border:1px solid var(--line2);border-radius:14px;padding:22px 24px;display:none;}
+  .cta{margin-top:26px;background:var(--inner);
+       border:1px solid var(--line2);border-radius:4px;padding:22px 24px;display:none;}
   .cta.show{display:block;}
-  .cta p{margin:0;font-size:15.5px;line-height:1.65;color:#c7d2fe;max-width:68ch;}
-  .cta b{color:#fff;} .cta .repo{font-family:var(--mono);color:#93c5fd;}
-  footer{margin-top:16px;font-size:12.5px;color:var(--dim);line-height:1.6;max-width:80ch;}
+  .cta p{margin:0;font-size:15.5px;line-height:1.65;color:var(--body);max-width:68ch;}
+  .cta b{color:var(--ink);} .cta .repo{font-family:var(--mono);color:var(--mute);}
+  footer{margin-top:16px;font-size:14px;color:var(--dim);line-height:1.6;max-width:80ch;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
 </style>
 </head>
 <body>
-<nav aria-label="On the Record pages" style="display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline;padding:12px 20px;border-bottom:1px solid #24324a;font-family:'JetBrains Mono',monospace;font-size:12.5px;letter-spacing:.02em;"><span style="color:#60a5fa;letter-spacing:.14em;">ON THE RECORD</span><a style="color:#94a3b8;text-decoration:none;" href="index.html">The Receipts</a><a style="color:#94a3b8;text-decoration:none;" href="not-a-fact-checker.html">Not a fact checker</a><a style="color:#e2e8f0;text-decoration:none;" href="bench.html">The Bench</a><a style="color:#94a3b8;text-decoration:none;" href="story.html">The Animation</a></nav>
+<nav class="otrnav" aria-label="On the Record pages">
+  <span class="brand">On the Record</span>
+  <a href="index.html">The Receipts</a>
+  <a href="not-a-fact-checker.html">Not a fact checker</a>
+  <a href="bench.html" class="cur">The Bench</a>
+  <a href="story.html">The Animation</a>
+  <a href="evidence-machine.html">The Machine</a>
+  <span class="spacer"><span class="put">Put it on the record →</span>
+    <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-show-count="true" data-size="large" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Star</a></span>
+</nav>
 
 
 <div class="wrap">
   <h1><span class="grad">Verifier Bench</span></h1>
   <p class="tagline">In a live replication of Columbia’s Tow Center study, AI search engines handed us
-  wrong answers 73.8% of the time, with fabricated citations. This bench shows how a verifier they
+  wrong answers 69.5% of the time, with fabricated citations. This bench shows how a verifier they
   can’t skip catches them. Three steps, two minutes.</p>
 
   <div class="stepper">
@@ -130,10 +135,10 @@
       <b>where is this from?</b> Here is its answer.</p>
       <div class="qcard"><span class="k">the question</span><br>
         “Some good news is that this storm should make a lasting impact…”
-        — which article is this from? <span style="color:#64748b;font-size:12.5px">(fragment only;
+        — which article is this from? <span style="color:var(--dim);font-size:14px">(fragment only;
         the dataset’s excerpts stay protected)</span></div>
       <div class="answer" id="a1">
-        <span class="k" style="color:#60a5fa">confident answer</span>
+        <span class="k" style="color:var(--red)">confident answer</span>
         <span class="stamp" id="stamp">404 NOT FOUND</span>
         <h3>“New England storm brings flooding rain”</h3>
         <div class="meta">The Boston Globe · December 11, 2024</div>
@@ -141,7 +146,7 @@
       </div>
       <div class="fetchlog" id="flog"></div>
       <p class="verdictline" id="v1">The page <b>does not exist</b>. The engine didn’t say “I’m not sure”;
-      it invented a plausible link. In our test, <b>54.6% of cited URLs</b> failed this one fetch.
+      it invented a plausible link. In our test, <b>51.2% of cited URLs</b> failed this one fetch.
       Nobody clicks every link. That’s the problem.</p>
       <button id="fetchBtn">Fetch that link</button>
       <button id="to2" class="quiet" style="display:none">So how do you catch these? →</button>
@@ -186,9 +191,13 @@
   <div class="cta" id="cta">
     <p><b>Every check you just toggled is real.</b> They’re the verifier from Marcus, an open-source board
     where an AI agent’s answer is not accepted without evidence, is never checked by its own author, and only
-    humans approve. Same engines, on the record: wrong answers reaching you fell from <b>73.8% to 4.8%</b>;
-    fabricated citations fell to <b>zero</b>; cost rose 1.42x, in fractions of a cent.<br><br>
-    <span class="repo">github.com/lwgray/marcus</span></p>
+    humans approve. Same engines, on the record: wrong answers reaching you fell from <b>69.5% to 12.1%</b>;
+    fabricated citations fell to <b>zero</b>; cost rose a small multiple on tokens alone, in fractions of a cent (grounded engines bill far more for search than token logging captures).<br><br>
+    <span class="repo">github.com/painted-porch/marcus</span></p>
+    <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:18px;">
+      <span style="font-family:var(--mono);font-size:14.5px;color:var(--ink);">That’s the checkpoint. Put it on the record →</span>
+      <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-size="large" data-show-count="true" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Put it on the record</a>
+    </div>
   </div>
   <footer>Fetches on this bench are simulated so it can run anywhere; the production verifier fetches live
   pages, respects robots.txt, and attaches its logs to every verdict. Sample answers mirror real cases from
@@ -358,7 +367,7 @@
       const synShipped = evaluate(syn).verdict==="ok";
       const note = $("sabnote");
       if (synShipped){
-        note.textContent = "That reprint you just shipped fooled our first pilot too: 15.8% wrong delivered, against a 10% pass gate. The preregistration had named this exact check as the remedy. We added it, re-ran everything, and passed at 4.8%. Turn it back on.";
+        note.textContent = "That reprint you just shipped fooled our first pilot too: 15.8% wrong delivered, against a 10% pass gate. The preregistration had named this exact check as the remedy. We added it, re-ran everything across all 200 questions and four engines, and the flatly-wrong rate reaching the user came in at 3.5%. Turn it back on.";
         note.classList.add("show");
       } else if (bad > 0){
         note.textContent = bad + " wrong answer" + (bad>1?"s":"") + " just reached someone who will act on " + (bad>1?"them":"it") + ". Every check you turn off is a failure mode you chose to ship.";

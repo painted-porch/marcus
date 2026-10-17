@@ -4,91 +4,118 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The Receipts</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="otr.css">
 <style>
-  :root{
-    --bg:#0f172a; --panel:#1e293b; --inner:#111b33; --line:#334155; --line2:#475569;
-    --ink:#e2e8f0; --body:#cbd5e1; --mute:#94a3b8; --dim:#64748b;
-    --red:#ef4444; --green:#10b981; --amber:#f59e0b; --blue:#60a5fa; --violet:#a78bfa;
-    --sans:'IBM Plex Sans',Arial,sans-serif; --mono:'JetBrains Mono','Courier New',monospace;
-  }
   html,body{height:100%;}
   body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);}
   #scroller{height:100%;overflow-y:auto;scroll-snap-type:y mandatory;scroll-behavior:smooth;}
   section.panel{min-height:100svh;scroll-snap-align:start;display:flex;align-items:center;
-    justify-content:center;padding-block:48px;padding-inline:20px;box-sizing:border-box;}
+    justify-content:center;padding:64px 20px 48px;box-sizing:border-box;}
   .inner{width:100%;max-width:640px;display:flex;flex-direction:column;gap:22px;}
-  .eyebrow{font-family:var(--mono);font-size:12.5px;letter-spacing:3px;text-transform:uppercase;
-    color:var(--blue);}
-  h1,h2{margin:0;font-weight:700;line-height:1.08;text-wrap:balance;}
-  h1{font-size:clamp(38px,8.5vw,68px);}
-  h2{font-size:clamp(28px,6.5vw,46px);}
-  .grad{background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
-    background-clip:text;-webkit-text-fill-color:transparent;}
-  p.lead{margin:0;font-size:clamp(17px,2.6vw,19.5px);line-height:1.6;color:var(--body);max-width:58ch;}
-  p.foot{margin:0;font-size:14.5px;line-height:1.6;color:var(--mute);max-width:60ch;}
+  .eyebrow{font-family:var(--mono);font-size:13px;letter-spacing:3px;text-transform:uppercase;
+    color:var(--red);}
+  h1,h2{margin:0;font-weight:600;line-height:1.05;text-wrap:balance;letter-spacing:-.01em;}
+  h1{font-size:clamp(38px,8.5vw,66px);}
+  h2{font-size:clamp(28px,6.5vw,44px);}
+  p.lead{margin:0;font-size:clamp(18px,2.6vw,20px);line-height:1.58;color:var(--body);max-width:60ch;}
+  p.foot{margin:0;font-size:15px;line-height:1.62;color:var(--mute);max-width:62ch;}
   .big{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;
-    font-size:clamp(64px,16vw,120px);line-height:1;}
+    font-size:clamp(60px,15vw,112px);line-height:1;}
   .big.red{color:var(--red);} .big.green{color:var(--green);}
-  .biglabel{font-size:15px;color:var(--mute);line-height:1.4;}
+  .biglabel{font-size:15.5px;color:var(--mute);line-height:1.45;}
 
-  .claim{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--blue);
-    border-radius:12px;padding:18px 20px;}
+  .claim{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--green);
+    border-radius:4px;padding:18px 20px;}
   .claim.dead{border-left-color:var(--red);}
-  .k{font-family:var(--mono);font-size:11.5px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
-  .claim h3{margin:6px 0 4px;font-size:16.5px;line-height:1.35;font-weight:600;}
-  .claim .meta{font-size:14.5px;color:var(--mute);}
-  .claim .url{font-family:var(--mono);font-size:12.5px;color:#60a5fa;word-break:break-all;margin-top:6px;}
+  .k{font-family:var(--mono);font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
+  .claim h3{margin:6px 0 4px;font-size:17px;line-height:1.35;font-weight:600;}
+  .claim .meta{font-size:15px;color:var(--mute);}
+  .claim .url{font-family:var(--mono);font-size:13px;color:var(--mute);word-break:break-all;margin-top:6px;}
+  .claim.dead .url{color:var(--red);}
   .stamp{display:inline-block;transform:rotate(-7deg);font-family:var(--mono);font-weight:700;
-    font-size:15px;color:var(--red);border:2px solid var(--red);border-radius:6px;
-    padding:2px 10px;background:rgba(239,68,68,.08);margin-top:10px;
+    font-size:15px;color:var(--red);border:2px solid var(--red);border-radius:4px;
+    padding:2px 10px;background:rgba(156,43,37,.09);margin-top:10px;
     opacity:0;transition:opacity .5s ease .3s;}
   .live .stamp{opacity:1;}
 
-  .receipt{background:#0b1222;border:1px solid var(--line);border-radius:10px;
-    padding:14px 16px;font-family:var(--mono);font-size:13.5px;line-height:1.9;color:var(--body);
+  .receipt{background:var(--inner);border:1px solid var(--line);border-radius:4px;
+    padding:14px 16px;font-family:var(--mono);font-size:14px;line-height:1.9;color:var(--body);
     overflow-wrap:anywhere;word-break:break-word;}
   .receipt .ok{color:var(--green);} .receipt .no{color:var(--red);} .receipt .wait{color:var(--amber);}
   .receipt .dim{color:var(--dim);}
-  .verdict{display:inline-block;font-family:var(--mono);font-size:12px;letter-spacing:1.5px;
+  .verdict{display:inline-block;font-family:var(--mono);font-size:12.5px;letter-spacing:1.5px;
     text-transform:uppercase;padding:5px 12px;border-radius:999px;margin-top:4px;}
-  .verdict.bad{color:#fecaca;border:1px solid var(--red);background:rgba(239,68,68,.12);}
-  .verdict.warn{color:var(--amber);border:1px solid #7c5806;}
-  .verdict.good{color:var(--green);border:1px solid #0b6e4f;}
+  .verdict.bad{color:var(--red);border:1px solid var(--red);background:rgba(156,43,37,.08);}
+  .verdict.warn{color:var(--amber);border:1px solid var(--amber);}
+  .verdict.good{color:var(--green);border:1px solid var(--green);}
   .rules{display:flex;flex-direction:column;gap:12px;}
   .rule{display:flex;gap:14px;align-items:baseline;background:var(--panel);
-    border:1px solid var(--line);border-radius:10px;padding:16px 18px;}
-  .rule b{font-size:16px;} .rule small{display:block;font-size:14px;color:var(--mute);margin-top:4px;line-height:1.6;}
-  .rule .n{font-family:var(--mono);color:var(--violet);font-size:14px;}
+    border:1px solid var(--line);border-radius:4px;padding:16px 18px;}
+  .rule b{font-size:16.5px;} .rule small{display:block;font-size:14.5px;color:var(--mute);margin-top:4px;line-height:1.62;}
+  .rule .n{font-family:var(--mono);color:var(--violet);font-size:14px;font-weight:700;}
   .vs{display:flex;gap:16px;align-items:stretch;flex-wrap:wrap;}
   .vs .side{flex:1;min-width:220px;background:var(--panel);border:1px solid var(--line);
-    border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:6px;}
+    border-radius:4px;padding:18px;display:flex;flex-direction:column;gap:6px;}
   .vs .side.l{border-top:3px solid var(--red);} .vs .side.r{border-top:3px solid var(--green);}
   .vs .n{font-family:var(--mono);font-weight:700;font-size:clamp(44px,9vw,64px);font-variant-numeric:tabular-nums;}
   .vs .l .n{color:var(--red);} .vs .r .n{color:var(--green);}
-  .vs .lbl{font-size:14px;color:var(--mute);line-height:1.45;}
-  .fragment{background:var(--inner);border:1px dashed var(--line2);border-radius:10px;padding:10px 14px;}
+  .vs .lbl{font-size:14.5px;color:var(--mute);line-height:1.45;}
+  .fragment{background:var(--inner);border:1px dashed var(--line2);border-radius:4px;padding:10px 14px;}
   .fragment canvas{display:block;max-width:100%;}
-  .fragment small{font-size:12px;color:var(--dim);}
-  .cue{font-family:var(--mono);font-size:12.5px;color:var(--dim);letter-spacing:2px;}
-  .cta{background:linear-gradient(135deg,#1e3a8a,#312e81);border:1px solid var(--line2);
-    border-radius:14px;padding:20px 22px;}
-  .cta p{margin:0;font-size:16.5px;line-height:1.65;color:#c7d2fe;}
-  .cta .repo{font-family:var(--mono);color:#93c5fd;font-size:14px;}
+  .fragment small{font-size:12.5px;color:var(--dim);}
+  .cue{font-family:var(--mono);font-size:13px;color:var(--dim);letter-spacing:2px;}
+  .cta{background:var(--panel2);border:1px solid var(--line2);
+    border-radius:6px;padding:20px 22px;}
+  .cta p{margin:0;font-size:16.5px;line-height:1.65;color:var(--body);}
+  .cta .repo{font-family:var(--mono);color:var(--mute);font-size:14px;}
   .cta-actions{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:18px;}
-  .cta-link{font-family:var(--mono);font-size:14.5px;color:#93c5fd;text-decoration:none;
-    border:1px solid var(--line2);border-radius:6px;padding:7px 12px;}
-  .cta-link:hover{border-color:#93c5fd;}
+  .cta-link{font-family:var(--mono);font-size:14.5px;color:var(--blue);text-decoration:none;
+    border:1px solid var(--line2);border-radius:4px;padding:7px 12px;}
+  .cta-link:hover{border-color:var(--ink);}
+  .cta-note{font-size:14px;color:var(--mute);}
+  .cta-next{display:block;margin-top:16px;background:var(--panel);border:1px solid var(--line2);
+    border-left:4px solid var(--red);border-radius:4px;padding:14px 16px;text-decoration:none;
+    color:var(--ink);font-size:16px;line-height:1.42;}
+  .cta-next:hover{border-left-color:var(--ink);}
+  .cta-next .lead-in{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--red);display:block;margin-bottom:4px;}
+  .cta-next b{color:var(--ink);font-weight:600;}
+  .cta-more{margin-top:18px;}
+  .more-label{font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--dim);display:block;margin-bottom:9px;}
+  .more-chips{display:flex;flex-wrap:wrap;gap:8px;}
+  .morechip{font-family:var(--mono);font-size:13px;color:var(--mute);text-decoration:none;
+    border:1px solid var(--line2);border-radius:999px;padding:7px 13px;background:transparent;}
+  .morechip:hover{border-color:var(--ink);color:var(--ink);}
   .dots{position:fixed;right:10px;top:50%;transform:translateY(-50%);display:flex;
     flex-direction:column;gap:8px;z-index:5;}
-  .dots a{width:8px;height:8px;border-radius:50%;background:var(--line);display:block;}
-  .dots a.on{background:var(--violet);}
-  .dots a:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
+  .dots a{width:8px;height:8px;border-radius:50%;background:var(--line2);display:block;}
+  .dots a.on{background:var(--ink);}
+  .dots a:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
   .count{transition:none;}
+  html,body{overflow-x:hidden;}
+  @media (max-width:480px){
+    #otr-bar .otr-label{display:none;}
+    h1{font-size:clamp(32px,8vw,66px);}
+  }
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;} #scroller{scroll-behavior:auto;} }
 </style>
 </head>
 <body>
+
+<div id="otr-bar">
+  <span class="brand">ON THE RECORD</span>
+  <span style="display:flex;gap:8px;align-items:center;">
+    <span class="otr-label">Put it on the record →</span>
+    <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star"
+       data-show-count="true" data-size="large"
+       data-color-scheme="no-preference: light; light: light; dark: light;"
+       target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Star</a>
+  </span>
+</div>
 
 <div id="scroller">
 
@@ -106,14 +133,16 @@
       <div class="biglabel">of the answers they delivered were wrong, and 51.2% of all cited links
       were fabricated, dead, or not the source.</div>
     </div>
+    <p class="lead" style="color:var(--ink)">About 7 in 10 answers came back wrong. Run the same engines
+    through the checkpoint and <b>0 fabricated links reach you</b> — anything unverified arrives as a
+    labeled decline with its receipts, not as an answer.</p>
     <p class="lead" style="color:var(--ink)">And citations are only the version of this problem
     that is easy to measure. The same failure hides in every AI answer anyone acts on without a way
     to check it: numbers in a report, legal references, medical claims, code.</p>
     <p class="foot">The test is a re-run of the Tow Center’s famous 2025 study, “AI Search Has a
-    Citation Problem,” with one addition of our own. The evidence follows as four exhibits,
-    pulled straight from the run’s audit
-    records: a perfect-looking fabrication, a reprint wearing the wrong byline, an honest decline,
-    and an answer that earned a human signature.</p>
+    Citation Problem.” The evidence follows as three exhibits, pulled straight from the run’s audit
+    records: a perfect-looking fabrication, a link that is simply dead, and the one answer that
+    earned a human signature.</p>
     <span class="cue">scroll ↓</span>
   </div>
 </section>
@@ -134,6 +163,22 @@
     </div>
     <p class="foot">The page does not exist. The real source was Entertainment Weekly. Full headline,
     confident date, invented link. Half the citations in our test died exactly here.</p>
+  </div>
+</section>
+
+<section class="panel" id="p4">
+  <div class="inner">
+    <span class="eyebrow">Exhibit B · case tow-0063</span>
+    <h2>And half the time, <span class="grad">the page is just gone.</span></h2>
+    <p class="lead">Same question, a different engine. This time the link isn’t invented — it’s dead.</p>
+    <div class="claim dead">
+      <span class="k">what it answered · the cited link</span>
+      <div class="url">theguardian.com/environment/article/2024/may/15/climate-scientists-baff…</div>
+      <span class="stamp">404 · NOT FOUND</span>
+    </div>
+    <p class="foot">Against a dataset of articles two years old, 47% of the pages are already dead or
+    closed to robots — and the engine cited them with the same confidence as a live one. Fabricated or
+    dead, a wrong link looks identical to a right one. You cannot tell which until you click. So we did.</p>
   </div>
 </section>
 
@@ -161,54 +206,14 @@
         never wave its own work through, and someone is always answerable for what shipped.</small></span></div>
     </div>
     <p class="foot">No retraining. No prompt begging for honesty. The environment simply stopped
-    letting unverified claims ship. Exhibits B, C, and D show each rule catching a real case from
-    the run.</p>
-  </div>
-</section>
-
-<section class="panel" id="p3">
-  <div class="inner">
-    <span class="eyebrow">Exhibit B · case tow-0012</span>
-    <h2>This one even loads.</h2>
-    <div class="claim">
-      <span class="k">what it answered</span>
-      <h3>Parker Solar Probe findings</h3>
-      <div class="meta">Live Science · August 13, 2024</div>
-      <div class="url">livescience.com/space/the-sun/nasa-s-parker-solar-probe-finds-fresh-clues…</div>
-    </div>
-    <div class="receipt">
-      <span class="dim">$ verify --fetch</span><br>
-      HTTP 200 <span class="ok">✓ page is live</span><br>
-      quote on page <span class="no">✗ not found</span><br>
-      rel=canonical → <b>space.com</b>/sun-parker-solar-probe-switchbacks… <span class="no">✗ reprint</span><br>
-      <span class="verdict bad">contradicted · wrong source</span>
-    </div>
-    <p class="foot">A syndicated copy wearing the wrong byline. Humans fall for this one too, and the
-    trap is subtle enough that it slipped past our first pilot, which is exactly why the preregistered
-    fix added this canonical check. Receipts from the live run, October 2026.</p>
-  </div>
-</section>
-
-<section class="panel" id="p4">
-  <div class="inner">
-    <span class="eyebrow">Exhibit C · case tow-0063</span>
-    <h2>And when the page is simply gone?</h2>
-    <div class="receipt">
-      <span class="dim">$ verify --fetch</span><br>
-      GET theguardian.com/environment/article/2024/may/15/climate-scientists-baff…<br>
-      HTTP 404 <span class="no">✗ page not found</span><br>
-      <span class="verdict warn">could not verify · declined, log attached</span>
-    </div>
-    <p class="lead">No guess. No confident filler. A labeled decline, receipts attached.</p>
-    <p class="foot">Against a dataset of two-year-old articles, 47% of pages are already dead or
-    closed to robots. An honest “can’t confirm” beats a confident lie every time someone acts on
-    the answer.</p>
+    letting unverified claims ship — and when a link cannot be verified, it declines with the receipt
+    instead of guessing. Here is what survives.</p>
   </div>
 </section>
 
 <section class="panel" id="p5">
   <div class="inner">
-    <span class="eyebrow">Exhibit D · case tow-0001</span>
+    <span class="eyebrow">Exhibit C · case tow-0001</span>
     <h2>What survives, <span class="grad">a person signs.</span></h2>
     <div class="claim">
       <span class="k">what it answered</span>
@@ -240,9 +245,9 @@
         <small>A citation arrived as bare text. Wrong ones looked identical to right ones, and when
         one burned you, no record existed of what was claimed or why it failed.</small></span></div>
       <div class="rule"><span class="n">now</span><span><b>Every answer leaves a record, especially the wrong ones.</b>
-        <small>Exhibits A through D are not reconstructions; they are the captured evidence itself.
-        The claim, the fetch, the 404, the canonical mismatch, the human signature: the reason an
-        answer was not trusted is on file, case by case.</small></span></div>
+        <small>Exhibits A through C are not reconstructions; they are the captured evidence itself.
+        The claim, the fetch, the 404, the human signature: the reason an answer was or was not
+        trusted is on file, case by case.</small></span></div>
     </div>
     <p class="foot">That is the trade. You accept fewer answers, and in exchange every answer you do
     accept has survived its checks, and every answer you refuse comes with the documented reason why.
@@ -258,15 +263,15 @@
       <div class="side l"><div class="n count" id="c1" data-target="69.5" data-suffix="%">69.5%</div>
         <div class="lbl">of delivered answers wrong · engines alone, full 200-question run</div>
         <div class="lbl" style="color:var(--red)">51.2% of links fabricated or dead</div></div>
-      <div class="side r"><div class="n count" id="c2" data-target="4.8" data-suffix="%">4.8%</div>
-        <div class="lbl">of delivered answers wrong · on the record, preregistered pilot (full run completing now)</div>
+      <div class="side r"><div class="n count" id="c2" data-target="12.1" data-suffix="%">12.1%</div>
+        <div class="lbl">of delivered answers wrong · on the record, full 200-question run across four engines</div>
         <div class="lbl" style="color:var(--green)">0.0% fabricated · every decline carries receipts</div></div>
     </div>
     <p class="lead">Say that plainly: once a verification step exists and the caught claims are
-    declined with receipts, <b style="color:var(--ink)">only about 1 in 20 answers that actually
-    reached you was false</b>. Without it, 7 in 10 were.</p>
+    declined with receipts, <b style="color:var(--ink)">only about 1 in 8 answers that actually
+    reached you carried any error, and only about 1 in 29 was flatly wrong</b>. Without it, about 7 in 10 were.</p>
     <p class="foot">The engines are exactly as wrong as before; the caught claims arrive as labeled
-    declines instead of answers. Cost of the record: 1.42x, in fractions of a cent per answer. The
+    declines instead of answers. Cost of the record: a small multiple on tokens alone, fractions of a cent per answer, and grounded engines bill far more for search than token logging captures. The
     effect held across every vendor and price tier tested, frontier models included.</p>
   </div>
 </section>
@@ -284,16 +289,23 @@
     <div class="cta-actions">
       <a class="github-button" href="https://github.com/painted-porch/marcus"
          data-icon="octicon-star" data-size="large" data-show-count="true"
-         data-color-scheme="no-preference: dark; light: dark; dark: dark;"
-         aria-label="Star painted-porch/marcus on GitHub">Star Marcus</a>
-      <a class="cta-link" data-goatcounter-click="receipts-release"
-         href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1">Audit bundles &amp; method ↗</a>
-      <a class="cta-link" data-goatcounter-click="receipts-nafc"
-         href="not-a-fact-checker.html">Why this isn't a fact checker →</a>
-      <a class="cta-link" data-goatcounter-click="receipts-bench"
-         href="bench.html">Run the verifier bench →</a>
-      <a class="cta-link" data-goatcounter-click="receipts-story"
-         href="story.html">Watch the 60-second animation →</a>
+         data-color-scheme="no-preference: light; light: light; dark: light;"
+         target="_blank" rel="noopener"
+         aria-label="Star painted-porch/marcus on GitHub">Put it on the record</a>
+      <span class="cta-note">One click, opens GitHub in a new tab — the public vote that keeps open work alive.</span>
+    </div>
+    <a class="cta-next" href="not-a-fact-checker.html" data-goatcounter-click="receipts-nafc">
+      <span class="lead-in">If you read one more thing</span>
+      “So it’s just a fact-checker?” <b>Here’s why it’s something bigger →</b>
+    </a>
+    <div class="cta-more">
+      <span class="more-label">Or explore it yourself</span>
+      <div class="more-chips">
+        <a class="morechip" href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener" data-goatcounter-click="receipts-runfree">Run it free in 60s ↗</a>
+        <a class="morechip" href="evidence-machine.html" data-goatcounter-click="receipts-machine">Watch the machine sort it →</a>
+        <a class="morechip" href="bench.html" data-goatcounter-click="receipts-bench">The verifier bench →</a>
+        <a class="morechip" href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener" data-goatcounter-click="receipts-release">Method &amp; code ↗</a>
+      </div>
     </div></div>
     <p class="foot">About the excerpts: the Tow Center distributes its 200 excerpts encrypted so the
     text stays out of AI training crawlers. We keep that promise here, which is why excerpt text
@@ -324,8 +336,8 @@
       canvas.style.width = w + "px"; canvas.style.height = "34px";
       var ctx = canvas.getContext("2d");
       ctx.scale(dpr, dpr);
-      ctx.font = "italic 15px Georgia, serif";
-      ctx.fillStyle = "#cbd5e1";
+      ctx.font = "italic 16px Georgia, serif";
+      ctx.fillStyle = "#352f24";
       ctx.fillText("“" + decodeURIComponent(escape(frag)) + "”", 2, 22);
     }
     draw();

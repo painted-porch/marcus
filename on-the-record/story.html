@@ -4,23 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>On the Record</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="otr.css">
 <style>
-  :root{
-    --bg:#0f172a; --panel:#1e293b; --panel2:#16213a; --line:#334155; --line2:#475569;
-    --ink:#e2e8f0; --body:#cbd5e1; --mute:#94a3b8; --dim:#64748b;
-    --red:#ef4444; --green:#10b981; --amber:#f59e0b; --blue:#3b82f6; --violet:#8b5cf6;
-    --sans:'IBM Plex Sans',Arial,sans-serif; --mono:'JetBrains Mono','Courier New',monospace;
-  }
   body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
        padding-block:24px;padding-inline:16px;}
   .wrap{max-width:1240px;margin:0 auto;}
   header.top{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:14px;}
-  .brand{font-size:22px;font-weight:700;background:linear-gradient(135deg,#60a5fa,#a78bfa);
-         -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+  .brand{font-size:22px;font-weight:700;color:var(--ink);}
   .sub{color:var(--mute);font-size:15px;}
-  .stagebox{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;
-            background:linear-gradient(135deg,#131c33,#0f172a);}
+  .stagebox{position:relative;border:1px solid var(--line);border-radius:4px;overflow:hidden;
+            background:var(--inner);}
   #scaler{position:relative;transform-origin:top left;width:1200px;height:600px;}
   .scene{position:absolute;inset:0;opacity:0;visibility:hidden;transition:opacity .5s ease;}
   .scene.live{opacity:1;visibility:visible;}
@@ -31,69 +27,69 @@
   [data-st="dim"]{opacity:.22;}
 
   /* shared pieces */
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;}
-  .k{font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
-  .pill{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:1px;
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:18px 20px;}
+  .k{font-family:var(--mono);font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--dim);}
+  .pill{display:inline-block;font-family:var(--mono);font-size:12px;letter-spacing:1px;
         text-transform:uppercase;padding:3px 10px;border-radius:999px;border:1px solid var(--line2);
         color:var(--mute);transition:all .4s ease;}
-  .pill.todo{color:var(--amber);border-color:#7c5806;}
-  .pill.prog{color:var(--blue);border-color:#1e4fa3;}
-  .pill.done{color:var(--green);border-color:#0b6e4f;}
+  .pill.todo{color:var(--amber);border-color:var(--amber);}
+  .pill.prog{color:var(--blue);border-color:var(--blue);}
+  .pill.done{color:var(--green);border-color:var(--green);}
   .agent{display:flex;align-items:center;gap:10px;background:var(--panel);
          border:1px solid var(--line);border-radius:999px;padding:10px 18px;font-size:14px;}
   .agent .dot{width:9px;height:9px;border-radius:50%;}
   .agent b{font-weight:600;}
-  .agent small{color:var(--dim);font-family:var(--mono);font-size:11px;}
-  .bubble{background:#0b1222;border:1px solid var(--line2);border-radius:10px;
+  .agent small{color:var(--dim);font-family:var(--mono);font-size:12px;}
+  .bubble{background:var(--inner);border:1px solid var(--line2);border-radius:4px;
           font-family:var(--mono);font-size:12px;color:var(--body);padding:8px 12px;}
   .bubble:after{content:"";position:absolute;left:24px;bottom:-6px;width:10px;height:10px;
-                background:#0b1222;border-right:1px solid var(--line2);border-bottom:1px solid var(--line2);
+                background:var(--inner);border-right:1px solid var(--line2);border-bottom:1px solid var(--line2);
                 transform:rotate(45deg);}
-  .toast{font-family:var(--mono);font-size:12px;padding:8px 14px;border-radius:8px;}
+  .toast{font-family:var(--mono);font-size:12px;padding:8px 14px;border-radius:4px;}
   .big{font-family:var(--mono);font-weight:700;font-variant-numeric:tabular-nums;}
 
   /* ---- scene A ---- */
   #excerpt{left:70px;top:60px;width:440px;}
   #excerpt p.q{font-size:17px;line-height:1.55;color:var(--body);margin:8px 0 10px;}
-  #excerpt .src{font-size:12px;color:var(--dim);}
+  #excerpt .src{font-size:13.5px;color:var(--dim);}
   #engine{left:70px;top:330px;}
-  #engine .dot{background:var(--blue);box-shadow:0 0 10px rgba(59,130,246,.8);}
+  #engine .dot{background:var(--blue);}
   #arrowA{left:330px;top:338px;color:var(--dim);font-size:26px;}
-  #answer{left:600px;top:70px;width:470px;border-left:4px solid var(--blue);}
-  #answer.bad{border-left-color:var(--red);border-color:#7f1d1d;}
+  #answer{left:600px;top:70px;width:470px;border-left:4px solid var(--line2);}
+  #answer.bad{border-left-color:var(--red);border-color:var(--red);}
   #answer h3{margin:6px 0 4px;font-size:19px;font-weight:600;}
   #answer .meta{font-size:14px;color:var(--mute);margin-bottom:8px;}
-  #answer .url{font-family:var(--mono);font-size:13px;color:#60a5fa;word-break:break-all;}
+  #answer .url{font-family:var(--mono);font-size:13px;color:var(--red);word-break:break-all;}
   #probe{left:600px;top:330px;width:470px;font-family:var(--mono);font-size:13px;color:var(--mute);}
   #stamp{left:860px;top:150px;transform:rotate(-12deg) scale(1);font-family:var(--mono);
          font-weight:700;font-size:26px;color:var(--red);border:3px solid var(--red);
-         border-radius:8px;padding:6px 16px;background:rgba(239,68,68,.08);}
+         border-radius:4px;padding:6px 16px;background:rgba(156,43,37,.09);}
   [data-st="hidden"]#stamp{transform:rotate(-12deg) scale(2.2);}
   #tallyA{left:70px;top:420px;width:1060px;display:flex;gap:28px;}
   #tallyA .tile{flex:1;background:var(--panel);border:1px solid var(--line);
-                border-left:4px solid var(--red);border-radius:12px;padding:18px 24px;}
+                border-left:4px solid var(--red);border-radius:4px;padding:18px 24px;}
   #tallyA .n{font-size:52px;color:var(--red);}
   #tallyA .cap2{color:var(--mute);font-size:14px;margin-top:4px;}
 
   /* ---- scene B ---- */
   .task{width:244px;padding:14px 16px;}
   .task h4{margin:6px 0 8px;font-size:15px;font-weight:600;line-height:1.3;}
-  .task .note{font-family:var(--mono);font-size:10.5px;color:var(--dim);line-height:1.5;}
+  .task .note{font-family:var(--mono);font-size:12px;color:var(--dim);line-height:1.5;}
   #tFind{left:48px;top:52px;}
   #tVerify{left:356px;top:52px;}
   #tApprove{left:664px;top:52px;}
   #tSynth{left:926px;top:52px;width:226px;}
-  .task.flash{border-color:var(--red);box-shadow:0 0 0 2px var(--red);}
-  .task.glow{border-color:var(--blue);box-shadow:0 0 14px rgba(59,130,246,.45);}
-  .task.ok{border-color:#0b6e4f;}
+  .task.flash{border-color:var(--red);}
+  .task.glow{border-color:var(--blue);}
+  .task.ok{border-color:var(--green);}
   .darrow{top:120px;color:var(--dim);font-size:22px;}
   #d1{left:300px;} #d2{left:608px;} #d3{left:912px;}
   #lock{left:470px;top:20px;font-size:17px;color:var(--violet);}
-  #packet{left:150px;top:210px;background:#0b1222;border:1px solid var(--violet);
-          border-radius:8px;font-family:var(--mono);font-size:11px;color:#c4b5fd;padding:7px 11px;}
+  #packet{left:150px;top:210px;background:var(--inner);border:1px solid var(--violet);
+          border-radius:4px;font-family:var(--mono);font-size:12px;color:var(--ink);padding:7px 11px;}
   #packet[data-st="atverify"]{left:420px;top:210px;}
-  #bounce{left:120px;top:250px;background:rgba(239,68,68,.12);border:1px solid var(--red);color:#fca5a5;}
-  #notask{left:120px;top:250px;background:rgba(148,163,184,.1);border:1px solid var(--line2);color:var(--mute);}
+  #bounce{left:120px;top:250px;background:rgba(156,43,37,.10);border:1px solid var(--red);color:var(--red);}
+  #notask{left:120px;top:250px;background:rgba(32,28,22,.06);border:1px solid var(--line2);color:var(--mute);}
   #checks{left:356px;top:230px;width:250px;font-size:13px;color:var(--body);}
   #checks div{display:flex;gap:9px;align-items:center;margin:7px 0;opacity:.25;transition:opacity .4s ease;}
   #checks .t{color:var(--green);font-family:var(--mono);}
@@ -104,7 +100,7 @@
   #decline .k{color:var(--amber);}
   #decline p{font-size:13.5px;color:var(--body);margin:7px 0 0;line-height:1.5;}
   #audit{left:926px;top:330px;width:226px;border-left:4px solid var(--green);}
-  #audit ul{margin:8px 0 0;padding-left:16px;font-size:12px;color:var(--mute);line-height:1.7;}
+  #audit ul{margin:8px 0 0;padding-left:16px;font-size:13.5px;color:var(--mute);line-height:1.7;}
   .agents{left:48px;top:470px;width:1104px;display:flex;gap:22px;}
   #bubFind{left:60px;top:392px;}
   #bubVerify{left:430px;top:392px;}
@@ -122,34 +118,42 @@
   #vsArrow{left:565px;top:160px;font-size:34px;color:var(--dim);}
   #closing{left:120px;top:380px;width:960px;text-align:center;}
   #closing p{font-size:26px;line-height:1.5;color:var(--ink);margin:0;}
-  #closing .u{background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;
-              background-clip:text;-webkit-text-fill-color:transparent;font-weight:700;}
-  #costchip{left:470px;top:500px;font-size:13px;color:var(--mute);border:1px solid var(--line2);
+  #closing .u{color:var(--ink);font-weight:700;}
+  #costchip{left:470px;top:500px;font-size:13.5px;color:var(--mute);border:1px solid var(--line2);
             border-radius:999px;padding:8px 18px;font-family:var(--mono);}
 
   /* ---- chrome ---- */
   .caption{min-height:66px;display:flex;align-items:center;gap:14px;margin-top:14px;
-           background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 18px;}
-  .caption .num{font-family:var(--mono);font-size:12.5px;color:var(--mute);white-space:nowrap;}
+           background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:12px 18px;}
+  .caption .num{font-family:var(--mono);font-size:13.5px;color:var(--mute);white-space:nowrap;}
   .caption p{margin:0;font-size:16.5px;line-height:1.55;color:var(--body);}
   .controls{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap;}
   button{font-family:var(--sans);font-size:14px;font-weight:600;color:var(--ink);
-         background:var(--panel);border:1px solid var(--line2);border-radius:8px;
+         background:transparent;border:1px solid var(--line2);border-radius:4px;
          padding:9px 16px;cursor:pointer;}
-  button:hover{background:var(--line);}
-  button:focus-visible{outline:2px solid var(--blue);outline-offset:2px;}
-  #play{background:linear-gradient(135deg,var(--blue),var(--violet));border:none;}
+  button:hover{background:var(--panel);}
+  button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+  #play{background:var(--ink);color:var(--bg);border:none;}
   .dots{display:flex;gap:6px;margin-left:6px;flex-wrap:wrap;}
   .dots i{width:9px;height:9px;border-radius:50%;background:var(--line);cursor:pointer;}
-  .dots i.on{background:#a78bfa;}
-  .legend{margin-top:10px;font-size:13px;color:var(--mute);}
+  .dots i.on{background:var(--ink);}
+  .legend{margin-top:10px;font-size:13.5px;color:var(--mute);}
   @media (prefers-reduced-motion: reduce){
     .el,.scene,.pill,#checks div{transition:none !important;}
   }
 </style>
 </head>
 <body>
-<nav aria-label="On the Record pages" style="display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline;padding:12px 20px;border-bottom:1px solid #24324a;font-family:'JetBrains Mono',monospace;font-size:12px;letter-spacing:.02em;"><span style="color:#60a5fa;letter-spacing:.14em;">ON THE RECORD</span><a style="color:#94a3b8;text-decoration:none;" href="index.html">The Receipts</a><a style="color:#94a3b8;text-decoration:none;" href="not-a-fact-checker.html">Not a fact checker</a><a style="color:#94a3b8;text-decoration:none;" href="bench.html">The Bench</a><a style="color:#e2e8f0;text-decoration:none;" href="story.html">The Animation</a></nav>
+<nav class="otrnav" aria-label="On the Record pages">
+  <span class="brand">On the Record</span>
+  <a href="index.html">The Receipts</a>
+  <a href="not-a-fact-checker.html">Not a fact checker</a>
+  <a href="bench.html">The Bench</a>
+  <a href="story.html" class="cur">The Animation</a>
+  <a href="evidence-machine.html">The Machine</a>
+  <span class="spacer"><span class="put">Put it on the record →</span>
+    <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-show-count="true" data-size="large" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Star</a></span>
+</nav>
 
 
 <div class="wrap">
@@ -179,9 +183,9 @@
         <div class="el" id="probe" data-st="hidden">GET /2024/12/11/metro/storm-flooding-rain-drought/ …</div>
         <div class="el" id="stamp" data-st="hidden">404 · NOT FOUND</div>
         <div class="el" id="tallyA" data-st="hidden">
-          <div class="tile"><div class="n big" id="n1" data-target="73.8" data-suffix="%">0%</div>
-            <div class="cap2">of confident answers were wrong (200 live answers, 4 engines)</div></div>
-          <div class="tile"><div class="n big" id="n2" data-target="54.6" data-suffix="%">0%</div>
+          <div class="tile"><div class="n big" id="n1" data-target="69.5" data-suffix="%">0%</div>
+            <div class="cap2">of confident answers were wrong (800 live answers, 4 engines)</div></div>
+          <div class="tile"><div class="n big" id="n2" data-target="51.2" data-suffix="%">0%</div>
             <div class="cap2">of cited URLs fabricated, dead, or not the source</div></div>
         </div>
       </section>
@@ -247,14 +251,14 @@
       <section class="scene" id="scC">
         <div class="el card res" id="resA" data-st="hidden">
           <span class="k">engines alone</span>
-          <div class="n big" id="n3" data-target="73.8" data-suffix="%">0%</div>
+          <div class="n big" id="n3" data-target="69.5" data-suffix="%">0%</div>
           <div class="lbl">of delivered answers wrong</div>
-          <div class="fab">fabricated URLs: <b style="color:var(--red)">54.6%</b></div>
+          <div class="fab">fabricated URLs: <b style="color:var(--red)">51.2%</b></div>
         </div>
         <div class="el" id="vsArrow" data-st="hidden">→</div>
         <div class="el card res" id="resB" data-st="hidden">
           <span class="k">same engines, on the record</span>
-          <div class="n big" id="n4" data-target="4.8" data-suffix="%">0%</div>
+          <div class="n big" id="n4" data-target="12.1" data-suffix="%">0%</div>
           <div class="lbl">of delivered answers wrong; the rest decline, with receipts</div>
           <div class="fab">fabricated URLs: <b style="color:var(--green)">0.0%</b></div>
         </div>
@@ -262,7 +266,7 @@
           <p>No retraining. No bigger model.<br>
           <span class="u">The environment stopped accepting unverified claims.</span></p>
         </div>
-        <div class="el" id="costchip" data-st="hidden">cost of the record: 1.42x · fractions of a cent per case</div>
+        <div class="el" id="costchip" data-st="hidden">cost of the record: a small multiple, token-only · grounded-engine search fees run far higher</div>
       </section>
 
     </div>
@@ -276,7 +280,7 @@
     <button id="next" aria-label="Next step">Next →</button>
     <div class="dots" id="dots"></div>
   </div>
-  <p class="legend">Preregistered pilot, 50 excerpts stratified from the Tow Center’s 200, October 2026.
+  <p class="legend">Full run, all 200 questions from the Tow Center’s study across four engines, October 2026.
   Arrow keys step; space plays. Marcus’s internal AI was disabled for every run shown.</p>
 </div>
 
@@ -287,7 +291,7 @@
     "The test: hand an AI search engine a sentence from a real news article, and ask where it came from. We know the answer. The engine doesn’t.",
     "The engine alone answers instantly, and confidently: headline, publisher, date, and a link.",
     "Click the link. The page does not exist. The engine didn’t say “I’m not sure”; it invented a plausible-looking URL.",
-    "Across 200 live answers from four engines: 73.8% of confident answers were wrong, and more than half of all cited URLs were fabricated, dead, or not the source.",
+    "Across 800 live answers from four engines: 69.5% of confident answers were wrong, and more than half of all cited URLs were fabricated, dead, or not the source.",
     "Inside Marcus, the same question becomes a chain of typed tasks on a shared board. Ground truth never touches the board.",
     "Nothing is assigned. The finder agent asks the board for work, and pulls the find task.",
     "It answers, then tries to hand the answer in without receipts. The board refuses to accept it. Not a reviewer. The board itself.",
@@ -297,7 +301,7 @@
     "Checks pass: verified. The approve task unlocks, and only a human can take it. A reviewer signs.",
     "And when checks fail? The claim never becomes a confident answer. It becomes an honest decline, with the fetch log attached as receipts.",
     "The synthesize task delivers only what survived. Every case can export its audit bundle: who claimed, who checked, the evidence, who signed, what it cost.",
-    "The result, same engines, same 50 questions. The engines are as wrong as ever; what changes is what reaches you. Alone, 73.8% of delivered answers were wrong. On the record, 4.8%: the caught lies arrive as labeled declines, not as answers. Fabricated URLs reaching you: zero.",
+    "The result, same engines, same 200 questions. The engines are as wrong as ever; what changes is what reaches you. Alone, 69.5% of delivered answers were wrong. On the record, 12.1%: the caught lies arrive as labeled declines, not as answers. Fabricated URLs reaching you: zero.",
     "No retraining. No bigger model. The environment stopped accepting unverified claims. That is what Marcus is for."
   ];
   const SCENES = ["a","a","a","a","b","b","b","b","b","b","b","b","b","c","c"];

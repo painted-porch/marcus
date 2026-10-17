@@ -4,25 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Not a Fact Checker</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="otr.css">
 <style>
-  :root {
-    --bg: #0b1120;
-    --panel: #0f172a;
-    --card: #1e293b;
-    --edge: #334155;
-    --edge-soft: #24324a;
-    --ink: #e2e8f0;
-    --muted: #94a3b8;
-    --faint: #64748b;
-    --blue: #60a5fa;
-    --violet: #a78bfa;
-    --green: #34d399;
-    --red: #f87171;
-    --amber: #fbbf24;
-    --sans: "IBM Plex Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
   * { box-sizing: border-box; }
   body {
     margin: 0;
@@ -44,10 +30,7 @@
     font-size: clamp(34px, 6vw, 54px); line-height: 1.08; margin: 0 0 20px;
     font-weight: 700; letter-spacing: -0.02em; text-wrap: balance;
   }
-  h1 .grad, .takeaway strong, .coda .grad {
-    background: linear-gradient(90deg, var(--blue), var(--violet));
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-  }
+  .takeaway strong { color: var(--ink); }
   .dek { font-size: 19px; color: var(--muted); max-width: 640px; margin: 0; }
   .dek b { color: var(--ink); font-weight: 600; }
 
@@ -58,7 +41,7 @@
   }
   .zoom .mag {
     font-family: var(--mono); font-weight: 700; font-size: 15px;
-    color: var(--bg); background: linear-gradient(90deg, var(--blue), var(--violet));
+    color: var(--bg); background: var(--ink);
     padding: 3px 10px; border-radius: 4px; letter-spacing: 0.04em; white-space: nowrap;
   }
   .zoom .frame {
@@ -78,18 +61,18 @@
   /* ---------- tier 1: the flow ---------- */
   .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; }
   .chip {
-    background: var(--card); border: 1px solid var(--edge); border-radius: 8px;
+    background: var(--card); border: 1px solid var(--edge); border-radius: 4px;
     padding: 10px 14px; font-size: 15px; line-height: 1.4; min-width: 0;
     flex: 1 1 130px; display: flex; flex-direction: column; justify-content: center;
   }
   .chip .who {
-    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 3px;
   }
-  .chip.engine { border-color: #475569; }
-  .chip.check { border-color: rgba(96,165,250,.55); }
-  .chip.human { border-color: rgba(251,191,36,.55); }
-  .chip.out   { border-color: rgba(52,211,153,.55); }
+  .chip.engine { border-color: var(--line2); }
+  .chip.check { border-color: var(--red); }
+  .chip.human { border-color: var(--amber); }
+  .chip.out   { border-color: var(--green); }
   .arrow {
     align-self: center; color: var(--faint); font-family: var(--mono);
     font-size: 16.5px; flex: 0 0 auto;
@@ -104,7 +87,7 @@
     margin-top: 22px; display: flex; flex-wrap: wrap; gap: 12px;
   }
   .num {
-    background: var(--panel); border: 1px solid var(--edge-soft); border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--edge-soft); border-radius: 4px;
     padding: 14px 18px; flex: 1 1 220px;
   }
   .num .big { font-family: var(--mono); font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -113,7 +96,7 @@
 
   /* ---------- tier 2: the room ---------- */
   .room {
-    border: 2px solid var(--edge); border-radius: 14px; background: var(--panel);
+    border: 2px solid var(--edge); border-radius: 4px; background: var(--panel);
     padding: 20px; position: relative;
   }
   .room-title {
@@ -121,11 +104,11 @@
     text-transform: uppercase; color: var(--blue); margin-bottom: 14px;
   }
   .mini-flow {
-    border: 1px dashed var(--edge); border-radius: 10px; padding: 12px 14px;
-    background: rgba(15,23,42,.6); margin-bottom: 18px;
+    border: 1px dashed var(--edge); border-radius: 4px; padding: 12px 14px;
+    background: rgba(32,28,22,.05); margin-bottom: 18px;
   }
   .mini-flow .cap {
-    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 8px;
   }
   .mini-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
@@ -146,20 +129,20 @@
   .laws b { color: var(--ink); font-weight: 600; }
   .sockets { display: flex; flex-direction: column; gap: 10px; }
   .socket {
-    border: 1px dashed var(--edge); border-radius: 8px; padding: 10px 14px;
-    font-size: 15px; color: var(--faint); background: rgba(30,41,59,.35);
+    border: 1px dashed var(--edge); border-radius: 4px; padding: 10px 14px;
+    font-size: 15px; color: var(--faint); background: rgba(32,28,22,.05);
   }
   .socket.live {
-    border: 1px solid rgba(96,165,250,.6); color: var(--ink);
-    background: rgba(96,165,250,.08);
+    border: 1px solid var(--green); color: var(--ink);
+    background: rgba(63,82,37,.10);
   }
   .socket .tag {
-    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
     text-transform: uppercase; display: inline-block; margin-left: 8px;
     color: var(--green);
   }
   .panel-label {
-    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 10px;
   }
 
@@ -168,14 +151,14 @@
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px;
   }
   .claim {
-    background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
+    background: var(--card); border: 1px solid var(--edge); border-radius: 4px;
     padding: 18px; display: flex; flex-direction: column; gap: 9px;
   }
-  .claim.proven { border-color: rgba(52,211,153,.6); background: rgba(52,211,153,.05); }
+  .claim.proven { border-color: var(--green); background: rgba(63,82,37,.10); }
   .claim h3 { margin: 0; font-size: 16.5px; font-weight: 600; }
   .claim .q { font-size: 14.5px; color: var(--muted); line-height: 1.6; flex: 1; }
   .claim .status {
-    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.1em;
     text-transform: uppercase; color: var(--faint);
     display: flex; align-items: center; gap: 6px;
   }
@@ -190,28 +173,28 @@
     font-size: 14.5px; background: var(--card); border: 1px solid var(--edge);
     border-radius: 999px; padding: 6px 14px; color: var(--muted);
   }
-  .party.human { border-color: rgba(251,191,36,.5); color: var(--ink); }
+  .party.human { border-color: var(--amber); color: var(--ink); }
   .down {
     font-family: var(--mono); color: var(--faint); font-size: 15px;
     padding: 10px 0 10px 26px;
   }
   .rooms-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .mini-room {
-    border: 1.5px solid var(--edge); border-radius: 10px; background: var(--panel);
+    border: 1.5px solid var(--edge); border-radius: 4px; background: var(--panel);
     padding: 12px 14px;
   }
   .mini-room .rt {
-    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--blue); margin-bottom: 6px;
   }
   .mini-room .rb { font-size: 14px; color: var(--muted); line-height: 1.6; }
   .bundle-note {
     font-size: 14.5px; color: var(--muted); border: 1px dashed var(--edge);
-    border-radius: 8px; padding: 10px 14px; background: rgba(15,23,42,.6);
+    border-radius: 4px; padding: 10px 14px; background: rgba(32,28,22,.05);
   }
   .bundle-note b { color: var(--ink); }
   .lane-label {
-    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 8px;
   }
 
@@ -223,31 +206,31 @@
   .forcings { display: flex; flex-direction: column; gap: 14px; }
   .forcing {
     display: grid; grid-template-columns: 1fr 1.25fr 1.1fr;
-    background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
+    background: var(--card); border: 1px solid var(--edge); border-radius: 4px;
     overflow: hidden;
   }
   .forcing > div { padding: 16px 18px; font-size: 15px; line-height: 1.6; min-width: 0; }
   .forcing .cell-label {
-    display: block; font-family: var(--mono); font-size: 11px;
+    display: block; font-family: var(--mono); font-size: 12px;
     letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 5px;
   }
-  .fdemand { background: rgba(96,165,250,.06); color: var(--ink); font-weight: 600; }
+  .fdemand { background: rgba(156,43,37,.07); color: var(--ink); font-weight: 600; }
   .fdemand .cell-label { color: var(--blue); }
   .fforce { color: var(--muted); border-left: 1px solid var(--edge-soft); }
   .fforce .cell-label { color: var(--violet); }
   .fforce b { color: var(--ink); font-weight: 600; }
-  .fbroke { color: var(--muted); border-left: 1px solid var(--edge-soft); background: rgba(248,113,113,.04); }
+  .fbroke { color: var(--muted); border-left: 1px solid var(--edge-soft); background: rgba(156,43,37,.08); }
   .fbroke .cell-label { color: var(--red); }
   .fbroke b { color: var(--red); font-weight: 600; }
   .alt-grid {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px;
   }
   .alt {
-    border: 1px dashed var(--edge); border-radius: 8px; padding: 12px 14px;
-    background: rgba(15,23,42,.6);
+    border: 1px dashed var(--edge); border-radius: 4px; padding: 12px 14px;
+    background: rgba(32,28,22,.05);
   }
   .alt .an { font-size: 15px; font-weight: 600; color: var(--ink); }
-  .alt .aw { font-size: 13.5px; color: var(--muted); margin-top: 3px; line-height: 1.6; }
+  .alt .aw { font-size: 14px; color: var(--muted); margin-top: 3px; line-height: 1.6; }
   .pedigree {
     margin-top: 18px; font-size: 14px; color: var(--faint); max-width: 660px;
     line-height: 1.6;
@@ -264,20 +247,16 @@
     letter-spacing: -0.01em; max-width: 720px; text-wrap: balance;
     margin: 26px 0;
   }
-  .defline .grad {
-    background: linear-gradient(90deg, var(--blue), var(--violet));
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-  }
   .inst-grid {
     display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
     margin: 26px 0;
   }
   .inst {
-    background: var(--card); border: 1px solid var(--edge); border-radius: 10px;
+    background: var(--card); border: 1px solid var(--edge); border-radius: 4px;
     padding: 16px 18px;
   }
   .inst .it {
-    font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em;
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em;
     text-transform: uppercase; color: var(--faint); margin-bottom: 6px;
   }
   .inst h3 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
@@ -285,8 +264,8 @@
   .inst .safe b { font-weight: 700; }
   .inst .how { font-size: 14px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
   .inst.marcus {
-    border-color: rgba(167,139,250,.65);
-    background: linear-gradient(135deg, rgba(96,165,250,.08), rgba(167,139,250,.08));
+    border-color: var(--violet);
+    background: var(--panel2);
   }
   .inst.marcus .it { color: var(--violet); }
 
@@ -333,7 +312,16 @@
 </style>
 </head>
 <body>
-<nav aria-label="On the Record pages" style="display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline;padding:12px 20px;border-bottom:1px solid #24324a;font-family:'JetBrains Mono',monospace;font-size:12px;letter-spacing:.02em;"><span style="color:#60a5fa;letter-spacing:.14em;">ON THE RECORD</span><a style="color:#94a3b8;text-decoration:none;" href="index.html">The Receipts</a><a style="color:#e2e8f0;text-decoration:none;" href="not-a-fact-checker.html">Not a fact checker</a><a style="color:#94a3b8;text-decoration:none;" href="bench.html">The Bench</a><a style="color:#94a3b8;text-decoration:none;" href="story.html">The Animation</a></nav>
+<nav class="otrnav" aria-label="On the Record pages">
+  <span class="brand">On the Record</span>
+  <a href="index.html">The Receipts</a>
+  <a href="not-a-fact-checker.html" class="cur">Not a fact checker</a>
+  <a href="bench.html">The Bench</a>
+  <a href="story.html">The Animation</a>
+  <a href="evidence-machine.html">The Machine</a>
+  <span class="spacer"><span class="put">Put it on the record →</span>
+    <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-show-count="true" data-size="large" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Star</a></span>
+</nav>
 
 
 <div class="wrap">
@@ -374,7 +362,7 @@
       </div>
       <div class="numbers">
         <div class="num"><div class="big bad">7 in 10</div><div class="lbl">answers wrong when engines run alone</div></div>
-        <div class="num"><div class="big good">1 in 20</div><div class="lbl">wrong among answers that reached you through Marcus</div></div>
+        <div class="num"><div class="big good">1 in 8</div><div class="lbl">wrong among answers that reached you through Marcus</div></div>
         <div class="num"><div class="big good">0</div><div class="lbl">fabricated links delivered, across every run</div></div>
       </div>
     </div>
@@ -690,19 +678,22 @@
     <div class="coda-actions">
       <a class="github-button" href="https://github.com/painted-porch/marcus"
          data-icon="octicon-star" data-size="large" data-show-count="true"
-         data-color-scheme="no-preference: dark; light: dark; dark: dark;"
-         aria-label="Star painted-porch/marcus on GitHub">Star Marcus</a>
+         data-color-scheme="no-preference: light; light: light; dark: light;"
+         target="_blank" rel="noopener"
+         aria-label="Star painted-porch/marcus on GitHub">Put it on the record</a>
+      <a class="coda-link" data-goatcounter-click="nafc-runfree"
+         href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">Run it free in 60s ↗</a>
       <a class="coda-link" data-goatcounter-click="nafc-receipts"
          href="index.html">Read the case files: The Receipts →</a>
       <a class="coda-link" data-goatcounter-click="nafc-release"
-         href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1">Reproduce it yourself ↗</a>
+         href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">The code &amp; method ↗</a>
     </div>
     <p class="credit">
       Numbers from a replication of Jaźwińska &amp; Chandrasekar,
       "AI Search Has a Citation Problem," Tow Center for Digital Journalism,
       Columbia Journalism Review, March 2025 — extended by running the same engines
       through Marcus's enforcement. Full method, code, and redacted audit bundles
-      ship with the <a href="https://github.com/painted-porch/marcus/releases/tag/on-the-record-v1" style="font-family: var(--mono); font-size: 13px; color: var(--blue);">on-the-record-v1</a> release.
+      ship with the <a href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener" style="font-family: var(--mono); font-size: 14px; color: var(--blue);">the repository</a> release.
     </p>
   </div>
 </div>

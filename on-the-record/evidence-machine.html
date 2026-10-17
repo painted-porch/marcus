@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Evidence Machine</title>
+<meta name="description" content="The AI keeps fabricating; the checkpoint sorts the fakes out before they reach you.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="otr.css">
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:16px;line-height:1.6;padding-inline:18px;}
+  .wrap{max-width:900px;margin:0 auto;padding-block:40px 64px;}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--blue);margin-bottom:14px;}
+  h1{font-size:clamp(30px,5.5vw,46px);line-height:1.08;margin:0 0 16px;font-weight:700;
+    letter-spacing:-.02em;text-wrap:balance;}
+  .dek{font-size:18px;color:var(--mute);max-width:640px;margin:0 0 28px;}
+  .dek b{color:var(--ink);font-weight:600;}
+
+  /* ---- counters ---- */
+  .counters{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:18px;}
+  .counter{flex:1 1 180px;background:var(--panel);border:1px solid var(--edge2);border-radius:4px;padding:14px 16px;}
+  .counter .n{font-family:var(--mono);font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1;}
+  .counter .lbl{font-size:13px;color:var(--mute);margin-top:6px;line-height:1.4;}
+  .counter.in .n{color:var(--amber);} .counter.out .n{color:var(--green);} .counter.caught .n{color:var(--red);}
+
+  /* ---- machine stage: engine -> scanner ---- */
+  .stage{position:relative;background:var(--panel);border:1px solid var(--edge);border-radius:4px;
+    padding:18px;overflow:hidden;}
+  .rail{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch;min-height:150px;}
+  .zone{border:1px dashed var(--edge);border-radius:4px;padding:12px;position:relative;display:flex;flex-direction:column;}
+  .zone .ztag{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px;}
+  .zone.engine{border-color:var(--line2);} .zone.engine .ztag{color:var(--mute);}
+  .zone.scanner{border-color:var(--red);background:rgba(156,43,37,.06);} .zone.scanner .ztag{color:var(--blue);}
+  .engine-mouth{font-size:13px;color:var(--mute);line-height:1.5;} .engine-mouth b{color:var(--ink);}
+  .scanner-core{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;}
+  .scanner-core .probe{font-family:var(--mono);font-size:12px;color:var(--blue);min-height:18px;}
+  .lens{width:60px;height:60px;border-radius:50%;border:3px solid var(--edge);display:flex;align-items:center;justify-content:center;
+    transition:border-color .25s;}
+  .lens.scan{border-color:var(--blue);}
+  .lens.pass{border-color:var(--green);}
+  .lens.fail{border-color:var(--red);}
+  .lens .mark{font-size:24px;font-weight:700;opacity:0;transition:opacity .2s;}
+  .lens.pass .mark{opacity:1;color:var(--green);} .lens.fail .mark{opacity:1;color:var(--red);}
+
+  /* ---- a flying claim card ---- */
+  .claim{position:absolute;width:168px;background:var(--card);border:1px solid var(--edge2);
+    border-left:3px solid var(--faint);border-radius:4px;padding:8px 10px;font-size:11.5px;line-height:1.35;
+    box-shadow:0 4px 14px rgba(32,28,22,.16);z-index:3;
+    transition:left .6s cubic-bezier(.4,0,.2,1),top .6s cubic-bezier(.4,0,.2,1),opacity .35s,transform .35s,border-left-color .3s;}
+  .claim .ttl{color:var(--ink);font-weight:600;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  .claim .url{font-family:var(--mono);font-size:11px;color:var(--blue);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .claim.verified{border-left-color:var(--green);} .claim.verified .url{color:var(--green);}
+  .claim.bad{border-left-color:var(--red);} .claim.bad .url{color:var(--red);text-decoration:line-through;}
+
+  /* ---- two balanced trays below ---- */
+  .trays{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;}
+  .tray{border-radius:4px;padding:12px 14px;}
+  .tray.delivered{border:1px solid var(--green);background:rgba(63,82,37,.08);}
+  .tray.caught{border:1px solid var(--red);background:rgba(156,43,37,.07);}
+  .tray .thead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px;}
+  .tray .ztag{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;}
+  .tray.delivered .ztag{color:var(--green);} .tray.caught .ztag{color:var(--red);}
+  .tray .tnum{font-family:var(--mono);font-size:18px;font-weight:700;font-variant-numeric:tabular-nums;}
+  .tray.delivered .tnum{color:var(--green);} .tray.caught .tnum{color:var(--red);}
+  .tgrid{display:flex;flex-direction:column;gap:6px;min-height:40px;}
+  .chip{font-size:11px;border-radius:4px;padding:6px 9px;line-height:1.3;animation:pop .3s ease;}
+  @keyframes pop{from{opacity:0;transform:translateY(6px) scale(.97);}to{opacity:1;transform:none;}}
+  .chip .u{font-family:var(--mono);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;margin-top:2px;}
+  .chip .why{font-family:var(--mono);font-size:11px;color:var(--faint);display:block;margin-top:2px;}
+  .chip.ok{background:rgba(63,82,37,.10);border:1px solid var(--green);color:var(--ink);} .chip.ok .u{color:var(--green);}
+  .chip.no{background:rgba(156,43,37,.08);border:1px solid var(--red);color:var(--ink);} .chip.no .u{color:var(--red);}
+  .ph{font-size:11px;color:var(--faint);font-style:italic;padding:6px 2px;}
+
+  .controls{display:flex;gap:10px;align-items:center;margin:16px 0 8px;flex-wrap:wrap;}
+  button{font-family:var(--sans);font-size:14px;font-weight:600;color:var(--bg);cursor:pointer;
+    background:var(--ink);border:none;border-radius:4px;padding:10px 18px;}
+  button.ghost{background:transparent;border:1px solid var(--line2);color:var(--ink);}
+  button:hover{background:#3a3326;filter:none;} button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+  button[disabled]{opacity:.5;cursor:default;filter:none;}
+  .runline{font-family:var(--mono);font-size:12px;color:var(--faint);}
+
+  .punch{margin-top:26px;border-left:3px solid var(--violet);padding-left:16px;}
+  .punch .big{font-size:clamp(20px,3.4vw,27px);font-weight:700;line-height:1.35;letter-spacing:-.01em;text-wrap:balance;margin:0 0 10px;}
+  .punch p{margin:0;color:var(--mute);max-width:660px;} .punch p b{color:var(--ink);font-weight:600;}
+  .credit{margin-top:26px;font-size:12.5px;color:var(--faint);max-width:640px;line-height:1.6;}
+
+  @media (max-width:620px){ .trays{grid-template-columns:1fr;} .claim{display:none;} }
+  @media (prefers-reduced-motion:reduce){ .claim{display:none;} .lens{transition:none;} }
+</style>
+</head>
+<body>
+<nav class="otrnav" aria-label="On the Record pages">
+  <span class="brand">On the Record</span>
+  <a href="index.html">The Receipts</a>
+  <a href="not-a-fact-checker.html">Not a fact checker</a>
+  <a href="bench.html">The Bench</a>
+  <a href="story.html">The Animation</a>
+  <a href="evidence-machine.html" class="cur">The Machine</a>
+  <span class="spacer"><span class="put">Put it on the record →</span>
+    <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-show-count="true" data-size="large" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Star</a></span>
+</nav>
+
+<div class="wrap">
+  <div class="eyebrow">On the Record · how the checkpoint works</div>
+  <h1>The AI keeps making things up.<br><span class="grad">The machine sorts the fakes out.</span></h1>
+  <p class="dek">The search engine sprays out answers, and <b>about half carry a fabricated or dead link</b> — that never changes. The checkpoint fetches the page each answer cites and <b>sorts</b>: real evidence is delivered, fakes are caught. So among the answers that reach you, <b>zero</b> have a fake link — not because the AI improved, but because the fakes got caught.</p>
+
+  <div class="counters">
+    <div class="counter in"><div class="n" id="cIn">0</div><div class="lbl">answers the AI produced</div></div>
+    <div class="counter out"><div class="n" id="cOut">0</div><div class="lbl">delivered to you &mdash; <b style="color:var(--green)">0 with a fake link</b></div></div>
+    <div class="counter caught"><div class="n" id="cCaught">0</div><div class="lbl">fabricated / dead links caught</div></div>
+  </div>
+
+  <div class="stage" id="stage">
+    <div class="rail">
+      <div class="zone engine">
+        <div class="ztag">AI search engine</div>
+        <div class="engine-mouth">Answers a question, cites a link.<br><b>You cannot tell</b> which of its links are real by looking — half aren't.</div>
+      </div>
+      <div class="zone scanner">
+        <div class="ztag">The checkpoint &middot; fetches the cited page</div>
+        <div class="scanner-core">
+          <div class="lens" id="lens"><span class="mark" id="lensMark"></span></div>
+          <div class="probe" id="probe">idle</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="trays">
+    <div class="tray delivered">
+      <div class="thead"><span class="ztag">Delivered &mdash; with receipts</span><span class="tnum" id="dNum">0</span></div>
+      <div class="tgrid" id="deliveredTray"></div>
+    </div>
+    <div class="tray caught">
+      <div class="thead"><span class="ztag">Caught &mdash; declined</span><span class="tnum" id="cNum">0</span></div>
+      <div class="tgrid" id="caughtTray"></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="playBtn">▶ Run it</button>
+    <button class="ghost" id="replayBtn">↺ Replay</button>
+    <span class="runline" id="runline">16 answers &middot; 8 carry a fabricated or dead link</span>
+  </div>
+
+  <div class="punch">
+    <p class="big">We didn't fix the AI. <span class="grad">We stopped trusting it on its word.</span></p>
+    <p>The engine fabricated links just as often as always. The only thing that changed is that a machine checked every citation and refused to deliver the ones that didn't hold up. <b>"0% fabricated" is a sorting result, not a smarter model.</b></p>
+  </div>
+
+  <p class="credit">Illustration of the On the Record checkpoint. In the full 200-question study, about 51% of the links the engines delivered when unchecked were fabricated or dead; among answers delivered through the checkpoint, that figure was 0%. The engines' underlying fabrication rate did not change.</p>
+</div>
+
+<script>
+(function(){
+  var DATA=[
+    {t:"Rainfall totals for New England last week", u:"bostonglobe.com/metro/weather", ok:true},
+    {t:"City council vote on the housing ordinance", u:"citywire.news/vote-2025-housing", ok:false, why:"404 — page not found"},
+    {t:"Quarterly earnings for the chipmaker", u:"reuters.com/markets/earnings", ok:true},
+    {t:"Who won the regional spelling bee", u:"heraldpress.org/schools/bee", ok:false, why:"fabricated — URL never existed"},
+    {t:"Recall notice on the infant car seat", u:"nhtsa.gov/recalls/2025", ok:true},
+    {t:"Statement from the hospital system", u:"statnews.com/health/statement", ok:false, why:"mismatch — excerpt not on page"},
+    {t:"Court ruling on the zoning appeal", u:"lawreporter.com/zoning-appeal", ok:false, why:"404 — page not found"},
+    {t:"New transit line opening date", u:"transitwire.org/line-opening", ok:true},
+    {t:"University research on sleep", u:"nature.com/articles/sleep-study", ok:true},
+    {t:"Wildfire containment update", u:"kqed.org/news/wildfire", ok:false, why:"fabricated — URL never existed"},
+    {t:"School board budget decision", u:"edweek.org/budget-vote", ok:true},
+    {t:"Interview with the retiring CEO", u:"businessdaily.co/ceo-exit", ok:false, why:"mismatch — different company"},
+    {t:"Air quality readings downtown", u:"airnow.gov/city/readings", ok:true},
+    {t:"Election certification timeline", u:"voteinfo.news/certification", ok:false, why:"404 — page not found"},
+    {t:"Museum exhibit closing this month", u:"artsjournal.org/exhibit", ok:true},
+    {t:"Highway reopening after repairs", u:"roadwatch.io/highway-7", ok:false, why:"fabricated — URL never existed"}
+  ];
+  var stage=document.getElementById('stage'),lens=document.getElementById('lens'),lensMark=document.getElementById('lensMark'),
+      probe=document.getElementById('probe'),deliveredTray=document.getElementById('deliveredTray'),caughtTray=document.getElementById('caughtTray'),
+      cIn=document.getElementById('cIn'),cOut=document.getElementById('cOut'),cCaught=document.getElementById('cCaught'),
+      dNum=document.getElementById('dNum'),cNum=document.getElementById('cNum'),
+      playBtn=document.getElementById('playBtn'),replayBtn=document.getElementById('replayBtn');
+  var reduce=matchMedia('(prefers-reduced-motion:reduce)').matches, running=false, timers=[];
+  function T(fn,ms){var id=setTimeout(fn,ms);timers.push(id);return id;}
+  function clearTimers(){timers.forEach(clearTimeout);timers=[];}
+  function pos(el){var s=stage.getBoundingClientRect(),r=el.getBoundingClientRect();return {x:r.left-s.left,y:r.top-s.top,w:r.width,h:r.height};}
+  function okChip(d){var c=document.createElement('div');c.className='chip ok';c.innerHTML='✓ '+d.t+'<span class="u">'+d.u+'</span>';return c;}
+  function noChip(d){var c=document.createElement('div');c.className='chip no';c.innerHTML='✕ '+d.t+'<span class="u">'+d.u+'</span><span class="why">'+d.why+'</span>';return c;}
+  function setCounts(ins,out,caught){cIn.textContent=ins;cOut.textContent=out;cCaught.textContent=caught;dNum.textContent=out;cNum.textContent=caught;}
+
+  function reset(){clearTimers();running=false;
+    deliveredTray.innerHTML='';caughtTray.innerHTML='';
+    Array.prototype.slice.call(stage.querySelectorAll('.claim')).forEach(function(c){c.remove();});
+    setCounts(0,0,0);lens.className='lens';lensMark.textContent='';probe.textContent='idle';
+    playBtn.disabled=false;playBtn.textContent='▶ Run it';}
+  function settleFinal(){reset();var ins=0,out=0,caught=0;
+    DATA.forEach(function(d){ins++;if(d.ok){out++;deliveredTray.appendChild(okChip(d));}else{caught++;caughtTray.appendChild(noChip(d));}});
+    setCounts(ins,out,caught);lens.className='lens pass';lensMark.textContent='✓';probe.textContent='done';
+    playBtn.disabled=false;playBtn.textContent='▶ Run it';}
+
+  function run(){
+    if(running)return;reset();running=true;playBtn.disabled=true;playBtn.textContent='running…';
+    var engine=stage.querySelector('.zone.engine'),scanner=stage.querySelector('.zone.scanner');
+    var ep=pos(engine),sp=pos(scanner),step=720,ins=0,out=0,caught=0;
+    DATA.forEach(function(d,i){
+      T(function(){
+        var card=document.createElement('div');card.className='claim';
+        card.innerHTML='<div class="ttl">'+d.t+'</div><div class="url">'+d.u+'</div>';
+        card.style.left=(ep.x+8)+'px';card.style.top=(ep.y+ep.h-52)+'px';card.style.opacity='0';
+        stage.appendChild(card);ins++;setCounts(ins,out,caught);
+        requestAnimationFrame(function(){card.style.opacity='1';card.style.left=(sp.x+sp.w/2-84)+'px';card.style.top=(sp.y+36)+'px';});
+        T(function(){lens.className='lens scan';lensMark.textContent='';probe.textContent='fetching '+d.u.split('/')[0]+'…';},330);
+        T(function(){
+          if(d.ok){lens.className='lens pass';lensMark.textContent='✓';probe.textContent='evidence holds';
+            card.classList.add('verified');card.style.opacity='0';card.style.transform='translateY(12px) scale(.94)';
+            T(function(){out++;setCounts(ins,out,caught);deliveredTray.appendChild(okChip(d));card.remove();},480);
+          }else{lens.className='lens fail';lensMark.textContent='✕';probe.textContent=d.why;
+            card.classList.add('bad');card.style.opacity='0';card.style.transform='translateY(12px) scale(.94)';
+            T(function(){caught++;setCounts(ins,out,caught);caughtTray.appendChild(noChip(d));card.remove();},480);
+          }
+        },620);
+      },i*step);
+    });
+    T(function(){lens.className='lens pass';lensMark.textContent='✓';probe.textContent='done';running=false;playBtn.disabled=false;playBtn.textContent='▶ Run again';},DATA.length*step+800);
+  }
+  function ready(){reset();
+    lens.className='lens';lensMark.textContent='';probe.textContent='ready';
+    deliveredTray.innerHTML='<div class="ph">verified answers land here</div>';
+    caughtTray.innerHTML='<div class="ph">caught fakes land here</div>';}
+  playBtn.addEventListener('click',run);
+  replayBtn.addEventListener('click',function(){clearTimers();reduce?settleFinal():ready();});
+  // Open in the ready (empty) state, then play once so it animates from empty
+  // rather than opening already-finished. Reduced-motion shows the end state.
+  if(reduce){settleFinal();} else {ready(); T(run,1100);}
+})();
+</script>
+
+<script data-goatcounter="https://graylabs.goatcounter.com/count"
+        async src="//gc.zgo.at/count.js"></script>
+<script async defer src="https://buttons.github.io/buttons.js"></script>
+</body>
+</html>

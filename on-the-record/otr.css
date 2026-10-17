@@ -1,0 +1,97 @@
+/* ============================================================
+   On the Record — shared "Paper of Record" design system
+   Owns the palette, the type baseline, and the shared masthead.
+   Each page links this FIRST, then its own <style> for layout.
+   Palette lives here only: change a token once, every page follows.
+   ============================================================ */
+
+:root{
+  /* ---- grounds ---- */
+  --bg:#e8e1cf;          /* warm document paper */
+  --panel:#f1ebdd;       /* a raised sheet, lighter than the ground */
+  --panel2:#ece5d4;      /* alternate raised sheet */
+  --card:#f1ebdd;        /* same family as panel */
+  --inner:#e0d9c4;       /* an inset well, a touch darker than the ground */
+
+  /* ---- rules & hairlines (ink at low alpha, so they read as drawn lines) ---- */
+  --line:rgba(32,28,22,.26);
+  --line2:rgba(32,28,22,.46);
+  --edge:rgba(32,28,22,.26);
+  --edge-soft:rgba(32,28,22,.15);
+  --edge2:rgba(32,28,22,.15);
+
+  /* ---- ink (type) ---- */
+  --ink:#201c16;         /* near-black warm ink: headings, primary text */
+  --body:#352f24;        /* running body text */
+  --mute:#5a4f3b;        /* secondary text (contrast-safe on paper) */
+  --muted:#5a4f3b;
+  --dim:#6b6049;         /* tertiary / small labels (kept dark enough to read) */
+  --faint:#6b6049;
+
+  /* ---- the four spot inks ---- */
+  --red:#9c2b25;         /* oxblood: wrong, dead, rejected — and the primary label accent */
+  --green:#3f5225;       /* olive: verified, delivered, good */
+  --amber:#8a5a16;       /* ochre: declined / pending / warning */
+  --blue:#9c2b25;        /* primary accent (eyebrows, links, active) = oxblood */
+  --violet:#6b4f2a;      /* secondary accent (numbering, "now"/in-progress) = warm umber */
+
+  /* ---- type families ---- */
+  --sans:'Newsreader',Georgia,'Times New Roman',serif;   /* editorial serif: display + prose */
+  --mono:'Courier Prime','Courier New',monospace;        /* typed record: data, labels, receipts */
+}
+
+html{ -webkit-text-size-adjust:100%; }
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:17px;              /* reading floor — no running text below this */
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+::selection{ background:#d8cdb2; }
+
+a{ color:var(--blue); }
+
+/* Emphasis that used to be a blue→violet gradient is now editorial italic ink.
+   (Pages must drop their own .grad gradient rules for this to take effect.) */
+.grad{ font-style:italic; color:var(--ink); -webkit-text-fill-color:currentColor; }
+
+/* ============================================================
+   Shared masthead / section nav  (class: .otrnav)
+   Replaces the old inline dark <nav> on every secondary page.
+   ============================================================ */
+.otrnav{
+  display:flex; flex-wrap:wrap; gap:7px 18px; align-items:center;
+  padding:12px 20px;
+  background:var(--bg);
+  border-bottom:2px solid var(--ink);
+  font-family:var(--mono); font-size:13px; letter-spacing:.02em;
+}
+.otrnav .brand{
+  font-family:var(--sans); font-weight:600; font-size:13.5px;
+  letter-spacing:.24em; text-transform:uppercase; color:var(--ink);
+}
+.otrnav a{ color:var(--mute); text-decoration:none; }
+.otrnav a:hover{ color:var(--ink); text-decoration:underline; text-underline-offset:3px; }
+.otrnav a.cur{ color:var(--ink); text-decoration:underline; text-underline-offset:3px; }
+.otrnav .spacer{ margin-left:auto; display:flex; gap:10px; align-items:center; }
+.otrnav .put{ color:var(--mute); }
+
+/* ============================================================
+   Index-only fixed masthead bar (id: #otr-bar)
+   ============================================================ */
+#otr-bar{
+  position:fixed; top:0; left:0; right:0; z-index:50;
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:8px 20px; padding-top:calc(8px + env(safe-area-inset-top,0px));
+  box-sizing:border-box;
+  background:rgba(232,225,207,.90);
+  backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+  border-bottom:2px solid var(--ink);
+  font-family:var(--mono);
+}
+#otr-bar .brand{ color:var(--red); letter-spacing:.14em; font-size:12px; }
+#otr-bar .otr-label{ color:var(--mute); font-size:12.5px; }
