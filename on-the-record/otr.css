@@ -1,32 +1,34 @@
 /* ============================================================
    On the Record — shared "Paper of Record" design system
-   Owns the palette, the type baseline, and the shared masthead.
+   Owns the palette, the type baseline, the shared masthead,
+   AND the document components (frame, ledger, record, leaders,
+   stamps) that give every page its ruled, filed-document look.
    Each page links this FIRST, then its own <style> for layout.
    Palette lives here only: change a token once, every page follows.
    ============================================================ */
 
 :root{
-  /* ---- grounds ---- */
-  --bg:#e8e1cf;          /* warm document paper */
-  --panel:#f1ebdd;       /* a raised sheet, lighter than the ground */
-  --panel2:#ece5d4;      /* alternate raised sheet */
-  --card:#f1ebdd;        /* same family as panel */
-  --inner:#e0d9c4;       /* an inset well, a touch darker than the ground */
+  /* ---- grounds (a cool document grey, not warm cream) ---- */
+  --bg:#e6e4db;          /* greyish document paper */
+  --panel:#f0efe8;       /* a raised sheet, lighter than the ground */
+  --panel2:#eae8e0;      /* alternate raised sheet */
+  --card:#f0efe8;
+  --inner:#dedcd1;       /* an inset well, a touch darker than the ground */
 
-  /* ---- rules & hairlines (ink at low alpha, so they read as drawn lines) ---- */
-  --line:rgba(32,28,22,.26);
-  --line2:rgba(32,28,22,.46);
-  --edge:rgba(32,28,22,.26);
-  --edge-soft:rgba(32,28,22,.15);
-  --edge2:rgba(32,28,22,.15);
+  /* ---- rules & hairlines (ink at low alpha, read as drawn lines) ---- */
+  --line:rgba(32,28,22,.30);
+  --line2:rgba(32,28,22,.48);
+  --edge:rgba(32,28,22,.30);
+  --edge-soft:rgba(32,28,22,.16);
+  --edge2:rgba(32,28,22,.16);
 
   /* ---- ink (type) ---- */
   --ink:#201c16;         /* near-black warm ink: headings, primary text */
   --body:#352f24;        /* running body text */
-  --mute:#5a4f3b;        /* secondary text (contrast-safe on paper) */
-  --muted:#5a4f3b;
-  --dim:#6b6049;         /* tertiary / small labels (kept dark enough to read) */
-  --faint:#6b6049;
+  --mute:#584d39;        /* secondary text (contrast-safe on grey paper) */
+  --muted:#584d39;
+  --dim:#6a5f49;         /* tertiary / small labels (dark enough to read) */
+  --faint:#6a5f49;
 
   /* ---- the four spot inks ---- */
   --red:#9c2b25;         /* oxblood: wrong, dead, rejected — and the primary label accent */
@@ -51,25 +53,100 @@ body{
   -webkit-font-smoothing:antialiased;
   text-rendering:optimizeLegibility;
 }
-::selection{ background:#d8cdb2; }
+::selection{ background:#d6cdb6; }
 
 a{ color:var(--blue); }
 
-/* Emphasis that used to be a blue→violet gradient is now editorial italic ink.
-   (Pages must drop their own .grad gradient rules for this to take effect.) */
+/* Emphasis that used to be a blue→violet gradient is now editorial italic ink. */
 .grad{ font-style:italic; color:var(--ink); -webkit-text-fill-color:currentColor; }
 
 /* ============================================================
-   Shared masthead / section nav  (class: .otrnav)
-   Replaces the old inline dark <nav> on every secondary page.
+   Document frame — a hairline matte ruled around the viewport,
+   fixed on every page. This is the single biggest "this is a
+   filed document, not a web page" cue.
+   ============================================================ */
+.otr-frame{ position:fixed; inset:14px; border:1px solid rgba(32,28,22,.34);
+  pointer-events:none; z-index:40; }
+@media (max-width:560px){ .otr-frame{ inset:8px; } }
+
+/* ============================================================
+   Ruled utilities + document components (reusable across pages)
+   ============================================================ */
+.rule-strong{ height:3px; background:var(--ink); }
+.rule-hair{ height:1px; background:var(--ink); margin-top:3px; }
+
+/* masthead line inside page content (brand left, dateline right) */
+.mh{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+.mh-brand{ font-family:var(--sans); font-weight:600; font-size:20px; letter-spacing:.34em;
+  text-transform:uppercase; color:var(--ink); }
+.mh-file{ font-family:var(--mono); font-size:12.5px; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--mute); text-align:right; }
+
+/* ruled two-column ledger: top + bottom rules, vertical ink divider */
+.ledger{ display:grid; grid-template-columns:1fr 1px 1fr;
+  border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }
+.ledger .col{ padding:20px 26px; }
+.ledger .col:first-child{ padding-left:0; }
+.ledger .divider{ background:var(--ink); }
+.ledg-tag{ font-family:var(--mono); font-size:12.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--mute); }
+.ledg-stat{ display:flex; flex-direction:column; align-items:flex-start; gap:4px; margin-top:12px; }
+.ledg-num{ font-family:var(--sans); font-weight:600; font-variant-numeric:tabular-nums; line-height:.92;
+  font-size:clamp(52px,9vw,66px); }
+.ledg-num.red{ color:var(--red); } .ledg-num.green{ color:var(--green); }
+.ledg-cap{ font-size:18px; line-height:1.25; color:var(--ink); }
+.ledg-sub{ font-size:15.5px; color:var(--mute); margin-top:10px; line-height:1.35; }
+@media (max-width:560px){
+  .ledger{ grid-template-columns:1fr; }
+  .ledger .divider{ display:none; }
+  .ledger .col{ padding:18px 0; border-top:1px solid var(--line); }
+  .ledger .col:first-child{ border-top:none; padding-top:2px; }
+}
+
+/* exhibit "record" caption + double rule */
+.record-cap{ display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+.rc-title{ font-family:var(--sans); font-weight:600; font-size:clamp(26px,5vw,32px); letter-spacing:.01em; }
+.rc-sub{ font-weight:400; font-style:italic; color:var(--mute); font-size:.78em; }
+.rc-meta{ font-family:var(--mono); font-size:12px; letter-spacing:.12em; text-transform:uppercase;
+  color:var(--mute); text-align:right; }
+.record-rule{ height:2px; background:var(--ink); }
+.record-rule.d{ height:1px; margin-top:3px; }
+.record-head{ font-family:var(--mono); font-size:12px; letter-spacing:.18em; text-transform:uppercase; color:var(--mute); }
+
+/* a quoted answer, ruled on the left */
+.quote{ border-left:3px solid var(--ink); padding:2px 0 2px 20px; }
+.quote h3{ margin:0; font-family:var(--sans); font-style:italic; font-size:20px; line-height:1.4; font-weight:500; }
+.quote .meta{ font-size:15px; color:var(--mute); margin-top:6px; }
+.quote .url{ font-family:var(--mono); font-size:13px; color:var(--red); word-break:break-all; margin-top:8px; }
+
+/* ledger lines / dotted-leader check rows */
+.leaders{ font-family:var(--mono); font-size:14.5px; }
+.leaders .row{ display:flex; justify-content:space-between; gap:16px; align-items:baseline;
+  border-bottom:1px dotted rgba(32,28,22,.34); padding:5px 0; line-height:1.4; }
+.leaders .row:last-child{ border-bottom:none; }
+.leaders .row .v{ white-space:nowrap; }
+.leaders .row .v.no{ color:var(--red); font-weight:700; }
+.leaders .row .v.ok{ color:var(--green); font-weight:700; }
+.leaders .row.muted{ color:var(--dim); }
+
+/* rubber stamps */
+.rubber{ display:inline-block; font-family:var(--mono); font-weight:700; border:3px double var(--red);
+  color:var(--red); border-radius:3px; letter-spacing:.14em; text-transform:uppercase; line-height:1; }
+.rubber.sm{ font-size:13px; padding:7px 13px 5px; }
+.rubber.lg{ font-size:clamp(22px,4vw,28px); padding:10px 18px 7px; }
+.rubber.ok{ border-color:var(--green); color:var(--green); }
+
+/* ============================================================
+   Shared masthead / section nav  (class: .otrnav) — double rule
    ============================================================ */
 .otrnav{
+  position:relative;
   display:flex; flex-wrap:wrap; gap:7px 18px; align-items:center;
   padding:12px 20px;
   background:var(--bg);
-  border-bottom:2px solid var(--ink);
+  border-bottom:3px solid var(--ink);
   font-family:var(--mono); font-size:13px; letter-spacing:.02em;
 }
+.otrnav::after{ content:""; position:absolute; left:0; right:0; bottom:-5px; height:1px; background:var(--ink); }
 .otrnav .brand{
   font-family:var(--sans); font-weight:600; font-size:13.5px;
   letter-spacing:.24em; text-transform:uppercase; color:var(--ink);
@@ -81,17 +158,18 @@ a{ color:var(--blue); }
 .otrnav .put{ color:var(--mute); }
 
 /* ============================================================
-   Index-only fixed masthead bar (id: #otr-bar)
+   Index-only fixed masthead bar (id: #otr-bar) — double rule
    ============================================================ */
 #otr-bar{
   position:fixed; top:0; left:0; right:0; z-index:50;
   display:flex; align-items:center; justify-content:space-between; gap:12px;
   padding:8px 20px; padding-top:calc(8px + env(safe-area-inset-top,0px));
   box-sizing:border-box;
-  background:rgba(232,225,207,.90);
+  background:rgba(230,228,219,.92);
   backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
-  border-bottom:2px solid var(--ink);
+  border-bottom:3px solid var(--ink);
   font-family:var(--mono);
 }
+#otr-bar::after{ content:""; position:absolute; left:0; right:0; bottom:-5px; height:1px; background:var(--ink); }
 #otr-bar .brand{ color:var(--red); letter-spacing:.14em; font-size:12px; }
 #otr-bar .otr-label{ color:var(--mute); font-size:12.5px; }

@@ -2,9 +2,118 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="0; url=on-the-record/">
-<link rel="canonical" href="on-the-record/">
-<title>Marcus — On the Record</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Marcus — trustworthy work, human or AI</title>
+<meta name="description" content="Marcus is an open-source board where untrusted workers — AI agents or people — produce work you can act on without re-checking it: evidence to close, a check the author can't game, a human signature, a complete record.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="on-the-record/otr.css">
+<style>
+  .wrap{max-width:860px;margin:0 auto;padding:40px 22px 72px;box-sizing:border-box;}
+  .eyebrow{font-family:var(--mono);font-size:13px;letter-spacing:.22em;text-transform:uppercase;color:var(--red);margin-top:30px;}
+  h1{font-family:var(--sans);font-weight:600;font-size:clamp(38px,6.6vw,60px);line-height:1.04;
+    letter-spacing:-.015em;margin:12px 0 0;text-wrap:balance;}
+  .lead{font-size:clamp(18px,2.3vw,21px);line-height:1.56;color:var(--body);max-width:64ch;margin:20px 0 0;}
+  .lead b{color:var(--ink);font-weight:600;}
+  .proofs{display:grid;grid-template-columns:1fr 1px 1fr;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink);margin-top:34px;}
+  .proofs .divider{background:var(--ink);}
+  .proof{padding:24px 28px;}
+  .proof:first-child{padding-left:0;}
+  .proof .n{font-family:var(--mono);font-size:12.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);}
+  .proof h2{font-family:var(--sans);font-weight:600;font-size:23px;line-height:1.2;margin:8px 0 0;}
+  .proof p{font-size:16px;line-height:1.55;color:var(--body);margin:10px 0 0;}
+  .proof .stat{font-family:var(--sans);font-weight:600;font-variant-numeric:tabular-nums;margin-top:12px;}
+  .proof .stat .a{color:var(--red);font-size:30px;} .proof .stat .b{color:var(--green);font-size:30px;}
+  .proof .links{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px;}
+  .plink{font-family:var(--mono);font-size:13px;color:var(--ink);text-decoration:none;
+    border:1px solid var(--line2);border-radius:3px;padding:6px 12px;}
+  .plink:hover{border-color:var(--ink);background:var(--panel);}
+  .plink.go{background:var(--ink);color:var(--bg);border-color:var(--ink);}
+  .core{margin-top:30px;font-size:17px;line-height:1.6;color:var(--body);max-width:66ch;}
+  .core b{color:var(--ink);font-weight:600;}
+  .cta{margin-top:34px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-top:1px solid var(--ink);padding-top:26px;}
+  .cta .put{font-family:var(--mono);font-size:14.5px;color:var(--ink);}
+  .foot{margin-top:30px;font-size:14px;line-height:1.7;color:var(--mute);max-width:70ch;}
+  .foot a{color:var(--red);}
+  @media (max-width:620px){
+    .proofs{grid-template-columns:1fr;} .proofs .divider{display:none;}
+    .proof{padding:20px 0;border-top:1px solid var(--line);} .proof:first-child{border-top:none;}
+  }
+</style>
 </head>
-<body><p><a href="on-the-record/">Marcus — On the Record</a></p></body>
+<body>
+
+<nav class="otrnav" aria-label="Marcus">
+  <span class="brand">Marcus</span>
+  <a href="on-the-record/">On the Record</a>
+  <a href="https://marcus.readthedocs.io/en/latest/" target="_blank" rel="noopener">Docs</a>
+  <a href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">GitHub</a>
+  <span class="spacer"><span class="put">Put it on the record →</span>
+    <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-show-count="true" data-size="large" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Star</a></span>
+</nav>
+
+<div class="otr-frame" aria-hidden="true"></div>
+
+<main class="wrap">
+  <div class="mh-block">
+    <div class="mh"><span class="mh-brand">Marcus</span><span class="mh-file">Open source · MIT · board-mediated multi-agent system</span></div>
+    <div class="rule-strong" style="margin-top:9px"></div><div class="rule-hair"></div>
+  </div>
+
+  <span class="eyebrow">The institution for accepting work from strangers</span>
+  <h1>Work you can act on — <span class="grad">without re-checking it yourself.</span></h1>
+  <p class="lead">Untrusted workers — AI agents or people — do the work. Marcus is the shared board that
+  refuses to accept any result until it carries <b>evidence</b>, a <b>check its own author never saw</b>,
+  and, where it matters, a <b>human signature</b>. You never have to trust a single worker in the
+  building, because the building is the thing you trust.</p>
+
+  <div class="proofs">
+    <div class="proof">
+      <div class="n">What you run today</div>
+      <h2>Coordinate AI coding agents</h2>
+      <p>You describe what to build. Marcus breaks the work into tasks on a shared kanban board. Agents
+      — Claude Code, Codex, Gemini CLI, any <a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener" style="color:var(--red)">MCP</a>-compatible runtime —
+      pull tasks independently, write the code, and coordinate through the board, never through chat.
+      Walk away; come back to working software.</p>
+      <div class="links">
+        <a class="plink go" href="https://github.com/painted-porch/marcus#get-started" target="_blank" rel="noopener">Quickstart ↗</a>
+        <a class="plink" href="https://marcus.readthedocs.io/en/latest/" target="_blank" rel="noopener">Docs ↗</a>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="proof">
+      <div class="n">The first case on the record</div>
+      <h2>Keep AI answers honest</h2>
+      <p>We re-ran Columbia’s Tow Center study of AI search — four engines, 200 news questions. Alone, the
+      engines got <b>7 in 10 answers wrong</b> and half the links they cited were fabricated or dead.
+      Through Marcus’s checkpoint, <b>zero fabricated links reach the reader</b> — the fakes are caught,
+      not fixed.</p>
+      <div class="stat"><span class="a">51%&nbsp;fabricated</span> &nbsp;→&nbsp; <span class="b">0%</span></div>
+      <div class="links">
+        <a class="plink go" href="on-the-record/">Read the receipts →</a>
+        <a class="plink" href="on-the-record/not-a-fact-checker.html">Not a fact checker →</a>
+      </div>
+    </div>
+  </div>
+
+  <p class="core">Same room, any claim: <b>evidence to close, a check the author can’t game, a human
+  signature, a complete audit trail.</b> Citations are one socket; code against its tests, a number
+  against its source, a legal cite against the record plug into the same board. Coordinating coding
+  agents is how Marcus started — making their work <i>trustworthy</i> is what it is.</p>
+
+  <div class="cta">
+    <span class="put">If it’s on the record, it’s worth keeping →</span>
+    <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-size="large" data-show-count="true" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Put it on the record</a>
+  </div>
+
+  <p class="foot">Open source under the MIT license · built as a board-mediated, blackboard-architecture
+  multi-agent system. The citation study replicates Jaźwińska &amp; Chandrasekar, “AI Search Has a
+  Citation Problem,” Tow Center for Digital Journalism, Columbia Journalism Review, 2025.
+  <a href="on-the-record/">See the method and the audit records →</a></p>
+</main>
+
+<script async defer src="https://buttons.github.io/buttons.js"></script>
+<script data-goatcounter="https://graylabs.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
 </html>
