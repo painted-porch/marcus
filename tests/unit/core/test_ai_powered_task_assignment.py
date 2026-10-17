@@ -366,6 +366,49 @@ class TestAITaskAssignmentEngine:
 
         assert mock_graph.get_critical_path.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_analyze_dependencies_counts_duplicate_deps_once(
+        self, mock_ai_engine
+    ):
+        """A dependent listing the same dep id twice is counted once.
+
+        ``Task.dependencies`` is a plain list that some generation paths
+        may fill with duplicate ids; the original membership test counted
+        each dependent task once, so the one-pass unblock count must
+        dedupe per dependent or it inflates a task's impact score (Codex
+        review on PR #744).
+        """
+        base = datetime.now(timezone.utc)
+
+        def mk(tid, deps):
+            return Task(
+                id=tid,
+                name=tid,
+                description="",
+                status=TaskStatus.TODO,
+                priority=Priority.MEDIUM,
+                assigned_to=None,
+                created_at=base,
+                updated_at=base,
+                due_date=None,
+                estimated_hours=1.0,
+                labels=[],
+                dependencies=deps,
+            )
+
+        blocker = mk("blocker", [])
+        dependent = mk("dep", ["blocker", "blocker"])  # duplicated id
+        engine = AITaskAssignmentEngine(mock_ai_engine, [blocker, dependent])
+        mock_graph = Mock(spec=DependencyGraph)
+        mock_graph.get_critical_path = Mock(return_value=[])
+        engine._build_explicit_graph = Mock(return_value=mock_graph)
+
+        scores = await engine._analyze_dependencies([blocker])
+
+        # One dependent unblocked -> unblocked_count 1 -> score 0.5.
+        # Counting the duplicate would give 2 -> 1.0.
+        assert scores["blocker"] == 0.5
+
     # Test _get_ai_recommendations
     @pytest.mark.asyncio
     async def test_get_ai_recommendations_calculates_scores(

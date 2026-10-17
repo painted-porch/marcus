@@ -180,7 +180,10 @@ class AITaskAssignmentEngine:
         unblock_counts: Dict[str, int] = defaultdict(int)
         for other_task in self.project_tasks:
             if other_task.status == TaskStatus.TODO:
-                for dep_id in other_task.dependencies:
+                # Dedupe per dependent: ``dependencies`` is a plain list that
+                # some generation paths may fill with duplicate ids, and the
+                # original membership test counted each dependent task once.
+                for dep_id in set(other_task.dependencies):
                     unblock_counts[dep_id] += 1
 
         for task in tasks:

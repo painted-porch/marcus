@@ -6382,7 +6382,7 @@ def _scope_tasks_to_project(tasks: List[Task], project_id: str) -> List[Task]:
 def _classify_task_cached(
     task: Task,
     classifier: Any,
-    cache: Dict[Tuple[str, str, Tuple[str, ...]], Any],
+    cache: Dict[str, Tuple[Tuple[str, str, Tuple[str, ...]], Any]],
 ) -> Any:
     """Return a task's TaskType, memoized by task content (issue #743).
 
@@ -6392,9 +6392,16 @@ def _classify_task_cached(
     every ``request_next_task`` call, and classifying a task with long
     text (the Tow experiment embeds excerpts and answers in task text)
     costs on the order of a second, so on a large board this dominated
-    request latency and froze the single-threaded server. Memoizing by a
-    content signature classifies each distinct task at most once while
-    still reclassifying a task whose text actually changed.
+    request latency and froze the single-threaded server. Memoizing
+    classifies each distinct task at most once while still reclassifying
+    a task whose text actually changed.
+
+    The cache is keyed by ``task.id`` and stores ``(signature, result)``
+    so it holds exactly one entry per task: editing a task replaces its
+    entry rather than accumulating a new one, which keeps the cache
+    bounded on a long-lived, multi-project server (Codex review on PR
+    #744). A stale entry is detected by comparing the current content
+    signature and recomputed when it differs.
 
     Parameters
     ----------
@@ -6402,8 +6409,8 @@ def _classify_task_cached(
         The task to classify.
     classifier : Any
         An object exposing ``classify(task) -> TaskType``.
-    cache : Dict[Tuple[str, str, Tuple[str, ...]], Any]
-        Mutable cache mapping a content signature to the classification;
+    cache : Dict[str, Tuple[Tuple[str, str, Tuple[str, ...]], Any]]
+        Mutable cache mapping ``task.id`` to ``(signature, result)``;
         callers persist it (e.g. on server state) across requests.
 
     Returns
@@ -6412,11 +6419,12 @@ def _classify_task_cached(
         The ``TaskType`` the classifier assigns to the task.
     """
     signature = (task.name, task.description or "", tuple(task.labels or []))
-    cached = cache.get(signature)
-    if cached is None:
-        cached = classifier.classify(task)
-        cache[signature] = cached
-    return cached
+    entry = cache.get(task.id)
+    if entry is not None and entry[0] == signature:
+        return entry[1]
+    result = classifier.classify(task)
+    cache[task.id] = (signature, result)
+    return result
 
 
 async def find_optimal_task_for_agent(agent_id: str, state: Any) -> Optional[Task]:

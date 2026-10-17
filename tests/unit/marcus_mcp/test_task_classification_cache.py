@@ -73,8 +73,14 @@ class TestClassifyTaskCached:
 
         assert classifier.classify.call_count == 2
 
-    def test_changed_content_reclassifies(self) -> None:
-        """A task whose text changed is reclassified, not served stale."""
+    def test_changed_content_reclassifies_and_replaces(self) -> None:
+        """An edited task is reclassified, and its entry is replaced, not added.
+
+        The cache is keyed by task id, so a task whose text changed must
+        reclassify AND leave the cache with a single entry for that id,
+        so a long-lived server cannot accumulate one entry per revision
+        (Codex review on PR #744).
+        """
         classifier = Mock()
         classifier.classify = Mock(return_value=TaskType.DESIGN)
         cache: dict = {}
@@ -84,3 +90,5 @@ class TestClassifyTaskCached:
         _classify_task_cached(_task("t1", "Implement the schema"), classifier, cache)
 
         assert classifier.classify.call_count == 2
+        # Bounded: one entry per task id, the old revision is overwritten.
+        assert list(cache.keys()) == ["t1"]
