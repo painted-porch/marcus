@@ -96,7 +96,15 @@ class EngineAnswer:
     completion_tokens : int
         Output tokens the provider reported.
     cost_usd : float
-        Illustrative cost estimate for this call.
+        Cost estimate for this call, including any search or grounding
+        fee (the token cost plus ``search_fee_usd``).
+    search_requests : int
+        Billed web-search or grounding requests the provider reported,
+        separate from tokens (0 when the engine did not search).
+    search_fee_usd : float
+        The search or grounding fee for this call at the provider's
+        list rate; a daily free tier may reduce what is actually
+        billed, so the request count is the reliable figure.
     """
 
     headline: str = ""
@@ -108,6 +116,8 @@ class EngineAnswer:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    search_requests: int = 0
+    search_fee_usd: float = 0.0
 
     def claim_evidence(self) -> Dict[str, Any]:
         """Build the evidence payload a finder reports for a find task."""
@@ -337,7 +347,11 @@ class PerplexityEngine(BaseEngine):
             model=str(data.get("model") or self.model),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            # Perplexity's provider cost already includes its search, so
+            # no separate fee is added and the count is not reported.
             cost_usd=provider_cost or self._cost(prompt_tokens, completion_tokens),
+            search_requests=0,
+            search_fee_usd=0.0,
         )
 
 
@@ -347,6 +361,10 @@ class OpenAIEngine(BaseEngine):
     name = "openai"
     env_key = "OPENAI_API_KEY"
     default_model = "gpt-4o-mini"
+    # The built-in web_search tool is billed per call ($10 per 1,000),
+    # separate from tokens; the response carries one web_search_call
+    # item per search the model ran.
+    SEARCH_FEE_USD = 10.0 / 1000.0
 
     def build_request(self, query: str) -> EngineRequest:
         """Build the Responses API request."""
@@ -361,11 +379,23 @@ class OpenAIEngine(BaseEngine):
         )
 
     def parse_response(self, data: Dict[str, Any]) -> EngineAnswer:
-        """Parse output messages and url_citation annotations."""
+        """Parse output messages, url citations, and the search fee.
+
+        The Responses API emits one ``web_search_call`` item per search
+        the model ran. OpenAI bills those separately from tokens, so a
+        token-only cost undercounts a grounded answer; the count and
+        its fee are recorded alongside the token cost.
+        """
         content, citations = _parse_responses_payload(data)
         usage = data.get("usage") or {}
         prompt_tokens = int(usage.get("input_tokens") or 0)
         completion_tokens = int(usage.get("output_tokens") or 0)
+        searches = sum(
+            1
+            for item in data.get("output") or []
+            if item.get("type") == "web_search_call"
+        )
+        search_fee = searches * self.SEARCH_FEE_USD
         claim = extract_claim_fields(content, citations)
         return EngineAnswer(
             **claim,
@@ -373,7 +403,9 @@ class OpenAIEngine(BaseEngine):
             model=str(data.get("model") or self.model),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_usd=self._cost(prompt_tokens, completion_tokens),
+            cost_usd=self._cost(prompt_tokens, completion_tokens) + search_fee,
+            search_requests=searches,
+            search_fee_usd=search_fee,
         )
 
 
@@ -385,6 +417,11 @@ class GeminiEngine(BaseEngine):
     # Pinned to the mainline stable flash model as of 2026-10 (the
     # original study used 2.0 Flash; the replication uses today's).
     default_model = "gemini-3.5-flash"
+    # Grounding with Google Search is billed per grounded prompt ($35
+    # per 1,000), separate from tokens; a call that returns grounding
+    # metadata used one grounded request. A daily free tier may reduce
+    # what is actually billed.
+    GROUNDING_FEE_USD = 35.0 / 1000.0
 
     def build_request(self, query: str) -> EngineRequest:
         """Build the generateContent request."""
@@ -401,17 +438,24 @@ class GeminiEngine(BaseEngine):
         )
 
     def parse_response(self, data: Dict[str, Any]) -> EngineAnswer:
-        """Parse candidate text and grounding chunk URIs."""
+        """Parse candidate text, grounding URIs, and the grounding fee.
+
+        Google bills "Grounding with Google Search" per grounded
+        prompt, separate from tokens. A candidate that carries
+        ``groundingMetadata`` used grounding, so it counts as one
+        grounded request; the token-only cost never saw it.
+        """
         candidate = (data.get("candidates") or [{}])[0]
         parts = candidate.get("content", {}).get("parts") or []
         content = "\n".join(p.get("text", "") for p in parts if p.get("text"))
+        grounding = candidate.get("groundingMetadata") or {}
         citations = [
             chunk.get("web", {}).get("uri", "")
-            for chunk in candidate.get("groundingMetadata", {}).get(
-                "groundingChunks", []
-            )
+            for chunk in grounding.get("groundingChunks", [])
             if chunk.get("web", {}).get("uri")
         ]
+        searches = 1 if grounding else 0
+        search_fee = searches * self.GROUNDING_FEE_USD
         usage = data.get("usageMetadata") or {}
         prompt_tokens = int(usage.get("promptTokenCount") or 0)
         completion_tokens = int(usage.get("candidatesTokenCount") or 0)
@@ -422,7 +466,9 @@ class GeminiEngine(BaseEngine):
             model=str(data.get("modelVersion") or self.model),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_usd=self._cost(prompt_tokens, completion_tokens),
+            cost_usd=self._cost(prompt_tokens, completion_tokens) + search_fee,
+            search_requests=searches,
+            search_fee_usd=search_fee,
         )
 
 
@@ -472,8 +518,11 @@ class GrokEngine(BaseEngine):
             model=str(data.get("model") or self.model),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            # Grok's tick cost already includes its search.
             cost_usd=(ticks / self.TICKS_PER_USD)
             or self._cost(prompt_tokens, completion_tokens),
+            search_requests=0,
+            search_fee_usd=0.0,
         )
 
 
@@ -586,6 +635,7 @@ class ClaudeEngine(BaseEngine):
         searches = int(
             (usage.get("server_tool_use") or {}).get("web_search_requests") or 0
         )
+        search_fee = searches * self.SEARCH_FEE_USD
         claim = extract_claim_fields(content, citations)
         return EngineAnswer(
             **claim,
@@ -593,8 +643,9 @@ class ClaudeEngine(BaseEngine):
             model=str(data.get("model") or self.model),
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            cost_usd=self._cost(prompt_tokens, completion_tokens)
-            + searches * self.SEARCH_FEE_USD,
+            cost_usd=self._cost(prompt_tokens, completion_tokens) + search_fee,
+            search_requests=searches,
+            search_fee_usd=search_fee,
         )
 
 

@@ -183,6 +183,39 @@ class TestOpenAIAdapter:
         assert answer.url == "https://www.cjr.org/tow_center/example.php"
         assert answer.completion_tokens == 50
 
+    def test_web_search_fee_is_captured(self) -> None:
+        """Each web_search_call item bills $0.01 and is recorded.
+
+        The Responses API returns one ``web_search_call`` item per
+        search; OpenAI bills those separately from tokens, so the
+        token-only cost silently undercounts a grounded answer.
+        """
+        data = {
+            "output": [
+                {"type": "web_search_call", "id": "ws_1"},
+                {"type": "web_search_call", "id": "ws_2"},
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": LABELED_ANSWER,
+                            "annotations": [],
+                        }
+                    ],
+                },
+            ],
+            "usage": {"input_tokens": 1_000_000, "output_tokens": 0},
+            "model": "gpt-4o-mini",
+        }
+        answer = OpenAIEngine().parse_response(data)
+
+        assert answer.search_requests == 2
+        assert answer.search_fee_usd == pytest.approx(0.02)
+        assert answer.cost_usd == pytest.approx(
+            OpenAIEngine()._cost(1_000_000, 0) + 0.02
+        )
+
 
 class TestGeminiAdapter:
     """Test suite for the Gemini grounding adapter."""
@@ -215,6 +248,50 @@ class TestGeminiAdapter:
         assert answer.publisher == "Columbia Journalism Review"
         assert answer.url == "https://www.cjr.org/tow_center/example.php"
         assert answer.prompt_tokens == 90
+
+    def test_grounding_fee_is_captured(self) -> None:
+        """A grounded answer bills one grounding request at $0.035.
+
+        Google bills "Grounding with Google Search" per grounded
+        prompt, separate from tokens; one grounded call is one request.
+        """
+        data = {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": LABELED_ANSWER}]},
+                    "groundingMetadata": {
+                        "groundingChunks": [
+                            {
+                                "web": {
+                                    "uri": "https://www.cjr.org/tow_center/example.php"
+                                }
+                            }
+                        ]
+                    },
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0},
+            "modelVersion": "gemini-3.5-flash",
+        }
+        answer = GeminiEngine().parse_response(data)
+
+        assert answer.search_requests == 1
+        assert answer.search_fee_usd == pytest.approx(0.035)
+        assert answer.cost_usd == pytest.approx(0.035)
+
+    def test_ungrounded_answer_has_no_grounding_fee(self) -> None:
+        """No grounding metadata means no grounding request billed."""
+        data = {
+            "candidates": [
+                {"content": {"parts": [{"text": "I could not find this excerpt."}]}}
+            ],
+            "usageMetadata": {"promptTokenCount": 0, "candidatesTokenCount": 0},
+            "modelVersion": "gemini-3.5-flash",
+        }
+        answer = GeminiEngine().parse_response(data)
+
+        assert answer.search_requests == 0
+        assert answer.search_fee_usd == 0.0
 
 
 class TestGrokAdapter:

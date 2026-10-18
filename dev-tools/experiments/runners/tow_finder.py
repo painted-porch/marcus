@@ -119,6 +119,8 @@ def main() -> None:
                 "prompt_tokens": answer.prompt_tokens,
                 "completion_tokens": answer.completion_tokens,
                 "cost_usd": answer.cost_usd,
+                "search_requests": answer.search_requests,
+                "search_fee_usd": answer.search_fee_usd,
             },
         )
         return answer.claim_evidence()
