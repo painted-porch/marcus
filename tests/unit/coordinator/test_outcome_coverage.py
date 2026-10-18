@@ -483,14 +483,30 @@ class TestFillGaps:
         assert new_tasks[0]["requires"] is None
 
     @pytest.mark.asyncio
-    async def test_non_string_provides_is_rejected(self, llm_returning: Any) -> None:
-        """A list or int for provides is malformed — must be string or null."""
+    async def test_non_string_optional_field_coerced_not_rejected(
+        self, llm_returning: Any
+    ) -> None:
+        """A list/int for an optional contract field coerces to None, not a raise.
+
+        The LLM commonly returns ``requires`` as a LIST of upstream task
+        ids. A hard raise here was stricter than the downstream handling
+        (which coerces non-strings to None anyway) and silently no-opped
+        the ENTIRE outcome-coverage pass — gap-fill, signal enrichment,
+        and #680 gotcha enumeration — for the whole project. So a
+        malformed optional field must degrade gracefully, not abort.
+        """
         gaps = [_outcome("o1", "user can do X", "X observable")]
         llm = llm_returning(
-            '{"tasks": [{' '"name": "X", "description": "Y", "provides": ["bad"]' "}]}"
+            '{"tasks": [{'
+            '"name": "X", "description": "Y", '
+            '"provides": ["bad"], "requires": ["a", "b"]'
+            "}]}"
         )
-        with pytest.raises(ValueError, match=r"'provides'.*string"):
-            await fill_gaps(spec="x", gaps=gaps, existing_tasks=[], llm_client=llm)
+        new_tasks = await fill_gaps(
+            spec="x", gaps=gaps, existing_tasks=[], llm_client=llm
+        )
+        assert new_tasks[0]["provides"] is None
+        assert new_tasks[0]["requires"] is None
 
     # ----- Existing task graph as prompt context -----
 
@@ -638,24 +654,29 @@ class TestFillGaps:
         assert "responsibility" not in new_tasks[0]
 
     @pytest.mark.asyncio
-    async def test_responsibility_validated_as_string_or_null(
+    async def test_non_string_responsibility_coerced_not_rejected(
         self, llm_returning: Any
     ) -> None:
-        """Non-string responsibility raises (same shape check as provides)."""
+        """Non-string responsibility coerces to None (same as provides/requires).
+
+        Tolerant degradation, not a hard raise — a malformed optional
+        field must not abort the whole coverage pass (see
+        ``test_non_string_optional_field_coerced_not_rejected``).
+        """
         llm = llm_returning(
             '{"tasks": [{'
             '"name": "X", "description": "Y",'
             '"responsibility": 42'
             "}]}"
         )
-        with pytest.raises(ValueError, match=r"'responsibility'.*string"):
-            await fill_gaps(
-                spec="x",
-                gaps=[_outcome("o1", "user can do X", "X observable")],
-                existing_tasks=[],
-                llm_client=llm,
-                contract_artifacts={"d": {"artifacts": []}},
-            )
+        new_tasks = await fill_gaps(
+            spec="x",
+            gaps=[_outcome("o1", "user can do X", "X observable")],
+            existing_tasks=[],
+            llm_client=llm,
+            contract_artifacts={"d": {"artifacts": []}},
+        )
+        assert new_tasks[0]["responsibility"] is None
 
     @pytest.mark.asyncio
     async def test_existing_tasks_is_required_kwarg(self, llm_returning: Any) -> None:

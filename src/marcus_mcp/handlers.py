@@ -32,6 +32,7 @@ from .tools import (  # Agent tools; Task tools; Project tools; System tools; NL
     report_blocker,
     report_task_progress,
     request_next_task,
+    request_task_redo,
 )
 from .tools.analytics import (  # Analytics tools
     get_agent_metrics,
@@ -40,7 +41,9 @@ from .tools.analytics import (  # Analytics tools
     get_task_metrics,
 )
 from .tools.audit_tools import (
+    EXPORT_CASE_TOOL,
     USAGE_REPORT_TOOL,
+    export_case,
     get_usage_report,
 )
 from .tools.auth import (
@@ -118,6 +121,7 @@ def get_all_tool_definitions() -> Dict[str, types.Tool]:
     all_tools["authenticate"] = AUTHENTICATE_TOOL
     all_tools["get_usage_report"] = USAGE_REPORT_TOOL
     all_tools["get_cost_summary"] = COST_SUMMARY_TOOL
+    all_tools["export_case"] = EXPORT_CASE_TOOL
 
     return all_tools
 
@@ -169,6 +173,25 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "Scopes task assignment to prevent cross-experiment "
                             "task theft (GH-388)."
                         ),
+                    },
+                    "vendor": {
+                        "type": "string",
+                        "description": (
+                            "Vendor whose model the worker runs on (e.g. "
+                            "'perplexity', 'google', 'openai'). Eligibility "
+                            "never offers a verify task to the claim "
+                            "author's vendor (#737)."
+                        ),
+                        "default": "",
+                    },
+                    "principal": {
+                        "type": "string",
+                        "enum": ["agent", "human"],
+                        "description": (
+                            "Who the worker is. An approve task is offered "
+                            "only to a human principal (#737)."
+                        ),
+                        "default": "agent",
                     },
                 },
                 "required": ["agent_id", "name", "role", "project_id"],
@@ -257,6 +280,44 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "'curl -f http://localhost:8000/health'."
                         ),
                     },
+                    "lease_epoch": {
+                        "type": "integer",
+                        "description": (
+                            "The lease_epoch returned by request_next_task "
+                            "for THIS task. Pass it unchanged on every "
+                            "report. It identifies which claim on the task "
+                            "you hold, so Marcus can tell your reports "
+                            "apart from a replacement agent's. Marcus "
+                            "currently RECORDS this and does not enforce "
+                            "it — no report is rejected for a superseded "
+                            "epoch today. Carry it anyway: it is what "
+                            "makes the collision visible. Omit only if you "
+                            "were not given one."
+                        ),
+                    },
+                    "verifications": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": (
+                            "Issue #523: per-outcome verification list for "
+                            "integration completions. Each entry: signal_id "
+                            "(str), command (str), optional description and "
+                            "readiness_probe. Takes precedence over "
+                            "start_command when present."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "object",
+                        "description": (
+                            "Typed evidence payload. REQUIRED when "
+                            "completing a find, verify, or synthesize task "
+                            "(#737): every field the task's output_schema "
+                            "requires must be present or the completion is "
+                            "rejected with the missing fields named. Also "
+                            "carries behavior evidence for integration "
+                            "tasks (#677)."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "task_id", "status"],
             },
@@ -278,11 +339,55 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     },
                     "severity": {
                         "type": "string",
-                        "description": "Blocker severity: low, medium, high",
+                        "enum": ["low", "medium", "high"],
+                        "description": (
+                            "Blocker severity, which decides what happens to "
+                            "the task (issue #719). 'low'/'medium' = ADVISORY: "
+                            "you get suggestions and KEEP the task (it stays "
+                            "in progress and assigned to you) — this is the "
+                            "normal way to ask for help. 'high' = TERMINAL: "
+                            "you hand the task back, it is marked BLOCKED and "
+                            "nobody else picks it up — use only when the task "
+                            "genuinely cannot be completed by anyone."
+                        ),
                         "default": "medium",
                     },
                 },
                 "required": ["agent_id", "task_id", "blocker_description"],
+            },
+        ),
+        types.Tool(
+            name="request_task_redo",
+            description=(
+                "Send a completed (DONE) task back to the board for a fresh "
+                "agent to redo. Use when you find another agent's completed "
+                "work is substantively wrong (wrong response shape, missing "
+                "behavior, logic bug) — instead of rewriting their code "
+                "yourself. Marcus resets the task to TODO with your "
+                "diagnostic; the next agent claims it normally. Capped at 3 "
+                "redos per task, after which fix in place."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Your agent ID (the redo requester)",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the DONE task to send back",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Diagnostic for the next agent: what is wrong "
+                            "and how you observed it (e.g. the contract "
+                            "clause the output violates)"
+                        ),
+                    },
+                },
+                "required": ["agent_id", "task_id", "reason"],
             },
         ),
         # Project Monitoring Tools
@@ -1225,6 +1330,8 @@ async def handle_tool_call(
                     skills=arguments.get("skills", []),
                     state=state,
                     project_id=arguments.get("project_id", ""),
+                    vendor=arguments.get("vendor", ""),
+                    principal=arguments.get("principal", "agent"),
                 )
 
         elif name == "get_agent_status":
@@ -1262,6 +1369,12 @@ async def handle_tool_call(
                     state=state,
                     start_command=arguments.get("start_command"),
                     readiness_probe=arguments.get("readiness_probe"),
+                    # #735/#737: the stdio path must carry the same
+                    # payloads as the FastMCP paths or the evidence
+                    # gates judge a None an agent never sent.
+                    verifications=arguments.get("verifications"),
+                    evidence=arguments.get("evidence"),
+                    lease_epoch=arguments.get("lease_epoch"),
                 )
 
         elif name == "report_blocker":
@@ -1286,6 +1399,21 @@ async def handle_tool_call(
                     state=state,
                 )
 
+        elif name == "request_task_redo":
+            agent_id = arguments.get("agent_id") if arguments else None
+            task_id = arguments.get("task_id") if arguments else None
+            reason = arguments.get("reason") if arguments else None
+
+            if not agent_id or not task_id or not reason:
+                result = {"error": "agent_id, task_id, and reason are required"}
+            else:
+                result = await request_task_redo(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    reason=reason,
+                    state=state,
+                )
+
         # Project monitoring tools
         elif name == "get_project_status":
             result = await get_project_status(state=state)
@@ -1300,6 +1428,13 @@ async def handle_tool_call(
         elif name == "get_usage_report":
             days = arguments.get("days", 7) if arguments else 7
             result = await get_usage_report(days=days, state=state)
+
+        elif name == "export_case":
+            case_id = arguments.get("case_id") if arguments else None
+            if not case_id:
+                result = {"error": "case_id is required"}
+            else:
+                result = await export_case(case_id=case_id, state=state)
 
         elif name == "get_cost_summary":
             args = arguments or {}

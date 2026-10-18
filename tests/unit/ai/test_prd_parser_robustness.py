@@ -227,14 +227,15 @@ class TestPRDParserRobustness:
 
         hierarchy = await parser._generate_task_hierarchy(analysis, mock_constraints)
 
-        # Should have 3 functional epics + 1 NFR + 1 infra (empty req is filtered out)
-        assert len(hierarchy) == 5
+        # #683: all 4 functional reqs are kept (capped by tier, not team_size),
+        # so 4 functional + 1 NFR + 1 infra = 6. The old count of 5 was the
+        # team_size cut dropping the 4th req — not "empty req filtered out".
+        assert len(hierarchy) == 6
 
         # Check epic IDs are properly generated
         assert "epic_crud_operations" in hierarchy
         assert "epic_user_authentication" in hierarchy
         assert "epic_data_validation" in hierarchy
-        # Note: Empty requirements are filtered out, not converted to fallback epics
         assert "epic_non_functional" in hierarchy
         assert "epic_infrastructure" in hierarchy
 

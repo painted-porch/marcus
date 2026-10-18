@@ -39,6 +39,7 @@ if _RUNNERS_PARENT not in sys.path:
 from runners.harness import HARNESSES, Harness, get_harness  # noqa: E402
 from runners.marcus_client import MarcusMCPClient  # noqa: E402
 from runners.spawn_controller import (  # noqa: E402
+    SpawnThrashDetector,
     StallWatchdog,
     compute_spawn_count,
     experiment_lifecycle_state,
@@ -324,6 +325,15 @@ class ExperimentConfig:
         # in project_options) so it is not forwarded to Marcus's
         # create_project, which would reject the unknown key.
         self.stall_timeout_minutes = int(self.config.get("stall_timeout_minutes", 20))
+
+        # Spawn-thrash fast-fail: tears down after this many consecutive
+        # polls of (to_spawn > 0 AND completed unchanged). Catches the
+        # failure mode where a BLOCKED task gates every claimable
+        # downstream task — the runner would otherwise keep spawning
+        # ephemeral agents that immediately exit, burning ~$0.50–$1.00
+        # per agent until the 20-minute stall watchdog fires. 5 polls at
+        # the default 30s cadence = a 2.5-minute fail-fast. 0 disables.
+        self.spawn_thrash_polls = int(self.config.get("spawn_thrash_polls", 5))
 
         # Agent harness selection (GH issue: codex harness support).
         # ``claude`` (default) spawns Anthropic's claude CLI in each pane;
@@ -1882,9 +1892,13 @@ echo "=========================================="
             max(1, (stall_minutes * 60) // poll_seconds) if stall_minutes > 0 else 0
         )
         watchdog = StallWatchdog(stall_polls=stall_polls)
+        thrash_polls = self.config.spawn_thrash_polls
+        thrash_detector = SpawnThrashDetector(thrash_polls=thrash_polls)
         _emit(
             f"poll every {poll_seconds}s; stall watchdog at "
-            f"{stall_minutes} min ({stall_polls} unchanged polls)"
+            f"{stall_minutes} min ({stall_polls} unchanged polls); "
+            f"spawn-thrash fast-fail at {thrash_polls} polls "
+            f"(~{(thrash_polls * poll_seconds) // 60} min)"
         )
 
         worker_pane_ids: List[str] = []
@@ -1940,7 +1954,13 @@ echo "=========================================="
                     )
                     desired = int(signal.get("desired_agent_count", 0))
                     unclaimed = int(signal.get("unclaimed_tasks", 0))
-                    to_spawn = compute_spawn_count(desired, live, unclaimed)
+                    # #632: spawn decision uses Marcus's IN_PROGRESS count
+                    # (the right "who is covering an unclaimed task" signal
+                    # under the ephemeral lifecycle), not the runner's
+                    # tmux-pane count. The pane count is still computed
+                    # above for teardown logic and stall reasoning.
+                    in_flight = int(signal.get("in_flight_tasks", 0))
+                    to_spawn = compute_spawn_count(desired, in_flight, unclaimed)
 
                     # Tell the user, once, how much parallelism the graph
                     # actually offers — and warn when it offers almost
@@ -1962,11 +1982,33 @@ echo "=========================================="
                     total = int(status.get("total_tasks", 0))
                     in_progress = int(status.get("in_progress_tasks", 0))
                     blocked = int(status.get("blocked_tasks", 0))
+                    # "Real progress" signal for the spawn-thrash detector:
+                    # a monotonic, cumulative tally of the signals an agent
+                    # emits while genuinely working a task — completions
+                    # plus the report_task_progress heartbeat (25/50/75%)
+                    # and logged work (context requests, artifacts,
+                    # decisions, blockers). progress_updates is the earliest
+                    # of these: it fires as soon as a claimed agent reports,
+                    # well before the first artifact lands, closing the
+                    # claim->first-artifact gap that would otherwise let the
+                    # detector fast-fail a healthy run. It rises on real work
+                    # and stays flat on claim-and-exit churn; unlike
+                    # in_progress it never flickers back down, so it cannot
+                    # mask thrash. See SpawnThrashDetector.observe.
+                    activity = (
+                        done
+                        + int(status.get("progress_updates", 0))
+                        + int(status.get("context_requests", 0))
+                        + int(status.get("artifacts_created", 0))
+                        + int(status.get("decisions_logged", 0))
+                        + int(status.get("blockers_reported", 0))
+                    )
                     _emit(
                         f"tasks {done}/{total} done "
                         f"({in_progress} in-progress, {blocked} blocked) | "
-                        f"live={live} desired={desired} "
-                        f"unclaimed={unclaimed} -> spawn {to_spawn}"
+                        f"live={live} in_flight={in_flight} "
+                        f"desired={desired} unclaimed={unclaimed} "
+                        f"-> spawn {to_spawn}"
                     )
 
                     for _ in range(to_spawn):
@@ -1991,6 +2033,21 @@ echo "=========================================="
                         self._teardown("stalled")
                         break
 
+                    if thrash_detector.observe(activity, to_spawn):
+                        _emit(
+                            f"SPAWN-THRASH: spawned an agent on each of the "
+                            f"last {thrash_polls} polls but saw no forward "
+                            f"progress — {done} completed, {in_progress} "
+                            f"in-progress, and no agent logged any work "
+                            f"(get_task_context / log_artifact / "
+                            f"log_decision). Agents are starting but not "
+                            f"claiming or working: likely deferred MCP tools, "
+                            f"a skill mismatch, or every unclaimed task gated "
+                            f"by a BLOCKED dependency. Tearing down."
+                        )
+                        self._teardown("spawn_thrash")
+                        break
+
                 except Exception as exc:  # noqa: BLE001
                     # A transient error must not kill the controller —
                     # log it and retry next cycle (#595 crash-resilience).
@@ -1998,10 +2055,86 @@ echo "=========================================="
 
                 time.sleep(poll_seconds)
         finally:
+            # Name the work that did not get built (see
+            # format_unfinished_report). Best-effort: a status-fetch
+            # failure here must never mask the run-finished line.
+            try:
+                final_status = mcp.call_tool("get_experiment_status") or {}
+                for line in format_unfinished_report(
+                    final_status.get("unfinished_tasks"),
+                    int(final_status.get("total_tasks", 0) or 0),
+                ):
+                    _emit(line)
+            except Exception as exc:  # noqa: BLE001
+                _emit(f"WARN could not build final report: {type(exc).__name__}")
             _emit(f"run finished — spawned {spawned_total} ephemeral agents")
             runner_log.close()
 
         return True
+
+
+def format_unfinished_report(
+    unfinished: Optional[List[Dict[str, Any]]], total: int
+) -> List[str]:
+    """Render the end-of-run statement of what did and did not get built.
+
+    A run used to end with ``run finished — spawned N ephemeral agents``
+    and nothing else: a project could finish with a deliverable silently
+    missing and the output still read like success. The user had to watch
+    the scrolling progress line or go inspect the board to find out.
+
+    Parameters
+    ----------
+    unfinished : List[Dict[str, Any]]
+        ``{"id", "name", "status", "reason"}`` records for every task that
+        did not reach DONE, as reported by ``get_experiment_status``.
+    total : int
+        Total task count for the project.
+
+    Returns
+    -------
+    List[str]
+        Lines to emit. A clean run returns a single confirmation line; an
+        incomplete run names every unfinished task, why it stopped, and
+        the consequence (its deliverable may be missing).
+    """
+    # Missing data must never read as success. ``unfinished`` is None when
+    # Marcus could not produce a trustworthy task list (board unreachable,
+    # or a fetch that contradicted the metrics total — providers return []
+    # on error rather than raising). Likewise a zero total tells us nothing
+    # about whether work was done (Codex P1 on PR #723).
+    if unfinished is None:
+        return [
+            "RESULT: could not verify completion — Marcus returned no "
+            "trustworthy task list (board unreachable?). Check the board "
+            "before treating this run as successful."
+        ]
+    if total <= 0:
+        return [
+            "RESULT: could not verify completion — no tasks reported for "
+            "this project. Check the board before treating this run as "
+            "successful."
+        ]
+
+    done = total - len(unfinished)
+    if not unfinished:
+        return [f"RESULT: all {done}/{total} tasks complete"]
+
+    lines = [
+        f"RESULT: {done}/{total} tasks complete — "
+        f"{len(unfinished)} task(s) did NOT complete:",
+    ]
+    for task in unfinished:
+        lines.append(
+            f"  - [{task.get('status', '?')}] {task.get('name', '?')} "
+            f"({str(task.get('id', ''))[:8]}): {task.get('reason', 'unknown')}"
+        )
+    lines.append(
+        "  Whatever these tasks were meant to produce may be missing from "
+        "the deliverable — check the board and the product before "
+        "treating this run as successful."
+    )
+    return lines
 
 
 def main() -> None:

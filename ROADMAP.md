@@ -8,14 +8,18 @@ This roadmap synthesizes our planning documents
 [Implementation Plans](docs/implementation/)) and research-driven features from
 GitHub issues.
 
-> **Status note (2026-04):** Current shipped release is **v0.3.6**. The
-> v0.2.x checklist is now complete and v0.3.x is largely complete — Epictetus
-> is integrated, board health monitoring lives in the Cato dashboard, and
-> parallel multi-instance experiments shipped on `develop` (the v0.4.0 work).
-> The biggest unrepresented gain since this roadmap was last edited is
-> **parallel experiment isolation** (per-instance SQLite kanban DBs +
-> env-var MCP URLs), which lets multiple independent Marcus instances run
-> at once without colliding. See *Phase 1 → v0.4.0-dev* below.
+> **Status note (2026-05):** Current shipped release is **v0.3.8** (2026-05-22).
+> One-agent-per-task lifecycle (#600) + decomposition redesign (#605, #607)
+> shipped this milestone.
+>
+> The **12-month sprint plan** below (2026-05-23 → 2027-05-23) pulls
+> **MFP/federation forward** from the "post-12 months" deferral in the
+> earlier Playbook triage. The v0.5.0 flagship is now **MFP v0.1**
+> (#476) with Board Rewind (#593) as a feature inside the protocol.
+> Federation production (v0.7.0) is a Q3 commitment, not a post-Year-1
+> aspiration. Marketplace + Brownfield sit in Sprint 4 (final 3 months).
+>
+> The arc: **Reliability → Open Protocol (MFP) → Federation → Commercial Surface.**
 
 ---
 
@@ -138,35 +142,114 @@ reliably after every experiment, and a remote-monitoring channel
 
 ---
 
-## Next Queue — Post-v0.4.0
+## 12-Month Sprint Plan — *2026-05-23 → 2027-05-23*
 
-The active queue, in order. Anything below is concrete, scoped, and on
-the near-term path. Issues exist for each.
+The active 12-month plan, broken into four sprints + a 2-month buffer.
+Each sprint maps to specific milestones. The arc:
+**Reliability → Open Protocol (MFP) → Federation → Commercial Surface.**
 
-### #414 — SQLite migration for all data streams
-Replace seven file-based streams (JSONL/JSON under `logs/conversations/`)
-with a unified SQLite store. Goal: queryable, multi-root safe, no
-full-file scans. **Unblocks Cato multi-path work** and makes Posidonius
-multi-instance cleaner. Blocking dependency for several other items.
+### Sprint 1 — Reliability *(2026-05-23 → 2026-07-23, 2 months)*
+**Goal:** A 9-task project completes cleanly end-to-end. No integration
+scrambles, no perf tax, no invariant leaks.
 
-### #416 — PostHog telemetry (PyCon 2026 sprint)
-Opt-in anonymized usage analytics across all Marcus runners (MCP Direct,
-`/marcus`, Posidonius). Surfaces in a PostHog dashboard. **PyCon sprint
-participants get first pick** — flag this issue before working on it
-solo so a sprinter doesn't get blocked.
+Pairs two milestones:
+- **v0.3.9** (13 issues) — decomposer correctness (#604, #615, #617,
+  #618, #619, #620), perf cache for `analyze_dependencies` (#626),
+  `request_task_redo` MCP tool (#627), ephemeral worker worktree
+  cleanup (#603), `_collect_task_artifacts` bug (#624),
+  `recommended_agents` bug (#462), decomposer auto-select (#382),
+  subtask spawning explosion (#628), integration partial-done bug
+  (#629), composition test triage (#630).
+- **v0.4.0 — Trustworthy Coordination** (15 issues) — observability
+  primitives (#447, #196, #284), god-file splits (#422, #423, #424),
+  `with_retry` dedup (#448), context system performance (#219, #222,
+  #223), CPM autoscale (#465), the integration-verifier-must-fix
+  invariant (#296), soft/hard dep support (#156), design/planning
+  validation (#205), project deletion UI (#256).
 
-### #363 — God-files refactor
-20 modules exceed 1000 lines (`advanced_parser.py` is 4505 lines). Each
-has a subissue with a concrete split plan. Cross-file deduplication
-(two `with_retry` implementations, etc.) is bundled in.
+### Sprint 2 — Open Protocol (MFP v0.1) *(2026-07-23 → 2026-09-23, 2 months)*
+**Goal:** MFP v0.1 published as a versioned, language-agnostic
+coordination protocol. Marcus is the *reference implementation*. Cato
+consumes MFP read API instead of filesystem coupling. Conformance test
+suite passes.
 
-### #442 — Track 2: per-session project isolation (deferred post-PyCon)
-The real fix for parallel experiments — one Marcus instance on `:4298`
-handles N experiments simultaneously, isolated by MCP session ID.
-Currently requires N separate Marcus processes on N ports. Blast
-radius: **80+ locations across 15+ files**, requires
-`contextvars.ContextVar`, threading `session_id` through all 50+ tool
-implementations. Deliberately held until after PyCon sprints.
+Milestone: **v0.5.0 — MFP v0.1 + Board Rewind** (8 issues).
+
+Headline: **#476** — MFP v0.1 spec + JSON Schemas + OpenAPI + conformance
+test suite. Defines the eight core artifact schemas (`AgentRegistration`,
+`Task`, `TaskContext`, `TaskProgress`, `Decision`, `ArtifactMetadata`,
+`BlockerReport`, `BoardEvent`) and the seven MCP tool RPC contracts.
+
+Co-flagship: **#593** — Board Rewind. Naturally enabled by MFP's
+immutable event log. Reconstruct board state at any prior task, edit
+that task's spec, re-execute only the tail. A 27-task run with a bad
+task 14 currently costs a full re-run; rewind makes it cost only tasks
+14–27.
+
+Also ships in v0.5.0:
+- **#414** — SQLite migration (unblocker; the schema must support
+  immutable branch lineage and the new `editing`/`pending_review`
+  task states from the start, or rewind forces a re-migration)
+- **#592** — `pending_review` task state (sibling gate machinery
+  for rewind)
+- **#299** — Domain-agnostic coordination (remove software-engineering
+  assumptions from core protocol; required for MFP scope)
+- **#594** — Richer agent capability profiles (MFP's
+  `AgentCapability` schema)
+- **#298** — Marcus Agent Protocol (MAP); rolled into MFP v0.1
+
+### Sprint 3 — Federation v1 *(2026-09-23 → 2026-12-23, 3 months)*
+**Goal:** Two Marcus instances discover each other, exchange
+capabilities, delegate tasks across the wire, sync reputation,
+auth/identity hardened. Private federation production-ready.
+
+Pairs two milestones:
+- **v0.6.0 — The Learning Coordinator** (16 issues) — per-experiment
+  outcome→adaptation loop (#176), backprop blame attribution (#255),
+  signal persistence for ML forecasting (#546), foundation-task
+  decision-compliance metrics (#468, #469, #471), audit-log duration
+  metrics (#228), foundations for federated reputation.
+  Spec-generation improvements feed off the rewind+edit diffs from
+  Sprint 2.
+- **v0.7.0 — Federation** (5 issues) — instance discovery, cross-instance
+  task delegation, reputation portability, payment routing skeleton,
+  cross-instance Build Kit licensing primitives.
+
+### Sprint 4 — Commercial Surface *(2026-12-23 → 2027-03-23, 3 months)*
+**Goal:** Brownfield + Build Kits + Stripe + agent hiring marketplace.
+Public agent economy launch.
+
+Pairs two milestones:
+- **v0.8.0 — Marketplace Foundation** — brownfield project ingestion
+  (RAG over existing repos), Build Kit format + 10 seed kits, Stripe
+  Connect for creators, Jira kanban provider (#241) for enterprise
+  adoption.
+- **v1.0.0 — The Agent Economy** — public marketplace launch, agent
+  hiring + escrow + reputation + dispute resolution, multi-dimensional
+  trust scoring.
+
+### Buffer *(2027-03-23 → 2027-05-23, 2 months)*
+Slip absorption, production hardening, polish. If unused, becomes
+growth/marketing/PMF time before v1.0.0 GA.
+
+---
+
+## Why the Reordering vs the Earlier Playbook
+
+The Playbook (2026-04 triage) deferred MFP, Federation, and Marketplace
+past 12 months in favor of "research-first" milestones. This roadmap
+flips that — **MFP earns its keep when federation lands on top, and
+federation cannot land cleanly without MFP**. The longer Marcus runs
+in production with implicit data shapes, the more expensive MFP
+becomes. Ship the protocol first while the surface area is small.
+
+**Marketplace stays in Sprint 4** because payment infrastructure
+without paying users is a sunk cost. Build Kits + Stripe Connect ship
+only after federation proves a network exists worth monetizing.
+
+**Reliability stays Sprint 1** because nothing compounds if every
+completion test still produces an integration scramble. Trust is the
+foundation everything else stacks on.
 
 ---
 

@@ -81,6 +81,7 @@ class WorkEvidence:
     design_artifacts: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
     project_root: str
+    file_manifest: list[str] = field(default_factory=list)
     collection_time: datetime = field(default_factory=lambda: datetime.utcnow())
 
     def has_source_files(self) -> bool:

@@ -747,12 +747,27 @@ Task Details:
             task_context=task_context,
         )
 
+        # Issue #676: differentiate the two failure modes so the log is
+        # attributable instead of a bare "AI blocker analysis failed:
+        # Expecting value". A transport/LLM error and a malformed (non-JSON)
+        # response are distinct problems; both fall back, but the cause
+        # should be visible. Behavior is unchanged (always falls back).
         try:
             response = await self._call_claude(prompt)
+        except Exception as e:
+            print(f"AI blocker analysis: LLM call failed: {e}", file=sys.stderr)
+            return self._generate_fallback_blocker_analysis(
+                description, severity, agent, task
+            )
+        try:
             result: Dict[str, Any] = json.loads(response)
             return result
-        except Exception as e:
-            print(f"AI blocker analysis failed: {e}", file=sys.stderr)
+        except (json.JSONDecodeError, TypeError) as e:
+            print(
+                f"AI blocker analysis: non-JSON LLM response ({e}); "
+                f"first 200 chars: {(response or '')[:200]!r}",
+                file=sys.stderr,
+            )
             return self._generate_fallback_blocker_analysis(
                 description, severity, agent, task
             )

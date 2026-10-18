@@ -17,6 +17,48 @@ from src.marcus_mcp.coordinator.subtask_assignment import (
 logger = logging.getLogger(__name__)
 
 
+def _build_eligibility_check(
+    agent_id: str, state: Any
+) -> Optional[Callable[[Task, Task], bool]]:
+    """Build the eligibility check the subtask loop applies (issue #737).
+
+    The returned callable evaluates BOTH the subtask and its parent
+    through the shared rules in
+    ``src.marcus_mcp.coordinator.eligibility``, refusing when either
+    refuses, so a verify parent's subtask can never leak to the
+    claim's author. Refusals are logged and recorded by the shared
+    filter; the refused worker itself just sees the next candidate or
+    the ordinary no-task response.
+
+    Parameters
+    ----------
+    agent_id : str
+        The requesting worker's id.
+    state : Any
+        Marcus server state; ``agent_status`` supplies the worker's
+        registered identity.
+
+    Returns
+    -------
+    Optional[Callable[[Task, Task], bool]]
+        The check, or None when the worker has no registration to
+        judge (existing behavior is then kept).
+    """
+    from src.core.models import WorkerStatus
+    from src.marcus_mcp.coordinator.eligibility import filter_eligible_tasks
+
+    agent = getattr(state, "agent_status", {}).get(agent_id)
+    if not isinstance(agent, WorkerStatus):
+        return None
+
+    def _check(subtask: Task, parent_task: Task) -> bool:
+        allowed_sub = filter_eligible_tasks(agent, [subtask], state)
+        allowed_parent = filter_eligible_tasks(agent, [parent_task], state)
+        return bool(allowed_sub) and bool(allowed_parent)
+
+    return _check
+
+
 async def find_optimal_task_with_subtasks(
     agent_id: str,
     state: Any,
@@ -70,6 +112,7 @@ async def find_optimal_task_with_subtasks(
         state.project_tasks,
         state.subtask_manager,
         all_assigned_ids,
+        eligibility_check=_build_eligibility_check(agent_id, state),
     )
 
     if subtask_task:

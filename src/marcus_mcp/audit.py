@@ -13,6 +13,8 @@ from typing import Any, Dict, Optional
 
 import aiofiles
 
+from src.core.paths import marcus_data_dir
+
 
 class AuditLogger:
     """Handles audit logging for Marcus operations."""
@@ -26,7 +28,7 @@ class AuditLogger:
         log_dir : Optional[Path]
             Directory for audit logs. Defaults to data/audit_logs/
         """
-        self.log_dir = log_dir or Path("data/audit_logs")
+        self.log_dir = log_dir or marcus_data_dir() / "audit_logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         # Create daily log file

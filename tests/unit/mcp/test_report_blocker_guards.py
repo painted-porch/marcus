@@ -20,6 +20,24 @@ import pytest
 
 from src.core.models import Task, TaskStatus
 
+
+def _wire_release_lease(lease_manager) -> None:
+    """Make a mocked lease manager honour release_lease().
+
+    Production code now drops leases through
+    ``AssignmentLeaseManager.release_lease`` rather than deleting from
+    ``active_leases`` directly, so the fencing epoch stays behind the
+    same lock every other mutation takes (ADR-0012 D11). A bare
+    ``MagicMock`` would accept the call and leave the dict untouched,
+    which makes these tests assert against a fiction.
+    """
+
+    async def _release(task_id, reason="released"):
+        return lease_manager.active_leases.pop(task_id, None) is not None
+
+    lease_manager.release_lease = AsyncMock(side_effect=_release)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -70,6 +88,7 @@ def _make_state(
     lease.agent_id = lease_holder or agent_id
     state.lease_manager = MagicMock()
     state.lease_manager.active_leases = {task_id: lease} if lease_holder else {}
+    _wire_release_lease(state.lease_manager)
 
     # agent_tasks (in-memory assignment)
     assignment = MagicMock()
@@ -178,7 +197,14 @@ class TestReportBlockerDoneTaskGuard:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_report_blocker_allowed_for_lease_holder(self) -> None:
-        """Legitimate blocker from the actual lease holder must succeed."""
+        """Legitimate blocker from the actual lease holder must succeed.
+
+        Issue #719 changed what "succeed" writes: a ``high`` blocker is
+        terminal and flips the board to BLOCKED (asserted here), while
+        low/medium are advisory and deliberately leave the task with the
+        agent — see ``tests/unit/mcp/test_advisory_blocker.py``. The guard
+        behaviour under test (lease holder is not rejected) is unchanged.
+        """
         from src.marcus_mcp.tools.task import report_blocker
 
         state = _make_state(
@@ -192,7 +218,7 @@ class TestReportBlockerDoneTaskGuard:
             agent_id="agent_holder",
             task_id="task-active",
             blocker_description="Real blocker",
-            severity="medium",
+            severity="high",
             state=state,
             skip_ai_analysis=True,
         )

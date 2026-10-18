@@ -28,6 +28,24 @@ import pytest
 
 from src.core.models import Priority, Task, TaskStatus
 
+
+def _wire_release_lease(lease_manager) -> None:
+    """Make a mocked lease manager honour release_lease().
+
+    Production code now drops leases through
+    ``AssignmentLeaseManager.release_lease`` rather than deleting from
+    ``active_leases`` directly, so the fencing epoch stays behind the
+    same lock every other mutation takes (ADR-0012 D11). A bare
+    ``MagicMock`` would accept the call and leave the dict untouched,
+    which makes these tests assert against a fiction.
+    """
+
+    async def _release(task_id, reason="released"):
+        return lease_manager.active_leases.pop(task_id, None) is not None
+
+    lease_manager.release_lease = AsyncMock(side_effect=_release)
+
+
 pytestmark = pytest.mark.unit
 
 
@@ -78,6 +96,12 @@ def _make_state(task: Task) -> Any:
     lease.agent_id = "agent-1"
     state.lease_manager = MagicMock()
     state.lease_manager.active_leases = {task.id: lease}
+    _wire_release_lease(state.lease_manager)
+    # Issue #667 Fix 1: report_task_progress awaits extend_for_validation
+    # on status=completed before the smoke gate runs. Mock as AsyncMock
+    # so the await resolves cleanly in tests that exercise the completion
+    # path.
+    state.lease_manager.extend_for_validation = AsyncMock(return_value=None)
 
     state.ai_engine = AsyncMock()
     state.ai_engine.analyze_blocker = AsyncMock(return_value="Try X")
@@ -90,7 +114,14 @@ def _make_state(task: Task) -> Any:
 
 
 class TestReportBlockerReleasesCoordination:
-    """``report_blocker`` must release the agent's assignment + lease."""
+    """``report_blocker`` must release the agent's assignment + lease.
+
+    Issue #719: these tests use ``severity="high"`` because the invariant
+    under test is "a terminal handoff releases coordination state".
+    low/medium blockers are advisory — they deliberately keep the task
+    with the agent (see ``tests/unit/mcp/test_advisory_blocker.py``), so
+    the invariant does not apply to them.
+    """
 
     @pytest.mark.asyncio
     async def test_report_blocker_clears_agent_tasks(self) -> None:
@@ -108,7 +139,7 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck on dep",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 
@@ -134,7 +165,7 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck on dep",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 
@@ -160,7 +191,7 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck on dep",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 
@@ -170,7 +201,15 @@ class TestReportBlockerReleasesCoordination:
 
     @pytest.mark.asyncio
     async def test_report_blocker_still_flips_status(self) -> None:
-        """The status update to BLOCKED still happens after coordination release."""
+        """A board write still happens alongside the coordination release.
+
+        The exact status depends on the repair rung — the first give-ups
+        write TODO (requeued for a fresh agent), an exhausted repair budget
+        writes BLOCKED. Both are pinned in
+        ``tests/unit/mcp/test_blocker_repair_requeue.py``; what this test
+        guards is that the board is updated at all, in the same call that
+        releases coordination state.
+        """
         from src.marcus_mcp.tools.task import report_blocker
 
         task = _make_task()
@@ -184,14 +223,20 @@ class TestReportBlockerReleasesCoordination:
                 agent_id="agent-1",
                 task_id=task.id,
                 blocker_description="Stuck",
-                severity="medium",
+                severity="high",
                 state=state,
             )
 
         update_call = state.kanban_client.update_task.call_args
         assert update_call is not None
         update_payload = update_call[0][1]
-        assert update_payload["status"] == TaskStatus.BLOCKED
+        # First give-up requeues for repair (TODO); an exhausted repair
+        # budget writes BLOCKED. Both are pinned in
+        # tests/unit/mcp/test_blocker_repair_requeue.py — what matters here
+        # is that the board write happens in the same call that releases
+        # coordination state.
+        assert update_payload["status"] == TaskStatus.TODO
+        assert update_payload["assigned_to"] is None
 
 
 class TestCompletionReleasesLeaseEvenOnMergeFailure:
@@ -240,7 +285,10 @@ class TestCompletionReleasesLeaseEvenOnMergeFailure:
 
         state.lease_manager = MagicMock()
         state.lease_manager.active_leases = {task.id: MagicMock()}
+        _wire_release_lease(state.lease_manager)
         state.lease_manager.renew_lease = AsyncMock(return_value=None)
+        # Issue #667 Fix 1: report_task_progress awaits this on completion.
+        state.lease_manager.extend_for_validation = AsyncMock(return_value=None)
 
         state.code_analyzer = None
         state.provider = "sqlite"

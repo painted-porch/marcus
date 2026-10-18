@@ -211,10 +211,17 @@ class TestCheckSpecCoverage:
             "weather panel",
             "5-day forecast",
         ]
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=extracted_features,
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=extracted_features,
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -233,10 +240,17 @@ class TestCheckSpecCoverage:
             "weather panel",
             "5-day forecast",
         ]
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=extracted_features,
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=extracted_features,
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -248,10 +262,16 @@ class TestCheckSpecCoverage:
     @pytest.mark.asyncio
     async def test_returns_empty_on_llm_failure(self) -> None:
         """LLM failure → no gap tasks, no crash (non-fatal)."""
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=[],  # empty on LLM failure
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=[],  # empty on LLM failure
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+            ) as mock_confirm,
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -259,14 +279,22 @@ class TestCheckSpecCoverage:
             )
 
         assert gap_tasks == []
+        mock_confirm.assert_not_awaited()  # no features -> nothing to confirm
 
     @pytest.mark.asyncio
     async def test_gap_task_has_correct_labels(self) -> None:
         """Gap tasks are labeled spec_gap so Cato/agents recognize them."""
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=["5-day forecast"],
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -280,10 +308,17 @@ class TestCheckSpecCoverage:
     @pytest.mark.asyncio
     async def test_gap_task_description_mentions_spec_source(self) -> None:
         """Gap task description explains it was found by spec coverage check."""
-        with patch(
-            "src.integrations.spec_coverage.extract_spec_features",
-            new_callable=AsyncMock,
-            return_value=["5-day forecast"],
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["5-day forecast"],
+            ),
         ):
             gap_tasks = await check_spec_coverage(
                 description=NIMBUS_SPEC,
@@ -293,3 +328,185 @@ class TestCheckSpecCoverage:
         assert len(gap_tasks) >= 1
         desc = gap_tasks[0].description.lower()
         assert "spec" in desc or "coverage" in desc or "missing" in desc
+
+
+class TestLlmConfirmUncovered:
+    """Issue #666: the LLM semantic-coverage check that replaces keyword
+    guessing — judges, per feature, whether any task actually delivers it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_features_the_llm_marks_uncovered(self) -> None:
+        """Returns exactly the features the LLM judges no task delivers."""
+        from src.integrations.spec_coverage import _llm_confirm_uncovered
+
+        tasks = [_make_task("Game Engine", "core loop and rendering")]
+        with patch("src.ai.providers.llm_abstraction.LLMAbstraction") as mock_llm:
+            mock_llm.return_value.analyze = AsyncMock(return_value='["game restart"]')
+            out = await _llm_confirm_uncovered(["game restart", "move snake"], tasks)
+        assert out == ["game restart"]
+
+    @pytest.mark.asyncio
+    async def test_filters_out_features_not_in_input(self) -> None:
+        """Guards against the LLM inventing feature strings."""
+        from src.integrations.spec_coverage import _llm_confirm_uncovered
+
+        with patch("src.ai.providers.llm_abstraction.LLMAbstraction") as mock_llm:
+            mock_llm.return_value.analyze = AsyncMock(
+                return_value='["hallucinated", "real one"]'
+            )
+            out = await _llm_confirm_uncovered(["real one"], [_make_task("t")])
+        assert out == ["real one"]
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_unparseable_response(self) -> None:
+        """A non-JSON response yields None so the caller can fall back."""
+        from src.integrations.spec_coverage import _llm_confirm_uncovered
+
+        with patch("src.ai.providers.llm_abstraction.LLMAbstraction") as mock_llm:
+            mock_llm.return_value.analyze = AsyncMock(return_value="not json at all")
+            out = await _llm_confirm_uncovered(["x"], [_make_task("t")])
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_exception(self) -> None:
+        """Any LLM error yields None (non-fatal — caller falls back)."""
+        from src.integrations.spec_coverage import _llm_confirm_uncovered
+
+        with patch("src.ai.providers.llm_abstraction.LLMAbstraction") as mock_llm:
+            mock_llm.return_value.analyze = AsyncMock(side_effect=RuntimeError("boom"))
+            out = await _llm_confirm_uncovered(["x"], [_make_task("t")])
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_task_criteria(self) -> None:
+        """The coverage prompt includes completion/acceptance criteria, so a
+        feature outcome coverage rolled into a task's criteria (#607/#611) is
+        seen as covered — preventing a duplicate-task double-fire with #665.
+        """
+        from src.integrations.spec_coverage import _llm_confirm_uncovered
+
+        task = _make_task("Tech Foundation", "vite project scaffold")
+        task.completion_criteria = [
+            "Implementation must cover: keyboard input handler for arrows"
+        ]
+        captured: dict[str, str] = {}
+
+        async def _fake_analyze(prompt: str, ctx: object, operation: str = "") -> str:
+            captured["prompt"] = prompt
+            return "[]"
+
+        with patch("src.ai.providers.llm_abstraction.LLMAbstraction") as mock_llm:
+            mock_llm.return_value.analyze = AsyncMock(side_effect=_fake_analyze)
+            await _llm_confirm_uncovered(["keyboard input"], [task])
+
+        assert "keyboard input handler for arrows" in captured["prompt"]
+
+
+class TestCheckSpecCoverageSemantic:
+    """Issue #666: check_spec_coverage uses semantic coverage, with the
+    keyword scan retained only as a fallback when the LLM call fails.
+    """
+
+    @pytest.mark.asyncio
+    async def test_synthesizes_gap_the_keyword_scan_would_miss(self) -> None:
+        """The snake-restart regression: 'game restart' is marked covered by
+        the keyword scan (the word 'game' matches a task) yet no task does
+        restart — semantic coverage catches it and synthesizes a task.
+        """
+        tasks = [_make_task("Game Mechanics", "snake movement and growth")]
+        # Prove the keyword scan MISSES it (the false negative behind #666):
+        assert find_uncovered_features(["game restart"], tasks) == []
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["game restart"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["game restart"],
+            ),
+        ):
+            gaps = await check_spec_coverage("snake game with restart", tasks)
+        assert len(gaps) == 1
+        assert gaps[0].name == "Implement Game Restart"
+        assert "spec_gap" in gaps[0].labels
+
+    @pytest.mark.asyncio
+    async def test_no_spurious_task_when_semantically_covered(self) -> None:
+        """The #637 regression: a feature a task DOES deliver is not
+        duplicated, even though the keyword scan would flag it (no shared
+        word with the covering task).
+        """
+        tasks = [
+            _make_task(
+                "Game Presentation and Rendering System",
+                "draws the playfield to an html canvas each frame",
+            )
+        ]
+        # Keyword scan WOULD flag it (false positive -> spurious build):
+        assert find_uncovered_features(["browser playability"], tasks) == [
+            "browser playability"
+        ]
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["browser playability"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            gaps = await check_spec_coverage("playable in a browser", tasks)
+        assert gaps == []
+
+    @pytest.mark.asyncio
+    async def test_domain_agnostic_non_game_gap(self) -> None:
+        """Not game-specific: a SaaS 'password reset' gap is synthesized the
+        same way, proving the logic carries no domain assumptions.
+        """
+        tasks = [_make_task("User Login", "email and password authentication")]
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["password reset"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=["password reset"],
+            ),
+        ):
+            gaps = await check_spec_coverage("saas app with login and reset", tasks)
+        assert len(gaps) == 1
+        assert gaps[0].name == "Implement Password Reset"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_keyword_when_semantic_check_unavailable(
+        self,
+    ) -> None:
+        """When the LLM coverage check errors (returns None), the keyword
+        scan is the fallback so the pipeline stays non-fatal.
+        """
+        tasks = [_make_task("Login", "auth")]
+        with (
+            patch(
+                "src.integrations.spec_coverage.extract_spec_features",
+                new_callable=AsyncMock,
+                return_value=["data export"],
+            ),
+            patch(
+                "src.integrations.spec_coverage._llm_confirm_uncovered",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            gaps = await check_spec_coverage("app with data export", tasks)
+        assert len(gaps) == 1
+        assert gaps[0].name == "Implement Data Export"

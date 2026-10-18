@@ -406,3 +406,64 @@ class TestComputeActiveLayerSignal:
 
         assert signal.desired_agent_count == 0
         assert signal.unclaimed_tasks == 0
+
+    def test_reports_in_flight_tasks_in_active_layer(self) -> None:
+        """in_flight_tasks counts IN_PROGRESS tasks in the active layer (#632).
+
+        The active layer here is ``[a, b, c]``: a (DONE) is in a prior
+        layer; b (TODO) and c (IN_PROGRESS) are at the next level. Of
+        the two unsettled tasks, one is IN_PROGRESS — that is the
+        ``in_flight_tasks`` value the runner needs to compute the
+        spawn gap.
+        """
+        tasks = [
+            _task("a", status=TaskStatus.DONE),
+            _task("b", dependencies=["a"], status=TaskStatus.TODO),
+            _task("c", dependencies=["a"], status=TaskStatus.IN_PROGRESS),
+        ]
+
+        signal = compute_active_layer_signal(tasks)
+
+        assert signal.in_flight_tasks == 1
+        assert signal.unclaimed_tasks == 1
+        assert signal.desired_agent_count == 2
+
+    def test_in_flight_zero_when_no_in_progress_in_active_layer(self) -> None:
+        """in_flight_tasks is 0 when the active layer has no IN_PROGRESS work."""
+        tasks = [_task("a", status=TaskStatus.TODO)]
+
+        signal = compute_active_layer_signal(tasks)
+
+        assert signal.in_flight_tasks == 0
+
+    def test_in_flight_zero_when_all_done(self) -> None:
+        """in_flight_tasks is 0 when every task is settled."""
+        signal = compute_active_layer_signal(
+            [_task("a", status=TaskStatus.DONE)], max_agents=5
+        )
+
+        assert signal.in_flight_tasks == 0
+
+    def test_in_flight_counts_only_active_layer_not_prior_in_progress(self) -> None:
+        """Symmetry with desired/unclaimed: in_flight is scoped to the active layer.
+
+        Construct a graph where the active layer contains IN_PROGRESS
+        work but a prior layer also has IN_PROGRESS (a stuck task from
+        an earlier layer that — under the active-layer cursor — should
+        still pin layer 0 as the active layer). The in_flight count
+        should reflect IN_PROGRESS tasks in the layer the runner is
+        actually spawning agents for.
+        """
+        tasks = [
+            _task("l0_a", status=TaskStatus.DONE),
+            _task("l0_b", status=TaskStatus.IN_PROGRESS),
+            _task("l1_a", dependencies=["l0_a", "l0_b"], status=TaskStatus.TODO),
+        ]
+
+        signal = compute_active_layer_signal(tasks)
+
+        # Active layer is [l0_a, l0_b] (l0_b not settled). l1_a is in
+        # the next layer; not counted here. in_flight == 1 (l0_b).
+        assert signal.desired_agent_count == 2
+        assert signal.in_flight_tasks == 1
+        assert signal.unclaimed_tasks == 0

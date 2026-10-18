@@ -692,6 +692,111 @@ class TestSQLiteKanbanUpdateTask:
         assert updated.status == TaskStatus.TODO
         assert updated.assigned_to is None
 
+    @pytest.mark.asyncio
+    async def test_update_task_source_context_merges_into_existing(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """Codex P1 on PR #660: ``source_context`` updates MUST merge.
+
+        Without merging, an anchoring update like ``{"scaffold_path":
+        "src/core/gameEngine.js"}`` would clobber the ``contract_file``
+        and ``responsibility`` fields the decomposer wrote at task
+        creation. Verify both old and new keys survive after the
+        merge.
+        """
+        data = _sample_task_data()
+        data["source_context"] = {
+            "contract_file": "docs/arch/engine.md",
+            "responsibility": "owns engine contract",
+        }
+        task = await connected_kanban.create_task(data)
+
+        # Anchor the scaffold path — must NOT lose contract_file /
+        # responsibility.
+        updated = await connected_kanban.update_task(
+            task.id,
+            {"source_context": {"scaffold_path": "src/core/gameEngine.js"}},
+        )
+        assert updated is not None
+        assert updated.source_context == {
+            "contract_file": "docs/arch/engine.md",
+            "responsibility": "owns engine contract",
+            "scaffold_path": "src/core/gameEngine.js",
+        }
+
+    @pytest.mark.asyncio
+    async def test_update_task_source_context_new_value_overrides_existing(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """New value for an existing key wins (standard dict merge semantics)."""
+        data = _sample_task_data()
+        data["source_context"] = {"scaffold_path": "src/old/path.js"}
+        task = await connected_kanban.create_task(data)
+
+        updated = await connected_kanban.update_task(
+            task.id,
+            {"source_context": {"scaffold_path": "src/new/path.js"}},
+        )
+        assert updated is not None
+        assert updated.source_context == {"scaffold_path": "src/new/path.js"}
+
+    @pytest.mark.asyncio
+    async def test_update_task_source_context_empty_dict_is_no_op(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """An empty ``source_context`` dict must not erase the existing value.
+
+        Codex catch: ``{"source_context": {}}`` previously fell through
+        the entire elif chain silently. Now it explicitly no-ops on the
+        column so updated_at doesn't churn either.
+        """
+        data = _sample_task_data()
+        data["source_context"] = {"contract_file": "docs/arch.md"}
+        task = await connected_kanban.create_task(data)
+
+        updated = await connected_kanban.update_task(
+            task.id,
+            {"source_context": {}},
+        )
+        assert updated is not None
+        assert updated.source_context == {"contract_file": "docs/arch.md"}
+
+    @pytest.mark.asyncio
+    async def test_update_task_source_context_none_clears_field(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """``source_context = None`` is the explicit "drop everything" signal."""
+        data = _sample_task_data()
+        data["source_context"] = {"contract_file": "docs/arch.md"}
+        task = await connected_kanban.create_task(data)
+
+        updated = await connected_kanban.update_task(
+            task.id,
+            {"source_context": None},
+        )
+        assert updated is not None
+        # The model normalizes a cleared source_context to either
+        # None or an empty dict depending on the deserializer. Either
+        # form is acceptable; what matters is that the prior keys
+        # are gone.
+        assert not updated.source_context
+
+    @pytest.mark.asyncio
+    async def test_update_task_source_context_merges_when_no_prior(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """A task created without source_context can still be anchored later."""
+        data = _sample_task_data()
+        # No source_context at create time.
+        task = await connected_kanban.create_task(data)
+
+        updated = await connected_kanban.update_task(
+            task.id,
+            {"source_context": {"scaffold_path": "src/core/engine.js"}},
+        )
+        assert updated is not None
+        assert updated.source_context == {"scaffold_path": "src/core/engine.js"}
+
 
 # ============================================================
 # Phase 4: Comments + Progress + Blockers + Metrics

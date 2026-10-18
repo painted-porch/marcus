@@ -42,14 +42,24 @@ class SpecCoverageAugmenter:
 
     Satisfies the
     :class:`~src.marcus_mcp.coordinator.graph_augmentation.GraphAugmenter`
-    Protocol.  Stateless — constructed without arguments; pulls the
-    spec text from ``prd_analysis.original_description`` at call time.
+    Protocol.  Pulls the spec text from
+    ``prd_analysis.original_description`` at call time.
 
     Attributes
     ----------
     name : str
         Stable identifier ``"spec_coverage"`` used as the telemetry
         key in the chain's namespaced result dict.
+
+    Parameters
+    ----------
+    complexity_mode : Optional[str]
+        Retained as a no-op for chain-construction compatibility
+        (issue #666).  It formerly short-circuited spec_coverage on
+        ``"prototype"`` runs, but that silenced the safety net and let
+        genuinely-dropped outcomes ship (the snake game with no restart).
+        spec_coverage now runs on every mode; this argument no longer
+        affects behavior and can be removed in a follow-up.
 
     Notes
     -----
@@ -61,13 +71,17 @@ class SpecCoverageAugmenter:
 
     Lifetime expectation
     --------------------
-    Stateless.  Constructed per-call inside
-    ``parse_prd_to_tasks`` / ``decompose_by_contract``.  See the
-    matching note on :class:`OutcomeCoverageAugmenter` — the same
-    tripwire applies if state is ever added.
+    Constructed per-call inside
+    ``parse_prd_to_tasks`` / ``decompose_by_contract`` via
+    :meth:`AdvancedPRDParser._build_augmenter_chain`.  Holds
+    ``complexity_mode`` for the duration of one decomposition; the
+    chain is rebuilt for each project so the state is per-run.
     """
 
     name: str = "spec_coverage"
+
+    def __init__(self, *, complexity_mode: Optional[str] = None) -> None:
+        self._complexity_mode = complexity_mode
 
     async def augment(
         self,
@@ -101,6 +115,12 @@ class SpecCoverageAugmenter:
             ``telemetry`` is empty when no gaps were filled, otherwise
             ``{"spec_gap_count": N, "spec_gap_features": [...names]}``.
         """
+        # Issue #666: spec_coverage runs on EVERY complexity mode. The
+        # former prototype short-circuit silenced the safety net on
+        # prototype runs, so genuinely-dropped outcomes (e.g. the snake
+        # game's restart) were never caught and shipped missing.
+        # ``complexity_mode`` is retained as a no-op for chain-construction
+        # compatibility (see __init__ docstring).
         spec = prd_analysis.original_description or ""
         if not spec:
             return AugmentationResult(augmented_tasks=list(tasks))

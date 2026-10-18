@@ -15,9 +15,11 @@ the component. Epictetus rated Completeness 2.0/5 (D).
 
 Design
 ------
-1. extract_spec_features  — LLM call to pull feature phrases from spec.
-2. find_uncovered_features — keyword match against task names/descriptions.
-3. check_spec_coverage    — orchestrates 1+2 and returns gap Task objects.
+1. extract_spec_features   — LLM call to pull feature phrases from spec.
+2. _llm_confirm_uncovered  — LLM semantic-coverage judgment: which features
+   does no task actually deliver? (issue #666). The ``find_uncovered_features``
+   keyword scan is kept only as a non-fatal fallback when this call fails.
+3. check_spec_coverage     — orchestrates 1+2 and returns gap Task objects.
 
 Gap tasks are labeled ``spec_gap`` so Cato and agents can distinguish them
 from normal decomposed tasks. They are inserted into safe_tasks before
@@ -28,7 +30,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any, List, Optional
 
 from src.core.models import Priority, Task, TaskStatus
 
@@ -164,6 +166,97 @@ def find_uncovered_features(
     return uncovered
 
 
+async def _llm_confirm_uncovered(
+    features: List[str],
+    tasks: List[Task],
+) -> Optional[List[str]]:
+    """Use one LLM call to find spec features that no task actually delivers.
+
+    Keyword matching (:func:`find_uncovered_features`) judges coverage by
+    whether a feature's words appear as substrings in the task text, which
+    is wrong in both directions: a shared generic word ("game") marks
+    "game restart" covered even when no task restarts the game (the #666
+    false negative — the snake game shipped without restart), and a feature
+    with no shared word ("browser playability") is marked uncovered even
+    when a "rendering" task delivers it (the #637 false positive — a
+    spurious build). Because every uncovered feature becomes a full agent
+    build, this judgment must be semantic, not lexical. It is
+    domain-agnostic: it reads whatever tasks exist and asks, per feature,
+    whether any task delivers it.
+
+    Parameters
+    ----------
+    features : List[str]
+        Feature phrases extracted from the spec.
+    tasks : List[Task]
+        Current task list to judge coverage against.
+
+    Returns
+    -------
+    Optional[List[str]]
+        The features no task delivers (a subset of ``features``), or
+        ``None`` on any failure so the caller can fall back to the keyword
+        scan and the pipeline stays non-fatal.
+    """
+    if not features:
+        return []
+
+    from src.ai.providers.llm_abstraction import LLMAbstraction
+
+    llm = LLMAbstraction()
+
+    class _Ctx:
+        max_tokens = 1024
+
+    def _task_line(t: Task) -> str:
+        line = f"- {t.name}: {t.description}"
+        # Include criteria so a feature that outcome coverage already rolled
+        # into a task's completion/acceptance criteria (#607/#611) is seen as
+        # covered here -- prevents a duplicate-task double-fire (#665/#666).
+        criteria = list(getattr(t, "acceptance_criteria", None) or []) + list(
+            getattr(t, "completion_criteria", None) or []
+        )
+        if criteria:
+            line += "\n    delivers: " + "; ".join(str(c) for c in criteria)
+        return line
+
+    task_lines = "\n".join(_task_line(t) for t in tasks)
+    feature_lines = "\n".join(f"- {f}" for f in features)
+    prompt = (
+        "You are reviewing whether a software project's task list covers "
+        "every feature its specification promises.\n\n"
+        "FEATURES (from the spec):\n"
+        f"{feature_lines}\n\n"
+        "TASKS (the planned work):\n"
+        f"{task_lines or '(no tasks)'}\n\n"
+        "For each feature, decide whether at least one task would, when "
+        "completed, actually deliver it. Judge by meaning, not by shared "
+        "words: a task can cover a feature with entirely different wording, "
+        "and merely sharing a word does not mean it delivers the feature. "
+        "Return ONLY a JSON array of the feature strings that NO task "
+        "delivers, copied verbatim from the FEATURES list. Return [] if "
+        'every feature is delivered.\nExample: ["game restart", "export csv"]'
+    )
+
+    try:
+        raw = str(await llm.analyze(prompt, _Ctx(), operation="spec_coverage_confirm"))
+        start = raw.find("[")
+        end = raw.rfind("]") + 1
+        if start == -1 or end == 0:
+            logger.warning("[spec_coverage] coverage LLM response missing JSON array")
+            return None
+        parsed: Any = json.loads(raw[start:end])
+        if not isinstance(parsed, list):
+            return None
+        # Only keep features that were actually in the input — guards
+        # against the model inventing or paraphrasing strings.
+        feature_set = set(features)
+        return [str(f) for f in parsed if str(f) in feature_set]
+    except Exception as exc:
+        logger.warning(f"[spec_coverage] _llm_confirm_uncovered failed: {exc}")
+        return None
+
+
 async def check_spec_coverage(
     description: str,
     tasks: List[Task],
@@ -203,7 +296,17 @@ async def check_spec_coverage(
             )
             return []
 
-        uncovered = find_uncovered_features(features, tasks)
+        uncovered = await _llm_confirm_uncovered(features, tasks)
+        if uncovered is None:
+            # LLM coverage check unavailable — fall back to the keyword scan
+            # so the pipeline stays non-fatal (less precise, but a missing
+            # safety net is worse than a coarse one).
+            logger.warning(
+                "[spec_coverage] LLM coverage check unavailable; "
+                "falling back to keyword scan"
+            )
+            uncovered = find_uncovered_features(features, tasks)
+
         if not uncovered:
             logger.info(
                 f"[spec_coverage] All {len(features)} spec features have coverage"

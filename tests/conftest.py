@@ -10,18 +10,119 @@ This configuration file is automatically loaded by pytest and provides shared
 resources for all tests in the suite.
 """
 
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Dict
+from pathlib import Path
+from typing import Any, AsyncGenerator, Dict, Generator
 
 import pytest
+
+# Marcus data isolation (issue #724) — must happen at IMPORT time, not in a
+# fixture: tests/unit/conftest.py imports MarcusServer during collection,
+# which constructs module-level singletons (e.g. cost_tracking's
+# token_tracker) that resolve their data paths immediately. A session
+# fixture runs too late for those; by then the singleton is bound. Codex P1
+# on PR #725. The session fixture below still owns per-session bookkeeping.
+_MARCUS_TEST_DATA_DIR = tempfile.mkdtemp(prefix="marcus_test_data_")
+os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
+atexit.register(shutil.rmtree, _MARCUS_TEST_DATA_DIR, True)
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "src"))
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import ClientSession, StdioServerParameters  # noqa: E402
+from mcp.client.stdio import stdio_client  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Marcus data-directory isolation (issue #724).
+#
+# On 2026-08-09, pytest runs destroyed six live project boards: tests
+# construct real Marcus components (six files build a real MarcusServer),
+# and their data paths default to the cwd-relative ./data — the PRODUCTION
+# data directory when pytest runs from the repo root. Fixture junk was
+# written into the live kanban.db and, in one run, every project created
+# after 2026-05-14 was deleted, unrecoverably (no backup existed).
+#
+# This autouse, session-scoped fixture points MARCUS_DATA_DIR at a pytest
+# temp directory before any test runs, so every default-path component
+# (SQLiteKanban, AuditLogger, TokenTracker, SubtaskManager, assignment
+# dirs) writes there. src/core/paths.py additionally REFUSES to resolve
+# the production default under pytest, so bypassing this fixture fails
+# loudly instead of touching real data.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _block_external_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail unit tests that reach the network instead of mocking it.
+
+    ``tests/unit/integrations/test_spec_coverage.py`` shipped five "unit"
+    tests that called the live OpenAI API: they mocked one LLM boundary
+    (``extract_spec_features``) but not the second
+    (``_llm_confirm_uncovered``). The suite was therefore nondeterministic
+    (the model's coverage verdict varies run to run — ~2 failures in 6),
+    spent real money on every run, and violated the project's own rule
+    that unit tests mock ALL external dependencies.
+
+    Scope is determined by PATH as well as marker (Codex P1 on PR #726):
+    136 of 293 files under ``tests/unit`` carry no ``@pytest.mark.unit``,
+    and the full-suite workflow runs plain ``pytest`` (defaulting to
+    ``testpaths = tests/unit``) with live ``OPENAI_API_KEY`` /
+    ``CLAUDE_API_KEY`` / Planka credentials in the environment — so a
+    marker-only guard left the majority of unit tests able to reach a
+    paid service in CI.
+
+    Loopback stays open so local-socket fixtures keep working; anything
+    else raises with a pointer to the boundary that needs mocking.
+    """
+    node_path = Path(str(request.node.fspath)).as_posix()
+    is_unit = (
+        request.node.get_closest_marker("unit") is not None
+        or "/tests/unit/" in node_path
+    )
+    if not is_unit:
+        return
+
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def _guarded_connect(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if isinstance(host, str) and host not in {
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        }:
+            raise RuntimeError(
+                f"Unit test attempted a network connection to {host!r}. "
+                "Unit tests must mock ALL external dependencies — patch the "
+                "client/helper that makes this call (see the spec_coverage "
+                "LLM boundaries for a worked example)."
+            )
+        return real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_marcus_data() -> Generator[None, None, None]:
+    """Keep MARCUS_DATA_DIR pinned to the import-time temp directory.
+
+    The real isolation happens at module import above (it must — see the
+    comment there). This fixture guards against a test deleting or
+    rewriting the variable and leaving the rest of the session exposed.
+    """
+    os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
+    yield
+    os.environ["MARCUS_DATA_DIR"] = _MARCUS_TEST_DATA_DIR
+
 
 # Import domain-specific fixtures
 pytest_plugins = [
@@ -80,6 +181,27 @@ def _disable_outcome_coverage_by_default(
     pipeline runs.
     """
     monkeypatch.setenv("MARCUS_OUTCOME_COVERAGE", "false")
+
+
+@pytest.fixture(autouse=True)
+def _allow_mlflow_file_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Permit MLflow's filesystem tracking backend (``./mlruns``) in tests.
+
+    Newer MLflow raises ``MlflowException`` from ``mlflow.set_experiment``
+    when the resolved tracking backend is the filesystem store, unless
+    ``MLFLOW_ALLOW_FILE_STORE=true`` is set — the file store is in
+    maintenance mode and now opt-in. Several tests construct real
+    ``MarcusExperiment`` / ``LiveExperimentMonitor`` objects (e.g.
+    ``tests/unit/marcus_mcp/test_experiment_termination.py``) whose
+    ``__init__`` calls ``mlflow.set_experiment("./mlruns")``, so without
+    this opt-in the suite fails purely on the installed MLflow version.
+
+    This is a test-environment shim, not the long-term answer — the file
+    store is being removed and Marcus should migrate experiment tracking
+    to a database backend (sqlite). That migration is tracked separately;
+    until then this keeps the suite reproducible across MLflow versions.
+    """
+    monkeypatch.setenv("MLFLOW_ALLOW_FILE_STORE", "true")
 
 
 @pytest.fixture

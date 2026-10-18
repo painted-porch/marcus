@@ -15,30 +15,49 @@ from typing import Optional, Tuple
 
 def compute_spawn_count(
     desired_agent_count: int,
-    live_agents: int,
+    in_flight_tasks: int,
     unclaimed_tasks: int,
 ) -> int:
     """
     Decide how many ephemeral agents to spawn this control cycle.
 
-    The formula is ``max(0, min(desired_agent_count - live_agents,
+    The formula is ``max(0, min(desired_agent_count - in_flight_tasks,
     unclaimed_tasks))``:
 
-    - ``desired_agent_count - live_agents`` is the staffing gap.
+    - ``desired_agent_count - in_flight_tasks`` is the staffing gap:
+      how many MORE active claimers the active layer needs.
     - The ``unclaimed_tasks`` cap prevents spawning an agent for which no
       claimable task exists — such an agent would receive "no task" and
       idle, the cost Fix 3 removes.
     - The ``max(0, ...)`` clamp handles a layer boundary: ``desired``
-      drops as the graph narrows while a just-finished agent is still
-      being reaped, so the gap can be momentarily negative.
+      drops as the graph narrows while a just-finished assignment is
+      still being reaped, so the gap can be momentarily negative.
+
+    Why ``in_flight_tasks`` instead of ``live_agents`` (issue #632)
+    --------------------------------------------------------------
+    Pre-#632 this formula used a runner-side count of alive tmux panes
+    as the staffing variable. That count answers the question "how many
+    processes exist?" which is the same as "how many agents will claim
+    the next unclaimed task?" only under the old long-lived agent model.
+    Under the ephemeral lifecycle (PR #600) an agent does EXACTLY ONE
+    task and exits — so a pane that's still alive after the agent
+    finished its task will never claim more work. Counting it as
+    "staffing" stalls the run for any hangover task.
+
+    The right question is "how many tasks have an agent actively working
+    on them?" — which Marcus answers directly via the IN_PROGRESS count
+    in the active layer. The runner reads it from
+    ``get_desired_agent_count``'s response.
 
     Parameters
     ----------
     desired_agent_count : int
         Active-layer width capped at ``max_agents`` (from Marcus's
         ``get_desired_agent_count``).
-    live_agents : int
-        Agents the runner currently has alive.
+    in_flight_tasks : int
+        IN_PROGRESS tasks in the active layer (from
+        ``get_desired_agent_count``). Replaces the pre-#632 ``live_agents``
+        pane count.
     unclaimed_tasks : int
         TODO tasks in the active layer (from ``get_desired_agent_count``).
 
@@ -47,7 +66,7 @@ def compute_spawn_count(
     int
         Number of ephemeral agents to spawn now; never negative.
     """
-    gap = desired_agent_count - live_agents
+    gap = desired_agent_count - in_flight_tasks
     return max(0, min(gap, unclaimed_tasks))
 
 
@@ -142,3 +161,116 @@ class StallWatchdog:
             self._last = current
             self._unchanged = 0
         return self._unchanged >= self._stall_polls
+
+
+class SpawnThrashDetector:
+    """
+    Detect spawn-thrash: agents keep spawning but no task ever completes.
+
+    The :class:`StallWatchdog` only fires when *everything* stops changing
+    (``completed``, ``in_progress``, and ``blocked`` all flat) for many
+    minutes — a coarse signal designed to catch wedged runs. It does not
+    catch a much more expensive failure mode where the runner keeps
+    spawning ephemeral agents that immediately exit because no task is
+    actually claimable (every unclaimed task is gated by a BLOCKED
+    dependency, or claim races leave the agent with nothing to do). On
+    paper the task counts are "changing" — ``in_progress`` flickers up
+    and back down each cycle — so the stall watchdog never fires. In
+    practice the run burns one ephemeral agent worth of cost per poll
+    (≈ $0.50–$1.00) until the 20-minute stall timeout finally bites,
+    by which point 30–50 agents have been spawned for nothing.
+
+    The thrash signature is much sharper than "everything is flat":
+
+    - ``to_spawn > 0`` (the runner is actively spawning this poll)
+    - no *real progress* since the previous poll, where progress is a
+      monotonic tally of the signals an agent emits while genuinely
+      working a task (completions plus logged work — context requests,
+      artifacts, decisions, blockers). See :meth:`observe`.
+
+    Each poll the runner reports both numbers to :meth:`observe`. Each
+    poll matching the signature increments an internal counter; any poll
+    that shows real progress — or any poll where the runner spawned
+    nothing — resets it. After ``thrash_polls`` matching polls in a row
+    the detector reports thrash and the runner tears the experiment down.
+
+    Why a separate detector instead of tightening :class:`StallWatchdog`
+    ------------------------------------------------------------------
+    StallWatchdog watches a different question: "has the run stopped
+    making any kind of progress?" That has to be a slow signal because
+    a long-running task can leave the tuple flat for minutes on
+    purpose. Spawn-thrash is the opposite — the runner is *not* idle,
+    it is actively burning money on doomed agents — and can be detected
+    quickly without the false-positive risk that would come from
+    speeding up StallWatchdog.
+
+    Parameters
+    ----------
+    thrash_polls : int
+        Consecutive idle-spawn polls (to_spawn > 0 AND completed
+        unchanged) that constitute a thrash. ``0`` disables the
+        detector entirely.
+    """
+
+    def __init__(self, thrash_polls: int) -> None:
+        self._thrash_polls = thrash_polls
+        self._last_activity: Optional[int] = None
+        self._idle_spawn_polls = 0
+
+    def observe(self, activity: int, to_spawn: int) -> bool:
+        """
+        Record one poll and report whether the run is spawn-thrashing.
+
+        Parameters
+        ----------
+        activity : int
+            A monotonic, cumulative "real progress" counter the caller
+            assembles from the signals an agent emits while actually
+            working a task — completed tasks plus logged work
+            (``get_task_context`` requests, ``log_artifact`` /
+            ``log_decision`` calls, ``report_blocker`` calls). Any
+            increase since the previous poll proves an agent is making
+            forward progress, so the thrash counter resets.
+
+            Why not ``in_progress``: that count *flickers* (0→1→0) during
+            genuine thrash — an agent claims a task, fails to make
+            progress, exits, the lease is recovered — so resetting on it
+            would mask the very failure this detector exists to catch.
+            The work-output counters are cumulative and only ever rise:
+            they move on real work and stay flat on claim-and-exit churn.
+        to_spawn : int
+            Number of ephemeral agents the runner is spawning this
+            poll (the output of :func:`compute_spawn_count`).
+
+        Returns
+        -------
+        bool
+            True once ``thrash_polls`` consecutive polls have spawned
+            agents without any real progress; always False when the
+            detector is disabled.
+        """
+        if self._thrash_polls <= 0:
+            return False
+
+        # Initialize baseline on the first observation. The first poll
+        # cannot itself be a thrash — we need at least one prior poll
+        # to compare ``activity`` against — so it only sets the baseline.
+        if self._last_activity is None:
+            self._last_activity = activity
+            return False
+
+        if activity > self._last_activity:
+            # Real forward progress — reset the counter.
+            self._last_activity = activity
+            self._idle_spawn_polls = 0
+            return False
+
+        if to_spawn > 0:
+            # No progress AND we spawned this poll — thrash candidate.
+            self._idle_spawn_polls += 1
+        # If to_spawn == 0 we are not burning money this poll; hold
+        # the counter where it is rather than incrementing, so a brief
+        # quiescent period during a slow task does not falsely trip
+        # the detector — but also does not reset it, because the
+        # thrash may resume next poll.
+        return self._idle_spawn_polls >= self._thrash_polls

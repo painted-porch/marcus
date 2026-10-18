@@ -574,6 +574,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             mock_gen.return_value = mock_design_content
@@ -659,6 +660,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             mock_gen.return_value = mock_design_content
@@ -742,6 +744,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             mock_gen.side_effect = RuntimeError("LLM timeout")
@@ -781,6 +784,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             mock_gen.return_value = {}
@@ -828,6 +832,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ) as mock_scaffold,
         ):
             mock_gen.return_value = mock_design_content
@@ -894,6 +899,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ) as mock_scaffold,
         ):
             mock_gen.return_value = mock_design_content
@@ -953,6 +959,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             mock_gen.return_value = mock_design_content
@@ -1019,6 +1026,7 @@ class TestRunDesignPhaseHandoff:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             mock_gen.return_value = mock_design_content
@@ -1164,6 +1172,7 @@ class TestRunDesignPhasePreGeneratedContent:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             await _run_design_phase(
@@ -1218,6 +1227,7 @@ class TestRunDesignPhasePreGeneratedContent:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             mock_log_artifact.return_value = {
@@ -1279,6 +1289,7 @@ class TestRunDesignPhasePreGeneratedContent:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             await _run_design_phase(
@@ -1375,6 +1386,7 @@ class TestRunDesignPhaseCostAttribution:
                 patch(
                     "src.integrations.nlp_tools._generate_project_scaffold",
                     new_callable=AsyncMock,
+                    return_value=(True, {}),
                 ),
             ):
                 await _run_design_phase(
@@ -1423,6 +1435,7 @@ class TestRunDesignPhaseCostAttribution:
             patch(
                 "src.integrations.nlp_tools._generate_project_scaffold",
                 new_callable=AsyncMock,
+                return_value=(True, {}),
             ),
         ):
             # Should not raise — the isinstance guard prevents the
@@ -1509,6 +1522,7 @@ class TestRunDesignPhaseCostAttribution:
                 patch(
                     "src.integrations.nlp_tools._generate_project_scaffold",
                     new_callable=AsyncMock,
+                    return_value=(True, {}),
                 ),
             ):
                 await _run_design_phase(

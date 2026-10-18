@@ -292,6 +292,28 @@ async def log_artifact(
 
         state.task_artifacts[task_id].append(artifact_entry)
 
+        # v0.3.8.post1: invalidate the foundation-contract cache when an
+        # artifact is logged to a foundation task. Without this, agents
+        # would see a stale (up to TTL-seconds) foundation contract that
+        # is missing the just-logged artifact.
+        try:
+            task = next(
+                (t for t in (state.project_tasks or []) if t.id == task_id),
+                None,
+            )
+            if (
+                task is not None
+                and getattr(task, "source_type", None) == "pre_fork_synthesis"
+            ):
+                from src.marcus_mcp.tools.context import (
+                    invalidate_foundation_contract_cache,
+                )
+
+                pid = getattr(state, "current_project_id", None)
+                invalidate_foundation_contract_cache(str(pid) if pid else None)
+        except Exception:  # noqa: BLE001 - never break log_artifact on cache miss
+            pass
+
         # Add a comment to the task if kanban is available
         if state.kanban_client and description:
             try:

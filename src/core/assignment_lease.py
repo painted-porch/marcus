@@ -82,6 +82,20 @@ class AssignmentLease:
     # lease. Bounded by ``MAX_MERGE_CONFLICT_EXTENSIONS`` so a stuck
     # agent cannot hold the lease forever.
     merge_conflict_extensions: int = 0
+    # ADR-0012 D11 fencing token. Monotonically increasing per task:
+    # every claim of a card gets a strictly higher epoch than any
+    # previous claim, and the agent carries it on every report. A
+    # report bearing a stale epoch is never applied as a completion.
+    #
+    # Marcus is deliberately blind to the OS process (the session model
+    # spawns nothing), so it can take the *job* away — the lease — but
+    # not the *life* away. Ownership must therefore be decided by a
+    # token both sides carry rather than by an assumption of death.
+    #
+    # ``0`` means "no epoch" and never compares equal to a real claim,
+    # so reports from un-migrated agents and leases rehydrated from
+    # pre-migration assignment records fail the fence closed.
+    lease_epoch: int = 0
 
     @property
     def median_update_interval(self) -> Optional[float]:
@@ -220,6 +234,7 @@ class AssignmentLeaseManager:
         enable_adaptive_leases: bool = True,
         task_list: Optional[List[Task]] = None,
         silence_multiplier: float = 5.0,
+        max_silent_recoveries: int = 3,
     ):
         """
         Initialize the lease manager.
@@ -254,6 +269,14 @@ class AssignmentLeaseManager:
                 Enable smart lease duration adjustments.
             task_list
                 Optional reference to project tasks for recovery info updates.
+            max_silent_recoveries
+                Circuit breaker (issue #667 Fix 3a): number of CONSECUTIVE
+                silent recoveries (lease expired with zero progress updates,
+                ``renewal_count == 0``) after which the task is marked
+                BLOCKED instead of returned to TODO. Stops the
+                reclaim/re-assign runaway loop regardless of who supplies
+                agents. A recovery where the agent reported progress resets
+                the streak.
         """
         self.kanban_client = kanban_client
         self.assignment_persistence = assignment_persistence
@@ -282,9 +305,27 @@ class AssignmentLeaseManager:
         self.stuck_task_threshold_renewals = stuck_task_threshold_renewals
         self.enable_adaptive_leases = enable_adaptive_leases
         self.silence_multiplier = silence_multiplier
+        self.max_silent_recoveries = max_silent_recoveries
+
+        # Circuit breaker state (issue #667 Fix 3a): consecutive SILENT
+        # recovery count per task. In-memory by design — the observed
+        # runaway (81 registrations over 3+ hours) happened inside one
+        # server process. Restart-durable counters ride with the
+        # session-model registration-persistence work (epic #706).
+        self._silent_recovery_streaks: Dict[str, int] = {}
 
         # Active leases tracked in memory
         self.active_leases: Dict[str, AssignmentLease] = {}
+
+        # ADR-0012 D11: highest ``lease_epoch`` ever issued per task.
+        # Deliberately SEPARATE from ``active_leases``, which holds only
+        # live leases — every release deletes the entry. An epoch derived
+        # from that dict would restart at 1 on the next claim, handing a
+        # displaced session an epoch that compares equal to the current
+        # holder's and defeating the fence precisely when it is needed.
+        # Seeded from persistence on rehydration so the sequence also
+        # survives a restart.
+        self._task_epochs: Dict[str, int] = {}
 
         # Observability counters — every increment indicates a latent
         # coordination bug. Surfaced via logs at WARNING level and
@@ -322,7 +363,10 @@ class AssignmentLeaseManager:
         self.task_list = task_list
 
     async def create_lease(
-        self, task_id: str, agent_id: str, task: Optional[Task] = None
+        self,
+        task_id: str,
+        agent_id: str,
+        task: Optional[Task] = None,
     ) -> AssignmentLease:
         """
         Create a new assignment lease.
@@ -383,6 +427,38 @@ class AssignmentLeaseManager:
 
             initial_duration = timedelta(hours=base_hours)
 
+            # ADR-0012 D11: issue the next fencing token for this card.
+            # Monotonic across release and across restart, so a session
+            # that was displaced can never present an epoch matching the
+            # current holder's.
+            #
+            # EXCEPT when the same agent already holds this task. That is
+            # a continuation, not a new claim, and rotating the epoch
+            # under a live holder is silently fatal: the agent is told
+            # its epoch exactly once (by request_next_task), so it keeps
+            # sending the old value and is fenced on its own completion.
+            # The window is real — report_task_progress re-grants a lease
+            # whose grace has elapsed but which the monitor has not yet
+            # recovered. Same rule the renewal path follows: "the same
+            # agent continuing the same claim" keeps its token.
+            existing = self.active_leases.get(task_id)
+            if existing is not None and existing.agent_id == agent_id:
+                # The same agent already holds this card: a continuation,
+                # not a new claim. Its token is unchanged.
+                epoch = existing.lease_epoch
+            else:
+                # Every other grant ADVANCES the sequence. A token is
+                # never reissued — that is the property that would make
+                # it a fencing token, and the one an earlier attempt
+                # broke by "preserving" an epoch for a caller that merely
+                # presented it.
+
+                epoch = self._task_epochs.get(task_id, 0) + 1
+                self._task_epochs[task_id] = epoch
+                # Persist to the task-keyed store, which survives the
+                # assignment-row removal that recovery performs.
+                await self.assignment_persistence.record_task_epoch(task_id, epoch)
+
             lease = AssignmentLease(
                 task_id=task_id,
                 agent_id=agent_id,
@@ -390,6 +466,7 @@ class AssignmentLeaseManager:
                 lease_expires=now + initial_duration,
                 last_renewed=now,
                 estimated_hours=task.estimated_hours if task else base_hours,
+                lease_epoch=epoch,
             )
 
             # Store lease
@@ -418,7 +495,7 @@ class AssignmentLeaseManager:
             return lease
 
     async def renew_lease(
-        self, task_id: str, progress: int, message: str = ""
+        self, task_id: str, progress: int, message: str = "", *, agent_id: str
     ) -> Optional[AssignmentLease]:
         """
         Renew an existing lease based on progress report.
@@ -434,10 +511,22 @@ class AssignmentLeaseManager:
                 Current progress percentage.
             message
                 Progress message.
+            agent_id
+                ID of the agent reporting. Must match the lease holder;
+                a mismatch is refused without mutating the lease.
+
+                Keyword-only and required (ADR-0012 D11 amendment). This
+                method previously looked the lease up by ``task_id`` alone
+                and never compared the caller, so any agent's progress
+                report overwrote the real holder's progress and reset its
+                expiry. Keyword-only means pre-migration positional calls
+                raise TypeError rather than silently binding the progress
+                integer to the agent parameter.
 
         Returns
         -------
-            Renewed lease or None if not found/expired
+            Renewed lease, or None if not found, expired, or the caller
+            does not hold the lease.
         """
         async with self.lease_lock:
             lease = self.active_leases.get(task_id)
@@ -445,7 +534,39 @@ class AssignmentLeaseManager:
                 logger.warning(f"No active lease found for task {task_id}")
                 return None
 
-            if lease.is_expired:
+            # ADR-0012 D11 amendment: refuse renewals from non-holders.
+            # Returning before any mutation keeps the refusal total —
+            # including the late-progress capture below, which would
+            # otherwise let a non-holder rewrite the recovery snapshot.
+            if lease.agent_id != agent_id:
+                logger.warning(
+                    f"Refusing lease renewal for task {task_id}: agent "
+                    f"{agent_id} is not the holder ({lease.agent_id}). "
+                    f"This is a displaced session reporting on a card it "
+                    f"no longer owns (ADR-0012 D11)."
+                )
+                return None
+
+            if lease.is_expired and self._within_grace(lease):
+                # ADR-0012 D11: the holder reporting inside the grace
+                # period is not a stale agent. The lease lapsed, but
+                # recovery has not fired and nobody else has claimed —
+                # grace is precisely the window in which Marcus has not
+                # yet given up on this agent. Let it renew.
+                #
+                # Refusing here dropped the caller into
+                # report_task_progress's re-grant branch, which calls
+                # create_lease and mints a NEW epoch for the same agent.
+                # The agent is only ever told its epoch once, by
+                # request_next_task, so it kept sending the old value and
+                # was fenced on its own completion — punishing exactly
+                # the agents that follow the protocol. Fixing the renewal
+                # means the re-grant never fires for the holder at all.
+                logger.info(
+                    f"Renewing lapsed lease for task {task_id} held by "
+                    f"{agent_id}: still within grace, not yet recovered."
+                )
+            elif lease.is_expired:
                 # Capture the progress value before giving up on the
                 # renewal. The lease itself cannot be renewed — that
                 # decision belongs to the monitor — but
@@ -543,54 +664,374 @@ class AssignmentLeaseManager:
 
             return lease
 
-    async def touch_lease(self, agent_id: str) -> bool:
-        """
-        Extend an agent's lease without changing progress.
+    async def extend_for_validation(
+        self, task_id: str, window_seconds: int = 600
+    ) -> Optional[AssignmentLease]:
+        """Extend a lease by a validation window after the agent reports completion.
 
-        Called on any MCP tool activity to prove the agent is alive.
-        This is a lightweight alternative to renew_lease that doesn't
-        require progress data or update cadence tracking.
+        When an agent reports ``status=completed``, Marcus's smoke
+        gate runs (install, build, run app, hit endpoints, contract
+        verifications) and may reject the completion. If rejected,
+        the agent is expected to remediate and re-report. The total
+        validation + remediation cycle routinely exceeds the
+        progressive-timeout phase-4 ceiling of 7m30s.
+
+        Before this method existed, ``report_task_progress`` skipped
+        lease renewal entirely on ``status=completed`` (see
+        ``src/marcus_mcp/tools/task.py``), so the post-completion
+        cycle ran under an expiring lease. That caused
+        ``agent_unicorn_1_11`` on the snake_game project to lose
+        its lease mid-validation, have its late completion rejected
+        as stale (Issue #343), and have its verification artifacts
+        discarded. See issue #667 Fix 1.
+
+        Semantics:
+
+        - The lease's ``lease_expires`` is set to
+          ``now + window_seconds``. Anchored on now, NOT extended on
+          top of any prior expiry — multiple completion reports
+          don't stack into hours of lease.
+        - ``progress_percentage`` is preserved (not reset to renewal
+          curve). Otherwise the next ``touch_lease`` would re-enter
+          Phase 1's short window and the validation coverage would
+          collapse.
+        - Returns ``None`` if the lease is missing or already expired,
+          mirroring ``renew_lease``. Late completions on expired
+          leases are handled by Fix 2's transactional-accept path.
+
+        Parameters
+        ----------
+        task_id : str
+            ID of the task whose lease to extend.
+        window_seconds : int, optional
+            Length of the validation window in seconds. Default 600
+            (10 minutes). Configurable per task type via the caller.
+
+        Returns
+        -------
+        Optional[AssignmentLease]
+            The extended lease, or None if no active lease or already
+            expired.
+        """
+        async with self.lease_lock:
+            lease = self.active_leases.get(task_id)
+            if not lease:
+                logger.warning(
+                    f"No active lease found for task {task_id} on "
+                    f"validation-window extension request"
+                )
+                return None
+
+            if lease.is_expired:
+                logger.warning(
+                    f"Cannot extend expired lease for task {task_id} "
+                    f"into validation window (Fix 2 transactional "
+                    f"late-accept path may still recover this work)"
+                )
+                return None
+
+            now = datetime.now(timezone.utc)
+            lease.last_renewed = now
+            lease.lease_expires = now + timedelta(seconds=window_seconds)
+            # ``progress_percentage`` deliberately NOT touched —
+            # completion was already reported at 100% and the next
+            # ``touch_lease`` should continue from phase 4, not
+            # restart from phase 1.
+            lease.update_timestamps.append(now)
+
+            await self._persist_lease(lease)
+
+            logger.info(
+                f"Extended lease for task {task_id} by validation window "
+                f"({window_seconds}s, expires: "
+                f"{lease.lease_expires.isoformat()})"
+            )
+
+            self.lease_history.append(
+                {
+                    "event": "lease_extended_for_validation",
+                    "task_id": task_id,
+                    "timestamp": now.isoformat(),
+                    "window_seconds": window_seconds,
+                    "new_expiry": lease.lease_expires.isoformat(),
+                }
+            )
+
+            return lease
+
+    async def touch_lease(self, agent_id: str, task_id: Optional[str] = None) -> bool:
+        """
+        Extend an agent's lease(s) without changing progress.
+
+        Called on any MCP tool activity to prove the agent is alive — this
+        is the D3 liveness heartbeat, and the highest-frequency lease
+        mutation in the codebase.
+
+        An agent normally holds exactly one task, but the
+        one-task-per-agent guard in ``request_next_task`` is *skipped*
+        when the agent has no registration entry — the post-restart state
+        described by ADR-0012 obligation O1, since ``agent_status`` is
+        never rehydrated. In that state the previous implementation
+        extended an arbitrary "first match" and let the agent's other
+        lease expire underneath a demonstrably live agent. Every lease the
+        agent actually holds is now extended, so the heartbeat is
+        deterministic regardless of how many it holds.
 
         Parameters
         ----------
         agent_id : str
-            ID of the agent whose lease to extend.
+            ID of the agent whose lease(s) to extend.
+        task_id : Optional[str]
+            When supplied, only the lease on this task is extended, and
+            only if ``agent_id`` holds it. When omitted, every lease held
+            by the agent is extended.
 
         Returns
         -------
         bool
-            True if a lease was touched, False if no active lease found.
+            True if at least one lease was touched, False otherwise.
+        """
+        advanced: List[AssignmentLease] = []
+        touched_any = False
+
+        async with self.lease_lock:
+            if task_id is not None:
+                scoped = self.active_leases.get(task_id)
+                # Ownership check: naming a task you do not hold must not
+                # extend it.
+                candidates = (
+                    [scoped]
+                    if scoped is not None and scoped.agent_id == agent_id
+                    else []
+                )
+            else:
+                candidates = [
+                    active_lease
+                    for active_lease in self.active_leases.values()
+                    if active_lease.agent_id == agent_id
+                ]
+
+            now = datetime.now(timezone.utc)
+
+            for lease in candidates:
+                if lease.is_expired:
+                    continue
+
+                # Extend by the current phase timeout
+                lease_seconds, _ = self.calculate_adaptive_timeout(
+                    progress=lease.progress_percentage,
+                    update_count=max(lease.renewal_count, 1),
+                    has_recent_activity=True,
+                )
+                lease.last_renewed = now
+                # A heartbeat proves liveness; it must never SHORTEN the
+                # lease. ``calculate_adaptive_timeout`` returns the
+                # progressive-timeout window (minutes), while a lease
+                # created in conservative mode (``default_lease_hours >=
+                # 1.0`` — what the shipped example configs set) runs for
+                # hours. Assigning unconditionally meant every MCP call an
+                # agent made cut its own multi-hour lease down to the next
+                # few minutes.
+                extended_to = now + timedelta(seconds=lease_seconds)
+                if extended_to > lease.lease_expires:
+                    lease.lease_expires = extended_to
+                    advanced.append(lease)
+
+                # Update timestamp for cadence tracking
+                lease.update_timestamps.append(now)
+                touched_any = True
+
+                logger.debug(
+                    f"Touched lease for agent {agent_id} "
+                    f"(task {lease.task_id}, "
+                    f"expires: {lease.lease_expires.isoformat()})"
+                )
+
+        # Persist only the leases whose heartbeat actually bought more
+        # time. Otherwise a restart inside the extended window would
+        # restore the older expiry and recover work from an agent whose
+        # heartbeat had successfully extended its lease.
+        #
+        # Gated on an actual advance because ``touch_lease`` fires on
+        # every MCP call carrying an agent_id and persisting rewrites the
+        # whole assignments file. When the expiry did not move there is
+        # nothing a restart could lose. Written outside the lock, as
+        # ``_try_extend_for_merge_conflict`` does.
+        for lease in advanced:
+            await self._persist_lease(lease)
+
+        return touched_any
+
+    async def release_lease(self, task_id: str, reason: str = "released") -> bool:
+        """
+        Release a lease, preserving its epoch for future fencing.
+
+        This is the single supported way to drop a lease. Four call sites
+        outside this module currently do ``del active_leases[task_id]``
+        directly, bypassing ``lease_lock`` — which every mutation inside
+        the manager takes. Routing releases through here keeps the
+        fencing token (ADR-0012 D11) as reliable as the lock that
+        protects it, rather than as reliable as the least careful caller.
+
+        The task's epoch high-water mark in ``_task_epochs`` is
+        deliberately *not* cleared: the next claim of this card must
+        receive a strictly higher epoch so a session displaced by this
+        release can never present a matching one.
+
+        Parameters
+        ----------
+        task_id : str
+            The task whose lease should be released.
+        reason : str
+            Short label recorded in lease history (e.g. "lease_expired",
+            "completed", "unassigned").
+
+        Returns
+        -------
+        bool
+            True if a lease was released, False if none was held.
         """
         async with self.lease_lock:
-            # Find lease by agent_id
-            lease = None
-            for active_lease in self.active_leases.values():
-                if active_lease.agent_id == agent_id:
-                    lease = active_lease
-                    break
-
-            if not lease or lease.is_expired:
+            lease = self.active_leases.pop(task_id, None)
+            if lease is None:
                 return False
 
-            # Extend by the current phase timeout
-            lease_seconds, _ = self.calculate_adaptive_timeout(
-                progress=lease.progress_percentage,
-                update_count=max(lease.renewal_count, 1),
-                has_recent_activity=True,
+            self.lease_history.append(
+                {
+                    "event": "lease_released",
+                    "task_id": task_id,
+                    "agent_id": lease.agent_id,
+                    "lease_epoch": lease.lease_epoch,
+                    "reason": reason,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
             )
-            now = datetime.now(timezone.utc)
-            lease.last_renewed = now
-            lease.lease_expires = now + timedelta(seconds=lease_seconds)
 
-            # Update timestamp for cadence tracking
-            lease.update_timestamps.append(now)
-
-            logger.debug(
-                f"Touched lease for agent {agent_id} "
-                f"(task {lease.task_id}, "
-                f"expires: {lease.lease_expires.isoformat()})"
+            logger.info(
+                f"Released lease for task {task_id} from agent "
+                f"{lease.agent_id} (epoch {lease.lease_epoch}, "
+                f"reason: {reason})"
             )
             return True
+
+    def _within_grace(self, lease: AssignmentLease) -> bool:
+        """
+        Report whether an expired lease is still inside its grace period.
+
+        Uses the same computation as ``check_expired_leases``: the
+        per-lease adaptive grace when set, the global default otherwise.
+        Keeping the two in step matters — grace is the window in which
+        recovery has deliberately not fired, so it is exactly the window
+        in which the holder is still the legitimate owner.
+
+        Parameters
+        ----------
+        lease : AssignmentLease
+            The lease to test. Assumed already expired.
+
+        Returns
+        -------
+        bool
+            True while the lease is expired but not yet recoverable.
+        """
+        if lease.grace_period_seconds is not None:
+            grace = timedelta(seconds=lease.grace_period_seconds)
+        else:
+            grace = timedelta(minutes=self.grace_period_minutes)
+        return datetime.now(timezone.utc) <= lease.lease_expires + grace
+
+    async def get_highest_epoch(self, task_id: str) -> int:
+        """
+        Return the highest epoch ever issued for a task, or 0.
+
+        This — not the live lease — is the authority on whether a
+        reporter's claim has been superseded. ``active_leases`` holds
+        only *currently held* leases, so it goes empty both when nobody
+        has claimed a recovered card AND when a replacement has already
+        claimed, finished, and released it. Those two states are
+        indistinguishable from the lease map, but they demand opposite
+        answers: in the first the reporter is still the latest claimant,
+        in the second it is provably displaced.
+
+        The epoch sequence tells them apart, and it survives release and
+        restart precisely so it can.
+
+        Parameters
+        ----------
+        task_id : str
+            The task to look up.
+
+        Returns
+        -------
+        int
+            The high-water mark, or 0 when this task has never been
+            claimed.
+        """
+        async with self.lease_lock:
+            return self._task_epochs.get(task_id, 0)
+
+    async def get_live_epoch(self, task_id: str) -> Optional[int]:
+        """
+        Return the epoch of the live claim on a task, or None.
+
+        The distinction this exists to draw: **no live lease is not a
+        superseded claim**. Recovery releases the lease, so "no live
+        lease" is the ordinary state a late report lands in, and there is
+        by definition no rival claimant. Collapsing the two made the
+        fence reject lone agents that nobody was competing with.
+
+        Parameters
+        ----------
+        task_id : str
+            The task to look up.
+
+        Returns
+        -------
+        Optional[int]
+            The live lease's epoch, or None when no lease is held.
+        """
+        async with self.lease_lock:
+            lease = self.active_leases.get(task_id)
+            return lease.lease_epoch if lease is not None else None
+
+    async def is_epoch_current(self, task_id: str, lease_epoch: int) -> bool:
+        """
+        Check whether a report's epoch matches the live claim (ADR-0012 D11).
+
+        **Nothing acts on this today.** The D11 fence is deferred pending
+        D3 (see the D11 amendment in
+        ``docs/architecture/adr/0012-session-model-migration.md``), so no
+        report is refused for a superseded epoch. The predicate is kept
+        because it is the contract any future enforcement will be built
+        on, and it should not silently change meaning while unused.
+
+        It fails closed: a missing epoch, a superseded epoch, and a task
+        with no live lease all return False.
+
+        Parameters
+        ----------
+        task_id : str
+            The task the report concerns.
+        lease_epoch : int
+            The epoch the reporting agent was issued at claim time.
+            ``0`` means the agent supplied none.
+
+        Returns
+        -------
+        bool
+            True only when a live lease exists on this task and its epoch
+            equals ``lease_epoch``. A missing epoch (0), a superseded
+            epoch, and a task with no live lease all return False, so the
+            fence fails closed.
+        """
+        if not lease_epoch:
+            return False
+
+        async with self.lease_lock:
+            lease = self.active_leases.get(task_id)
+            if lease is None:
+                return False
+            return lease.lease_epoch == lease_epoch
 
     async def check_expired_leases(self) -> List[AssignmentLease]:
         """
@@ -942,6 +1383,27 @@ class AssignmentLeaseManager:
                 f"(expired: {lease.lease_expires.isoformat()})"
             )
 
+            # Circuit breaker (issue #667 Fix 3a): a SILENT recovery is one
+            # where the agent never reported progress (renewal_count == 0 —
+            # the `updates=0` signature of the snake_game runaway). After
+            # max_silent_recoveries consecutive silent recoveries, mark the
+            # task BLOCKED instead of returning it to TODO: the failure is
+            # almost certainly external (LLM/API outage, broken env), and
+            # every fresh agent will hit it identically. BLOCKED tasks are
+            # never offered by request_next_task, so the loop cannot
+            # continue — regardless of who is supplying agents
+            # (Invariant #1: the guard must live in Marcus, not a spawner).
+            if lease.renewal_count == 0:
+                streak = self._silent_recovery_streaks.get(lease.task_id, 0) + 1
+                self._silent_recovery_streaks[lease.task_id] = streak
+                if streak >= self.max_silent_recoveries:
+                    return await self._block_task_after_silent_recoveries(lease, streak)
+            else:
+                # An agent that reported progress but still expired is a
+                # slow-but-alive pattern (see #703), not the silent-failure
+                # pattern — reset the streak.
+                self._silent_recovery_streaks.pop(lease.task_id, None)
+
             # Calculate time spent
             now = datetime.now(timezone.utc)
             time_spent = now - lease.assigned_at
@@ -1122,6 +1584,139 @@ class AssignmentLeaseManager:
             logger.error(f"Error recovering lease for task {lease.task_id}: {e}")
             return False
 
+    async def _block_task_after_silent_recoveries(
+        self, lease: AssignmentLease, streak: int
+    ) -> bool:
+        """Mark a task BLOCKED after N consecutive silent recoveries.
+
+        Terminal arm of the circuit breaker (issue #667 Fix 3a). Instead
+        of resetting the task to TODO (which would let yet another agent
+        claim it and fail identically), flip it to BLOCKED, surface a
+        diagnostic comment on the board, and perform the same
+        coordination-state cleanup as a normal recovery so no in-memory
+        agent state leaks (the issue #485 failure class).
+
+        A human (or a later automated policy) can reset the task to TODO
+        to retry; the streak counter is cleared here so a reset starts
+        fresh.
+
+        Parameters
+        ----------
+        lease : AssignmentLease
+            The expired lease whose recovery tripped the breaker.
+        streak : int
+            The consecutive-silent-recovery count that tripped it.
+
+        Returns
+        -------
+        bool
+            True if the BLOCKED transition was applied (cleanup errors on
+            non-authoritative writes are logged, not raised).
+        """
+        logger.warning(
+            f"Circuit breaker: task {lease.task_id} has been recovered "
+            f"{streak} consecutive times with zero progress updates "
+            f"(last agent: {lease.agent_id}). Marking BLOCKED instead of "
+            f"TODO — likely external failure (LLM/API outage, broken "
+            f"environment). Human investigation required."
+        )
+
+        # 1. Update task model (source of truth)
+        task = self._find_task(lease.task_id)
+        if task:
+            task.status = TaskStatus.BLOCKED
+            task.assigned_to = None
+
+        # 2. Remove from active leases
+        async with self.lease_lock:
+            if lease.task_id in self.active_leases:
+                del self.active_leases[lease.task_id]
+
+        # 3. Remove assignment from persistence
+        await self.assignment_persistence.remove_assignment(lease.agent_id)
+
+        # 4. Invoke recovery callback so server cleans in-memory state
+        if self.on_recovery_callback is not None:
+            try:
+                self.on_recovery_callback(lease.agent_id, lease.task_id)
+            except Exception as e:
+                logger.warning(
+                    f"Recovery callback failed for task {lease.task_id}: {e}"
+                )
+
+        # 5. Board: status → BLOCKED, clear ownership
+        try:
+            if hasattr(self.kanban_client, "update_task"):
+                await self.kanban_client.update_task(
+                    lease.task_id,
+                    {"status": TaskStatus.BLOCKED, "assigned_to": None},
+                )
+            elif hasattr(self.kanban_client, "update_task_status"):
+                await self.kanban_client.update_task_status(
+                    lease.task_id, TaskStatus.BLOCKED
+                )
+        except Exception as e:
+            logger.error(f"Failed to mark task {lease.task_id} BLOCKED on board: {e}")
+
+        # 5b. Provider-portable BLOCKED transition (Codex P2 on PR #707).
+        # GitHub- and Linear-backed boards do NOT persist status through
+        # update_task (GitHubKanban.update_task only opens/closes the
+        # issue; LinearKanban.update_task ignores status) — their
+        # blocked-state mechanics live in move_task_to_column ("blocked"
+        # → GitHub `blocked` label / Linear "Blocked" state / SQLite
+        # direct status match). Without this, the next project refresh
+        # would re-read the task as open/TODO on those providers and the
+        # runaway loop this breaker exists to stop would resume.
+        try:
+            if hasattr(self.kanban_client, "move_task_to_column"):
+                await self.kanban_client.move_task_to_column(lease.task_id, "blocked")
+        except Exception as e:
+            logger.warning(
+                f"move_task_to_column('blocked') failed for {lease.task_id}: {e}"
+            )
+
+        # 6. Diagnostic comment (observability dual-write)
+        try:
+            await self.kanban_client.add_comment(
+                lease.task_id,
+                (
+                    f"🛑 **CIRCUIT BREAKER — task BLOCKED by Marcus**\n\n"
+                    f"{streak} consecutive agents claimed this task and "
+                    f"reported no progress before their lease expired. "
+                    f"This pattern almost always means an external "
+                    f"failure every fresh agent hits identically — an "
+                    f"LLM/API outage, a broken environment, or a task "
+                    f"that cannot run as specified — so retrying with "
+                    f"more agents only burns cost (issue #667).\n\n"
+                    f"**What to do:** investigate the root cause, then "
+                    f"reset this task's status to TODO to retry.\n\n"
+                    f"- Last agent: {lease.agent_id}\n"
+                    f"- Silent recoveries: {streak} "
+                    f"(threshold: {self.max_silent_recoveries})\n"
+                ),
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to write circuit-breaker comment for " f"{lease.task_id}: {e}"
+            )
+
+        # 7. Auditable history event
+        self.lease_history.append(
+            {
+                "event": "task_blocked_circuit_breaker",
+                "task_id": lease.task_id,
+                "agent_id": lease.agent_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "consecutive_silent_recoveries": streak,
+                "threshold": self.max_silent_recoveries,
+            }
+        )
+
+        # 8. Clear the streak — a human reset to TODO starts fresh
+        self._silent_recovery_streaks.pop(lease.task_id, None)
+
+        return True
+
     async def get_expiring_leases(self) -> List[AssignmentLease]:
         """
         Get leases that are expiring soon.
@@ -1140,29 +1735,88 @@ class AssignmentLeaseManager:
         return expiring
 
     async def _persist_lease(self, lease: AssignmentLease) -> None:
-        """Persist lease information to assignment persistence."""
-        assignment = await self.assignment_persistence.get_assignment(lease.agent_id)
-        if assignment:
-            assignment["lease_expires"] = lease.lease_expires.isoformat()
-            assignment["lease_renewed_at"] = lease.last_renewed.isoformat()
-            assignment["renewal_count"] = lease.renewal_count
-            assignment["progress_percentage"] = lease.progress_percentage
-            assignment["last_progress_update"] = datetime.now(timezone.utc).isoformat()
-            assignment["update_timestamps"] = [
-                ts.isoformat() for ts in lease.update_timestamps
-            ]
-            # Persist merge-conflict extension counter so the cap
-            # survives a service restart during the extension window
-            # (Codex P1 on PR #350).
-            assignment["merge_conflict_extensions"] = lease.merge_conflict_extensions
-            await self.assignment_persistence.save_assignment(
-                lease.agent_id,
-                lease.task_id,
-                assignment.get("assigned_at", datetime.now(timezone.utc).isoformat()),
-            )
+        """
+        Persist lease information to assignment persistence.
+
+        Notes
+        -----
+        Writes through ``update_assignment_fields``, which merges onto the
+        worker's existing record.
+
+        This previously mutated the dict returned by ``get_assignment``
+        and then called ``save_assignment``, which rebuilt the record from
+        scratch — so every field written here was discarded before
+        reaching disk. Because ``load_active_leases`` defaults a missing
+        ``lease_expires`` to *now*, every lease rehydrated after a restart
+        was born already expiring, and the PR #350 merge-conflict
+        extension cap did not actually survive a restart.
+
+        The record is also created when absent: ``create_lease`` runs
+        before the assignment row exists, so the previous
+        ``if assignment:`` guard persisted nothing at all for a
+        freshly-claimed lease.
+
+        Creation is gated on the lease still being the live one for its
+        task. That old ``if assignment:`` check incidentally guarded
+        against resurrecting a released row; without a replacement, a
+        write already in flight when a completion, recovery, or
+        unassignment removes the record would recreate it — leaving a
+        TODO task falsely assigned on disk. This mirrors the liveness
+        re-check ``_try_extend_for_merge_conflict`` already performs
+        before mutating a lease.
+        """
+        # Reading the dict is safe without ``lease_lock``: there is no
+        # await between the lookup and its use, and callers already
+        # inside the lock (create_lease, renew_lease) would deadlock on
+        # re-entry.
+        is_live = self.active_leases.get(lease.task_id) is lease
+
+        await self.assignment_persistence.update_assignment_fields(
+            lease.agent_id,
+            lease.task_id,
+            {
+                "lease_expires": lease.lease_expires.isoformat(),
+                "lease_renewed_at": lease.last_renewed.isoformat(),
+                "renewal_count": lease.renewal_count,
+                "progress_percentage": lease.progress_percentage,
+                "last_progress_update": datetime.now(timezone.utc).isoformat(),
+                "update_timestamps": [ts.isoformat() for ts in lease.update_timestamps],
+                # Persist merge-conflict extension counter so the cap
+                # survives a service restart during the extension window
+                # (Codex P1 on PR #350).
+                "merge_conflict_extensions": lease.merge_conflict_extensions,
+                # Per-lease adaptive grace. ``check_expired_leases`` uses
+                # this when set and falls back to the global default
+                # otherwise, so dropping it on restart would recover
+                # tail-phase work earlier than the phase intended.
+                "grace_period_seconds": lease.grace_period_seconds,
+                # The D11 fencing token. Without this a restart resets
+                # the epoch sequence and the fence stops fencing — the
+                # failure would be silent, because a reissued epoch
+                # compares equal rather than raising.
+                "lease_epoch": lease.lease_epoch,
+            },
+            create_if_absent=is_live,
+        )
 
     async def load_active_leases(self) -> None:
         """Load active leases from persistence on startup."""
+        # Seed the D11 epoch high-water marks FIRST, from the task-keyed
+        # store. Recovery removes assignment rows, so the per-lease
+        # seeding below cannot see previously-recovered tasks — which are
+        # the only tasks that ever have a displaced agent.
+        try:
+            stored_epochs = await self.assignment_persistence.load_task_epochs()
+            if isinstance(stored_epochs, dict):
+                self._task_epochs.update(stored_epochs)
+        except Exception as epoch_err:
+            # Losing the marks re-opens the fence, so this is loud — but
+            # it must not stop Marcus from starting.
+            logger.error(
+                f"Failed to seed D11 epoch high-water marks: {epoch_err}. "
+                "Previously-recovered tasks may reissue epochs from 1."
+            )
+
         assignments = await self.assignment_persistence.load_assignments()
 
         for agent_id, assignment in assignments.items():
@@ -1209,6 +1863,21 @@ class AssignmentLeaseManager:
                 merge_conflict_extensions=assignment.get(
                     "merge_conflict_extensions", 0
                 ),
+                # Restore the per-lease adaptive grace. Absent on legacy
+                # records, where None correctly falls back to the global
+                # default in ``check_expired_leases``.
+                grace_period_seconds=assignment.get("grace_period_seconds"),
+                # Defaults to 0 for assignments written before the D11
+                # fencing token existed. 0 never compares equal to a real
+                # claim, so a legacy lease fails the fence closed rather
+                # than being mistaken for the current holder.
+                lease_epoch=assignment.get("lease_epoch", 0),
+            )
+
+            # Seed the per-task high-water mark so the next claim of this
+            # card is issued a strictly higher epoch than the rehydrated one.
+            self._task_epochs[task_id] = max(
+                self._task_epochs.get(task_id, 0), lease.lease_epoch
             )
 
             self.active_leases[task_id] = lease

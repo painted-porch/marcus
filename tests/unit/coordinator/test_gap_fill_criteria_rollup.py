@@ -682,3 +682,249 @@ class TestRolloupIdempotenceAndTelemetry:
         assert "coverage_before_fill" in result.telemetry
         assert "coverage_after_fill" in result.telemetry
         assert "gap_filled_outcomes" in result.telemetry
+
+
+# ---------------------------------------------------------------------------
+# #683 Cause 2 — core gaps with no implementation home synthesize impl tasks
+# ---------------------------------------------------------------------------
+
+
+class TestCoreGapSynthesizesImplTask:
+    """A gap whose resolved anchor is a non-implementation (design) task is
+    materialized into a real implementation task (#683 Cause 2), instead of
+    rolling its criterion onto a design task where no code lives.
+    """
+
+    @pytest.mark.asyncio
+    async def test_design_anchor_gap_synthesizes_impl_task(
+        self, monkeypatch: Any
+    ) -> None:
+        """Gap co-anchored only to a design task → new impl task; design
+        task does NOT gain the criterion."""
+        from src.core.task_classification import get_task_type
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            apply_outcome_coverage_to_feature_graph,
+        )
+
+        monkeypatch.setenv(ENV_VAR_NAME, "true")
+        llm = _llm_mock(
+            pre_fill_coverage='{"coverage": {"outcome_play": []}}',
+            fill_response=(
+                '{"tasks": [{'
+                '"name": "Implement collision detection",'
+                '"description": "end the game on wall or self collision"'
+                "}]}"
+            ),
+            # Post-fill maps the outcome to the DESIGN task + the stub.
+            post_fill_coverage=(
+                '{"coverage": {"outcome_play": '
+                '["t_design", "_synth_for_coverage_0"]}}'
+            ),
+        )
+        design = _task("t_design", "Design Game Core Mechanics", labels=["design"])
+
+        result = await apply_outcome_coverage_to_feature_graph(
+            prd_analysis=_bare_analysis([_outcome()]),
+            tasks=[design],
+            llm_client=llm,
+        )
+
+        # A new implementation task was synthesized.
+        synth = [t for t in result.augmented_tasks if t.id.startswith("gap_fill_")]
+        assert len(synth) == 1, "core gap on a design anchor must synthesize a task"
+        assert get_task_type(synth[0]) == "implementation"
+        assert result.synthesized_ids == [synth[0].id]
+
+        # The design task did NOT absorb the gap criterion.
+        design_out = next(t for t in result.augmented_tasks if t.id == "t_design")
+        assert not (design_out.completion_criteria or [])
+
+    @pytest.mark.asyncio
+    async def test_impl_anchor_gap_does_not_synthesize(self, monkeypatch: Any) -> None:
+        """When the co-anchor is already an implementation task, no new task
+        is created — the criterion rolls onto it (anti-atomization guard)."""
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            apply_outcome_coverage_to_feature_graph,
+        )
+
+        monkeypatch.setenv(ENV_VAR_NAME, "true")
+        llm = _llm_mock(
+            pre_fill_coverage='{"coverage": {"outcome_play": []}}',
+            fill_response=(
+                '{"tasks": [{'
+                '"name": "Implement collision detection",'
+                '"description": "end the game on collision"'
+                "}]}"
+            ),
+            post_fill_coverage=(
+                '{"coverage": {"outcome_play": ' '["t_impl", "_synth_for_coverage_0"]}}'
+            ),
+        )
+        impl = _task("t_impl", "Implement Snake State")
+
+        result = await apply_outcome_coverage_to_feature_graph(
+            prd_analysis=_bare_analysis([_outcome()]),
+            tasks=[impl],
+            llm_client=llm,
+        )
+
+        assert not any(t.id.startswith("gap_fill_") for t in result.augmented_tasks)
+        assert result.synthesized_ids == []
+        impl_out = next(t for t in result.augmented_tasks if t.id == "t_impl")
+        assert any(
+            "collision" in c.lower() for c in (impl_out.completion_criteria or [])
+        )
+
+    @pytest.mark.asyncio
+    async def test_gotcha_lands_on_synthesized_task(self, monkeypatch: Any) -> None:
+        """End-to-end #683: a #680 gotcha for the gap's outcome is attached to
+        the synthesized implementation task (not dropped as an orphan)."""
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            GOTCHA_CRITERION_PREFIX,
+            apply_outcome_coverage_to_feature_graph,
+        )
+
+        monkeypatch.setenv(ENV_VAR_NAME, "true")
+        monkeypatch.setenv("MARCUS_GOTCHA_ENUMERATION", "true")
+        # 4 LLM calls: pre-fill, fill, post-fill, gotcha enumeration.
+        llm = AsyncMock()
+        llm.analyze = AsyncMock(
+            side_effect=[
+                '{"coverage": {"outcome_play": []}}',
+                (
+                    '{"tasks": [{'
+                    '"name": "Implement collision detection",'
+                    '"description": "end the game on collision"'
+                    "}]}"
+                ),
+                '{"coverage": {"outcome_play": ["t_design", "_synth_for_coverage_0"]}}',
+                (
+                    '{"gotchas": {"outcome_play": '
+                    '["the snake passes through its own body instead of dying"]}}'
+                ),
+            ]
+        )
+        design = _task("t_design", "Design Game Core Mechanics", labels=["design"])
+
+        result = await apply_outcome_coverage_to_feature_graph(
+            prd_analysis=_bare_analysis([_outcome()]),
+            tasks=[design],
+            llm_client=llm,
+        )
+
+        synth = next(t for t in result.augmented_tasks if t.id.startswith("gap_fill_"))
+        assert any(
+            c.startswith(GOTCHA_CRITERION_PREFIX)
+            for c in (synth.acceptance_criteria or [])
+        ), "gotcha must land on the synthesized implementation task"
+
+    @pytest.mark.asyncio
+    async def test_synthesis_capped(self, monkeypatch: Any) -> None:
+        """No more than GAP_SYNTH_CAP impl tasks are synthesized; the rest
+        fall back to the design anchor's completion_criteria."""
+        import src.marcus_mcp.coordinator.outcome_coverage as oc
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            apply_outcome_coverage_to_feature_graph,
+        )
+
+        monkeypatch.setenv(ENV_VAR_NAME, "true")
+        monkeypatch.setattr(oc, "GAP_SYNTH_CAP", 2)
+
+        n_gaps = 4
+        outcomes = [_outcome(f"o{i}") for i in range(n_gaps)]
+        gap_tasks = ",".join(
+            f'{{"name": "Implement feature {i}", "description": "d{i}"}}'
+            for i in range(n_gaps)
+        )
+        post_cov = ",".join(
+            f'"o{i}": ["t_design", "_synth_for_coverage_{i}"]' for i in range(n_gaps)
+        )
+        pre_cov = ",".join(f'"o{i}": []' for i in range(n_gaps))
+        llm = _llm_mock(
+            pre_fill_coverage=f'{{"coverage": {{{pre_cov}}}}}',
+            fill_response=f'{{"tasks": [{gap_tasks}]}}',
+            post_fill_coverage=f'{{"coverage": {{{post_cov}}}}}',
+        )
+        design = _task("t_design", "Design Game Core Mechanics", labels=["design"])
+
+        result = await apply_outcome_coverage_to_feature_graph(
+            prd_analysis=_bare_analysis(outcomes),
+            tasks=[design],
+            llm_client=llm,
+        )
+
+        synth = [t for t in result.augmented_tasks if t.id.startswith("gap_fill_")]
+        assert len(synth) == 2, "synthesis must respect the cap"
+        # The 2 over-cap gaps fell back onto the design task's criteria.
+        design_out = next(t for t in result.augmented_tasks if t.id == "t_design")
+        assert len(design_out.completion_criteria or []) == 2
+
+
+class TestSynthesizedTaskContractRoundTrip:
+    """#687 Codex P1: a synthesized contract gap task must carry its
+    responsibility in source_context + the description marker, not only the
+    SQLite-native top-level field, so it survives the kanban round-trip and
+    the contract-responsibility instruction layer fires."""
+
+    def test_responsibility_persisted_for_round_trip(self) -> None:
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            _build_impl_task_from_gap,
+        )
+
+        task = _build_impl_task_from_gap(
+            {
+                "name": "Implement GameEngine",
+                "description": "build the loop",
+                "responsibility": "implements GameEngine from engine.ts",
+                "contract_file": "docs/engine.ts",
+            }
+        )
+        assert task is not None
+        # Native field (SQLite)
+        assert task.responsibility == "implements GameEngine from engine.ts"
+        # source_context (JSON-capable providers, via build_task_data)
+        assert task.source_context is not None
+        assert (
+            task.source_context["responsibility"]
+            == "implements GameEngine from engine.ts"
+        )
+        assert task.source_context["contract_file"] == "docs/engine.ts"
+        # Description marker (universal fallback, e.g. Planka)
+        assert "<!-- MARCUS_CONTRACT_FIRST:" in task.description
+        assert "implements GameEngine from engine.ts" in task.description
+
+    def test_non_contract_gap_has_no_marker_or_source_context(self) -> None:
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            _build_impl_task_from_gap,
+        )
+
+        task = _build_impl_task_from_gap(
+            {"name": "Implement collision", "description": "end on collision"}
+        )
+        assert task is not None
+        assert task.responsibility is None
+        assert "MARCUS_CONTRACT_FIRST" not in task.description
+        assert not (task.source_context or {})
+
+    def test_parse_contract_metadata_recovers_after_field_loss(self) -> None:
+        """Simulate the kanban round-trip dropping the native field: metadata
+        must still resolve from source_context (Codex P1 scenario)."""
+        from dataclasses import replace
+
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            _build_impl_task_from_gap,
+        )
+        from src.marcus_mcp.tools.task import _parse_contract_metadata
+
+        task = _build_impl_task_from_gap(
+            {
+                "name": "Implement GameEngine",
+                "description": "build the loop",
+                "responsibility": "implements GameEngine from engine.ts",
+            }
+        )
+        assert task is not None
+        # Drop the SQLite-native field to mimic a non-SQLite provider.
+        round_tripped = replace(task, responsibility=None)
+        meta = _parse_contract_metadata(round_tripped)
+        assert meta["responsibility"] == "implements GameEngine from engine.ts"

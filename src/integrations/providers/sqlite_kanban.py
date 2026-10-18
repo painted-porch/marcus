@@ -21,9 +21,10 @@ import sqlite3
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Set, TypeVar, Union
 
 from src.core.models import Priority, Task, TaskStatus
+from src.core.paths import marcus_data_dir
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     requires TEXT,
     recovery_info TEXT,
     completed_at TEXT,
-    original_id TEXT
+    original_id TEXT,
+    task_type TEXT NOT NULL DEFAULT 'implement',
+    inputs TEXT,
+    output_schema TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status
@@ -231,6 +235,11 @@ CREATE INDEX IF NOT EXISTS idx_blockers_task
 """
 
 
+# Databases snapshotted in this process (issue #724): one snapshot per
+# db file per process — reconnects are frequent and must not spam.
+_SNAPSHOT_TAKEN: Set[str] = set()
+
+
 class SQLiteKanban(KanbanInterface):
     """SQLite-backed kanban board — zero external dependencies.
 
@@ -252,9 +261,17 @@ class SQLiteKanban(KanbanInterface):
         super().__init__(config)
         self.provider = KanbanProvider.SQLITE
 
-        self.db_path = Path(config.get("db_path", "./data/kanban.db"))
+        db_path_cfg = config.get("db_path")
+        self.db_path = (
+            Path(db_path_cfg) if db_path_cfg else marcus_data_dir() / "kanban.db"
+        )
         self.project_name: str = config.get("project_name", "Marcus Project")
-        self.attachments_dir = Path(config.get("attachments_dir", "./data/attachments"))
+        attachments_cfg = config.get("attachments_dir")
+        self.attachments_dir = (
+            Path(attachments_cfg)
+            if attachments_cfg
+            else marcus_data_dir() / "attachments"
+        )
         self.connected = False
 
         # Project/board scoping — each experiment gets its own IDs
@@ -275,7 +292,16 @@ class SQLiteKanban(KanbanInterface):
     # ----------------------------------------------------------
 
     async def connect(self) -> bool:
-        """Create database and initialize schema.
+        """Create database, initialize schema, and secure durability.
+
+        Beyond schema init, connect() applies the #724 post-incident
+        durability measures: snapshot the existing database via the
+        SQLite backup API (WAL-safe; a bare file copy without sidecars
+        reproduces the incident's data loss), force a TRUNCATE
+        checkpoint so the main file can never lag behind its WAL
+        sidecar, and log the resolved absolute path plus WAL size —
+        a growing sidecar was the invisible precondition for losing
+        three months of boards.
 
         Returns
         -------
@@ -283,13 +309,77 @@ class SQLiteKanban(KanbanInterface):
             True if connection succeeded.
         """
         try:
+            db_existed = self.db_path.exists()
+            if db_existed:
+                await self._run_in_executor(self._snapshot_db)
             await self._run_in_executor(self._init_db)
+            await self._run_in_executor(self._checkpoint_wal)
             self.connected = True
-            logger.info("[SQLiteKanban] Connected successfully")
+            wal_path = Path(str(self.db_path) + "-wal")
+            wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+            logger.info(
+                "[SQLiteKanban] Connected: db=%s (wal sidecar: %d bytes)",
+                self.db_path.resolve(),
+                wal_size,
+            )
             return True
         except Exception as e:
             logger.error(f"[SQLiteKanban] Connect failed: {e}")
             return False
+
+    def _checkpoint_wal(self) -> None:
+        """Force WAL contents into the main database file.
+
+        Issue #724: the main file's checkpoint horizon was pinned at
+        2026-05-14 by a long-lived reader, so three months of commits
+        lived only in ``kanban.db-wal`` — and vanished with it. A
+        TRUNCATE checkpoint on every connect bounds that exposure to a
+        single session.
+        """
+        conn = self._get_raw_connection()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+
+    def _snapshot_db(self) -> None:
+        """Snapshot the database via the SQLite backup API, keeping 7.
+
+        Once per process per database file (``_SNAPSHOT_TAKEN``): the
+        provider reconnects freely, and a snapshot per reconnect would
+        be noise. The backup API copies main + WAL coherently — the
+        one safe way to copy a live WAL database. Best-effort: snapshot
+        failure must never block connecting. Retention deletes ONLY
+        files matching our own ``kanban-*.db`` naming, newest 7 kept.
+        """
+        key = str(self.db_path.resolve())
+        if key in _SNAPSHOT_TAKEN:
+            return
+        _SNAPSHOT_TAKEN.add(key)
+        try:
+            backups_dir = self.db_path.parent / "backups"
+            backups_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            dest_path = backups_dir / f"kanban-{stamp}.db"
+            src = sqlite3.connect(str(self.db_path), timeout=30)
+            try:
+                dest = sqlite3.connect(str(dest_path))
+                try:
+                    src.backup(dest)
+                finally:
+                    dest.close()
+            finally:
+                src.close()
+            snapshots = sorted(backups_dir.glob("kanban-*.db"))
+            for stale in snapshots[:-7]:
+                stale.unlink()
+            logger.info(
+                "[SQLiteKanban] Snapshot written: %s (%d kept)",
+                dest_path.name,
+                min(len(snapshots), 7),
+            )
+        except Exception as snap_err:  # noqa: BLE001 - never block connect
+            logger.warning(f"[SQLiteKanban] Snapshot failed: {snap_err}")
 
     async def disconnect(self) -> None:
         """Mark provider as disconnected."""
@@ -426,7 +516,8 @@ class SQLiteKanban(KanbanInterface):
                         source_context, completion_criteria,
                         acceptance_criteria,
                         validation_spec, provides, requires,
-                        original_id
+                        original_id, task_type, inputs,
+                        output_schema
                     ) VALUES (
                         ?, ?, ?, ?, ?,
                         ?, ?, ?,
@@ -435,6 +526,7 @@ class SQLiteKanban(KanbanInterface):
                         ?,
                         ?, ?, ?,
                         ?, ?,
+                        ?, ?, ?,
                         ?, ?, ?,
                         ?
                     )
@@ -485,6 +577,23 @@ class SQLiteKanban(KanbanInterface):
                         task_data.get("provides"),
                         task_data.get("requires"),
                         task_data.get("original_id"),
+                        task_data.get("task_type", "implement"),
+                        (
+                            json.dumps(
+                                task_data["inputs"],
+                                default=_json_default,
+                            )
+                            if task_data.get("inputs")
+                            else None
+                        ),
+                        (
+                            json.dumps(
+                                task_data["output_schema"],
+                                default=_json_default,
+                            )
+                            if task_data.get("output_schema")
+                            else None
+                        ),
                     ),
                 )
 
@@ -539,6 +648,40 @@ class SQLiteKanban(KanbanInterface):
 
         rows = await self._run_in_executor(lambda: self._with_connection(_query))
         return [await self._hydrate_task(row) for row in rows]
+
+    async def get_task_blockers(self, task_id: str) -> List[Dict[str, Any]]:
+        """Return the blocker records recorded against a task.
+
+        ``update_task`` with a ``blocker`` key and ``report_blocker`` both
+        INSERT into the ``blockers`` table, but nothing read them back, so
+        the recorded explanation for a blocked task was unreachable —
+        end-of-run reporting rendered every blocked lane as "no blocker
+        text recorded" (Codex P1 on PR #723).
+
+        Parameters
+        ----------
+        task_id : str
+            Task whose blockers to fetch.
+
+        Returns
+        -------
+        List[Dict[str, Any]]
+            ``{"id", "description", "severity", "created_at"}`` per
+            blocker, oldest first — consumers wanting the operative
+            reason take the last entry. Empty when none were recorded.
+        """
+        if not self.connected:
+            await self.connect()
+
+        def _query(conn: sqlite3.Connection) -> List[sqlite3.Row]:
+            return conn.execute(
+                "SELECT id, description, severity, created_at "
+                "FROM blockers WHERE task_id = ? ORDER BY created_at ASC",
+                (task_id,),
+            ).fetchall()
+
+        rows = await self._run_in_executor(lambda: self._with_connection(_query))
+        return [dict(row) for row in rows]
 
     async def get_all_tasks(self) -> List[Task]:
         """Get all tasks regardless of status or assignment.
@@ -684,6 +827,57 @@ class SQLiteKanban(KanbanInterface):
                             now_iso,
                         ),
                     )
+                elif key == "inputs":
+                    # Issue #737: the claim handoff writes a dependent
+                    # task's complete merged inputs, so this is a
+                    # replace, not a merge; None clears the field.
+                    set_clauses.append("inputs = ?")
+                    params.append(
+                        json.dumps(value, default=_json_default)
+                        if value is not None
+                        else None
+                    )
+                elif key == "source_context":
+                    # Merge into existing source_context JSON, not
+                    # replace. Codex P1 on PR #660: prior to this
+                    # branch, update_task silently ignored
+                    # source_context entirely so the #659 scaffold
+                    # anchor never landed on the row. Read-modify-write
+                    # under the same connection keeps the merge atomic.
+                    # Callers passing a dict (e.g. ``{"scaffold_path":
+                    # "..."}``) merge their keys in; ``None`` clears
+                    # the field; an empty dict ``{}`` is a no-op.
+                    if value is None:
+                        set_clauses.append("source_context = ?")
+                        params.append(None)
+                    elif isinstance(value, dict):
+                        if not value:
+                            # Empty dict — no-op so we don't churn
+                            # updated_at when there's nothing to merge.
+                            continue
+                        row = conn.execute(
+                            "SELECT source_context FROM tasks " "WHERE id = ?",
+                            (task_id,),
+                        ).fetchone()
+                        existing_json = row["source_context"] if row else None
+                        existing_ctx: Dict[str, Any] = {}
+                        if existing_json:
+                            try:
+                                parsed = json.loads(existing_json)
+                                if isinstance(parsed, dict):
+                                    existing_ctx = parsed
+                            except (json.JSONDecodeError, TypeError):
+                                # Corrupt row — overwrite rather than
+                                # silently preserve unparseable state.
+                                existing_ctx = {}
+                        merged = {**existing_ctx, **value}
+                        set_clauses.append("source_context = ?")
+                        params.append(
+                            json.dumps(
+                                merged,
+                                default=_json_default,
+                            )
+                        )
 
             params.append(task_id)
             # Safe: set_clauses only contains hardcoded column names
@@ -1490,6 +1684,12 @@ class SQLiteKanban(KanbanInterface):
         """
         migrations = [
             "ALTER TABLE tasks ADD COLUMN acceptance_criteria TEXT",
+            # System-of-record fields (issue #737); the default keeps
+            # every board created before the change loading unchanged.
+            "ALTER TABLE tasks ADD COLUMN task_type TEXT "
+            "NOT NULL DEFAULT 'implement'",
+            "ALTER TABLE tasks ADD COLUMN inputs TEXT",
+            "ALTER TABLE tasks ADD COLUMN output_schema TEXT",
         ]
         for sql in migrations:
             try:
@@ -1644,6 +1844,37 @@ class SQLiteKanban(KanbanInterface):
         except (json.JSONDecodeError, TypeError, IndexError, KeyError):
             pass
 
+        # System-of-record fields (issue #737). _migrate_schema adds the
+        # columns on connect, so they exist on every board this provider
+        # has opened; the guards keep hydration total even on a corrupt
+        # or hand-edited row.
+        task_type = "implement"
+        try:
+            if row["task_type"]:
+                task_type = row["task_type"]
+        except (IndexError, KeyError):
+            pass
+
+        inputs: Dict[str, Any] = {}
+        try:
+            inputs_raw = row["inputs"]
+            if inputs_raw:
+                parsed_inputs = json.loads(inputs_raw)
+                if isinstance(parsed_inputs, dict):
+                    inputs = parsed_inputs
+        except (json.JSONDecodeError, TypeError, IndexError, KeyError):
+            pass
+
+        output_schema: Optional[Dict[str, Any]] = None
+        try:
+            schema_raw = row["output_schema"]
+            if schema_raw:
+                parsed_schema = json.loads(schema_raw)
+                if isinstance(parsed_schema, dict):
+                    output_schema = parsed_schema
+        except (json.JSONDecodeError, TypeError, IndexError, KeyError):
+            pass
+
         return Task(
             id=row["id"],
             name=row["name"],
@@ -1672,4 +1903,7 @@ class SQLiteKanban(KanbanInterface):
             subtask_index=row["subtask_index"],
             provides=row["provides"],
             requires=row["requires"],
+            task_type=task_type,
+            inputs=inputs,
+            output_schema=output_schema,
         )

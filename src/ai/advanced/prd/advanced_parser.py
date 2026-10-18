@@ -9,7 +9,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from src.ai.advanced.prd.outcome_extractor import (
     UserOutcome,
@@ -34,6 +34,173 @@ from src.marcus_mcp.coordinator.spec_coverage_augmenter import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_declared_file_path(raw: str) -> str:
+    r"""Return the canonical form of a declared file path.
+
+    The registry uses the path string as part of its lookup key, so
+    two tasks declaring the same file under different surface forms
+    (``./src/foo.py`` vs ``src/foo.py`` vs ``src\\foo.py``) would
+    otherwise miss each other and skip the conflict check — exactly
+    the regression Kaia's #658 review flagged.
+
+    Normalizes by:
+
+    - Stripping surrounding whitespace.
+    - Resolving leading ``./`` and embedded ``./`` segments via
+      ``os.path.normpath``.
+    - Converting Windows-style backslash separators to POSIX ``/``
+      so Marcus's cross-platform agent fleet sees one form.
+    - NOT resolving symlinks or making the path absolute — the
+      contract file is repo-relative and Marcus has no business
+      knowing the agent's worktree root at decomposition time.
+
+    Parameters
+    ----------
+    raw : str
+        Raw path string (typically from the LLM-produced contract
+        descriptor).
+
+    Returns
+    -------
+    str
+        Canonical POSIX-style relative path. Empty string if ``raw``
+        is empty after stripping.
+    """
+    import os
+
+    stripped = raw.strip()
+    if not stripped:
+        return ""
+    # Replace backslashes BEFORE normpath so Linux normpath treats
+    # the path as POSIX (normpath('a\\b') on Linux returns 'a\\b').
+    posix_form = stripped.replace("\\", "/")
+    return os.path.normpath(posix_form).replace("\\", "/")
+
+
+def _extract_contract_domain_slug(contract_file: str) -> str:
+    """Return the domain slug from a contract artifact path.
+
+    The contract-generation pipeline emits four artifact types per
+    domain, all sharing a filename template
+    ``{domain_slug}-{artifact_type}.md`` and one of four artifact
+    suffixes: ``-architecture``, ``-api-contracts``, ``-data-models``,
+    or ``-interface-contracts`` (see ``_DESIGN_ARTIFACT_SPECS`` in
+    ``src/integrations/nlp_tools.py``). The over-fragmentation guard
+    in ``decompose_by_contract`` needs to detect when the LLM
+    produced multiple tasks claiming the SAME domain via different
+    artifact types — naive contract_file-string dedupe misses this
+    because the filenames differ.
+
+    On the ``snake-663-658`` run (2026-05-27) the LLM produced three
+    tasks for two domains by using three different artifact types of
+    those two domains:
+
+      Implement Game Core Engine
+        → ...game-core-engine-interface-contracts.md
+      Implement Game Presentation
+        → ...game-presentation-and-feedback-interface-contracts.md
+      Integrate Engine + Presentation
+        → ...game-core-engine-architecture.md  ← same domain!
+
+    All three contract_files are unique strings, but two of them
+    point at the SAME domain (``game-core-engine``). Dedupe by
+    domain slug to catch this.
+
+    Parameters
+    ----------
+    contract_file : str
+        A contract artifact path, typically
+        ``docs/{artifact_dir}/{domain_slug}-{artifact_type}.md``.
+        May be empty / unset — returns ``""`` then.
+
+    Returns
+    -------
+    str
+        The domain slug (e.g. ``game-core-engine``) — the part of
+        the basename before the artifact-type suffix. Returns the
+        whole stem if no recognized artifact suffix matches.
+    """
+    import os
+
+    if not contract_file:
+        return ""
+    # Strip directory + extension.
+    base = os.path.basename(contract_file.strip())
+    if base.endswith(".md"):
+        base = base[:-3]
+    elif "." in base:
+        base = base.rsplit(".", 1)[0]
+    # Strip the artifact-type suffix. Order matters: longer
+    # suffixes first so ``-interface-contracts`` matches before
+    # ``-contracts`` (defensive — current spec has no bare
+    # ``-contracts`` but future drift is cheap to guard against).
+    artifact_suffixes = (
+        "-interface-contracts",
+        "-api-contracts",
+        "-data-models",
+        "-architecture",
+    )
+    for suffix in artifact_suffixes:
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    # Unknown shape — return the bare stem so dedupe still works
+    # on identical paths, just without the artifact-type
+    # cross-matching.
+    return base
+
+
+def _extract_declared_files(
+    responsibility: Optional[str],
+    contract_file: Optional[str],
+    contract_artifacts: Optional[Dict[str, Any]],
+) -> List[str]:
+    """Return the list of file paths a contract task intends to write.
+
+    Populated into ``task.source_context["declared_files"]`` by
+    :meth:`AdvancedPRDParser.decompose_by_contract`. Later consulted
+    by ``request_next_task`` to skip tasks whose declared files are
+    currently held by another in-progress task (#206 MVP, Phase 3).
+
+    MVP scope — **conservative**: the only declared write target is
+    the task's own ``contract_file``. Contract artifacts (foundation
+    files read by every implementation task) are NOT included because
+    the registry only locks writes — agents read freely. Inferred
+    implementation files beyond ``contract_file`` are also excluded
+    to avoid over-blocking before we have empirical contention data.
+
+    Parameters
+    ----------
+    responsibility : str, optional
+        The task's contract responsibility text. Reserved for future
+        inference heuristics; currently unused so MVP behavior stays
+        deterministic.
+    contract_file : str, optional
+        Path of the contract interface this task owns (e.g.,
+        ``src/types/engine.ts``). May be empty / None / whitespace
+        — in which case the task declares nothing and passes through
+        the registry filter untouched.
+    contract_artifacts : dict, optional
+        Foundation contract artifacts shared across all tasks.
+        Accepted for signature stability with future heuristics; the
+        MVP does not consult them (reads are free, never locked).
+
+    Returns
+    -------
+    list of str
+        The declared write targets. Empty when ``contract_file`` is
+        missing, None, or whitespace-only.
+    """
+    # Defensive normalization: callers in the parser already coerce
+    # ``contract_file`` to ``str(raw or "")`` but the helper must be
+    # robust on its own — it's also called from tests with None.
+    if contract_file is None:
+        return []
+    normalized = _normalize_declared_file_path(contract_file)
+    if not normalized:
+        return []
+    return [normalized]
 
 
 #: Fixed project-classification taxonomies (Marcus #546 Phase 0).
@@ -484,7 +651,9 @@ class AdvancedPRDParser:
         # Fallback to default
         return default_minutes
 
-    def _build_augmenter_chain(self) -> Sequence[GraphAugmenter]:
+    def _build_augmenter_chain(
+        self, complexity_mode: Optional[str] = None
+    ) -> Sequence[GraphAugmenter]:
         """Build the canonical pre-inference augmenter chain.
 
         Single source of truth for the chain order, used by both
@@ -494,6 +663,14 @@ class AdvancedPRDParser:
         ``OutcomeCoverageAugmenter`` so it sees any outcome gap-fill
         tasks when scoring spec feature coverage (locked by
         ``test_second_augmenter_sees_first_augmenter_tasks``).
+
+        Parameters
+        ----------
+        complexity_mode : Optional[str]
+            Forwarded to :class:`SpecCoverageAugmenter`, where it is now a
+            no-op: issue #666 removed the prototype skip so spec_coverage
+            runs on every mode.  Retained for call-site compatibility and
+            removable in a follow-up.
 
         Returns
         -------
@@ -505,7 +682,7 @@ class AdvancedPRDParser:
         """
         return [
             OutcomeCoverageAugmenter(llm_client=self.llm_client),
-            SpecCoverageAugmenter(),
+            SpecCoverageAugmenter(complexity_mode=complexity_mode),
         ]
 
     async def parse_prd_to_tasks(
@@ -558,7 +735,7 @@ class AdvancedPRDParser:
         # feature-based outcome-coverage path; spec_coverage ignores
         # the parameter (operates on spec text, not contracts).
         augmenter_result = await run_augmenter_chain(
-            self._build_augmenter_chain(),
+            self._build_augmenter_chain(complexity_mode=constraints.complexity_mode),
             prd_analysis=prd_analysis,
             tasks=tasks,
             contract_artifacts=None,
@@ -885,6 +1062,87 @@ class AdvancedPRDParser:
         if not raw_tasks:
             raise RuntimeError("Contract decomposition LLM response contained no tasks")
 
+        # Decomposer over-fragmentation guard (#658 follow-up).
+        #
+        # The prompt instructs the LLM: "Produce exactly one task per
+        # contract boundary listed above." The LLM has circumvented
+        # this in two observed shapes:
+        #
+        # 1. ``snake-decomposer-1`` (2026-05-26) — LLM produced 5
+        #    tasks for 2 contracts where 3 tasks all pointed at the
+        #    same ``contract_file`` string. Dedupe by raw
+        #    ``contract_file`` caught this.
+        #
+        # 2. ``snake-663-658`` (2026-05-27) — LLM produced 3 tasks
+        #    for 2 contracts where the three contract_files were
+        #    DIFFERENT strings but two of them named the same DOMAIN
+        #    via different artifact types of that domain
+        #    (``...game-core-engine-interface-contracts.md`` and
+        #    ``...game-core-engine-architecture.md``). Dedupe by
+        #    raw string missed this because the filenames differ;
+        #    the third task ran in parallel, wrote to a sibling
+        #    agent's file, and merge-conflicted.
+        #
+        # The fix dedupes by DOMAIN SLUG (extracted via
+        # ``_extract_contract_domain_slug``), which collapses all
+        # artifact-type variants of the same domain into one key.
+        # The LLM stays in charge of description, product_intent,
+        # acceptance criteria — everything that genuinely benefits
+        # from LLM creativity. It just doesn't get to invent extra
+        # task slots, regardless of which artifact type it names.
+        #
+        # Tasks lacking ``contract_file`` are treated as a violation
+        # of the prompt's "Each task owns exactly one contract
+        # boundary" rule and dropped.
+        contract_count = len(usable_contracts)
+        if len(raw_tasks) > contract_count:
+            seen_domain_slugs: set[str] = set()
+            deduped: List[Dict[str, Any]] = []
+            for raw in raw_tasks:
+                cf = (
+                    str(raw.get("contract_file") or "").strip()
+                    if isinstance(raw, dict)
+                    else ""
+                )
+                if not cf:
+                    logger.warning(
+                        "[decompose_by_contract] dropping LLM task with "
+                        "no contract_file: name=%r — violates 'one "
+                        "task per contract' rule",
+                        raw.get("name") if isinstance(raw, dict) else None,
+                    )
+                    continue
+                domain_slug = _extract_contract_domain_slug(cf)
+                if not domain_slug:
+                    # Defensive: a contract_file we can't parse a
+                    # domain from. Fall back to raw string so
+                    # behavior degrades to the pre-domain-slug
+                    # guard rather than silently passing.
+                    domain_slug = cf
+                if domain_slug in seen_domain_slugs:
+                    logger.warning(
+                        "[decompose_by_contract] dropping duplicate task "
+                        "'%s' — domain '%s' (contract_file %s) already "
+                        "claimed by earlier task (prompt requires "
+                        "exactly one task per contract boundary)",
+                        raw.get("name"),
+                        domain_slug,
+                        cf,
+                    )
+                    continue
+                seen_domain_slugs.add(domain_slug)
+                deduped.append(raw)
+
+            logger.info(
+                "[decompose_by_contract] over-fragmentation guard fired: "
+                "LLM produced %d tasks for %d contracts → kept %d unique "
+                "tasks after dedupe by domain slug",
+                len(raw_tasks),
+                contract_count,
+                len(deduped),
+            )
+            raw_tasks = deduped
+
         # Build Task objects. IDs are synthetic — caller replaces with
         # kanban UUIDs when creating cards.
         constraints = constraints or ProjectConstraints()
@@ -1001,6 +1259,19 @@ class AdvancedPRDParser:
                 source_type="contract_first",
                 source_context={
                     "contract_file": contract_file,
+                    # #206 MVP: which file(s) this task is authorized to
+                    # write. request_next_task consults this to skip
+                    # tasks whose declared files are currently held by
+                    # another in-progress task, preventing the
+                    # verify-snake-4 class of merge conflicts. MVP is
+                    # conservative — declared_files == [contract_file]
+                    # when present, [] otherwise. See
+                    # ``_extract_declared_files`` above.
+                    "declared_files": _extract_declared_files(
+                        responsibility=responsibility,
+                        contract_file=contract_file,
+                        contract_artifacts=contract_artifacts,
+                    ),
                     "complexity_mode": complexity_mode,
                     # Also persist responsibility here so it round-trips
                     # through kanban providers that don't yet serialize
@@ -1057,7 +1328,7 @@ class AdvancedPRDParser:
         # empty telemetry on flag off / no outcomes / LLM error.
         chain_input_tasks = list(pre_existing_tasks or []) + tasks
         return await run_augmenter_chain(
-            self._build_augmenter_chain(),
+            self._build_augmenter_chain(complexity_mode=constraints.complexity_mode),
             prd_analysis=prd_analysis,
             tasks=chain_input_tasks,
             contract_artifacts=contract_artifacts,
@@ -1706,7 +1977,9 @@ Return ONLY the JSON object. Do not include commentary.
             raise ai_error
 
     async def _discover_domains(
-        self, functional_requirements: List[Dict[str, Any]]
+        self,
+        functional_requirements: List[Dict[str, Any]],
+        complexity_mode: Optional[str] = None,
     ) -> Dict[str, List[str]]:
         """
         Use AI to discover natural domain groupings from functional requirements.
@@ -1715,6 +1988,15 @@ Return ONLY the JSON object. Do not include commentary.
         ----------
         functional_requirements : List[Dict[str, Any]]
             List of functional requirements with id, name, description, etc.
+        complexity_mode : Optional[str]
+            Project complexity mode: ``"prototype"``, ``"standard"``,
+            or ``"enterprise"``. When ``"prototype"``, the prompt asks
+            the LLM for exactly 1 domain so trivial projects (snake
+            game, todo app, etc.) don't get split into multiple
+            domains. This honors the prototype-mode contract of
+            "speed over granularity" — see bug #649 root cause 3.
+            ``None`` or any non-prototype value falls back to the
+            size-based floor below.
 
         Returns
         -------
@@ -1744,10 +2026,20 @@ Return ONLY the JSON object. Do not include commentary.
 
         features_text = "\n\n".join(feature_list)
 
-        # Determine target number of domains based on project size
+        # Determine target number of domains based on project size.
+        #
+        # Bug #649 root cause 3: prototype mode now forces a single
+        # domain so trivial projects (≤5 features) don't get split
+        # into "Game Physics" + "Game Presentation" for a 50-line
+        # snake game. For non-prototype small projects the floor was
+        # lowered from "2-3" to "1-3" so the LLM can still return 1
+        # when the project genuinely fits one domain — without
+        # preventing 2-3 when warranted.
         num_features = len(functional_requirements)
-        if num_features <= 5:
-            target_domains = "2-3"
+        if complexity_mode == "prototype":
+            target_domains = "1"
+        elif num_features <= 5:
+            target_domains = "1-3"
         elif num_features <= 15:
             target_domains = "3-5"
         elif num_features <= 30:
@@ -1988,19 +2280,66 @@ Create design artifacts such as:
         project_size = (constraints.quality_requirements or {}).get(
             "project_size", "medium"
         )
+
+        # #683 Cause 1: determine which features are CORE (serve an
+        # in-scope user outcome) via one LLM call, so the filter keeps
+        # them and trims only scope-creep — instead of dropping by list
+        # position. Gated on outcome coverage (which provides the
+        # outcomes). On flag-off / no outcomes / LLM error we pass
+        # ``None``: the filter still caps by the complexity tier
+        # (deterministic, far better than the old team_size cut) and #683
+        # Cause 2 backstops any core feature that slips through.
+        protected_ids: Optional[Set[str]] = None
+        from src.config.outcome_coverage_config import is_outcome_coverage_enabled
+
+        if is_outcome_coverage_enabled() and analysis.user_outcomes:
+            try:
+                from src.marcus_mcp.coordinator.outcome_coverage import (
+                    map_core_feature_ids_with_llm,
+                )
+
+                protected_ids = await map_core_feature_ids_with_llm(
+                    requirements=analysis.functional_requirements,
+                    outcomes=analysis.user_outcomes,
+                    llm_client=self.llm_client,
+                )
+            except Exception as exc:  # noqa: BLE001 — graceful degradation
+                # Codex P2 on PR #688: a transient mapping failure must NOT
+                # reintroduce the outcome-dropping behavior this fixes. With
+                # outcome coverage ON, the safe fallback is to protect ALL
+                # current requirements (treat every feature as core) so an
+                # over-cap list can't trim a real feature by list position.
+                # The deterministic tier cap still applies; #683 Cause 2
+                # backstops anything genuinely beyond it.
+                logger.warning(
+                    "#683 Cause 1: core-feature mapping failed; protecting "
+                    "all requirements so none are dropped by position: %s",
+                    exc,
+                )
+                protected_ids = {
+                    str(r.get("id") or r.get("name") or "")
+                    for r in analysis.functional_requirements
+                    if (r.get("id") or r.get("name"))
+                }
+
         functional_requirements = self._filter_requirements_by_size(
             analysis.functional_requirements,
             project_size,
             constraints.team_size,
             # Pass original PRD for specificity detection
             analysis.original_description,
+            protected_ids,
         )
 
         # Get complexity mode from constraints (passed from create_project)
         complexity_mode = constraints.complexity_mode
 
-        # STEP 1: Discover domains from functional requirements
-        domains = await self._discover_domains(functional_requirements)
+        # STEP 1: Discover domains from functional requirements.
+        # Bug #649 root cause 3: forward ``complexity_mode`` so prototype
+        # projects collapse to a single domain (no over-decomposition).
+        domains = await self._discover_domains(
+            functional_requirements, complexity_mode=complexity_mode
+        )
         logger.info(f"Discovered {len(domains)} domains: {list(domains.keys())}")
 
         # STEP 2: Create bundled design tasks (one per domain)
@@ -4891,6 +5230,7 @@ explanation."""
         project_size: str,
         team_size: int,
         prd_content: str,
+        protected_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Filter functional requirements based on project size and team capacity.
@@ -4965,27 +5305,59 @@ explanation."""
             f"filtering for project_size={project_size}"
         )
 
-        # Map to new 3-option system (with legacy support)
-        if project_size in ["prototype", "mvp"]:
-            # Prototype: only keep the most essential 1-2 requirements
-            filtered = requirements[:2]
-        elif project_size in ["standard", "small", "medium"]:
-            # Standard: limit based on team size (typically 3-5 features)
-            max_reqs = min(len(requirements), max(3, team_size))
-            filtered = requirements[:max_reqs]
-        else:
-            # Enterprise/Large: include all requirements
-            filtered = requirements
+        # #683 Cause 1: cap by the project's complexity tier, NOT team
+        # size. ``project_size`` IS the complexity mode; team size governs
+        # parallelism, not scope. The old ``requirements[:max(3, team_size)]``
+        # cut a "medium" project (whose own expected range is 8-15) down to
+        # 3 by list position, silently dropping core features (the snake
+        # collision / game-over / restart loss in #683). The cap is the
+        # upper bound of the tier's expected feature range.
+        tier_caps = {
+            "prototype": 5,
+            "mvp": 5,
+            "small": 10,
+            "standard": 15,
+            "medium": 15,
+            "enterprise": 30,
+            "large": 30,
+        }
+        cap = tier_caps.get(project_size, 15)
+
+        # #683 Cause 1: never drop a CORE feature (one that serves an
+        # in-scope user outcome, per the LLM mapping the caller passes in).
+        # Keep all protected requirements first; fill the rest of the cap
+        # with non-core features in order; trim only genuine scope-creep.
+        protected = protected_ids or set()
+
+        def _rid(req: Dict[str, Any]) -> str:
+            return str(req.get("id") or req.get("name") or "unknown")
+
+        core = [r for r in requirements if _rid(r) in protected]
+        non_core = [r for r in requirements if _rid(r) not in protected]
+
+        # Core features are never dropped, even if they alone exceed the
+        # cap (correctness floor — Cause 2 would otherwise have to rebuild
+        # them). Non-core fills whatever capacity remains.
+        remaining = max(0, cap - len(core))
+        filtered = core + non_core[:remaining]
+        # Preserve original ordering for stability/readability.
+        kept_ids = {_rid(r) for r in filtered}
+        filtered = [r for r in requirements if _rid(r) in kept_ids]
 
         if len(filtered) < original_count:
-            filtered_ids = [
-                req.get("id", req.get("name", "unknown")) for req in filtered
-            ]
-            dropped_ids = [id for id in original_ids if id not in filtered_ids]
+            filtered_ids = [_rid(r) for r in filtered]
+            dropped_ids = [i for i in original_ids if i not in filtered_ids]
             logger.warning(
                 f"Filtered {original_count} -> {len(filtered)} "
-                f"(size={project_size}, team={team_size}). "
+                f"(size={project_size}, cap={cap}, "
+                f"core_protected={len(core)}). "
                 f"Kept: {filtered_ids}, Dropped: {dropped_ids}"
+            )
+        if len(core) > cap:
+            logger.warning(
+                f"#683 Cause 1: {len(core)} core feature(s) exceed the "
+                f"{project_size} cap of {cap}; keeping all core features "
+                f"(scope floor) — consider a larger project_size."
             )
 
         return filtered

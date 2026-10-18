@@ -152,10 +152,109 @@ class TestBundledDomainDiscovery:
         # Act
         await parser._discover_domains(small_requirements)
 
-        # Assert - Should suggest 2-3 domains for small projects
+        # Assert - Should suggest 1-3 domains for small projects.
+        #
+        # Bug #649 root cause 3: the previous floor of "2-3" forced
+        # trivial projects (snake game, etc.) into ≥2 domains, which
+        # cascaded into over-decomposition (11 tasks for 50-line snake).
+        # Lowering the floor to "1-3" lets the LLM return 1 domain when
+        # the project genuinely fits one — without preventing it from
+        # returning 2-3 when warranted.
         parser.llm_client.analyze.assert_called_once()
         call_args = parser.llm_client.analyze.call_args.kwargs["prompt"]
-        assert "2-3" in call_args  # Target domain count for small projects
+        assert "1-3" in call_args  # Target domain count for small projects
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_discover_domains_prototype_mode_forces_single_domain(
+        self, parser, sample_functional_requirements
+    ):
+        """Test that complexity_mode='prototype' forces target=1 domain.
+
+        Bug #649 root cause 3: ``should_decompose`` correctly skips
+        further per-task decomposition in prototype mode, but
+        ``_discover_domains`` was called unconditionally — so trivial
+        projects still got split into multiple domains, defeating the
+        prototype-mode promise of "speed over granularity."
+
+        With the fix, prototype mode forces ``target_domains="1"`` in
+        the LLM prompt so the model returns a single cohesive domain
+        for the whole feature set.
+        """
+        # Arrange
+        parser.llm_client.analyze.return_value = json.dumps(
+            {
+                "domains": [
+                    {
+                        "name": "Snake Game",
+                        "feature_ids": [
+                            req["id"] for req in sample_functional_requirements
+                        ],
+                        "rationale": "Single trivial-project domain",
+                    }
+                ]
+            }
+        )
+
+        # Act
+        await parser._discover_domains(
+            sample_functional_requirements,
+            complexity_mode="prototype",
+        )
+
+        # Assert - Prompt asks for exactly 1 domain.
+        parser.llm_client.analyze.assert_called_once()
+        call_args = parser.llm_client.analyze.call_args.kwargs["prompt"]
+        assert "1" in call_args.split("Return JSON with")[1].split("domains")[0]
+        # And the prompt MUST NOT carry the multi-domain floor language.
+        assert "2-3" not in call_args
+        assert "3-5" not in call_args
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_discover_domains_non_prototype_unchanged_for_medium(self, parser):
+        """Standard/enterprise complexity preserves the existing 4-7 floor
+        for medium projects (16-30 features).
+
+        Regression guard: the fix for bug #649 root cause 3 must only
+        change behavior for prototype mode and small projects — medium
+        and large projects retain the same target_domains buckets.
+        """
+        # Arrange - 20 features so we hit the "4-7" bucket
+        medium_requirements = [
+            {
+                "id": f"feature_{i}",
+                "name": f"Feature {i}",
+                "description": f"Description {i}",
+                "affected_components": ["frontend"],
+                "complexity": "simple",
+            }
+            for i in range(20)
+        ]
+        parser.llm_client.analyze.return_value = json.dumps(
+            {
+                "domains": [
+                    {
+                        "name": f"Domain{i}",
+                        "feature_ids": [
+                            f"feature_{j}" for j in range(i * 4, (i + 1) * 4)
+                        ],
+                        "rationale": f"Domain {i}",
+                    }
+                    for i in range(5)
+                ]
+            }
+        )
+
+        # Act
+        await parser._discover_domains(
+            medium_requirements,
+            complexity_mode="standard",
+        )
+
+        # Assert - Medium-project floor (4-7) unchanged.
+        call_args = parser.llm_client.analyze.call_args.kwargs["prompt"]
+        assert "4-7" in call_args
 
     @pytest.mark.unit
     @pytest.mark.asyncio

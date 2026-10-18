@@ -6,8 +6,11 @@ dependency awareness, and relevant patterns. Enhances agent effectiveness by
 reducing time spent understanding existing code and architectural decisions.
 """
 
-# import asyncio  # Removed - not needed after lazy loading fix
+import asyncio
+import copy
+import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,6 +20,148 @@ from src.core.models import Priority, Task
 from src.core.resilience import with_fallback
 
 logger = logging.getLogger(__name__)
+
+
+# Per-process cache for ``Context.analyze_dependencies`` output.
+#
+# Issue #626: ``analyze_dependencies`` is called from every
+# ``request_next_task`` MCP call. The hybrid inferer's LLM call
+# (``HybridDependencyInferer._get_ai_dependencies``) costs ~13-15
+# seconds and the task graph rarely changes between calls. Caching the
+# computed dependency map per graph-signature drops the cost to ~0ms on
+# subsequent calls within the TTL window.
+#
+# The cache key hashes ``(task.id, sorted_dependencies, infer_implicit)``
+# tuples, so the cache invalidates automatically when the task graph
+# changes. Re-ordering of the tasks list or of an individual task's
+# dependencies does not change the key — both are normalized via
+# sorting before hashing.
+_DEPS_CACHE_TTL_SECONDS = 60.0
+
+# Drop entries older than this on each cache write. Bounds memory
+# without an explicit LRU policy — Marcus typically holds one entry per
+# active task graph (a handful at most), so a simple time-based prune
+# is sufficient.
+_DEPS_CACHE_PRUNE_AGE_SECONDS = 300.0
+
+_deps_cache: Dict[str, Tuple[float, Dict[str, List[str]]]] = {}
+
+# Per-key compute lock map. Prevents the thundering-herd case where N
+# ephemeral agents spawn concurrently, all miss the cache, and all fire
+# parallel LLM calls. With the lock, the first caller computes and
+# writes; the rest wait, re-check the cache, and hit. Wall-clock latency
+# is unchanged (limited by the first compute), but API cost drops by
+# Nx for the cold-start moment that Marcus's multi-agent workflow makes
+# inevitable.
+_deps_cache_locks: Dict[str, asyncio.Lock] = {}
+
+# Guards creation of entries in ``_deps_cache_locks``. Without it, two
+# coroutines racing to create the lock for a given key would each
+# instantiate their own and store the later one — defeating the
+# thundering-herd protection for the racing coroutines.
+_deps_cache_locks_guard = asyncio.Lock()
+
+
+def _deps_cache_key(tasks: List[Task], infer_implicit: bool) -> str:
+    """Compute a stable hash of the task graph and inference flag.
+
+    Parameters
+    ----------
+    tasks
+        Task list whose dependency graph is about to be analyzed.
+    infer_implicit
+        Whether implicit dependencies are being inferred. Different
+        flag values produce different outputs, so they must hash
+        differently.
+
+    Returns
+    -------
+    str
+        SHA-256 hex digest. The hash changes when any field that
+        affects dependency inference changes — task id, name,
+        description, labels, or explicit dependencies — and when
+        ``infer_implicit`` toggles. The hash is stable across
+        re-ordering of the tasks list or of an individual task's
+        labels/dependencies.
+
+    Notes
+    -----
+    The hash deliberately includes ``name``, ``description``, and
+    ``labels`` (Codex P2 on PR #631), plus ``provides`` and
+    ``requires`` (Kaia P3 follow-up). The pattern-based fallback in
+    :meth:`Context._infer_dependency` matches against task names and
+    labels; the hybrid inferer's LLM prompt is built from names and
+    descriptions; the cross-parent contract-wiring system (GH-320)
+    matches ``provides`` against ``requires`` to derive implicit
+    edges. A cache key that omitted any of these fields would return
+    stale dependency maps when an agent or the kanban refresh edited
+    them without changing the id or explicit dependencies — exactly
+    the failure mode the cache must not introduce.
+    """
+    normalized = sorted(
+        (
+            t.id,
+            t.name,
+            t.description or "",
+            tuple(sorted(t.labels or [])),
+            tuple(sorted(t.dependencies or [])),
+            t.provides or "",
+            t.requires or "",
+        )
+        for t in tasks
+    )
+    payload = repr((normalized, infer_implicit))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def _get_deps_cache_lock(cache_key: str) -> asyncio.Lock:
+    """Return the per-key compute lock, creating it on first use.
+
+    The ``_deps_cache_locks_guard`` prevents two coroutines from
+    racing to create separate locks for the same key.
+    """
+    async with _deps_cache_locks_guard:
+        lock = _deps_cache_locks.get(cache_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _deps_cache_locks[cache_key] = lock
+        return lock
+
+
+def _prune_stale_deps_cache() -> None:
+    """Drop cache entries older than ``_DEPS_CACHE_PRUNE_AGE_SECONDS``.
+
+    Called opportunistically on each cache write. The work is O(N) in
+    cache size but N stays small in practice (one entry per active
+    task graph), so amortized cost is negligible. Also drops the
+    matching per-key compute lock when the cache entry is dropped AND
+    the lock is not currently held — keeps the lock dict bounded
+    without orphaning an in-flight compute.
+    """
+    now = time.monotonic()
+    expired = [
+        k
+        for k, (timestamp, _) in _deps_cache.items()
+        if (now - timestamp) > _DEPS_CACHE_PRUNE_AGE_SECONDS
+    ]
+    for k in expired:
+        _deps_cache.pop(k, None)
+        lock = _deps_cache_locks.get(k)
+        if lock is not None and not lock.locked():
+            _deps_cache_locks.pop(k, None)
+
+
+def invalidate_deps_cache() -> None:
+    """Drop all cached dependency maps.
+
+    Call on project switch or when external state has changed in a way
+    the signature-based cache key cannot detect (e.g. tests that mutate
+    Task instances in place). Locks are left in place — they cost a few
+    bytes and may be held by an in-flight compute; orphaning them would
+    defeat thundering-herd protection mid-flight.
+    """
+    _deps_cache.clear()
+
 
 # Optional import for hybrid dependency inference
 try:
@@ -379,6 +524,52 @@ class Context:
         Returns
         -------
             Mapping of task_id to list of dependent task IDs
+
+        Notes
+        -----
+        Output is cached per graph-signature for ``_DEPS_CACHE_TTL_SECONDS``
+        (issue #626). The cache key hashes ``(task.id, sorted_dependencies,
+        infer_implicit)`` so adding/removing a task or editing a task's
+        ``dependencies`` field invalidates the entry automatically.
+        Returned dicts are deep-copied so callers can mutate without
+        corrupting the cache.
+        """
+        cache_key = _deps_cache_key(tasks, infer_implicit)
+
+        # Fast path: cache hit without acquiring the compute lock.
+        cached = _deps_cache.get(cache_key)
+        if cached is not None:
+            cached_at, cached_map = cached
+            if (time.monotonic() - cached_at) < _DEPS_CACHE_TTL_SECONDS:
+                return copy.deepcopy(cached_map)
+
+        # Cache miss: acquire the per-key compute lock so concurrent
+        # callers for the same task graph serialize through one compute
+        # instead of each firing an LLM call (the thundering-herd case).
+        lock = await _get_deps_cache_lock(cache_key)
+        async with lock:
+            # Double-check: while we were waiting for the lock another
+            # coroutine may have populated the cache. Re-read inside
+            # the critical section before paying the compute cost.
+            cached = _deps_cache.get(cache_key)
+            if cached is not None:
+                cached_at, cached_map = cached
+                if (time.monotonic() - cached_at) < _DEPS_CACHE_TTL_SECONDS:
+                    return copy.deepcopy(cached_map)
+
+            result = await self._compute_dependencies(tasks, infer_implicit)
+
+            _prune_stale_deps_cache()
+            _deps_cache[cache_key] = (time.monotonic(), copy.deepcopy(result))
+            return result
+
+    async def _compute_dependencies(
+        self, tasks: List[Task], infer_implicit: bool
+    ) -> Dict[str, List[str]]:
+        """Compute the dependency map without consulting the cache.
+
+        Extracted from :meth:`analyze_dependencies` so the cache wrapper
+        can apply uniformly across the hybrid and pattern-based paths.
         """
         # Use hybrid inferer if available for better accuracy with fewer API calls
         if self.hybrid_inferer and infer_implicit:

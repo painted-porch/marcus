@@ -14,7 +14,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -1137,6 +1137,13 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
         composition_task = build_composition_task(
             project_name=project_name,
             impl_tasks=contract_first_impl_tasks,
+            # Defensive getattr matches the pattern at the create_project
+            # result assembly below: the attribute is set lazily by the
+            # decomposer path and may be absent on early/feature-based
+            # flows.  Falls back to "unknown" (no behavior contract).
+            structural_category=getattr(
+                self, "_project_structural_category", "unknown"
+            ),
         )
 
         # Design ghosts come first so the integration task's dependency
@@ -1209,10 +1216,17 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
 
         # Appended to every synthesized description so foundation tasks
         # carry the same Marcus workflow reminder as any implementation
-        # task — agents must call log_artifact so downstream agents can
-        # discover the output via get_task_context.  This is not HOW
-        # guidance; it is standard Marcus workflow that applies to all
-        # tasks that produce artifacts consumed by other tasks.
+        # task.  Scope matters: log_artifact is for INTERFACE-BEARING
+        # reference outputs (contracts, schemas, API specs, design
+        # docs), NOT source files.  Git is already the file channel —
+        # an artifact copy of a source file goes stale the moment the
+        # real one changes (two sources of truth, the v80 failure class
+        # through a different door), it buries the one contract that
+        # matters under implementation blobs, and every artifact
+        # inflates downstream get_task_context payloads (coordination
+        # tax buying nothing git doesn't provide).  This is not HOW
+        # guidance; it is standard Marcus workflow for tasks that
+        # produce reference artifacts consumed by other tasks.
         #
         # Issue #446 (Kaia review checkpoint #2): foundation agents must
         # also call log_decision titled "Public API surface" so the
@@ -1229,9 +1243,12 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
         # the chosen surface be published.  Bright-line: coordination
         # contract requirement, not implementation guidance.
         _WORKFLOW_REMINDER = (
-            " Call log_artifact for every file you produce so that "
-            "downstream agents can discover your output via "
-            "get_task_context. Also call log_decision titled "
+            " Call log_artifact for interface-bearing outputs that "
+            "downstream agents must consume as references — contracts, "
+            "schemas, API specs, design docs — so they can discover "
+            "them via get_task_context. Do NOT log source files: they "
+            "are discovered via git once your work merges. Also call "
+            "log_decision titled "
             "'Public API surface' listing the exact import paths, "
             "exported symbols, config keys, and usage constraints "
             "downstream consumers must coordinate against — without "
@@ -1273,9 +1290,13 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
             "2. Shared Components: reusable UI or logic components (Card, "
             "Button, API client) — needed when ≥2 domains will use the "
             "same component.\n"
-            "3. Tech Foundation: shared configuration (TypeScript config, "
-            "routing, test harness) — needed when agents would duplicate "
-            "this setup independently.\n\n"
+            "3. Tech Foundation: shared build/tooling configuration "
+            "matching the project's stated tech stack (e.g., the build "
+            "tool config, router setup, test harness for whatever "
+            "language the spec asks for) — needed when agents would "
+            "duplicate this setup independently. Do NOT assume "
+            "TypeScript; honor the language the spec actually states "
+            "(bug #649 root cause 1).\n\n"
             "Be CONSERVATIVE. Return foundation tasks ONLY when agents "
             "would DEFINITELY produce incompatible implementations without "
             "them.  When uncertain, return an empty list.\n\n"
@@ -1438,6 +1459,14 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
 
         Uses the base class implementation for common functionality.
         """
+        # Phase timing for performance monitoring (where does the
+        # 30-60s project-creation cost come from?). Mirrors the inline
+        # _mark pattern in ``src/marcus_mcp/tools/task.py`` so all
+        # Marcus timing log lines can be grepped together. Marks fire
+        # on the success path only — error returns skip the log.
+        from src.core.perf_instrumentation import PhaseTimer
+
+        _timer = PhaseTimer()
         try:
             _planning_started_at = datetime.now(timezone.utc)
             # Initialise deferred-write state so the except block can write
@@ -1547,6 +1576,8 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                         logger.error(f"Failed to create new project: {e}")
                         raise
 
+            _timer.mark("kanban_setup")
+
             # Parse tasks
             from src.core.error_framework import ErrorContext, error_context
 
@@ -1603,6 +1634,8 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                         },
                     ),
                 )
+
+            _timer.mark("natural_language_processing")
 
             # Apply safety checks using base class
             with error_context(
@@ -1676,6 +1709,9 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                     contract_file=contract_file_for_integration,
                     functional_requirements=stashed_requirements,
                     outcomes=stashed_outcomes,
+                    structural_category=getattr(
+                        self, "_project_structural_category", "unknown"
+                    ),
                 )
                 logger.info(
                     "After integration enhancement: " f"{len(safe_tasks)} tasks"
@@ -1723,6 +1759,8 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                 if _is_design_task(task):
                     task.assigned_to = "Marcus"
 
+            _timer.mark("augmentation")
+
             # Create tasks on board using base class (this also triggers decomposition)
             with error_context(
                 "kanban_task_creation",
@@ -1733,6 +1771,8 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
             ):
                 created_tasks = await self.create_tasks_on_board(safe_tasks)
                 logger.info(f"Created {len(created_tasks)} tasks on board")
+                _timer.mark("kanban_persist")
+
                 # Planning phase ends: board is populated, agents can now
                 # self-select work.  Log JSONL event (debugging) and persist
                 # to marcus.db so Cato renders a "Marcus Planning" swim lane
@@ -2125,6 +2165,15 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
             except asyncio.TimeoutError:
                 logger.warning("Cleanup timed out after 5.0s, continuing anyway")
 
+            _timer.mark("finalize")
+            _timer.mark("total")
+            logger.info(
+                "create_project_from_description timing: "
+                f"project_name={project_name!r} "
+                f"task_count={len(safe_tasks) if 'safe_tasks' in locals() else 0} "
+                f"total_ms={_timer.total_ms()} "
+                f"phases={_timer.to_phase_durations()}"
+            )
             return result
 
         except Exception as e:
@@ -3930,30 +3979,63 @@ for the following project.
 Generate ONLY the shared build/tooling infrastructure. The implementing \
 agents decide everything about the application code.
 
-ALLOWED files (generate these):
-- Package manifest (package.json, pyproject.toml, Cargo.toml, etc.)
-- Build configuration (tsconfig, vite.config, eslint config, etc.)
-- Entry point (main.tsx, main.py, main.rs — minimal, just mounts app)
-- App shell (App.tsx or equivalent — imports components, no styling logic)
+LANGUAGE / TECH-STACK CONSTRAINTS (bug #649 root cause 1):
+Read the project description above for any explicit language, framework, \
+or "no <X>" constraint (e.g., "vanilla JavaScript", "plain Python", \
+"no TypeScript", "Flask only"). HONOR THOSE CONSTRAINTS EXACTLY:
+- If the spec says "vanilla JavaScript", produce .js files and do NOT \
+generate tsconfig.json, main.tsx, App.tsx, or any TypeScript artifact.
+- If the spec says "plain Python", do not introduce frameworks or \
+type-checking config the spec did not ask for.
+- Pick file extensions and config filenames to match the stated stack. \
+The architecture document above is authoritative for the tech stack \
+choice — follow it instead of any example below.
+
+ALLOWED files (generate these — file names/extensions match stated stack):
+- Package manifest (e.g., package.json, pyproject.toml, Cargo.toml)
+- Build configuration (e.g., vite.config.js / vite.config.ts / \
+pyproject build settings — pick the form that matches the language)
+- Entry point (e.g., main.js, main.ts, index.js, main.py — pick the \
+extension that matches the language stated in the spec)
+- App shell (the entry module wires up components; for vanilla-JS \
+projects this is just main.js, not App.tsx)
 - Tooling config (.gitignore, .env.example)
 - ONE placeholder file per implementation task (see below)
 
 FORBIDDEN — do NOT generate these:
-- TypeScript interfaces, types, or data model definitions
+- Type definitions or data-model files (those are the agents' work)
 - Utility functions, helpers, or service implementations
 - CSS files, stylesheets, or design tokens
 - Test files or test configuration
 - Any file with more than 3 lines of actual code (configs excepted)
+- Files in a language the spec did NOT ask for (no .ts when the spec \
+says vanilla JS; no Python config when the spec says JavaScript)
 
-Placeholder files must contain EXACTLY one comment line:
+Placeholder files must contain EXACTLY one comment line using the \
+language's native comment syntax (// for JS/TS, # for Python, etc.):
 // TimeWidget — implementation task for agent
 
-The .gitignore MUST include: node_modules/, dist/, *.js (in src/), \
-.env, and build artifacts appropriate for the project type.
+The .gitignore MUST include the build artifacts appropriate for the \
+project's stated tech stack (e.g., node_modules/ and dist/ for JS/TS, \
+__pycache__/ and *.pyc for Python). Do NOT add "*.js in src/" to the \
+gitignore when the project's source language IS JavaScript — that \
+would ignore the user's actual source files.
 
-Respond with ONLY a JSON array of files. No markdown fencing:
+TASK ANCHORING (issue #659): for each placeholder file you generate \
+for an implementation task, you MUST include a ``task_name`` field \
+that EXACTLY matches the task name from the Implementation Tasks \
+list above (e.g., ``"Implement Game Core Engine"``). This binds the \
+placeholder to its owning task so Marcus can surface the path to the \
+implementing agent. Files that are NOT per-task placeholders (config, \
+manifests, entry points, .gitignore) MUST omit the ``task_name`` \
+field — they are shared infrastructure, not owned by any single task.
+
+Respond with ONLY a JSON array of files. No markdown fencing.
+Example shape (your actual extensions must match the stated stack):
 [{{"path": "package.json", "content": "..."}}, \
-{{"path": "src/main.tsx", "content": "..."}}]
+{{"path": "src/<entry-file>", "content": "..."}}, \
+{{"path": "src/<placeholder>", "content": "// ...", \
+"task_name": "Implement <FeatureName>"}}]
 """
 
 
@@ -3963,7 +4045,7 @@ async def _generate_project_scaffold(
     project_name: str,
     project_root: str,
     design_content: Dict[str, Dict[str, Any]],
-) -> bool:
+) -> Tuple[bool, Dict[str, str]]:
     """
     Generate project scaffold and write to disk on main.
 
@@ -3971,6 +4053,18 @@ async def _generate_project_scaffold(
     shared infrastructure files (package manifest, config, entry
     point) and empty placeholder files per implementation task.
     Written to project_root so worktrees inherit them.
+
+    Issue #659 — task anchoring
+    ---------------------------
+    Each per-task placeholder the LLM emits now carries a
+    ``task_name`` field binding it to the owning implementation
+    task. The returned mapping ``{task_name: scaffold_path}`` lets
+    the caller persist the scaffold path on the corresponding
+    kanban task's ``source_context``. Agents then read this
+    anchor from their task instructions instead of inventing a
+    sibling path and orphaning the scaffold (the
+    ``src/core/gameEngine.js`` failure observed in
+    ``snake-baton-1``).
 
     Parameters
     ----------
@@ -3987,8 +4081,15 @@ async def _generate_project_scaffold(
 
     Returns
     -------
-    bool
-        True if scaffold was generated successfully.
+    Tuple[bool, Dict[str, str]]
+        ``(success, task_to_path)`` where ``success`` is True iff
+        the scaffold wrote at least one file and ``task_to_path``
+        maps each implementation task name the LLM bound to a
+        placeholder file → that placeholder's relative path
+        within ``project_root``. Config/entry-point files are
+        absent from the mapping (they have no owning task). The
+        mapping is empty when scaffold generation is skipped or
+        all placeholders were rejected.
 
     See: https://github.com/lwgray/marcus/issues/300
     """
@@ -3998,6 +4099,9 @@ async def _generate_project_scaffold(
     from src.ai.providers.llm_abstraction import LLMAbstraction
 
     project_root_path = Path(project_root)
+    # #659: filled in below from LLM output; returned to caller so
+    # the scaffold path can be persisted on the owning task.
+    task_to_path: Dict[str, str] = {}
 
     # Get the architecture doc content from design_content
     arch_content = ""
@@ -4013,7 +4117,7 @@ async def _generate_project_scaffold(
         logger.warning(
             "[scaffold] No architecture doc found — " "skipping scaffold generation"
         )
-        return False
+        return False, task_to_path
 
     # Build implementation task list
     impl_tasks = [
@@ -4030,7 +4134,7 @@ async def _generate_project_scaffold(
         logger.warning(
             "[scaffold] No implementation tasks found — " "skipping scaffold generation"
         )
-        return False
+        return False, task_to_path
 
     llm = LLMAbstraction()
 
@@ -4051,7 +4155,7 @@ async def _generate_project_scaffold(
 
         if not response:
             logger.warning("[scaffold] Empty LLM response")
-            return False
+            return False, task_to_path
 
         # Parse JSON array of files
         from src.utils.json_parser import clean_json_response
@@ -4061,7 +4165,7 @@ async def _generate_project_scaffold(
 
         if not isinstance(files, list):
             logger.warning("[scaffold] Expected JSON array")
-            return False
+            return False, task_to_path
 
         # Filter out over-generated files (GH-307)
         # Config files can be any length. Non-config files must be
@@ -4086,6 +4190,12 @@ async def _generate_project_scaffold(
             "vite.config.ts",
             "vite.config.js",
         }
+
+        # Build the set of impl task names so we can validate the
+        # LLM-emitted ``task_name`` field (#659). Anything not in this
+        # set is silently dropped from the mapping — the scaffold file
+        # still gets written, but no task ends up anchored to it.
+        impl_task_names = {getattr(t, "name", "") for t in impl_tasks}
 
         # Write each file to disk
         written = 0
@@ -4122,6 +4232,32 @@ async def _generate_project_scaffold(
             full_path.write_text(fcontent, encoding="utf-8")
             written += 1
 
+            # #659: bind the placeholder to its owning implementation
+            # task so the caller can stamp ``scaffold_path`` on the
+            # task's ``source_context``. Only honor ``task_name`` when
+            # it names a real impl task — defensive against the LLM
+            # inventing a name (or attaching it to a config file).
+            raw_task_name = f.get("task_name")
+            if (
+                raw_task_name
+                and isinstance(raw_task_name, str)
+                and raw_task_name in impl_task_names
+                and not is_config
+            ):
+                if raw_task_name in task_to_path:
+                    # Two placeholders bound to the same task — keep
+                    # the first one, warn so we can investigate the
+                    # prompt drift if it recurs.
+                    logger.warning(
+                        "[scaffold] task '%s' bound to multiple "
+                        "placeholders: keeping %s, ignoring %s",
+                        raw_task_name,
+                        task_to_path[raw_task_name],
+                        fpath,
+                    )
+                else:
+                    task_to_path[raw_task_name] = fpath
+
         if rejected > 0:
             logger.info(f"[scaffold] Rejected {rejected} over-generated " f"file(s)")
 
@@ -4152,11 +4288,11 @@ async def _generate_project_scaffold(
         else:
             logger.warning(f"[scaffold] Commit failed: " f"{result.stderr.decode()}")
 
-        return written > 0
+        return written > 0, task_to_path
 
     except Exception as e:
         logger.warning(f"[scaffold] Failed: {e}")
-        return False
+        return False, task_to_path
 
 
 async def _register_design_via_mcp(
@@ -4616,13 +4752,103 @@ async def _run_design_phase_body(
 
     # Scaffold generation — best effort, non-fatal on failure
     try:
-        await _generate_project_scaffold(
+        scaffold_ok, scaffold_task_to_path = await _generate_project_scaffold(
             tasks=safe_tasks,
             project_description=description,
             project_name=project_name,
             project_root=project_root,
             design_content=design_content,
         )
+
+        # #659: persist the scaffold path on the owning task's
+        # ``source_context`` so the agent prompt (Layer 1.3 in
+        # ``build_tiered_instructions``) can show it as the canonical
+        # implementation address. Without this, agents pick a sibling
+        # path by accident — the ``src/core/gameEngine.js`` orphan
+        # observed in ``snake-baton-1`` (commit 0ddc6c0 wrote at
+        # ``src/game/gameEngine.js`` while the scaffold sat at
+        # ``src/core/gameEngine.js``).
+        #
+        # ``safe_tasks`` and ``created_tasks`` are index-aligned by
+        # construction (same ``zip`` invariant used for the design-DONE
+        # update above), so we match the LLM-emitted ``task_name``
+        # against the ORIGINAL task name and use the kanban-side task
+        # ID to issue the update.
+        # Cross-provider persistence: SQLite merges ``source_context``
+        # into its JSON column; Planka / GitHub / Linear don't have a
+        # ``source_context`` column and would otherwise silently drop
+        # the anchor. The single ``update_task`` call below also writes
+        # a ``MARCUS_SCAFFOLD_PATH`` marker into the description,
+        # mirroring the ``MARCUS_CONTRACT_FIRST`` pattern. Every
+        # provider's ``update_task`` round-trips description.
+        # ``_resolve_scaffold_path`` in ``task.py`` parses the marker
+        # as the fallback path source when ``source_context`` is empty
+        # — cross-provider parity intact.
+        if scaffold_ok and scaffold_task_to_path:
+            name_to_pair = {
+                orig.name: (ct.id, orig) for ct, orig in zip(created_tasks, safe_tasks)
+            }
+            for task_name, scaffold_path in scaffold_task_to_path.items():
+                pair = name_to_pair.get(task_name)
+                if not pair:
+                    logger.warning(
+                        "[scaffold] LLM bound placeholder to task "
+                        "'%s' but no kanban task matches that name; "
+                        "skipping anchor",
+                        task_name,
+                    )
+                    continue
+                kanban_id, orig_task = pair
+                # Idempotent marker append: skip when the marker is
+                # already present so re-invocation doesn't multiply
+                # the comment.
+                existing_desc = getattr(orig_task, "description", "") or ""
+                if "<!-- MARCUS_SCAFFOLD_PATH:" in existing_desc:
+                    new_desc = existing_desc
+                else:
+                    marker = f"<!-- MARCUS_SCAFFOLD_PATH: {scaffold_path} -->"
+                    new_desc = (
+                        f"{existing_desc}\n\n{marker}" if existing_desc else marker
+                    )
+                try:
+                    # #206 + #659 lock-target refinement: when we
+                    # anchor a task to a scaffold path, we ALSO update
+                    # ``declared_files`` to point at that path.
+                    # Previously the lock layer (#658) declared
+                    # ``[contract_file]`` — but contract_file points at
+                    # a docs/specifications/*.md artifact agents read
+                    # but never write. Locking on the doc path is a
+                    # no-op against the real merge conflicts on the
+                    # implementation file. After this update, the lock
+                    # filter/acquire in ``task.py`` sees the scaffold
+                    # path as the declared write target and serializes
+                    # tasks correctly when two impl tasks both touch
+                    # the same shared file.
+                    await kanban_client.update_task(
+                        kanban_id,
+                        {
+                            "description": new_desc,
+                            "source_context": {
+                                "scaffold_path": scaffold_path,
+                                "declared_files": [scaffold_path],
+                            },
+                        },
+                    )
+                    logger.info(
+                        "[scaffold] Anchored task '%s' (%s) to %s "
+                        "(lock target = scaffold path)",
+                        task_name,
+                        kanban_id,
+                        scaffold_path,
+                    )
+                except Exception as anchor_err:
+                    logger.warning(
+                        "[scaffold] Failed to anchor task '%s' to %s: %s",
+                        task_name,
+                        scaffold_path,
+                        anchor_err,
+                    )
+
         logger.info("[scaffold] Background generation complete")
     except Exception as e:
         logger.warning(f"[scaffold] Background generation failed (non-fatal): {e}")

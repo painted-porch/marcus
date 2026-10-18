@@ -215,7 +215,11 @@ STARTUP SEQUENCE:
 4. Call mcp__marcus__request_next_task:
    - No parameters needed
    - This will find tasks suitable for your skills
-   - If you get "no suitable tasks", wait 30 seconds and try again (max 3 retries)
+   - If you get "no suitable tasks", follow the PERSISTENCE PATTERN below:
+     check get_project_status, and while work remains keep retrying with
+     backoff (30s -> 60s -> 120s max). Only exit when all tasks are complete.
+     A task can return to the board late in the run (e.g. sent back for
+     redo during integration verification) — someone must be there to claim it.
 
 5. When you get a task:
    - Check dependencies with get_task_context
@@ -224,7 +228,7 @@ STARTUP SEQUENCE:
    - Commit to main branch (git add, commit, push)
    - When 100% complete, IMMEDIATELY call request_next_task again
 
-6. Repeat step 5 until NO_TASKS_AVAILABLE or all retries exhausted
+6. Repeat step 5 until get_project_status shows all tasks complete
 
 ---
 
@@ -239,7 +243,8 @@ CRITICAL REMINDERS:
 - Use get_task_context for tasks with dependencies
 - Use log_decision for architectural choices
 - Use log_artifact with project_root: {self.config.implementation_dir}
-- If "no suitable tasks", wait 30s and try again (max 3 retries)
+- If "no suitable tasks", follow the PERSISTENCE PATTERN
+  (retry with backoff while work remains)
 
 START NOW!
 """

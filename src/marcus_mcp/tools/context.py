@@ -5,8 +5,10 @@ This module contains tools for context management:
 - get_task_context: Get context for a specific task
 """
 
+import copy
 import logging
-from typing import Any, Dict, List, Set
+import time
+from typing import Any, Dict, List, Optional, Set
 
 from src.core.project_history import Decision as HistoryDecision
 from src.core.project_history import (
@@ -72,6 +74,29 @@ async def log_decision(
         logged_decision = await state.context.log_decision(
             agent_id=agent_id, task_id=task_id, what=what, why=why, impact=impact
         )
+
+        # v0.3.8.post1 (Codex P2 on PR #625): invalidate the
+        # foundation-contract cache when a decision is logged against
+        # a foundation task. The cached contract includes
+        # foundation-task decisions; without this invalidation an
+        # agent calling ``get_task_context`` right after a foundation
+        # decision lands would see the stale pre-decision contract
+        # for up to ``_FOUNDATION_CONTRACT_CACHE_TTL_SECONDS`` and
+        # build the wrong architecture guidance into its work.
+        # Best-effort: never break log_decision on cache-miss.
+        try:
+            task = next(
+                (t for t in (state.project_tasks or []) if t.id == task_id),
+                None,
+            )
+            if (
+                task is not None
+                and getattr(task, "source_type", None) == "pre_fork_synthesis"
+            ):
+                pid = getattr(state, "current_project_id", None)
+                invalidate_foundation_contract_cache(str(pid) if pid else None)
+        except Exception:  # noqa: BLE001 - never break log_decision on cache miss
+            pass
 
         # Add comment to task if kanban is available
         if state.kanban_client:
@@ -156,6 +181,16 @@ async def get_task_context(task_id: str, state: Any) -> Dict[str, Any]:
         },
     )
 
+    # Record in the active experiment if one is running (mirrors
+    # log_decision above). Without this, context_requests stays 0 and the
+    # runner's spawn-thrash detector cannot see a claimed agent pulling
+    # context as a sign of forward progress.
+    from src.experiments.live_experiment_monitor import get_active_monitor
+
+    _monitor = get_active_monitor()
+    if _monitor and _monitor.is_running:
+        _monitor.record_context_request(agent_id=agent_id, task_id=task_id)
+
     try:
         # Check if this is a subtask
         if hasattr(state, "subtask_manager") and state.subtask_manager:
@@ -217,6 +252,30 @@ async def get_task_context(task_id: str, state: Any) -> Dict[str, Any]:
                     context_dict["parent_context"] = parent_context.to_dict()
 
                 return {"success": True, "context": context_dict}
+
+        # Issue #737: a verify task sees the claim and nothing else.
+        # Its context is the ``inputs`` the board wrote when the find
+        # task closed — never the dependency's evidence, reasoning, or
+        # raw response — and it works without the Context system, so
+        # the independence invariant cannot be eroded by context
+        # enrichment added elsewhere.
+        sor_task = next(
+            (
+                t
+                for t in (getattr(state, "project_tasks", None) or [])
+                if t.id == task_id
+            ),
+            None,
+        )
+        if sor_task is not None and sor_task.task_type == "verify":
+            return {
+                "success": True,
+                "context": {
+                    "is_subtask": False,
+                    "task_type": "verify",
+                    "inputs": dict(sor_task.inputs or {}),
+                },
+            }
 
         # Standard task context (not a subtask)
         # Check if Context system is available
@@ -324,6 +383,95 @@ _FOUNDATION_USAGE_GUIDANCE = (
 )
 
 
+#: Per-project cache for ``_collect_foundation_contract`` output.
+#:
+#: v0.3.8.post1 perf hotfix. Pre-cache the helper was invoked on every
+#: ``request_next_task`` call. With 3 foundation tasks per project,
+#: each call re-walked ``state.task_artifacts`` AND made 3 fresh
+#: kanban ``get_attachments`` queries — context_building dominated by
+#: that work at ~12 seconds per call against the snake-completion-1
+#: probe board. Multiplied by ephemeral agents each polling, the
+#: server appears hung.
+#:
+#: Cache is keyed by ``state.current_project_id`` and TTL-bound. The
+#: foundation contract is intentionally cheap to invalidate: it only
+#: changes when (a) the active project changes, (b) a new artifact is
+#: logged to a foundation task, or (c) a board attachment is added.
+#: We bound staleness with a TTL rather than tracking change events,
+#: because the cost of a stale read (one cycle of slightly-old
+#: foundation data) is much smaller than the cost of a missed
+#: invalidation (agents permanently miss new foundation content).
+#:
+#: TTL history
+#: -----------
+#: v0.3.8.post1 (PR #625) set TTL to 60s as a conservative safety
+#: net under the assumption that explicit invalidation might miss
+#: some mutation case (e.g. ``state.project_tasks`` reassignment in
+#: ``server.py`` — the Kaia self-review on PR #625 flagged this).
+#: PR #625 then added explicit invalidation at that site
+#: (``server.py:1003``).  Together with the existing invalidations
+#: on ``log_artifact`` to foundation tasks (``attachment.py:313``)
+#: and ``log_decision`` to foundation tasks (``context.py:97``), the
+#: explicit invalidation paths now cover every write surface that
+#: mutates the foundation contract.
+#:
+#: 2026-05-25 (verify-snake-5 audit): empirical measurement showed
+#: the 60s TTL hits only ~33% of the time because ephemeral agent
+#: lifecycle (#600) spaces ``request_next_task`` calls 1-5 minutes
+#: apart while agents work in their worktrees.  6 of 9 calls in
+#: test67 missed the cache and paid the ~13s context_building
+#: penalty.
+#:
+#: Bumping to 600s (10 minutes) is safe because:
+#: 1. All three write surfaces invalidate explicitly, so the cache
+#:    only goes stale on bug-cases where invalidation is missed —
+#:    and 60s vs 600s is the same correctness exposure (both are
+#:    "until something invalidates").
+#: 2. Ephemeral agent cadence is bounded by the runner's stall
+#:    watchdog (20-min spawn ceiling per ``run_experiment.py``),
+#:    so a 10-min TTL fits comfortably inside one run cycle.
+#: 3. Per-run wall-clock saving is ~78s (~5%) at trivial-spec
+#:    complexity; higher savings expected for richer projects with
+#:    more task assignments.
+#:
+#: Shape: ``{project_id: (computed_at_monotonic, contract_dict)}``.
+_FOUNDATION_CONTRACT_CACHE_TTL_SECONDS: float = 600.0
+_foundation_contract_cache: Dict[str, tuple[float, Dict[str, List[Dict[str, Any]]]]] = (
+    {}
+)
+
+
+def _foundation_contract_cache_key(state: Any) -> Optional[str]:
+    """Return the cache key for the current project, or None to skip caching.
+
+    Returns ``None`` when ``state.current_project_id`` is missing —
+    the caller will compute fresh every time, never crashing. This is
+    the safe degrade path for unit-test mocks or partially-initialized
+    state.
+    """
+    pid = getattr(state, "current_project_id", None)
+    return str(pid) if pid else None
+
+
+def invalidate_foundation_contract_cache(project_id: Optional[str] = None) -> None:
+    """Drop the foundation-contract cache entry for one project (or all).
+
+    Call when an artifact is logged to a foundation task or an attachment
+    is added — the cache MUST be invalidated so the next
+    ``_collect_foundation_contract`` call sees the new content.
+
+    Parameters
+    ----------
+    project_id : Optional[str]
+        Drop only this project's entry. When ``None``, drop everything
+        (used during full state resets / project switches).
+    """
+    if project_id is None:
+        _foundation_contract_cache.clear()
+    else:
+        _foundation_contract_cache.pop(project_id, None)
+
+
 def _inject_usage_guidance(
     artifact: Dict[str, Any],
     is_design_dep: bool,
@@ -388,7 +536,7 @@ async def _collect_foundation_contract(
     1. ``state.task_artifacts[fid]`` — artifacts logged via
        :func:`log_artifact`.
     2. Kanban-board attachments on each foundation task — fetched via
-       ``state.kanban_client.get_attachments(card_id=...)``. Without
+       ``state.kanban_client.get_attachments(task_id=...)``. Without
        this second source, foundation documents attached to the board
        directly (not logged through ``log_artifact``) would be silently
        dropped, because the dependency-traversal path also skips
@@ -417,14 +565,51 @@ async def _collect_foundation_contract(
         architectural artifacts and decisions produced by every
         foundation task in the project. Both lists are empty when there
         is no foundation work or the backing state is unavailable.
+
+    Caching (v0.3.8.post1 perf hotfix). The result is cached per
+    ``state.current_project_id`` for
+    :data:`_FOUNDATION_CONTRACT_CACHE_TTL_SECONDS`. Cache invalidation
+    is TTL-only — the cost of a 60-second-stale read is negligible
+    relative to the per-call latency this avoids (12+ seconds on
+    multi-foundation projects). Callers that need to invalidate
+    explicitly (e.g. when a new artifact is logged to a foundation
+    task) should call :func:`invalidate_foundation_contract_cache`.
     """
+    # Cache check — return cached entry within TTL.
+    #
+    # Deep-copy the cached contract on read so callers can mutate
+    # their returned dict without corrupting the shared cache entry
+    # for subsequent readers. The contract is small (typically <10
+    # artifacts), so the copy cost is negligible vs the ~13s of work
+    # this saves on a cache hit.
+    cache_key = _foundation_contract_cache_key(state)
+    if cache_key is not None:
+        cached = _foundation_contract_cache.get(cache_key)
+        if cached is not None:
+            cached_at, cached_contract = cached
+            if (time.monotonic() - cached_at) < _FOUNDATION_CONTRACT_CACHE_TTL_SECONDS:
+                return copy.deepcopy(cached_contract)
+
     foundation_tasks = [
         t
         for t in (getattr(state, "project_tasks", None) or [])
         if getattr(t, "source_type", None) == "pre_fork_synthesis"
     ]
     if not foundation_tasks:
-        return {"artifacts": [], "decisions": []}
+        # Cache the empty-foundation result too. Otherwise projects
+        # without foundation tasks (prototypes that don't pre-fork,
+        # NFR-only projects) re-scan ``state.project_tasks`` on every
+        # ``request_next_task`` call.
+        empty_contract: Dict[str, List[Dict[str, Any]]] = {
+            "artifacts": [],
+            "decisions": [],
+        }
+        if cache_key is not None:
+            _foundation_contract_cache[cache_key] = (
+                time.monotonic(),
+                empty_contract,
+            )
+        return copy.deepcopy(empty_contract)
 
     foundation_task_ids = {t.id for t in foundation_tasks}
 
@@ -457,9 +642,9 @@ async def _collect_foundation_contract(
     # The keys are normalized; do NOT use Planka-style raw keys
     # (``name`` / ``userId`` / ``createdAt``) — they would all read
     # as ``None`` against the canonical provider output (Codex P2
-    # follow-up on PR #623). The same bug exists in
-    # ``_collect_task_artifacts`` and is tracked separately; this
-    # fix is foundation-collector only.
+    # follow-up on PR #623). The same bug existed in the task,
+    # dependency and transitive-ancestor collectors below and was
+    # fixed together in #624 — all four now share this contract.
     kanban_client = getattr(state, "kanban_client", None)
     if kanban_client is not None:
         for t in foundation_tasks:
@@ -508,7 +693,20 @@ async def _collect_foundation_contract(
             if getattr(decision, "task_id", None) in foundation_task_ids:
                 decisions.append(decision.to_dict())
 
-    return {"artifacts": artifacts, "decisions": decisions}
+    contract = {"artifacts": artifacts, "decisions": decisions}
+
+    # Write to cache when a key is available. Store a deep copy so
+    # caller-side mutations of the returned dict don't corrupt the
+    # cache. Skip caching when no current_project_id is set — that
+    # keeps the helper degrade-safe for partially-initialized state
+    # and unit-test mocks.
+    if cache_key is not None:
+        _foundation_contract_cache[cache_key] = (
+            time.monotonic(),
+            copy.deepcopy(contract),
+        )
+
+    return contract
 
 
 async def _collect_task_artifacts(
@@ -534,22 +732,34 @@ async def _collect_task_artifacts(
         # 2. Get Kanban attachments for this task
         if state.kanban_client:
             try:
-                card_id = getattr(task, "kanban_card_id", None) or task.id
-                result = await state.kanban_client.get_attachments(card_id=card_id)
+                # Issue #624: KanbanInterface.get_attachments takes
+                # ``task_id`` and returns NORMALIZED records
+                # ({"id", "filename", "url", "content_type", "size",
+                # "created_at", "created_by"}). The previous ``card_id=``
+                # keyword raised TypeError against every compliant
+                # provider — swallowed by the except below, silently
+                # dropping all board attachments — and the Planka raw
+                # keys (name/userId/createdAt) would have read as None
+                # even if the call had succeeded. Same fix as PR #623
+                # applied to _collect_foundation_contract.
+                result = await state.kanban_client.get_attachments(task_id=task.id)
                 if result.get("success", False):
                     attachments = result.get("data", [])
                     for attachment in attachments:
+                        filename = attachment.get("filename")
+                        location = attachment.get("url") or (
+                            f"./attachments/{attachment.get('id')}/{filename}"
+                            if filename
+                            else None
+                        )
                         artifacts.append(
                             {
-                                "filename": attachment.get("name"),
-                                "location": (
-                                    f"./attachments/{attachment.get('id')}/"
-                                    f"{attachment.get('name')}"
-                                ),
+                                "filename": filename,
+                                "location": location,
                                 "storage_type": "attachment",
                                 "artifact_type": "reference",
-                                "created_by": attachment.get("userId"),
-                                "created_at": attachment.get("createdAt"),
+                                "created_by": attachment.get("created_by"),
+                                "created_at": attachment.get("created_at"),
                                 "description": f"Attachment from task {task_id}",
                             }
                         )
@@ -645,11 +855,9 @@ async def _collect_task_artifacts(
                     # Kanban attachments from dependency
                     if state.kanban_client:
                         try:
-                            dep_card_id = (
-                                getattr(dep_task, "kanban_card_id", None) or dep_task.id
-                            )
+                            # Issue #624: documented keyword is task_id.
                             result = await state.kanban_client.get_attachments(
-                                card_id=dep_card_id
+                                task_id=dep_task.id
                             )
                             if result.get("success", False):
                                 attachments = result.get("data", [])
@@ -677,15 +885,17 @@ async def _collect_task_artifacts(
                                         attachment_scope = "reference_only"
                                     artifacts.append(
                                         {
-                                            "filename": attachment.get("name"),
+                                            "filename": attachment.get("filename"),
                                             "location": (
-                                                f"./attachments/{attachment.get('id')}/"
-                                                f"{attachment.get('name')}"
+                                                attachment.get("url")
+                                                or f"./attachments/"
+                                                f"{attachment.get('id')}/"
+                                                f"{attachment.get('filename')}"
                                             ),
                                             "storage_type": "attachment",
                                             "artifact_type": "reference",
-                                            "created_by": attachment.get("userId"),
-                                            "created_at": attachment.get("createdAt"),
+                                            "created_by": attachment.get("created_by"),
+                                            "created_at": attachment.get("created_at"),
                                             "dependency_task_id": dep_id,
                                             "dependency_task_name": dep_task.name,
                                             "description": (
@@ -806,20 +1016,21 @@ async def _collect_transitive_context(
         kanban = getattr(state, "kanban_client", None)
         if kanban is not None and anc_task is not None:
             try:
-                card_id = getattr(anc_task, "kanban_card_id", None) or anc_id
-                kanban_result = await kanban.get_attachments(card_id=card_id)
+                # Issue #624: documented keyword is task_id.
+                kanban_result = await kanban.get_attachments(task_id=anc_id)
                 if kanban_result.get("success", False):
                     for attachment in kanban_result.get("data", []) or []:
                         attach_artifact: Dict[str, Any] = {
-                            "filename": attachment.get("name"),
+                            "filename": attachment.get("filename"),
                             "location": (
-                                f"./attachments/{attachment.get('id')}/"
-                                f"{attachment.get('name')}"
+                                attachment.get("url")
+                                or f"./attachments/{attachment.get('id')}/"
+                                f"{attachment.get('filename')}"
                             ),
                             "storage_type": "attachment",
                             "artifact_type": "reference",
-                            "created_by": attachment.get("userId"),
-                            "created_at": attachment.get("createdAt"),
+                            "created_by": attachment.get("created_by"),
+                            "created_at": attachment.get("created_at"),
                             "dependency_task_id": anc_id,
                             "dependency_task_name": anc_name,
                             "description": (

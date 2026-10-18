@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.core.models import Priority, Task, TaskStatus
+from src.core.paths import marcus_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ class SubtaskManager:
             Defaults to data/marcus_state/subtasks.json
         """
         if state_file is None:
-            state_file = Path("data/marcus_state/subtasks.json")
+            state_file = marcus_data_dir() / "marcus_state" / "subtasks.json"
 
         self.state_file = state_file
         self.state_file.parent.mkdir(parents=True, exist_ok=True)

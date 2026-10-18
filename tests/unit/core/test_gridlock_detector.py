@@ -6,7 +6,7 @@ true gridlock (all tasks blocked, no progress possible) from
 normal steady state (agents polling while tasks are in-progress).
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import pytest
@@ -251,3 +251,75 @@ class TestGridlockDiagnosis:
         result = detector.check_for_gridlock(tasks)
 
         assert "No gridlock" in result["diagnosis"]
+
+
+@pytest.mark.unit
+class TestBestEffortClaimAlignment:
+    """Issue #629: the detector must share the selector's claimability rule.
+
+    The selector now lets the integration task claim best-effort over
+    settled-but-BLOCKED upstreams (>=80% done). A detector that keeps
+    the strict all-DONE rule would declare GRIDLOCK on a state that is
+    actually about to progress — the exact state the #629 fix creates.
+    """
+
+    @pytest.fixture
+    def detector(self) -> GridlockDetector:
+        return GridlockDetector()
+
+    def _integration_over_degraded_board(self) -> List[Task]:
+        """6 done + 1 blocked + integration TODO depending on all 7."""
+        tasks = [_make_task(f"d{i}", TaskStatus.DONE) for i in range(6)]
+        tasks.append(_make_task("d6", TaskStatus.BLOCKED))
+        integration = _make_task(
+            "int-1", TaskStatus.TODO, dependencies=[f"d{i}" for i in range(7)]
+        )
+        integration.labels = ["integration", "verification", "type:integration"]
+        tasks.append(integration)
+        return tasks
+
+    def test_claimable_integration_task_is_not_gridlock(
+        self, detector: GridlockDetector
+    ) -> None:
+        """Best-effort-claimable integration waiting for pickup != gridlock."""
+        tasks = self._integration_over_degraded_board()
+        for _ in range(3):
+            detector.record_no_task_response("agent-1")
+
+        result = detector.check_for_gridlock(tasks)
+
+        assert result["is_gridlock"] is False
+
+    def test_ordinary_task_behind_blocked_dep_is_still_gridlock(
+        self, detector: GridlockDetector
+    ) -> None:
+        """A non-integration TODO behind a BLOCKED dep stays gridlocked."""
+        tasks = [
+            _make_task("done-1", TaskStatus.DONE),
+            _make_task("blocked-1", TaskStatus.BLOCKED),
+            _make_task("waiting-1", TaskStatus.TODO, dependencies=["blocked-1"]),
+        ]
+        for _ in range(3):
+            detector.record_no_task_response("agent-1")
+
+        result = detector.check_for_gridlock(tasks)
+
+        assert result["is_gridlock"] is True
+
+    def test_integration_below_done_floor_is_still_gridlock(
+        self, detector: GridlockDetector
+    ) -> None:
+        """1 done + 1 blocked (50% < 80%): integration unclaimable -> gridlock."""
+        tasks = [
+            _make_task("d0", TaskStatus.DONE),
+            _make_task("d1", TaskStatus.BLOCKED),
+        ]
+        integration = _make_task("int-1", TaskStatus.TODO, dependencies=["d0", "d1"])
+        integration.labels = ["integration", "verification", "type:integration"]
+        tasks.append(integration)
+        for _ in range(3):
+            detector.record_no_task_response("agent-1")
+
+        result = detector.check_for_gridlock(tasks)
+
+        assert result["is_gridlock"] is True

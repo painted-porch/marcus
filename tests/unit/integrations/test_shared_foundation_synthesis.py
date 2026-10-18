@@ -883,3 +883,52 @@ class TestFeatureBasedFoundationWiring:
         assert len(tasks) == 2
         for t in tasks:
             assert t.dependencies == []
+
+
+class TestArtifactScopeReminder:
+    """The artifact reminder must scope log_artifact to reference outputs.
+
+    "Call log_artifact for every file you produce" was wrong on three
+    counts: git is already the file channel (an artifact copy of a
+    source file goes stale the moment the real one changes — two
+    sources of truth, the v80 failure class through a different door);
+    artifacts are the coordination channel, so logging every file
+    buries the one contract that matters under implementation blobs;
+    and every artifact inflates downstream get_task_context payloads —
+    coordination tax purchasing nothing git doesn't provide. Artifacts
+    are for interface-bearing outputs consumed as references.
+    """
+
+    async def _foundation_task(self) -> Any:
+        """Helper: drive ``_synthesize_shared_foundation`` once."""
+        creator = _make_creator()
+        creator.prd_parser.llm_client.analyze.return_value = json.dumps(
+            {
+                "foundation_tasks": [
+                    {
+                        "name": "Design System Setup",
+                        "description": "Create shared design tokens.",
+                        "estimated_hours": 2.0,
+                    }
+                ]
+            }
+        )
+        result = await creator._synthesize_shared_foundation("Build a dashboard.")
+        assert len(result) == 1
+        return result[0]
+
+    async def test_every_file_phrasing_removed(self) -> None:
+        """The 'every file you produce' instruction must be gone."""
+        task = await self._foundation_task()
+        assert "every file" not in task.description.lower()
+
+    async def test_artifacts_scoped_to_reference_outputs(self) -> None:
+        """log_artifact is scoped to interface-bearing reference outputs."""
+        desc = (await self._foundation_task()).description.lower()
+        assert "contracts" in desc and "schemas" in desc
+
+    async def test_source_files_travel_via_git(self) -> None:
+        """The description says source files are discovered via git."""
+        desc = (await self._foundation_task()).description.lower()
+        assert "do not log source files" in desc
+        assert "git" in desc

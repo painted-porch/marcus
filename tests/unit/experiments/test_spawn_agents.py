@@ -1396,14 +1396,17 @@ class TestAgentSpawnerHarnessRouting:
         return spawner
 
     def test_mcp_register_claude(self, tmp_path: Path) -> None:
-        """Claude harness uses ``claude mcp add ... -t http``."""
+        """Claude harness no longer registers marcus via ``claude mcp add``.
+
+        Marcus is pinned per-pane through --strict-mcp-config on the agent
+        command; the register snippet is a no-op marker. ``claude mcp add``
+        wrote ~/.claude.json, which strict config ignores and which parallel
+        panes can corrupt.
+        """
         spawner = self._make_bypass_spawner(tmp_path, "claude")
         snippet = spawner._build_mcp_register_snippet()
-        assert "claude mcp add marcus -t http" in snippet
+        assert "claude mcp add" not in snippet
         assert "codex" not in snippet
-        # Idempotent re-runs: errors are swallowed so re-spawning doesn't
-        # abort the pane.
-        assert "|| true" in snippet
 
     def test_mcp_register_codex(self, tmp_path: Path) -> None:
         """Codex harness uses ``codex mcp add ... --url``."""
@@ -1459,7 +1462,7 @@ class TestAgentSpawnerHarnessRouting:
         # documented flags only.
         assert "--yolo" not in cmd
         # Claude-side flags must NOT leak into the codex branch.
-        assert "claude" not in cmd
+        assert "claude " not in cmd
         assert "--dangerously-skip-permissions" not in cmd
 
     def test_agent_command_codex_ignores_print_mode(self, tmp_path: Path) -> None:
@@ -2125,3 +2128,154 @@ class TestSpawnAgentsDirectInvocation:
             "Script ran without import error but never printed usage; "
             f"stdout={result.stdout!r}, stderr={result.stderr!r}"
         )
+
+
+class TestRealTemplateRedoGuidance:
+    """Issue #627: the live worker prompt must teach request_task_redo.
+
+    The MCP schema alone does not create discovery: the template's
+    "You can only use these Marcus tools" constraint means a tool absent
+    from that list is a tool the agent will refuse to touch — even when
+    an integration task description tells it to send wrong work back.
+    """
+
+    @pytest.fixture
+    def spawner(self, tmp_path: Path) -> Any:
+        """Build an AgentSpawner with minimal config for prompt rendering."""
+        config = MagicMock()
+        config.implementation_dir = tmp_path / "impl"
+        config.project_info_file = tmp_path / "project_info.json"
+        config.prompts_dir = tmp_path / "prompts"
+        config.prompts_dir.mkdir()
+
+        template = tmp_path / "agent_template.md"
+        template.write_text("# Base agent template\n")
+
+        instance = MagicMock(spec=spawn_agents.AgentSpawner)
+        instance.config = config
+        instance.agent_prompt_template = template
+        instance.create_worker_prompt = (
+            spawn_agents.AgentSpawner.create_worker_prompt.__get__(
+                instance, spawn_agents.AgentSpawner
+            )
+        )
+        return instance
+
+    @pytest.fixture
+    def agent_config(self) -> dict[str, Any]:
+        """Minimal agent config dict for prompt rendering."""
+        return {
+            "id": "agent_test_1",
+            "name": "Test Agent 1",
+            "role": "full-stack",
+            "skills": ["python", "javascript"],
+            "subagents": 0,
+        }
+
+    def _real_prompt(self, spawner: Any, agent_config: dict[str, Any]) -> str:
+        real_template = (
+            Path(spawn_agents.__file__).resolve().parent.parent
+            / "templates"
+            / "agent_prompt.md"
+        )
+        assert real_template.exists(), f"real template missing: {real_template}"
+        spawner.agent_prompt_template = real_template
+        return spawner.create_worker_prompt(agent_config)
+
+    def test_redo_tool_is_on_the_allowlist(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """request_task_redo appears in the composed worker prompt."""
+        assert "request_task_redo" in self._real_prompt(spawner, agent_config)
+
+    def test_redo_guidance_draws_the_glue_line(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """The prompt distinguishes glue fixes from redo-worthy failures."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        assert "glue" in prompt
+        assert "redo" in prompt
+
+    def test_redo_guidance_keeps_ephemeral_contract(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """Adding redo guidance must not reintroduce loop language."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        for banned in ("keep polling", "max retries", "retries exhausted"):
+            assert banned not in prompt
+
+
+class TestRealTemplateBlockerSeverityContract:
+    """Issue #719: the worker prompt must teach advisory vs terminal blockers.
+
+    Marcus now branches on ``severity``: low/medium keep the task with the
+    agent, high hands it back. An agent that does not know this will send
+    "high" for an ordinary snag and kill its own lane — the exact failure
+    #719 fixes on the server side.
+    """
+
+    @pytest.fixture
+    def spawner(self, tmp_path: Path) -> Any:
+        """Build an AgentSpawner with minimal config for prompt rendering."""
+        config = MagicMock()
+        config.implementation_dir = tmp_path / "impl"
+        config.project_info_file = tmp_path / "project_info.json"
+        config.prompts_dir = tmp_path / "prompts"
+        config.prompts_dir.mkdir()
+
+        template = tmp_path / "agent_template.md"
+        template.write_text("# Base agent template\n")
+
+        instance = MagicMock(spec=spawn_agents.AgentSpawner)
+        instance.config = config
+        instance.agent_prompt_template = template
+        instance.create_worker_prompt = (
+            spawn_agents.AgentSpawner.create_worker_prompt.__get__(
+                instance, spawn_agents.AgentSpawner
+            )
+        )
+        return instance
+
+    @pytest.fixture
+    def agent_config(self) -> dict[str, Any]:
+        """Minimal agent config dict for prompt rendering."""
+        return {
+            "id": "agent_test_1",
+            "name": "Test Agent 1",
+            "role": "full-stack",
+            "skills": ["python"],
+            "subagents": 0,
+        }
+
+    def _real_prompt(self, spawner: Any, agent_config: dict[str, Any]) -> str:
+        real_template = (
+            Path(spawn_agents.__file__).resolve().parent.parent
+            / "templates"
+            / "agent_prompt.md"
+        )
+        assert real_template.exists(), f"real template missing: {real_template}"
+        spawner.agent_prompt_template = real_template
+        return spawner.create_worker_prompt(agent_config)
+
+    def test_prompt_distinguishes_advisory_from_terminal(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """Both severity behaviours must be named explicitly."""
+        prompt = self._real_prompt(spawner, agent_config)
+        assert "ADVISORY" in prompt
+        assert "TERMINAL" in prompt
+
+    def test_prompt_says_advisory_keeps_the_task(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """The load-bearing fact: a medium blocker does not lose the task."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        assert "keep the task" in prompt or "keep the task" in prompt
+        assert "medium" in prompt
+
+    def test_prompt_scopes_high_severity_to_genuinely_impossible(
+        self, spawner: Any, agent_config: dict[str, Any]
+    ) -> None:
+        """ "high" must be framed as last-resort, or agents will overuse it."""
+        prompt = self._real_prompt(spawner, agent_config).lower()
+        assert "only when" in prompt

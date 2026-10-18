@@ -107,10 +107,12 @@ async def get_desired_agent_count(
     Return the layered-spawning signal for the runner controller (#595 Fix 3).
 
     Returns ``desired_agent_count`` (the width of the earliest DAG layer
-    with incomplete work) and ``unclaimed_tasks`` (TODO tasks in that
-    layer). The runner's spawn formula is
-    ``max(0, min(desired_agent_count - live_agents, unclaimed_tasks))``.
-    Both are 0 when every task is DONE.
+    with incomplete work), ``unclaimed_tasks`` (TODO tasks in that
+    layer), and ``in_flight_tasks`` (IN_PROGRESS tasks in that layer —
+    the runner's coverage signal under the ephemeral lifecycle, issue
+    #632). The runner's spawn formula is
+    ``max(0, min(desired_agent_count - in_flight_tasks,
+    unclaimed_tasks))``. All three are 0 when every task is DONE.
 
     Recomputed from live board state on every call (no cursor — survives
     a rewind). Unlike ``get_optimal_agent_count`` (a one-shot whole-project
@@ -155,6 +157,7 @@ async def get_desired_agent_count(
             "success": True,
             "desired_agent_count": signal.desired_agent_count,
             "unclaimed_tasks": signal.unclaimed_tasks,
+            "in_flight_tasks": signal.in_flight_tasks,
             "max_layer_width": signal.max_layer_width,
             "max_agents": max_agents,
             "total_tasks": len(tasks),

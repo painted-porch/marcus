@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from src.core.models import Task, TaskStatus
+from src.core.task_claimability import deps_allow_claim
 
 logger = logging.getLogger(__name__)
 
@@ -120,17 +121,18 @@ class GridlockDetector:
         in_progress_tasks = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
         done_tasks = [t for t in tasks if t.status == TaskStatus.DONE]
 
-        # Check if all TODO tasks are blocked
+        # Check if all TODO tasks are blocked. Uses the SAME claimability
+        # rule as the assignment filter (issue #629): a best-effort-claimable
+        # integration task (settled upstreams, >=80% done) is about to be
+        # picked up — counting it as blocked would declare gridlock on a
+        # state that is actually progressing.
+        tasks_by_id = {t.id: t for t in tasks}
         blocked_tasks = []
         for task in todo_tasks:
             if task.dependencies:
-                # Check if any dependency is not done
-                dep_ids = task.dependencies
-                for dep_id in dep_ids:
-                    dep_task = next((t for t in tasks if t.id == dep_id), None)
-                    if not dep_task or dep_task.status != TaskStatus.DONE:
-                        blocked_tasks.append(task)
-                        break
+                claimable, _ = deps_allow_claim(task, task.dependencies, tasks_by_id)
+                if not claimable:
+                    blocked_tasks.append(task)
 
         # GRIDLOCK CONDITIONS (task-state-based):
         # 1. TODO tasks exist

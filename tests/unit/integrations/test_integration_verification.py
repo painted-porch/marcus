@@ -164,86 +164,6 @@ class TestIntegrationTaskGenerator:
         assert task is not None
         assert task.priority == Priority.URGENT
 
-    def test_task_description_includes_verification_steps(
-        self, all_sample_tasks: list[Task]
-    ) -> None:
-        """Test task description includes key verification instructions."""
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        task = IntegrationTaskGenerator.create_integration_task(
-            all_sample_tasks, "Dashboard"
-        )
-
-        assert task is not None
-        desc = task.description
-        # Should mention key verification steps
-        assert "build" in desc.lower()
-        assert "start" in desc.lower()
-        assert "verify" in desc.lower()
-        assert "integration_verification.json" in desc
-        assert "log_artifact" in desc
-
-    def test_description_includes_config_doc_verification(
-        self, all_sample_tasks: list[Task]
-    ) -> None:
-        """Description instructs agent to cross-check documented config values against source.
-
-        Prevents 'specification theater': agents documenting configuration keys
-        or env vars from a spec without verifying they are actually wired in
-        code. Applies to any project type, not just web apps.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        task = IntegrationTaskGenerator.create_integration_task(
-            all_sample_tasks, "Dashboard"
-        )
-
-        assert task is not None
-        desc = task.description
-        # Must mention configuration / env var checking …
-        assert "configuration" in desc.lower() or "env" in desc.lower()
-        # … and include at least one concrete search pattern for common stacks
-        assert any(
-            pattern in desc
-            for pattern in ["import.meta.env", "os.environ", "process.env"]
-        )
-        # … and the concept of phantom / unused values
-        assert "phantom" in desc.lower() or "never used" in desc.lower()
-
-    def test_description_includes_interface_doc_verification(
-        self, all_sample_tasks: list[Task]
-    ) -> None:
-        """Description instructs agent to verify documented interfaces have implementations.
-
-        General language covers all project types: web services (endpoints),
-        CLIs (commands), libraries (functions), data pipelines (stages), etc.
-        Dead documentation should be removed or implemented.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        task = IntegrationTaskGenerator.create_integration_task(
-            all_sample_tasks, "Dashboard"
-        )
-
-        assert task is not None
-        desc = task.description
-        # Must mention documentation accuracy in general terms …
-        assert "documented" in desc.lower() or "documentation" in desc.lower()
-        # … with project-type examples that span beyond just web APIs
-        assert "implementation" in desc.lower() or "implement" in desc.lower()
-        # … and cover multiple project type examples
-        assert (
-            "cli" in desc.lower()
-            or "library" in desc.lower()
-            or "pipeline" in desc.lower()
-        )
-
     def test_task_id_format(self, all_sample_tasks: list[Task]) -> None:
         """Test integration task ID starts with correct prefix."""
         from src.integrations.integration_verification import (
@@ -298,90 +218,6 @@ class TestIntegrationTaskGenerator:
 
         assert task is not None
         assert "My Dashboard" in task.name
-
-    def test_description_requires_composition_verification(
-        self, all_sample_tasks: list[Task]
-    ) -> None:
-        """Description must instruct agent to verify real component instantiation.
-
-        Catches the v81 composition gap: Agent 1 left placeholder divs in
-        DashboardContainer instead of real component instances.  The
-        integration agent must explicitly check each component type renders
-        a real implementation, not a placeholder div or stub.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        task = IntegrationTaskGenerator.create_integration_task(
-            all_sample_tasks, "Dashboard"
-        )
-
-        assert task is not None
-        desc = task.description
-        # Must mention placeholder divs specifically (not just generic "missing")
-        assert (
-            "placeholder" in desc.lower()
-        ), "Description must warn against placeholder divs"
-        # Must require verifying real component instantiation
-        assert (
-            "real component" in desc.lower() or "real implementation" in desc.lower()
-        ), "Description must require verifying real component/implementation, not stubs"
-
-    def test_description_requires_error_path_content_type_check(
-        self, all_sample_tasks: list[Task]
-    ) -> None:
-        """Description must instruct the agent to check Content-Type on error paths.
-
-        Catches the v81 JSON parse error: weather widget called res.json()
-        on Vite's HTML SPA-fallback page (200 + text/html).  The integration
-        agent must verify that out-of-scope dependencies return the correct
-        content-type on the error path, not HTML masquerading as JSON.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        task = IntegrationTaskGenerator.create_integration_task(
-            all_sample_tasks, "Dashboard"
-        )
-
-        assert task is not None
-        desc = task.description
-        # Must explicitly mention Content-Type checking (not just "HTML" generically)
-        assert (
-            "content-type" in desc.lower() or "content_type" in desc.lower()
-        ), "Description must require Content-Type verification on error paths"
-
-    def test_description_requires_dead_type_variant_check(
-        self, all_sample_tasks: list[Task]
-    ) -> None:
-        """Description must instruct agent to detect unreachable type variants.
-
-        Catches the v81 STALE ghost-state: a WidgetState variant declared
-        in the type system and styled in WidgetCard but never set by any
-        widget.  Both agents treated it as in-scope without anyone building
-        the transition logic.  The integration agent must enumerate
-        enum/union variants and verify each is reachable at runtime.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        task = IntegrationTaskGenerator.create_integration_task(
-            all_sample_tasks, "Dashboard"
-        )
-
-        assert task is not None
-        desc = task.description
-        # Must address dead / unreachable variants specifically
-        assert (
-            "never set" in desc.lower() or "unreachable" in desc.lower()
-        ), "Description must flag variants that are defined but never set at runtime"
-        # Must reference enums or union type variants explicitly
-        assert (
-            "enum" in desc.lower() or "variant" in desc.lower()
-        ), "Description must mention enum/union variant checking by name"
 
     def test_works_with_generic_ai_labels(self) -> None:
         """Test integration task created with generic labels.
@@ -1061,162 +897,6 @@ class TestStartCommandBuildPipelineRequirement:
     command for their stack.
     """
 
-    def test_prompt_requires_start_command_to_exercise_build_pipeline(self) -> None:
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        prompt = IntegrationTaskGenerator._generate_integration_description(
-            project_name="dashboard-v74"
-        )
-
-        # The contract must appear verbatim — this is the v73-class fix
-        assert "exercise the build pipeline" in prompt
-
-    def test_prompt_explains_why_test_suite_is_not_enough(self) -> None:
-        """
-        The prompt must explain WHY a passing test suite isn't
-        sufficient evidence the deliverable works. Without the
-        explanation the agent will rationalize that "tests pass =
-        product works" and re-fall into v73.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        prompt = IntegrationTaskGenerator._generate_integration_description(
-            project_name="dashboard-v74"
-        )
-
-        # Must address the "tests pass therefore product works" fallacy
-        assert "test suite does not prove" in prompt
-
-    def test_prompt_is_tool_agnostic(self) -> None:
-        """
-        The contract sentence must not pin any specific stack. Tool
-        names (npm, vite, tsc, pip, cargo, go, mvn, etc.) may appear
-        in worked examples elsewhere in the prompt, but the contract
-        sentence itself must describe the requirement abstractly.
-        Marcus is a coordination layer for ALL agent work, not just
-        software dev — stack-specific contract language regresses
-        toward the "software bias" failure mode that pre-#347 had.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        prompt = IntegrationTaskGenerator._generate_integration_description(
-            project_name="dashboard-v74"
-        )
-
-        # Find the "must exercise the build pipeline" sentence and
-        # verify the SENTENCE itself contains no stack-specific tokens.
-        # Locate the contract sentence
-        idx = prompt.find("must exercise the build pipeline")
-        assert idx >= 0
-        # Take a window of ~400 chars around the contract sentence
-        # to sanity-check the surrounding language
-        window = prompt[idx : idx + 400].lower()
-        # The contract sentence should be tool-agnostic — none of
-        # these stack names should appear in the window
-        forbidden_in_contract = [
-            " npm ",
-            " vite ",
-            " tsc ",
-            " pip ",
-            " cargo ",
-            " maven ",
-            " gradle ",
-            " webpack ",
-        ]
-        for tok in forbidden_in_contract:
-            assert tok not in window, (
-                f"Build-pipeline contract sentence must be "
-                f"tool-agnostic; found {tok!r} in:\n\n{window}"
-            )
-
-    def test_prompt_forbids_shell_chains_in_start_command(self) -> None:
-        """
-        The prompt must explicitly tell agents that start_command is
-        a single subprocess invocation, not a shell script.
-
-        Codex P1 on PR #351: Marcus's product_smoke runner uses
-        asyncio.create_subprocess_exec(*shlex.split(...)), which does
-        NOT interpret shell operators. && / || / | / cd / $(...) are
-        passed as literal arguments and produce confusing failures
-        (or worse, vacuous passes — on macOS /usr/bin/cd is a real
-        no-op binary that returns exit 0 for any args, so
-        `cd ... && X` silently false-passes the smoke gate). Until
-        the runner is fixed (#125), the prompt must steer agents
-        away from shell chains and toward a single binary invocation.
-        """
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        prompt = IntegrationTaskGenerator._generate_integration_description(
-            project_name="dashboard-v74"
-        )
-
-        prompt_lower = prompt.lower()
-        # Must explicitly state that start_command is a single command
-        assert "single command" in prompt_lower or "single subprocess" in prompt_lower
-        # Must call out shell operators by name so the agent
-        # recognizes the trap
-        assert "&&" in prompt
-        # Must offer the wrapper-script escape hatch for cases that
-        # genuinely need to combine steps
-        assert "wrapper" in prompt_lower
-
-    def test_prompt_examples_contain_no_shell_chains(self) -> None:
-        """
-        All ``start_command`` example strings in the prompt must be
-        single-command invocations. Pre-existing examples used shell
-        chains (``test -d docs && test -f README.md``) which would
-        not work under Marcus's exec-based runner. The fix is to
-        replace them with single binary invocations and steer
-        chained needs toward wrapper scripts.
-
-        Detection strategy: find every quoted ``start_command="..."``
-        substring in the prompt and assert none contain ``&&``.
-        """
-        import re
-
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        prompt = IntegrationTaskGenerator._generate_integration_description(
-            project_name="dashboard-v74"
-        )
-
-        # Find every start_command="..." example string
-        examples = re.findall(r'start_command="([^"]*)"', prompt)
-        assert examples, "Prompt should still have start_command examples"
-        for example in examples:
-            assert "&&" not in example, (
-                f"start_command example contains a shell chain that "
-                f"will not work under Marcus's exec-based runner: "
-                f"{example!r}. Replace with a single command or a "
-                f"wrapper script."
-            )
-            assert "||" not in example
-            # `cd` as the first token is the v73 vacuous-pass trap
-            # on macOS where /usr/bin/cd exists as a no-op stub
-            tokens = example.split()
-            if tokens:
-                assert tokens[0] != "cd", (
-                    f"start_command example begins with 'cd' which is "
-                    f"a vacuous-pass trap on macOS (/usr/bin/cd returns "
-                    f"exit 0 for any args). Use the worktree's actual "
-                    f"build command instead."
-                )
-
-
-# ---------------------------------------------------------------------------
-# Slice B (#523): outcomes wiring into integration task
-# ---------------------------------------------------------------------------
-
 
 def _user_outcome(
     out_id: str,
@@ -1298,40 +978,11 @@ class TestIntegrationTaskOutcomesWiring:
         assert task is not None
         ids = (task.source_context or {}).get("in_scope_outcome_ids")
         assert ids == ["outcome_play"]
-        # Description names the in-scope outcome but not the out-of-scope.
-        assert "outcome_play" in task.description
-        assert "outcome_admin" not in task.description
-
-    def test_description_grows_verifications_section(
-        self, sample_tasks: list[Task]
-    ) -> None:
-        """The new section names each outcome's id, action, and signal."""
-        from src.integrations.integration_verification import (
-            IntegrationTaskGenerator,
-        )
-
-        outcomes = [
-            _user_outcome(
-                "outcome_play",
-                action="user can play the snake game",
-                signal="snake visibly moves on a board",
-            ),
-        ]
-        task = IntegrationTaskGenerator.create_integration_task(
-            sample_tasks, project_name="Snake", outcomes=outcomes
-        )
-
-        assert task is not None
-        d = task.description
-        assert "Verifications required" in d
-        assert "outcome_play" in d
-        assert "user can play the snake game" in d
-        assert "snake visibly moves on a board" in d
-        # Worked example referencing the same signal_id
-        assert 'signal_id": "outcome_play"' in d or "signal_id" in d
-        # Worked example block points at report_task_progress
-        assert "report_task_progress" in d
-        assert "verifications=[" in d
+        # Description names the in-scope outcome's user-facing action but not
+        # the out-of-scope one (the self-verify prompt lists outcomes by
+        # action — success_signal, the spine of "done means").
+        assert "user can play" in task.description
+        assert "admin can do X" not in task.description
 
     def test_no_outcomes_leaves_description_unchanged_default(
         self, sample_tasks: list[Task]
@@ -1339,8 +990,12 @@ class TestIntegrationTaskOutcomesWiring:
         """``outcomes=None`` preserves the legacy description shape.
 
         Legacy callers (feature-based path until follow-up wiring) get
-        identical behavior — no source_context, no Verifications
-        section.
+        no Verifications section and no ``in_scope_outcome_ids``.  Issue
+        #677 added a ``structural_category`` key to ``source_context``
+        (defaulting to ``"unknown"``) so the smoke gate can judge
+        behavior evidence — but with no behavior contract for the
+        default category, the description is otherwise unchanged and the
+        outcome-coverage key stays absent.
         """
         from src.integrations.integration_verification import (
             IntegrationTaskGenerator,
@@ -1350,8 +1005,12 @@ class TestIntegrationTaskOutcomesWiring:
             sample_tasks, project_name="Snake"
         )
         assert task is not None
-        assert task.source_context is None
+        # in_scope_outcome_ids must remain absent — the coverage rule
+        # only applies when outcomes were wired (gate uses .get()).
+        assert "in_scope_outcome_ids" not in (task.source_context or {})
+        assert (task.source_context or {}).get("structural_category") == "unknown"
         assert "Verifications required" not in task.description
+        assert "Behavior evidence required" not in task.description
 
     def test_empty_outcomes_list_stores_empty_list_not_none(
         self, sample_tasks: list[Task]
@@ -1411,3 +1070,261 @@ class TestIntegrationTaskOutcomesWiring:
         assert (integration_task.source_context or {}).get("in_scope_outcome_ids") == [
             "outcome_play"
         ]
+
+
+class TestBehaviorEvidenceThreading:
+    """Issue #677: the integration task carries the per-type behavior contract.
+
+    The description must require the agent to RUN the assembled product and
+    capture *behavior evidence* against the per-type bar, and the task must
+    stash ``structural_category`` on ``source_context`` so the product smoke
+    gate can judge that evidence.  Non-web types must NOT be told to curl an
+    HTTP endpoint — Marcus builds any software, not just web apps.
+    """
+
+    def test_stashes_structural_category_on_source_context(
+        self, all_sample_tasks: list[Task]
+    ) -> None:
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            all_sample_tasks, "Dashboard", structural_category="web app"
+        )
+        assert task is not None
+        assert task.source_context is not None
+        assert task.source_context["structural_category"] == "web app"
+
+    def test_fuzzy_type_has_no_behavior_section(
+        self, all_sample_tasks: list[Task]
+    ) -> None:
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            all_sample_tasks, "Misc", structural_category="other"
+        )
+        assert task is not None
+        assert "Behavior evidence required" not in task.description
+        # ...but the category is still stashed for the gate's fallback logic.
+        assert (task.source_context or {}).get("structural_category") == "other"
+
+    def test_default_category_is_backward_compatible(
+        self, all_sample_tasks: list[Task]
+    ) -> None:
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            all_sample_tasks, "Dashboard"
+        )
+        assert task is not None
+        assert "Behavior evidence required" not in task.description
+
+
+class TestSelfVerifyPrompt:
+    """Issue #677 rework: the integration prompt is short, generic, and
+    criteria-based — it empowers the agent to RUN and self-verify the product
+    with whatever tools, and states Marcus only runs the build."""
+
+    def _outcomes(self):
+        return [
+            _user_outcome("o_play", "play the snake game", "a snake moves on screen"),
+            _user_outcome("o_score", "see their score", "a score counter is visible"),
+        ]
+
+    def _desc(self, category="game", contract=None):
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            [create_test_task("impl-1", "Build engine", labels=["implement"])],
+            project_name="Snake",
+            outcomes=self._outcomes(),
+            structural_category=category,
+            contract_file=contract,
+        )
+        assert task is not None
+        return task.description
+
+    def test_lists_outcomes_as_the_spine(self) -> None:
+        desc = self._desc()
+        assert "play the snake game" in desc
+        assert "see their score" in desc
+        assert '"Done" means' in desc
+
+    def test_tells_agent_to_actually_run_it_with_any_tool(self) -> None:
+        desc = self._desc().lower()
+        assert "run" in desc
+        assert "whatever tools" in desc or "install a tool" in desc
+
+    def test_frames_agent_as_skeptic_not_closer(self) -> None:
+        desc = self._desc().lower()
+        # A MAS built it and always leaves mistakes; find and fix them.
+        assert "multi-agent system built this" in desc
+        assert "find" in desc and "fix" in desc
+        assert "not here to confirm it works" in desc
+
+    def test_bans_the_unit_test_shortcut(self) -> None:
+        # The exact dodge that shipped an idle game (test98): a green test
+        # suite reported as "it works."
+        desc = self._desc().lower()
+        assert "unit-test suite is not proof" in desc
+        assert "isolation" in desc
+
+    def test_states_marcus_runs_no_check_no_safety_net(self) -> None:
+        # Codex P1 on #679: the build floor was removed, so the prompt must
+        # NOT promise Marcus runs the build (an agent could skip it expecting
+        # Marcus to catch compile errors — no one would). It must make the
+        # agent own build+run with no safety net.
+        desc = self._desc().lower()
+        assert "marcus does not run" in desc
+        assert "no safety net" in desc
+        assert "marcus runs the project's build" not in desc
+
+    def test_is_generic_no_tech_specifics(self) -> None:
+        # The body must not hardcode a stack/tool. (The contract preamble may
+        # name a file path, so test the no-contract body.)
+        desc = self._desc(contract=None).lower()
+        for token in ["react", "npm ", "curl", "uvicorn", "pytest", "json", "vite"]:
+            assert token not in desc, f"prompt leaked tech-specific token: {token!r}"
+
+    def test_is_short(self) -> None:
+        # The old wall was ~4,000 words. The self-verify prompt is a fraction.
+        # Raised 350 -> 400 for the #627 redo-lane rule (glue in place,
+        # logic failures via request_task_redo) — still <10% of the wall.
+        assert len(self._desc(contract=None).split()) < 400
+
+    def test_contract_preamble_preserved_when_contract_first(self) -> None:
+        desc = self._desc(contract="docs/contract.md")
+        assert "contract" in desc.lower()
+        assert "docs/contract.md" in desc
+        # Stale "Phase 1 / step 9" references from the old wall are gone.
+        assert "Phase 1" not in desc
+        assert "step 9" not in desc
+
+
+class TestGotchaPropagationToSkeptic:
+    """#680: gotchas stamped on impl tasks reach the integration (skeptic) task."""
+
+    def test_gotcha_criteria_propagate_to_integration_task(self) -> None:
+        """A GOTCHA-prefixed criterion on an impl task is copied onto the
+        integration verification task's acceptance_criteria so the skeptic
+        actively tests for that failure mode."""
+        from src.integrations.integration_verification import (
+            enhance_project_with_integration,
+        )
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            GOTCHA_CRITERION_PREFIX,
+        )
+
+        gotcha = f"{GOTCHA_CRITERION_PREFIX}reversal is ignored, not instant death"
+        impl = create_test_task(
+            "impl-001", "Build snake movement", labels=["implement"]
+        )
+        impl.acceptance_criteria = [gotcha]
+
+        result = enhance_project_with_integration([impl], "Build a snake game", "Snake")
+
+        integration_task = next(t for t in result if "integration" in t.labels)
+        assert gotcha in integration_task.acceptance_criteria
+
+    def test_no_gotchas_leaves_integration_checklist_unchanged(self) -> None:
+        """Impl tasks with no gotcha criteria add nothing extra to the skeptic."""
+        from src.integrations.integration_verification import (
+            enhance_project_with_integration,
+        )
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            GOTCHA_CRITERION_PREFIX,
+        )
+
+        impl = create_test_task(
+            "impl-001", "Build snake movement", labels=["implement"]
+        )
+        result = enhance_project_with_integration([impl], "Build a snake game", "Snake")
+
+        integration_task = next(t for t in result if "integration" in t.labels)
+        assert not any(
+            c.startswith(GOTCHA_CRITERION_PREFIX)
+            for c in integration_task.acceptance_criteria
+        )
+
+
+class TestIntegrationTaskRedoGuidance:
+    """
+    Issue #627: the integration description must teach the redo decision.
+
+    When integration finds a sibling agent's completed work is
+    substantively wrong, the agent should send it back via
+    request_task_redo (clean attribution, Invariant #2) rather than
+    rewrite the sibling's lane — but mechanical glue fixes at contract
+    boundaries stay in-lane and should be fixed in place.
+    """
+
+    def test_description_names_request_task_redo(
+        self, sample_implementation_tasks: list[Task]
+    ) -> None:
+        """The integration task description must mention the redo tool."""
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            sample_implementation_tasks,
+            project_name="Snake Game",
+        )
+
+        assert task is not None
+        assert "request_task_redo" in task.description
+
+    def test_description_draws_the_glue_vs_logic_line(
+        self, sample_implementation_tasks: list[Task]
+    ) -> None:
+        """The description distinguishes in-place glue fixes from redo-worthy logic failures."""
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        task = IntegrationTaskGenerator.create_integration_task(
+            sample_implementation_tasks,
+            project_name="Snake Game",
+        )
+
+        assert task is not None
+        description_lower = task.description.lower()
+        assert "glue" in description_lower
+        assert "redo" in description_lower
+
+
+class TestRedoGateRebalance:
+    """PR #712 Tier-2 follow-up: the redo rule must be a GATE, not a footnote.
+
+    Two seeded-defect runs showed 0/3 redo adoption — the integration
+    agent re-implemented a gutted lane in place. The skeptic prompt's
+    'FIND and FIX' pressure dominated a trailing redo paragraph. The
+    rebalance makes the redo decision a mandatory check applied BEFORE
+    any edit to another task's files, with cross-lane rewriting framed
+    as the last resort (reserved for the redo cap).
+    """
+
+    def _desc(self) -> str:
+        from src.integrations.integration_verification import (
+            IntegrationTaskGenerator,
+        )
+
+        return IntegrationTaskGenerator._generate_integration_description("X")
+
+    def test_gate_applies_before_any_cross_lane_edit(self) -> None:
+        """The rule is framed as a pre-edit gate, not an afterthought."""
+        desc = self._desc().lower()
+        assert "before you edit any file another task created" in desc
+
+    def test_cross_lane_rewrite_is_last_resort(self) -> None:
+        """Rewriting another lane is explicitly the last resort."""
+        desc = self._desc().lower()
+        assert "last resort" in desc
+        assert "request_task_redo" in self._desc()

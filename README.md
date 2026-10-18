@@ -5,20 +5,20 @@
 <h1 align="center">Marcus</h1>
 
 <p align="center">
-  <strong>Agents coordinate through shared state, not conversation.</strong>
+  <strong>Work you can act on without re-checking it yourself — whether an AI or a person did it.</strong>
 </p>
 
 <p align="center">
   <a href="#get-started">Quickstart</a> •
-  <a href="https://marcus-ai.dev">Docs</a> •
-  <a href="https://discord.com/channels/1409498120739487859/1409498121456848907">Discord</a> •
+  <a href="https://docs.marcus-ai.dev">Docs</a> •
+  <a href="https://discord.gg/DZWTbXr4">Discord</a> •
   <a href="ROADMAP.md">Roadmap</a> •
   <a href="PROTOCOL.md">Protocol</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/lwgray/marcus"><img src="https://img.shields.io/github/stars/lwgray/marcus?style=social" alt="GitHub Stars"></a>
-  <a href="https://discord.com/channels/1409498120739487859/1409498121456848907"><img
+  <a href="https://github.com/painted-porch/marcus"><img src="https://img.shields.io/github/stars/painted-porch/marcus?style=social" alt="GitHub Stars"></a>
+  <a href="https://discord.gg/DZWTbXr4"><img
 src="https://img.shields.io/discord/1409498120739487859?color=7289da&label=Discord&logo=discord&logoColor=white" alt="Discord"></a>
   <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" alt="Python 3.11+">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
@@ -30,13 +30,41 @@ src="https://img.shields.io/discord/1409498120739487859?color=7289da&label=Disco
 
 ## What is Marcus?
 
-Marcus is an open-source orchestration server for AI coding agents. You describe what
-to build. Marcus breaks the work into tasks on a shared kanban board. Multiple agents
-pull tasks independently, write the code, and coordinate through the board — never
-through chat. You walk away; you come back to working software.
+Marcus is open-source software for getting real work out of AI agents, and for actually being able to trust what comes back.
 
-Any [MCP](https://modelcontextprotocol.io/)-compatible agent works: Claude Code,
-Codex, Gemini CLI, Kimi, AutoGen, LangGraph, or a custom runtime.
+Here is the problem it solves.
+When an AI hands you a piece of work, or for that matter a person you don't know, you usually can't tell whether it's right without checking it yourself.
+That piece of work might be some code, an answer with a source, or a number in a report.
+And if you have to re-check everything by hand, you've thrown away most of the reason you asked an AI in the first place.
+
+Marcus fixes this by changing the rules for how work gets turned in, not by hoping for a smarter AI.
+It runs a shared task board (think of a team's to-do list that everyone pulls work from) and enforces three rules automatically:
+
+1. **Nothing counts as "done" without proof.** A worker can't just declare something finished; it has to attach the evidence, which means the code *and* its passing tests, the link behind a claim, or the document a number came from.
+2. **Someone other than the worker checks that proof, and the worker is never told how.** The check is run by a different party, often a small deterministic script, and whoever did the task never sees the test their work will have to pass. Why that matters: if they knew the exact test, they could do the bare minimum to pass it instead of actually doing the job right. Kept in the dark, the only way through is to genuinely be correct.
+3. **A person has the final say.** On the work that matters, a human signs off at the end; software can never wave its own work through, so a real person is always accountable for what ships.
+
+The result: you don't have to trust any single worker, AI or human.
+You trust the process that every piece of work had to survive before it reached you.
+Untrusted work goes in; work you can actually act on comes out.
+
+That one idea powers two very different things you can run today.
+
+**1. Coordinate AI coding agents.**
+You describe what you want built, and Marcus breaks it into tasks on the shared board. The board is a [kanban](https://en.wikipedia.org/wiki/Kanban_board) board, which is a set of to-do cards that move across columns to "done."
+Several AI agents (Claude Code, Codex, Gemini CLI, or any [MCP](https://modelcontextprotocol.io/)-compatible tool) each grab tasks, write the code, and coordinate only through the board, never by chatting at each other.
+You walk away; you come back to working software.
+
+**2. Keep AI answers honest (a worked example).**
+We re-ran a 2025 Columbia Journalism Review study of AI search engines: four engines, 200 real news questions where we already knew the correct source.
+On their own, the engines got **7 in 10 answers wrong**, and **51% of the links they cited were fabricated, dead, or pointed to the wrong article.**
+Then we ran the same engines through Marcus, which fetched every cited page, checked it, and refused the ones that didn't hold up.
+The result: **0 fabricated links reached the reader**, because the fakes get caught, not fixed.
+See it case by case: **[On the Record →](https://marcus-ai.dev/on-the-record/)**
+
+Checking news links was just an easy thing to measure.
+The same board handles any claim a script can check: code against its tests, a number against its source document, or a legal citation against the court record.
+Coordinating AI agents is how Marcus started; making their work trustworthy enough to act on is what it is.
 
 ---
 
@@ -361,9 +389,9 @@ By default Posidonius writes projects to `~/experiments/`.
 
 ## Community
 
-- [**Discord**](https://discord.com/channels/1409498120739487859/1409498121456848907) — real-time help and discussions
-- [**GitHub Discussions**](https://github.com/lwgray/marcus/discussions) — ideas and questions
-- [**GitHub Issues**](https://github.com/lwgray/marcus/issues) — bugs and feature requests
+- [**Discord**](https://discord.gg/DZWTbXr4) — real-time help, questions, and feedback. Report errors in `#bugs`
+- [**GitHub Issues**](https://github.com/lwgray/marcus/issues) — detailed bug reports (use [bug report template](/.github/ISSUE_TEMPLATE/bug_report.md)) and feature requests
+- [**GitHub Discussions**](https://github.com/lwgray/marcus/discussions) — ideas and long-form questions
 
 **For researchers and educators:** Board-mediated coordination extends the blackboard pattern to autonomous LLM agents - a named, citable variant for multi-agent-over-MCP systems. Marcus is MIT-licensed — use it in courses,
 papers, and experiments.  The pattern is documented in the [Architecture Docs](docs/source/architecture/).

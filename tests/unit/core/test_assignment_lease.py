@@ -131,8 +131,11 @@ class TestAssignmentLeaseManager:
             }
         )
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
+        persistence.record_task_epoch = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
         return persistence
 
     @pytest.fixture
@@ -177,7 +180,9 @@ class TestAssignmentLeaseManager:
         initial_expiry = lease.lease_expires
 
         # Renew lease
-        renewed_lease = await lease_manager.renew_lease("task-123", 50, "Halfway done")
+        renewed_lease = await lease_manager.renew_lease(
+            "task-123", 50, "Halfway done", agent_id="agent-001"
+        )
 
         assert renewed_lease is not None
         assert renewed_lease.renewal_count == 1
@@ -198,7 +203,9 @@ class TestAssignmentLeaseManager:
         lease_manager.active_leases["task-123"] = lease
 
         # Try to renew
-        renewed_lease = await lease_manager.renew_lease("task-123", 50, "Progress")
+        renewed_lease = await lease_manager.renew_lease(
+            "task-123", 50, "Progress", agent_id="agent-001"
+        )
 
         assert renewed_lease is None
 
@@ -626,17 +633,26 @@ class TestUpdateTimestampPersistence:
 
     @pytest.mark.asyncio
     async def test_persist_lease_saves_update_timestamps(self):
-        """Test that _persist_lease includes update_timestamps."""
+        """_persist_lease hands update_timestamps to the persistence layer.
+
+        This previously asserted that ``_persist_lease`` mutated the dict
+        returned by ``get_assignment``. It did -- but ``save_assignment``
+        then replaced the cached record wholesale, so every field written
+        here was discarded before reaching disk. The test passed while
+        the behaviour it described did not work. Assert against the call
+        that actually persists instead.
+        """
         from src.core.assignment_persistence import AssignmentPersistence
 
         now = datetime.now(timezone.utc)
         mock_persistence = Mock(spec=AssignmentPersistence)
-        existing_assignment: dict[str, Any] = {
-            "task_id": "task-789",
-            "assigned_at": now.isoformat(),
-        }
-        mock_persistence.get_assignment = AsyncMock(return_value=existing_assignment)
-        mock_persistence.save_assignment = AsyncMock()
+        mock_persistence.get_assignment = AsyncMock(
+            return_value={
+                "task_id": "task-789",
+                "assigned_at": now.isoformat(),
+            }
+        )
+        mock_persistence.update_assignment_fields = AsyncMock()
 
         lease_manager = AssignmentLeaseManager(
             kanban_client=Mock(),
@@ -657,8 +673,13 @@ class TestUpdateTimestampPersistence:
 
         await lease_manager._persist_lease(lease)
 
-        assert "update_timestamps" in existing_assignment
-        assert len(existing_assignment["update_timestamps"]) == 2
+        mock_persistence.update_assignment_fields.assert_called_once()
+        agent_id, task_id, fields = (
+            mock_persistence.update_assignment_fields.call_args.args
+        )
+        assert agent_id == "agent-001"
+        assert task_id == "task-789"
+        assert len(fields["update_timestamps"]) == 2
 
 
 class TestRecoveryInfo:
@@ -764,8 +785,11 @@ class TestRecoveryHandoffDualWrite:
         persistence = Mock()
         persistence.get_assignment = AsyncMock(return_value=None)
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
+        persistence.record_task_epoch = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
         return persistence
 
     @pytest.fixture
@@ -1039,8 +1063,11 @@ class TestExpiredLeaseProgressCapture:
         persistence = Mock()
         persistence.get_assignment = AsyncMock(return_value=None)
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
+        persistence.record_task_epoch = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
         return persistence
 
     @pytest.fixture
@@ -1112,7 +1139,7 @@ class TestExpiredLeaseProgressCapture:
         )
 
         result = await lease_manager.renew_lease(
-            task_id="task-342", progress=50, message="halfway"
+            task_id="task-342", progress=50, message="halfway", agent_id="agent-001"
         )
 
         # Renewal still fails — lease can't be un-expired
@@ -1133,7 +1160,10 @@ class TestExpiredLeaseProgressCapture:
         )
 
         result = await lease_manager.renew_lease(
-            task_id="task-342", progress=30, message="out of order"
+            task_id="task-342",
+            progress=30,
+            message="out of order",
+            agent_id="agent-001",
         )
 
         assert result is None
@@ -1160,7 +1190,7 @@ class TestExpiredLeaseProgressCapture:
         # 2. Agent reports late progress — renewal fails, but
         #    capture fires.
         await lease_manager.renew_lease(
-            task_id="task-342", progress=50, message="halfway"
+            task_id="task-342", progress=50, message="halfway", agent_id="agent-001"
         )
         assert expired.progress_percentage == 50
 
@@ -1191,7 +1221,7 @@ class TestExpiredLeaseProgressCapture:
         )
 
         result = await lease_manager.renew_lease(
-            task_id="task-342", progress=80, message="almost done"
+            task_id="task-342", progress=80, message="almost done", agent_id="agent-001"
         )
 
         assert result is None
@@ -1237,8 +1267,11 @@ class TestMergeConflictExtension:
     def mock_persistence(self):
         persistence = Mock()
         persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
         persistence.remove_assignment = AsyncMock()
         persistence.load_assignments = AsyncMock(return_value={})
+        persistence.record_task_epoch = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
         # Default to returning an assignment dict so _persist_lease's
         # "if assignment:" branch fires when extensions are granted.
         # Tests that need a different shape override this directly.
@@ -1536,14 +1569,32 @@ class TestMergeConflictExtension:
         ):
             await lease_manager.check_expired_leases()
 
-        # _persist_lease writes via assignment_persistence.save_assignment
-        mock_persistence.save_assignment.assert_called()
-        # The persisted assignment dict must include the new field
-        # so a restart can rehydrate the cap counter.
-        # Check the dict that get_assignment returned was mutated:
-        loaded = await mock_persistence.get_assignment(lease.agent_id)
-        assert loaded["merge_conflict_extensions"] == 1
-        assert "lease_expires" in loaded
+        # _persist_lease writes via update_assignment_fields, which merges
+        # onto the record instead of replacing it. The previous
+        # save_assignment path discarded merge_conflict_extensions before
+        # it reached disk, so the restart-safety guarantee this test
+        # describes did not actually hold.
+        mock_persistence.update_assignment_fields.assert_called()
+        persisted_counters = [
+            call.args[2].get("merge_conflict_extensions")
+            for call in mock_persistence.update_assignment_fields.call_args_list
+        ]
+        assert (
+            1 in persisted_counters
+        ), f"extension counter never persisted; saw {persisted_counters}"
+        # The persisted fields must also carry the expiry, so a restart
+        # rehydrates both the cap counter and the extended lease window.
+        #
+        # This previously asserted that the dict returned by
+        # ``get_assignment`` had been mutated in place. That dict never
+        # reached disk -- ``save_assignment`` replaced the cached record
+        # wholesale -- so the assertion described a guarantee the code
+        # did not provide.
+        persisted_fields = [
+            call.args[2]
+            for call in mock_persistence.update_assignment_fields.call_args_list
+        ]
+        assert any("lease_expires" in fields for fields in persisted_fields)
 
     @pytest.mark.asyncio
     async def test_extension_does_not_hold_lock_during_git_probe(
@@ -1849,3 +1900,445 @@ class TestPhase4Timeout:
             progress=74, update_count=3, has_recent_activity=True
         )
         assert lease_s + grace_s == 360
+
+
+class TestExtendForValidation:
+    """Tests for Fix 1 of issue #667: validation-window extension on
+    ``status=completed``.
+
+    Today ``report_task_progress`` skips lease renewal when the agent
+    reports completion (``src/marcus_mcp/tools/task.py:4480-4488``).
+    The smoke gate and any rejection-triggered remediation then run
+    under an expiring lease. ``extend_for_validation`` is the new
+    entry point that grants a configurable window (default 600s) at
+    completion time so the post-completion validation/remediation
+    cycle has lease coverage.
+
+    The window covers smoke-gate runtime + one round of remediation.
+    Subsequent ``touch_lease`` activity from the agent during
+    remediation continues to extend from the validation anchor.
+    """
+
+    @pytest.fixture
+    def mock_kanban_client(self) -> Mock:
+        """Create mock kanban client for lease persistence."""
+        client = Mock()
+        client.update_task = AsyncMock()
+        return client
+
+    @pytest.fixture
+    def mock_persistence(self) -> Mock:
+        """Create mock persistence layer that no-ops on save."""
+        persistence = Mock()
+        persistence.get_assignment = AsyncMock(
+            return_value={
+                "task_id": "task-validation",
+                "assigned_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
+        persistence.remove_assignment = AsyncMock()
+        persistence.load_assignments = AsyncMock(return_value={})
+        persistence.record_task_epoch = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
+        return persistence
+
+    @pytest.fixture
+    def lease_manager(
+        self, mock_kanban_client: Mock, mock_persistence: Mock
+    ) -> AssignmentLeaseManager:
+        """Construct lease manager in aggressive mode (matches prod default)."""
+        return AssignmentLeaseManager(
+            mock_kanban_client,
+            mock_persistence,
+            default_lease_hours=0.0667,
+        )
+
+    @pytest.mark.asyncio
+    async def test_extend_for_validation_extends_by_default_window(
+        self, lease_manager: AssignmentLeaseManager
+    ) -> None:
+        """``extend_for_validation`` adds 600s to the existing lease.
+
+        Default validation window is 600 seconds (10 minutes). The
+        method must move ``lease_expires`` forward to ``now + 600s``
+        regardless of where the prior expiry sat — completion is the
+        anchor moment, not a continuation of the progressive curve.
+        """
+        await lease_manager.create_lease("task-validation", "agent-001")
+
+        before = datetime.now(timezone.utc)
+        result = await lease_manager.extend_for_validation("task-validation")
+        after = datetime.now(timezone.utc)
+
+        assert result is not None
+        # Validation window extension lands at now + 600s (default).
+        # Bound check accommodates the time elapsed during the call.
+        min_expected = before + timedelta(seconds=600)
+        max_expected = after + timedelta(seconds=601)
+        assert min_expected <= result.lease_expires <= max_expected
+
+    @pytest.mark.asyncio
+    async def test_extend_for_validation_honors_custom_window(
+        self, lease_manager: AssignmentLeaseManager
+    ) -> None:
+        """Caller-provided window override is respected.
+
+        Allows callers to configure shorter or longer validation
+        windows per task type without changing the default.
+        """
+        await lease_manager.create_lease("task-validation", "agent-001")
+
+        before = datetime.now(timezone.utc)
+        result = await lease_manager.extend_for_validation(
+            "task-validation", window_seconds=300
+        )
+        after = datetime.now(timezone.utc)
+
+        assert result is not None
+        min_expected = before + timedelta(seconds=300)
+        max_expected = after + timedelta(seconds=301)
+        assert min_expected <= result.lease_expires <= max_expected
+
+    @pytest.mark.asyncio
+    async def test_extend_for_validation_does_not_regress_progress(
+        self, lease_manager: AssignmentLeaseManager
+    ) -> None:
+        """Progress percentage stays at 100 after the validation extension.
+
+        The agent has reported completion. Pushing ``progress_percentage``
+        back to 0 (or to the renewal curve) would re-enter Phase 1's
+        short window on the next ``touch_lease`` call and lose the
+        validation coverage we just granted.
+        """
+        lease = await lease_manager.create_lease("task-validation", "agent-001")
+        lease.progress_percentage = 100
+
+        result = await lease_manager.extend_for_validation("task-validation")
+
+        assert result is not None
+        assert result.progress_percentage == 100
+
+    @pytest.mark.asyncio
+    async def test_extend_for_validation_returns_none_when_no_lease(
+        self, lease_manager: AssignmentLeaseManager
+    ) -> None:
+        """Missing lease returns None, doesn't raise.
+
+        The caller (``report_task_progress``) may invoke this for a
+        task whose lease was already cleared (e.g. completion arrives
+        for a task that finished moments ago). Defensive None preserves
+        the caller's error-handling pattern matching ``renew_lease``.
+        """
+        result = await lease_manager.extend_for_validation("task-nonexistent")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_extend_for_validation_returns_none_when_expired(
+        self, lease_manager: AssignmentLeaseManager
+    ) -> None:
+        """Expired lease is not retroactively resurrected.
+
+        If the lease already expired before completion arrived, the
+        validation extension is too late to help — the late completion
+        will be handled by Fix 2's transactional accept path. Mirrors
+        the behavior of ``renew_lease`` on expired leases.
+        """
+        lease = await lease_manager.create_lease("task-validation", "agent-001")
+        # Force expiry by moving lease_expires into the past
+        lease.lease_expires = datetime.now(timezone.utc) - timedelta(seconds=60)
+
+        result = await lease_manager.extend_for_validation("task-validation")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_extend_for_validation_is_idempotent(
+        self, lease_manager: AssignmentLeaseManager
+    ) -> None:
+        """Calling extend_for_validation twice doesn't stack windows.
+
+        An agent may report ``status=completed`` more than once
+        (e.g. retry after a transient failure). Each call should land
+        on ``now + window_seconds``, not extend by ``window_seconds``
+        on top of the prior extension. Otherwise a chatty agent could
+        accumulate hours of lease.
+        """
+        await lease_manager.create_lease("task-validation", "agent-001")
+
+        first = await lease_manager.extend_for_validation(
+            "task-validation", window_seconds=600
+        )
+        # Tiny delay so the second call's anchor moves forward
+        await asyncio.sleep(0.01)
+        second = await lease_manager.extend_for_validation(
+            "task-validation", window_seconds=600
+        )
+
+        assert first is not None and second is not None
+        # The two expiries should differ by approximately the sleep,
+        # not by 600 seconds. Generous bound to avoid flakes.
+        delta = (second.lease_expires - first.lease_expires).total_seconds()
+        assert 0 <= delta < 5
+
+
+class TestSilentRecoveryCircuitBreaker:
+    """Test suite for the silent-recovery circuit breaker (issue #667 Fix 3a).
+
+    A "silent" recovery is a lease recovery where the agent never
+    reported progress (``renewal_count == 0`` — the ``updates=0``
+    signature from the snake_game runaway incident). After N consecutive
+    silent recoveries of the same task, Marcus must mark the task
+    BLOCKED instead of returning it to TODO, so the respawn/reclaim loop
+    physically cannot continue and the failure becomes visible on the
+    board.
+    """
+
+    @pytest.fixture
+    def mock_kanban_client(self):
+        """Create mock kanban client."""
+        client = Mock()
+        client.update_task = AsyncMock()
+        client.add_comment = AsyncMock()
+        client.move_task_to_column = AsyncMock(return_value=True)
+        return client
+
+    @pytest.fixture
+    def mock_persistence(self):
+        """Create mock assignment persistence."""
+        persistence = Mock()
+        persistence.get_assignment = AsyncMock(return_value=None)
+        persistence.save_assignment = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
+        persistence.remove_assignment = AsyncMock()
+        persistence.load_assignments = AsyncMock(return_value={})
+        persistence.record_task_epoch = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
+        return persistence
+
+    @pytest.fixture
+    def task(self):
+        """Create the task under recovery, registered in task_list."""
+        return Task(
+            id="task-667",
+            name="Integration verification",
+            description="Terminal integration task",
+            status=TaskStatus.IN_PROGRESS,
+            priority=Priority.HIGH,
+            estimated_hours=1.0,
+            dependencies=[],
+            labels=["type:integration"],
+            assigned_to="agent-001",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            due_date=None,
+        )
+
+    @pytest.fixture
+    def lease_manager(self, mock_kanban_client, mock_persistence, task):
+        """Create lease manager with the default breaker threshold (3)."""
+        return AssignmentLeaseManager(
+            mock_kanban_client,
+            mock_persistence,
+            default_lease_hours=1.0,
+            task_list=[task],
+        )
+
+    def _expired_lease(self, agent_id: str, renewal_count: int = 0):
+        """Build an already-expired lease for task-667.
+
+        ``renewal_count=0`` models a SILENT failure (agent never
+        reported progress); ``renewal_count>0`` models an agent that
+        made progress but still expired.
+        """
+        now = datetime.now(timezone.utc)
+        return AssignmentLease(
+            task_id="task-667",
+            agent_id=agent_id,
+            assigned_at=now - timedelta(minutes=10),
+            lease_expires=now - timedelta(minutes=1),
+            last_renewed=now - timedelta(minutes=10),
+            renewal_count=renewal_count,
+        )
+
+    @pytest.mark.asyncio
+    async def test_silent_recovery_below_threshold_resets_to_todo(
+        self, lease_manager, mock_kanban_client
+    ):
+        """First and second silent recoveries keep today's TODO reset."""
+        # Arrange / Act — two silent recoveries
+        await lease_manager.recover_expired_lease(self._expired_lease("agent-1"))
+        await lease_manager.recover_expired_lease(self._expired_lease("agent-2"))
+
+        # Assert — both board updates were TODO resets, never BLOCKED
+        statuses = [
+            call.args[1]["status"]
+            for call in mock_kanban_client.update_task.await_args_list
+        ]
+        assert statuses == [TaskStatus.TODO, TaskStatus.TODO]
+
+    @pytest.mark.asyncio
+    async def test_third_consecutive_silent_recovery_marks_task_blocked(
+        self, lease_manager, mock_kanban_client
+    ):
+        """The third consecutive silent recovery trips the breaker to BLOCKED."""
+        # Arrange / Act — three consecutive silent recoveries
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        # Assert — final board update is BLOCKED with ownership cleared
+        final_update = mock_kanban_client.update_task.await_args_list[-1]
+        assert final_update.args[1]["status"] == TaskStatus.BLOCKED
+        assert final_update.args[1]["assigned_to"] is None
+
+    @pytest.mark.asyncio
+    async def test_progressful_recovery_resets_silent_streak(
+        self, lease_manager, mock_kanban_client
+    ):
+        """A recovery WITH progress breaks the silent streak (not the pattern).
+
+        silent, silent, progressful, silent, silent → never reaches 3
+        consecutive silent recoveries, so the task stays recoverable.
+        A slow-but-alive agent must not trip the breaker (the #703
+        lesson applied at the board level).
+        """
+        await lease_manager.recover_expired_lease(self._expired_lease("a1"))
+        await lease_manager.recover_expired_lease(self._expired_lease("a2"))
+        await lease_manager.recover_expired_lease(
+            self._expired_lease("a3", renewal_count=2)
+        )
+        await lease_manager.recover_expired_lease(self._expired_lease("a4"))
+        await lease_manager.recover_expired_lease(self._expired_lease("a5"))
+
+        statuses = [
+            call.args[1]["status"]
+            for call in mock_kanban_client.update_task.await_args_list
+        ]
+        assert TaskStatus.BLOCKED not in statuses
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_posts_explanatory_comment(
+        self, lease_manager, mock_kanban_client
+    ):
+        """The BLOCKED transition posts a human-readable diagnostic comment."""
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        comment_bodies = [
+            call.args[1] for call in mock_kanban_client.add_comment.await_args_list
+        ]
+        breaker_comments = [
+            body
+            for body in comment_bodies
+            if "3 consecutive" in body and "no progress" in body
+        ]
+        assert len(breaker_comments) == 1
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_still_cleans_coordination_state(
+        self, lease_manager, mock_persistence
+    ):
+        """Tripping the breaker still releases lease + assignment + callback.
+
+        The BLOCKED path must perform the same coordination cleanup as a
+        normal recovery, or the server would leak in-memory agent state
+        (the exact class of bug behind issue #485).
+        """
+        callback_calls = []
+        lease_manager.on_recovery_callback = lambda agent_id, task_id: (
+            callback_calls.append((agent_id, task_id))
+        )
+
+        for i in range(3):
+            lease = self._expired_lease(f"agent-{i}")
+            lease_manager.active_leases[lease.task_id] = lease
+            await lease_manager.recover_expired_lease(lease)
+
+        assert "task-667" not in lease_manager.active_leases
+        assert mock_persistence.remove_assignment.await_count == 3
+        assert ("agent-2", "task-667") in callback_calls
+
+    @pytest.mark.asyncio
+    async def test_threshold_is_configurable(
+        self, mock_kanban_client, mock_persistence, task
+    ):
+        """max_silent_recoveries=1 blocks on the very first silent recovery."""
+        manager = AssignmentLeaseManager(
+            mock_kanban_client,
+            mock_persistence,
+            default_lease_hours=1.0,
+            task_list=[task],
+            max_silent_recoveries=1,
+        )
+
+        await manager.recover_expired_lease(self._expired_lease("agent-1"))
+
+        final_update = mock_kanban_client.update_task.await_args_list[-1]
+        assert final_update.args[1]["status"] == TaskStatus.BLOCKED
+
+    @pytest.mark.asyncio
+    async def test_task_model_marked_blocked_in_task_list(self, lease_manager, task):
+        """The in-memory task model (source of truth) flips to BLOCKED too."""
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        assert task.status == TaskStatus.BLOCKED
+        assert task.assigned_to is None
+
+    @pytest.mark.asyncio
+    async def test_breaker_event_recorded_in_lease_history(self, lease_manager):
+        """The breaker records an auditable lease-history event."""
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        events = [entry["event"] for entry in lease_manager.lease_history]
+        assert "task_blocked_circuit_breaker" in events
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_moves_task_to_blocked_column(
+        self, lease_manager, mock_kanban_client
+    ):
+        """The breaker also calls move_task_to_column("blocked").
+
+        Codex P2 on PR #707: GitHub- and Linear-backed boards do NOT
+        persist status through ``update_task`` (GitHub only opens/closes
+        the issue; Linear ignores status entirely) — their blocked-state
+        mechanics live in ``move_task_to_column``. Without this call,
+        the next project refresh re-reads the task as open/TODO on those
+        providers and the loop the breaker exists to stop resumes.
+        """
+        for i in range(3):
+            await lease_manager.recover_expired_lease(self._expired_lease(f"agent-{i}"))
+
+        mock_kanban_client.move_task_to_column.assert_awaited_once_with(
+            "task-667", "blocked"
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_tolerates_client_without_move_method(
+        self, mock_persistence, task
+    ):
+        """A kanban client lacking move_task_to_column doesn't break the breaker.
+
+        The status write via ``update_task`` must still land and the
+        breaker must complete without raising.
+        """
+        client = Mock(spec=["update_task", "add_comment"])
+        client.update_task = AsyncMock()
+        client.add_comment = AsyncMock()
+        manager = AssignmentLeaseManager(
+            client,
+            mock_persistence,
+            default_lease_hours=1.0,
+            task_list=[task],
+        )
+
+        result = False
+        for i in range(3):
+            result = await manager.recover_expired_lease(
+                self._expired_lease(f"agent-{i}")
+            )
+
+        assert result is True
+        final_update = client.update_task.await_args_list[-1]
+        assert final_update.args[1]["status"] == TaskStatus.BLOCKED

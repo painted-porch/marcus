@@ -1,3 +1,11 @@
+General Guidelines:
+- When writing commit messages, NEVER auto-add your agent name as co-author
+- When writing or substantially editing Markdown files, put each full sentence on its own line.  Preserve normal Markdown structure, but avoid wrapping multiple sentences onto one physical line
+- When making technical decisions, do not give much weight to development costs.  Instead, prefer quality, simplicity, robustness, scalability, and long term maintainability.
+- When doing bug fixes, always start with reproducing the bug in an E2E setting as closely aligned with how an end user might experience it.  This makes sure you find the real problem so your fix will actually solve it.
+- When end-to-end testing a product, be picky about the UI you see and be obsessed with pixel perfection.  If something clearly looks off, even if it is not directly related to what you are doing, try to get it fixed along with the other stuff.
+- Apply that same high standard to engineering excellence: lint, test failures, and test flakiness.  If you see one, even if it is not caused by what you are working on aright now, still get it fixed.
+
 SESSION_START:
   - At session start, read ~/.simon/memory-bank/activeContext.md for current focus and recent state.
   - Also read ~/.simon/memory-bank/progress.md for what shipped / what's left / critical reminders.
@@ -416,10 +424,18 @@ FILE_MANAGEMENT:
 
 
   AI_ARCHITECT_PARTNER:
-    Dr. Kaia Chen is available via the /kaia skill.
-    When the user mentions "Kaia", "Dr. Chen", "ask Kaia", "what would Kaia think",
-    or wants architectural advice, mentorship, or a second opinion, invoke the /kaia skill.
+    Dr. Kaia Chen is personal advisory tooling provided by the /kaia skill,
+    which is intentionally NOT tracked in this repository (.gitignore:
+    skills/kaia/). It exists only on machines where it has been installed
+    locally.
+    IF (and only if) the /kaia skill appears in your available-skills list:
+    when the user mentions "Kaia", "Dr. Chen", "ask Kaia", "what would Kaia
+    think", or wants architectural advice, mentorship, or a second opinion,
+    invoke the /kaia skill.
     Modes: /kaia <question>, /kaia --review, /kaia --research <topic>, /kaia --reflect, /kaia --chat
+    If the skill is NOT available, do not attempt to invoke /kaia — provide
+    the architectural advice yourself and note that the Kaia advisor is not
+    installed in this environment.
 
   MINI_RED_LINE:
     marcus-mini is the proof-of-concept and research instrument. Marcus is the product.
@@ -455,9 +471,17 @@ FILE_MANAGEMENT:
        never pushes work, never assigns without request, never forces a specific
        agent onto a specific task.
     2. Agents make all implementation decisions. Marcus says WHAT to build and
-       WHY it matters. Marcus never says HOW — no library choices, no patterns,
-       no internal code structure. Two agents given the same task must be able
-       to produce legitimately different implementations.
+       WHY it matters. Marcus never dictates implementation HOW — no library
+       choices, no patterns, no internal code structure. Two agents given the
+       same task must be able to produce legitimately different implementations.
+
+       Scope of "implementation" (v2 clarification): the code an agent writes
+       to satisfy the task's acceptance criteria. EXCLUDES self-verification:
+       how Marcus checks the work is correct is part of the task contract,
+       authored by Marcus's setup-time pipeline, not the agent's discretion.
+       The agent owns the bid (implementation); the contract specifies both
+       the acceptance criteria AND how those criteria will be verified. This
+       is the contract-net protocol pattern from 1980s MAS literature.
     3. Agents communicate exclusively through the board. No agent-to-agent
        direct communication. No Marcus-to-agent push outside task assignment.
        The board is the only channel.
@@ -481,3 +505,28 @@ FILE_MANAGEMENT:
     measurable contribution distribution, and fully observable board-mediated
     communication. Honest limitation: agents are reactive within a task, not
     continuously goal-pursuing across tasks (not a BDI architecture).
+
+    VERSION HISTORY:
+
+    v2 — 2026-05-24
+    - Scope of Invariant #2 clarified. "HOW" applies to implementation only,
+      not self-verification. Verification commands are part of the task
+      contract Marcus authors at setup time; agents run them but don't
+      author them.
+    - Rationale: agent-authored verifications were gameable under retry
+      pressure. Project test58 shipped an unplayable snake game because
+      the integration verifier iterated verification commands until one
+      passed (after multiple retries) without actually testing the
+      user-facing behavior (issue #636). The contract-net-protocol framing
+      preserves the MAS research claim while making the smoke gate
+      reliable.
+    - Driven by: issues #636 (smoke-gate ownership), #637 (decomposer
+      redundant gap-fill), #638 (composition orphan detection).
+    - Reviewed by: Kaia (/kaia --chat session, 2026-05-24).
+    - Simon decision: see ~/.simon/decisions.jsonl for the immutable record
+      stamped with this version's commit SHA.
+
+    v1 — 2026-04 (original)
+    - Three Agent Invariants established as part of the Multi-Agency
+      Proclamation.
+    - Driven by: original Marcus design.

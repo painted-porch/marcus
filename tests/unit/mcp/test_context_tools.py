@@ -86,9 +86,9 @@ class MockKanbanClient:
         self.add_comment_calls.append({"task_id": task_id, "comment": comment})
         return {"success": True}
 
-    async def get_attachments(self, card_id: str) -> Dict[str, Any]:
+    async def get_attachments(self, task_id: str) -> Dict[str, Any]:
         """Mock get_attachments method."""
-        self.get_attachments_calls.append({"card_id": card_id})
+        self.get_attachments_calls.append({"task_id": task_id})
         return {"success": True, "data": self.mock_attachments}
 
 
@@ -189,9 +189,9 @@ class TestGetTaskContext:
         mock_state.kanban_client.mock_attachments = [
             {
                 "id": "attach-1",
-                "name": "design.png",
-                "userId": "user-1",
-                "createdAt": "2024-01-01T00:00:00Z",
+                "filename": "design.png",
+                "created_by": "user-1",
+                "created_at": "2024-01-01T00:00:00Z",
             }
         ]
 
@@ -298,9 +298,9 @@ class TestGetTaskContext:
         mock_state.kanban_client.mock_attachments = [
             {
                 "id": "attach-1",
-                "name": "design.png",
-                "userId": "user-1",
-                "createdAt": "2024-01-01T00:00:00Z",
+                "filename": "design.png",
+                "created_by": "user-1",
+                "created_at": "2024-01-01T00:00:00Z",
             }
         ]
 

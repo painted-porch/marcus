@@ -6,7 +6,7 @@ integrating with the existing task assignment workflow.
 """
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from src.core.models import Task, TaskStatus
 from src.marcus_mcp.coordinator.subtask_manager import Subtask, SubtaskManager
@@ -115,6 +115,7 @@ def find_next_available_subtask(
     project_tasks: List[Task],
     subtask_manager: SubtaskManager,
     assigned_task_ids: set[str],
+    eligibility_check: Optional[Callable[[Task, Task], bool]] = None,
 ) -> Optional[Task]:
     """
     Find the next available subtask for an agent using unified graph.
@@ -132,6 +133,12 @@ def find_next_available_subtask(
         Manager tracking all subtasks (for legacy compatibility)
     assigned_task_ids : set[str]
         IDs of tasks/subtasks already assigned
+    eligibility_check : Optional[Callable[[Task, Task], bool]]
+        Issue #737: called with ``(subtask, parent_task)`` after all
+        other filters; a False means this worker may not be offered
+        the candidate (e.g. a verify parent's subtask offered to the
+        claim's author) and the loop moves on. None (the default)
+        keeps the pre-#737 behavior for existing callers.
 
     Returns
     -------
@@ -187,6 +194,17 @@ def find_next_available_subtask(
                 f"Skipping subtask '{subtask.name}' - "
                 "subtask dependencies not satisfied"
             )
+            continue
+
+        # Issue #737: eligibility is the LAST filter, after every
+        # other guard, so a refusal here means the candidate would
+        # otherwise have been offered. The check sees the subtask AND
+        # its parent, because a verify parent's subtask must never
+        # reach the claim's author even when the subtask itself
+        # carries no dependency on the find task.
+        if eligibility_check is not None and not eligibility_check(
+            subtask, parent_task
+        ):
             continue
 
         # Found an available subtask!

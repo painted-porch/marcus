@@ -6,12 +6,14 @@ Phase 1-4 AI capabilities for intelligent task selection.
 """
 
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set
 
 from src.ai.core.ai_engine import MarcusAIEngine
 from src.ai.types import AssignmentContext
 from src.core.models import Priority, Task, TaskStatus
 from src.integrations.ai_analysis_engine import AIAnalysisEngine
+from src.intelligence.dependency_inferer import DependencyGraph
 from src.intelligence.dependency_inferer_hybrid import HybridDependencyInferer
 
 logger = logging.getLogger(__name__)
@@ -117,27 +119,75 @@ class AITaskAssignmentEngine:
 
         return safe_tasks
 
+    def _build_explicit_graph(self) -> DependencyGraph:
+        """Build the dependency graph from declared task dependencies.
+
+        Inference exists to fill in MISSING dependencies; on a board
+        whose tasks declare their edges it is pure overhead, and its
+        O(n^2) pattern sweep on the request path pins the event loop
+        for minutes per request at a few hundred tasks (the #737 full
+        run hit client timeouts at 620 tasks; Simon 44db8b8b).
+
+        Returns
+        -------
+        DependencyGraph
+            The graph of declared edges, in the same shape the
+            inferer produces, sufficient for critical-path scoring.
+        """
+        nodes = {t.id: t for t in self.project_tasks}
+        adjacency: Dict[str, List[str]] = {}
+        reverse: Dict[str, List[str]] = {}
+        for task in self.project_tasks:
+            for dep_id in task.dependencies or []:
+                if dep_id in nodes:
+                    adjacency.setdefault(dep_id, []).append(task.id)
+                    reverse.setdefault(task.id, []).append(dep_id)
+        graph = DependencyGraph(
+            nodes=nodes,
+            edges=[],
+            adjacency_list=adjacency,
+            reverse_adjacency=reverse,
+        )
+        # Declared edges are user input and may contain a cycle, which
+        # would spin get_critical_path's reconstruction forever; a
+        # cyclic board forfeits the critical-path bonus, nothing more.
+        if graph.has_cycle():
+            return DependencyGraph(
+                nodes=nodes, edges=[], adjacency_list={}, reverse_adjacency={}
+            )
+        return graph
+
     async def _analyze_dependencies(self, tasks: List[Task]) -> Dict[str, float]:
         """Phase 2: Analyze task dependencies and prioritize unblocking tasks."""
         dependency_scores = {}
 
-        # Build dependency graph
-        dependency_graph = await self.dependency_inferer.infer_dependencies(
-            self.project_tasks
-        )
+        # Build dependency graph: from declared edges when the board
+        # is explicitly wired; inference only fills in missing ones.
+        if any(t.dependencies for t in self.project_tasks):
+            dependency_graph = self._build_explicit_graph()
+        else:
+            dependency_graph = await self.dependency_inferer.infer_dependencies(
+                self.project_tasks
+            )
+
+        # The critical path is a property of the graph, not of any one
+        # task, so compute it once (not once per task) and look up
+        # membership in O(1). Likewise, count how many TODO tasks each
+        # task unblocks in a single pass over the board rather than a
+        # nested scan per task. Both were O(n^2) in task count on the
+        # request path and froze large boards (issue #743).
+        critical_path = set(dependency_graph.get_critical_path())
+        unblock_counts: Dict[str, int] = defaultdict(int)
+        for other_task in self.project_tasks:
+            if other_task.status == TaskStatus.TODO:
+                # Dedupe per dependent: ``dependencies`` is a plain list that
+                # some generation paths may fill with duplicate ids, and the
+                # original membership test counted each dependent task once.
+                for dep_id in set(other_task.dependencies):
+                    unblock_counts[dep_id] += 1
 
         for task in tasks:
-            # Count how many tasks this would unblock
-            unblocked_count = 0
-            for other_task in self.project_tasks:
-                if (
-                    task.id in other_task.dependencies
-                    and other_task.status == TaskStatus.TODO
-                ):
-                    unblocked_count += 1
-
-            # Check if task is on critical path
-            critical_path = dependency_graph.get_critical_path()
+            unblocked_count = unblock_counts.get(task.id, 0)
             is_critical = task.id in critical_path
 
             # Calculate dependency score

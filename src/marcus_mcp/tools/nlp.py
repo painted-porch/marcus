@@ -479,6 +479,42 @@ async def create_project(
     return result
 
 
+def _resolve_project_info_path(options: Dict[str, Any]) -> Optional[str]:
+    """Resolve where Marcus writes ``project_info.json`` for the runner.
+
+    The experiment runner waits for ``<experiment_dir>/project_info.json``
+    as its go-signal and instructs the project-creator agent to pass
+    ``project_info_path`` in the ``create_project`` options. A
+    lower-fidelity agent can drop that single field from a long options
+    object; when it does, Marcus has no path, silently skips the write,
+    and the runner times out without ever spawning a work agent (the
+    snake-pr673 / test92 failure).
+
+    To make the handshake independent of agent fidelity, fall back to
+    deriving the path from ``project_root`` (which survives reliably): the
+    runner sets ``project_root == <experiment_dir>/implementation``, so the
+    info file sits one level up.
+
+    Parameters
+    ----------
+    options : Dict[str, Any]
+        The ``create_project`` options dict.
+
+    Returns
+    -------
+    Optional[str]
+        The resolved path, or ``None`` when neither ``project_info_path``
+        nor ``project_root`` is usable (caller then skips the write).
+    """
+    explicit = options.get("project_info_path")
+    if explicit:
+        return str(explicit)
+    project_root = options.get("project_root")
+    if project_root:
+        return str(Path(project_root).parent / "project_info.json")
+    return None
+
+
 async def _create_project_inner(
     description: str, project_name: str, options: Optional[Dict[str, Any]], state: Any
 ) -> Dict[str, Any]:
@@ -527,6 +563,18 @@ async def _create_project_inner(
         - tech_stack (List[str]): Technologies to use (e.g., ["React", "Python"])
         - deadline (str): Project deadline in YYYY-MM-DD format
         - tags (List[str]): Tags for project organization
+        - decomposer (str): Task decomposition strategy. One of:
+            - "contract_first" — generates domain contracts before
+              decomposition; each task owns a contract interface.
+              Recommended for projects where agents must coordinate
+              against shared interfaces (most multi-agent runs).
+              Requires ``project_root``.
+            - "feature_based" (default) — shapes tasks directly from
+              functional requirements. Faster to plan; weaker
+              coordination signal. Falls back here automatically if
+              ``contract_first`` is selected but ``project_root`` is
+              absent or contract generation fails.
+          Overrides the ``MARCUS_DECOMPOSER`` environment variable.
 
         Runner Integration:
         - project_info_path (str): Absolute path where Marcus should write
@@ -1221,7 +1269,7 @@ async def _create_project_inner(
         # recommended_agents without a second MCP HTTP session (which was
         # racy — the session could time out before Marcus was ready).
         if result.get("success") and isinstance(options, dict):
-            info_path_str = options.get("project_info_path")
+            info_path_str = _resolve_project_info_path(options)
             if info_path_str:
                 import json as _json
                 from pathlib import Path as _Path

@@ -33,7 +33,11 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.10.0",
+    "mcp>=1.10.0,<2.0.0",
+    # Upper bound: mcp 2.0.0 restructured the package and removed
+    # mcp.server.fastmcp (imported by src/marcus_mcp/server.py), so an
+    # unpinned >=1.10.0 floats to 2.0.0 and breaks import/test collection.
+    # Cap at <2.0.0 until the 2.x import path is adopted deliberately.
     # Transitive pins forced by mcp 1.10's streamable_http transport.
     # Without anyio>=4.5 the server raises TypeError on every HTTP MCP
     # request (PEP 585 subscript on a non-generic function in anyio 3.x)
@@ -55,7 +59,10 @@ dependencies = [
     "psutil>=5.9.0",
     "structlog>=24.0.0",
     "jinja2>=3.1.0",
-    "mlflow>=2.10.0",
+    # Ceiling is deliberate — see the note in requirements.txt. A minor
+    # mlflow upgrade can tighten annotations and turn `mypy src/` red
+    # without a commit causing it. Raise it deliberately.
+    "mlflow>=2.10.0,<3.17.0",
     "pyyaml>=6.0.0",
     "uvicorn>=0.25.0",
     "python-dateutil>=2.8.0",

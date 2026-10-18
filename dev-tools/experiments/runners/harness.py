@@ -253,8 +253,29 @@ class ClaudeHarness:
             matching the byte layout the prior ``if/elif`` produced.
         """
         print_flag = "--print " if print_mode else ""
+        # Restrict the agent to ONLY the Marcus MCP server. Without this,
+        # the pane inherits every globally-registered MCP server (Gmail,
+        # Drive, Calendar, Docker, ...). That large tool surface pushes
+        # claude into deferred-tool mode, where the mcp__marcus__* tools
+        # are not directly available and must be loaded via ToolSearch
+        # first. Smaller models (e.g. haiku) mishandle that and try to
+        # invoke Marcus through nonexistent shell CLIs ("mcp call ...")
+        # instead of calling the tool, so they never register and the run
+        # spawn-thrashes. --strict-mcp-config narrows the session to just
+        # Marcus, and "alwaysLoad": true exempts it from Tool Search
+        # deferral (https://code.claude.com/docs/en/mcp) so the ~16 Marcus
+        # tools load upfront and are directly callable — without it the
+        # tools stay behind ToolSearch, which is exactly the step a small
+        # model fumbles. $MARCUS_MCP_URL is exported by the pane wrapper
+        # before this command runs.
+        marcus_only_mcp = (
+            r'"{\"mcpServers\":{\"marcus\":'
+            r"{\"type\":\"http\",\"url\":\"$MARCUS_MCP_URL\","
+            r'\"alwaysLoad\":true}}}"'
+        )
         return (
             f"claude --add-dir {workdir} \\\n"
+            f"  --strict-mcp-config --mcp-config {marcus_only_mcp} \\\n"
             f"  {model_flag}--dangerously-skip-permissions "
             f"{print_flag}< {prompt_file}"
         )
@@ -264,12 +285,16 @@ class ClaudeHarness:
         return inner_cmd
 
     def build_mcp_register_snippet(self) -> str:
-        """``claude mcp add`` writes to ``~/.claude.json``.
+        """No-op: the agent command pins Marcus via ``--strict-mcp-config``.
 
-        ``|| true`` swallows the "already exists" error so re-spawned
-        panes do not abort on the registration step.
+        Workers and the project creator now launch with
+        ``--strict-mcp-config --mcp-config <marcus-only>`` (see
+        :meth:`build_agent_command`), which ignores ``~/.claude.json``
+        entirely. A ``claude mcp add`` here would therefore be both
+        redundant and a liability: many panes writing ``~/.claude.json``
+        in parallel can corrupt it. Emit a harmless marker instead.
         """
-        return 'claude mcp add marcus -t http "$MARCUS_MCP_URL" ' "2>/dev/null || true"
+        return 'echo "  Marcus MCP pinned via --strict-mcp-config (marcus-only)"'
 
     def install_hint(self, marcus_mcp_url: str) -> List[str]:
         """Single-line install hint shown when ``claude`` is missing."""

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -147,18 +148,33 @@ class WorkAnalyzer:
         project_root = self._get_project_root(task, state, agent_id=agent_id)
         logger.debug(f"Project root: {project_root}")
 
-        # 2. Discover source files by scanning project_root
-        source_files = self._discover_source_files(project_root)
+        # 2. Scope evidence to git delta when a baseline_commit is available.
+        #    This prevents the token explosion caused by loading all merged-agent
+        #    files when validating a single agent's work (issue #696).
+        allowed_files = self._get_git_delta_files(project_root, state, agent_id)
+
+        # 3. Discover source files — scoped to delta or full scan as fallback
+        source_files = self._discover_source_files(
+            project_root, allowed_files=allowed_files
+        )
         logger.info(
             f"Discovered {len(source_files)} source files "
             f"({sum(f.size_bytes for f in source_files)} total bytes)"
         )
 
-        # 3. Get design artifacts from state
+        # 4. Collect full file manifest (names only, no content reads).
+        #    Injected into the prompt so the LLM knows which files exist
+        #    even when their extension is excluded from SOURCE_EXTENSIONS
+        #    (e.g. pyproject.toml, Makefile). Prevents false "file missing"
+        #    reports when the delta scan limits content to .py/.js files.
+        file_manifest = self._collect_file_manifest(project_root)
+        logger.info(f"File manifest: {len(file_manifest)} files in project")
+
+        # 5. Get design artifacts from state
         design_artifacts = state.task_artifacts.get(task.id, []).copy()
         logger.debug(f"Found {len(design_artifacts)} design artifacts")
 
-        # 4. Get decisions from get_task_context
+        # 6. Get decisions from get_task_context
         decisions = await self._get_decisions(task, state)
         logger.debug(f"Retrieved {len(decisions)} architectural decisions")
 
@@ -167,6 +183,7 @@ class WorkAnalyzer:
             design_artifacts=design_artifacts,
             decisions=decisions,
             project_root=project_root,
+            file_manifest=file_manifest,
             collection_time=datetime.utcnow(),
         )
 
@@ -451,29 +468,223 @@ class WorkAnalyzer:
             ),
         )
 
-    def _discover_source_files(self, project_root: str) -> list[SourceFile]:
+    def _get_git_delta_files(
+        self, project_root: str, state: Any, agent_id: str | None
+    ) -> list[str] | None:
+        """Return the relative file paths changed by this agent since their baseline.
+
+        Uses ``git diff <baseline_commit>..HEAD --name-only`` to isolate only
+        the files the agent wrote, preventing the entire merged codebase from
+        being loaded into the validation prompt (issue #696).
+
+        Parameters
+        ----------
+        project_root : str
+            Absolute path to the agent's worktree (or main repo as fallback)
+        state : Any
+            Marcus server state — used to look up the agent's TaskAssignment
+        agent_id : str | None
+            Agent performing the task
+
+        Returns
+        -------
+        list[str] | None
+            Relative file paths in the delta. An empty list means the diff
+            succeeded but the agent changed no files — the caller must treat
+            this as "no source-file evidence" (a correct completion failure),
+            NOT as a reason to fall back to the full worktree scan. None is
+            returned only when the delta genuinely cannot be computed (no
+            baseline, git error), where the caller falls back to a full scan.
+        """
+        baseline_commit: str | None = None
+        if agent_id and hasattr(state, "agent_tasks"):
+            assignment = state.agent_tasks.get(agent_id)
+            if assignment:
+                baseline_commit = getattr(assignment, "baseline_commit", None)
+
+        if not baseline_commit:
+            logger.debug(
+                f"No baseline_commit for agent {agent_id} — using full worktree scan"
+            )
+            return None
+
+        try:
+            result = subprocess.run(
+                ["git", "diff", f"{baseline_commit}..HEAD", "--name-only"],
+                capture_output=True,
+                text=True,
+                cwd=project_root,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    f"git diff failed (exit {result.returncode}): "
+                    f"{result.stderr.strip()} — falling back to full worktree scan"
+                )
+                return None
+
+            files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+            logger.info(
+                f"Git delta for agent {agent_id}: {len(files)} files changed "
+                f"since {baseline_commit[:8]}"
+            )
+            # A successful-but-empty diff means the agent committed no changes.
+            # Return the empty list (not None) so validation surfaces the
+            # "no source files" failure instead of scanning the entire merged
+            # worktree and grading the agent against other agents' work.
+            return files
+
+        except Exception as exc:
+            logger.warning(
+                f"Failed to compute git delta for agent {agent_id}: {exc}"
+                " — falling back to full worktree scan"
+            )
+            return None
+
+    def _collect_file_manifest(self, project_root: str) -> list[str]:
+        """Return relative paths of every file in project_root (names only).
+
+        This is the cheap half of the git-delta approach (issue #696): we
+        scan the full worktree for filenames — no content reads — and inject
+        the list into the validation prompt so the LLM knows which files
+        *exist* even when their extension is excluded from SOURCE_EXTENSIONS
+        (e.g. ``pyproject.toml``, ``Makefile``, ``.flake8``).
+
+        Parameters
+        ----------
+        project_root : str
+            Absolute path to the project directory to scan
+
+        Returns
+        -------
+        list[str]
+            Sorted relative file paths (POSIX separators)
+        """
+        manifest: list[str] = []
+        project_path = Path(project_root).resolve()
+
+        for root, dirs, files in os.walk(project_root):
+            dirs[:] = [d for d in dirs if d not in self.EXCLUDE_DIRS]
+            for file in files:
+                file_path = Path(root) / file
+                try:
+                    resolved = file_path.resolve()
+                    if not resolved.is_relative_to(project_path):
+                        continue
+                    manifest.append(str(resolved.relative_to(project_path)))
+                except (ValueError, OSError):
+                    continue
+
+        return sorted(manifest)
+
+    def _discover_source_files(
+        self, project_root: str, allowed_files: list[str] | None = None
+    ) -> list[SourceFile]:
         """Discover source files by scanning project_root directory.
 
         Parameters
         ----------
         project_root : str
             Root directory to scan
+        allowed_files : list[str] | None
+            When provided, only load these relative paths (git-delta scoping).
+            When None, walk the entire project_root (legacy behaviour).
 
         Returns
         -------
         list[SourceFile]
             Discovered source files with content
         """
-        logger.debug(
-            f"Scanning {project_root} for source files (excluding {self.EXCLUDE_DIRS})"
-        )
         source_files: list[SourceFile] = []
-        project_path = Path(project_root).resolve()  # Resolve to absolute path
+        project_path = Path(project_root).resolve()
 
         # Track total content size to prevent memory exhaustion
         total_content_bytes = 0
         MAX_TOTAL_CONTENT = 10_000_000  # 10MB total limit across all files
 
+        if allowed_files is not None:
+            # Git-delta mode: only load the specific files the agent changed
+            logger.debug(
+                f"Git-delta mode: loading {len(allowed_files)} files "
+                f"from {project_root}"
+            )
+            delta_pairs = []
+            for rel in allowed_files:
+                abs_p = project_path / rel
+                try:
+                    resolved = abs_p.resolve()
+                except (OSError, RuntimeError):
+                    logger.debug(f"Skipping unresolvable delta file: {rel}")
+                    continue
+                # Guard against a source-named symlink escaping the worktree
+                # (e.g. leak.py -> /etc/secret). Without this, validation would
+                # follow the link and send external file content to the LLM.
+                # Mirrors the resolve + containment check in
+                # _collect_file_manifest / the legacy full scan.
+                if not resolved.is_relative_to(project_path):
+                    logger.warning(
+                        "Skipping delta file outside project root "
+                        f"(possible symlink escape): {rel}"
+                    )
+                    continue
+                if resolved.exists():
+                    delta_pairs.append((resolved, resolved))
+                else:
+                    logger.debug(f"Skipping missing delta file: {rel}")
+
+            for file_path, resolved_path in delta_pairs:
+                if resolved_path.suffix not in self.SOURCE_EXTENSIONS:
+                    continue
+                try:
+                    stat = resolved_path.stat()
+                    size_bytes = stat.st_size
+                    modified_time = datetime.fromtimestamp(stat.st_mtime)
+
+                    if size_bytes == 0:
+                        content = ""
+                    elif total_content_bytes + size_bytes > MAX_TOTAL_CONTENT:
+                        logger.warning(
+                            f"Skipping {resolved_path} — total content limit "
+                            f"({MAX_TOTAL_CONTENT} bytes) would be exceeded"
+                        )
+                        continue
+                    elif size_bytes > 1_000_000:
+                        content = resolved_path.read_text(errors="ignore")[:100000]
+                        content += "\n\n[FILE TRUNCATED - Too large for validation]"
+                        total_content_bytes += len(content)
+                    else:
+                        content = resolved_path.read_text(errors="ignore")
+                        total_content_bytes += len(content)
+
+                    has_placeholders = any(
+                        pattern in content for pattern in self.PLACEHOLDER_PATTERNS
+                    )
+                    source_files.append(
+                        SourceFile(
+                            path=str(resolved_path),
+                            relative_path=str(resolved_path.relative_to(project_path)),
+                            size_bytes=size_bytes,
+                            content=content,
+                            has_placeholders=has_placeholders,
+                            extension=resolved_path.suffix,
+                            modified_time=modified_time,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to read {resolved_path}: {exc}")
+                    continue
+
+            logger.info(
+                f"Loaded {len(source_files)} delta files, "
+                f"total {total_content_bytes:,} bytes"
+            )
+            return source_files
+
+        # Legacy full-worktree mode (no baseline_commit available)
+        logger.debug(
+            f"Full-scan mode: walking {project_root} "
+            f"(excluding {self.EXCLUDE_DIRS})"
+        )
         for root, dirs, files in os.walk(project_root):
             # Filter out excluded directories (in-place modification)
             dirs[:] = [d for d in dirs if d not in self.EXCLUDE_DIRS]
@@ -1182,6 +1393,24 @@ Focus on FUNCTIONALITY, not understanding. Code must WORK, not just exist.
         else:
             for i, criterion in enumerate(criteria, 1):
                 prompt_parts.append(f"{i}. {criterion}")
+
+        # Add file manifest — existence proof for every file in the project.
+        # This lets the LLM verify "does pyproject.toml exist?" without
+        # needing its content. Files in the manifest but absent from the
+        # source file section below exist but aren't readable (wrong
+        # extension or excluded by SOURCE_EXTENSIONS) — the LLM must NOT
+        # report them as missing. Only files absent from BOTH the manifest
+        # AND the source files section are truly missing.
+        if evidence.file_manifest:
+            prompt_parts.append("\n\nPROJECT FILE MANIFEST (every file that exists):")
+            for path in evidence.file_manifest:
+                prompt_parts.append(f"  {path}")
+            prompt_parts.append(
+                "\nNOTE: Files listed above exist in the project. "
+                "If a file appears in the manifest but not in the source "
+                "files section below, it exists but its content is not "
+                "shown. Do NOT report manifest-listed files as missing."
+            )
 
         # Add discovered source files with full content (no truncation).
         # Previously content was truncated to 8KB per file which caused

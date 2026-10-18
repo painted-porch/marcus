@@ -492,3 +492,99 @@ class TestStage4PostSafetyCheckCallSiteRemoved:
             "nlp_tools.py must not import check_spec_coverage post-Stage-4 — "
             "the augmenter chain handles spec coverage now."
         )
+
+
+# ---------------------------------------------------------------------------
+# Prototype-mode skip (bug #649 root cause 4)
+# ---------------------------------------------------------------------------
+
+
+class TestPrototypeModeNoLongerSkips:
+    """Issue #666: spec_coverage now runs on EVERY complexity mode.
+
+    The old prototype short-circuit (bug #649 root cause 4) silenced
+    spec_coverage on prototype runs to cut a redundant-task/cost problem.
+    But a *dropped* outcome (e.g. the snake game's restart) is
+    mode-independent, and skipping the whole pass meant genuine gaps were
+    never caught — the snake game shipped without restart (#666). The skip
+    is removed. ``complexity_mode`` is retained as a no-op for chain
+    construction compatibility and no longer affects behavior.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prototype_mode_runs_spec_coverage(self) -> None:
+        """Prototype mode now RUNS the coverage check (no short-circuit)."""
+        from src.marcus_mcp.coordinator.spec_coverage_augmenter import (
+            SpecCoverageAugmenter,
+        )
+
+        with patch(
+            "src.marcus_mcp.coordinator.spec_coverage_augmenter.check_spec_coverage",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_check:
+            augmenter = SpecCoverageAugmenter(complexity_mode="prototype")
+            tasks = [_make_task("t1"), _make_task("t2")]
+            result = await augmenter.augment(
+                prd_analysis=_make_prd_analysis("build a snake game"),
+                tasks=tasks,
+            )
+
+        # Coverage check now runs even on prototype (no skip).
+        mock_check.assert_awaited_once()
+        # No gaps found -> passthrough unchanged.
+        assert result.augmented_tasks == tasks
+        assert result.synthesized_ids == []
+        assert result.telemetry == {}
+
+    @pytest.mark.asyncio
+    async def test_standard_mode_unchanged_behavior(self) -> None:
+        """Non-prototype mode still calls ``check_spec_coverage``.
+
+        Regression guard: only prototype mode short-circuits.  Standard
+        and enterprise modes (the previous default) keep the existing
+        behavior so the fix is opt-in via complexity_mode.
+        """
+        from src.marcus_mcp.coordinator.spec_coverage_augmenter import (
+            SpecCoverageAugmenter,
+        )
+
+        with patch(
+            "src.marcus_mcp.coordinator.spec_coverage_augmenter." "check_spec_coverage",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_check:
+            augmenter = SpecCoverageAugmenter(complexity_mode="standard")
+            await augmenter.augment(
+                prd_analysis=_make_prd_analysis("build a weather app"),
+                tasks=[_make_task("t1")],
+            )
+
+        mock_check.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_default_complexity_mode_preserves_legacy_behavior(self) -> None:
+        """Construction without ``complexity_mode`` keeps the old default.
+
+        Pre-bug-#649 callers constructed ``SpecCoverageAugmenter()`` with
+        no arguments.  The new keyword-only ``complexity_mode`` must
+        default to ``None`` and behave identically to standard mode for
+        backwards compatibility — only when an explicit ``"prototype"``
+        is passed does the short-circuit engage.
+        """
+        from src.marcus_mcp.coordinator.spec_coverage_augmenter import (
+            SpecCoverageAugmenter,
+        )
+
+        with patch(
+            "src.marcus_mcp.coordinator.spec_coverage_augmenter." "check_spec_coverage",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_check:
+            augmenter = SpecCoverageAugmenter()  # No complexity_mode
+            await augmenter.augment(
+                prd_analysis=_make_prd_analysis("build a thing"),
+                tasks=[_make_task("t1")],
+            )
+
+        mock_check.assert_awaited_once()

@@ -15,7 +15,12 @@ from .context import get_task_context, log_decision
 from .nlp import add_feature, create_project
 from .project import get_project_status
 from .system import check_assignment_health, ping
-from .task import report_blocker, report_task_progress, request_next_task
+from .task import (
+    report_blocker,
+    report_task_progress,
+    request_next_task,
+    request_task_redo,
+)
 
 __all__ = [
     # Agent tools
@@ -26,6 +31,7 @@ __all__ = [
     "request_next_task",
     "report_task_progress",
     "report_blocker",
+    "request_task_redo",
     # Artifact tools
     "log_artifact",
     # Context tools

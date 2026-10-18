@@ -473,3 +473,205 @@ class TestCompositionIdempotency:
             impl_tasks=[existing_composition, _impl_task("t1")],
         )
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #649 root cause 2 — mandatory build verification gate
+# ---------------------------------------------------------------------------
+
+
+class TestBuildVerificationGate:
+    """Composition task description must require a real build check.
+
+    Background — bug #649 root cause 2
+    -----------------------------------
+    The verify-snake-3 run (2026-05-24) shipped a broken Vite import
+    (``@/physics/engine`` unresolvable) because the composer agent
+    merged worktree files and marked its task done without verifying
+    the result built.  The integration verification smoke gate
+    eventually got bypassed when later retries used weak
+    ``start_command`` values until one returned exit 0.
+
+    The fix: the composition task description (Marcus-authored)
+    explicitly requires a build-verification command appropriate to
+    the project's stated tech stack, and forbids marking complete on
+    a broken build.  Marcus says WHAT must be true (build exit 0);
+    agent decides HOW (which bundler, which flags).  Per Invariant
+    #2 v2 (CLAUDE.md), verification belongs to Marcus's setup-time
+    pipeline; this is the composition-task expression of that rule.
+    """
+
+    def test_description_mandates_build_verification(self) -> None:
+        """Description names a mandatory build-verification step.
+
+        Pre-fix the description had a vague "smoke test the
+        composition root" bullet that left the agent free to skip the
+        check.  Post-fix the description uses MANDATORY phrasing so
+        the agent cannot interpret it as optional.
+        """
+        from src.integrations.composition_synthesis import (
+            build_composition_task,
+        )
+
+        task = build_composition_task(
+            project_name="snake-game",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+        )
+        assert task is not None
+        # The description must contain MANDATORY-style framing for the
+        # build step.  Accept any of "MANDATORY", "REQUIRED", or
+        # "must" near the build check so phrasing can evolve.
+        desc = task.description
+        assert "build verification" in desc.lower() or "mandatory build" in desc.lower()
+
+    def test_description_lists_per_stack_build_commands(self) -> None:
+        """Description gives concrete per-stack build-command examples.
+
+        Marcus does not pick THE command — the agent picks the form
+        matching the scaffold.  Multiple examples are named so the
+        agent reads them as a menu, not a prescription.  This is
+        coordination per Invariant #2 v2: Marcus says "your build
+        must succeed"; the agent decides HOW to satisfy that for
+        their stack.
+        """
+        from src.integrations.composition_synthesis import (
+            build_composition_task,
+        )
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+        )
+        assert task is not None
+        desc_lower = task.description.lower()
+        # At minimum two of the canonical stacks must be named so
+        # the agent does not read it as "Marcus picked npm".
+        stacks_named = sum(
+            keyword in desc_lower
+            for keyword in ("npm run build", "python -m build", "cargo build")
+        )
+        assert stacks_named >= 2, (
+            "Description must list >=2 stack-specific build commands "
+            "so the agent does not read a single example as the "
+            "canonical command"
+        )
+
+    def test_description_forbids_marking_complete_on_broken_build(self) -> None:
+        """Description must explicitly forbid done-on-broken-build.
+
+        Without an explicit prohibition the agent under retry
+        pressure may report the task complete by reasoning "I tried
+        to fix the build, close enough."  The text bans that
+        interpretation outright.
+        """
+        from src.integrations.composition_synthesis import (
+            build_composition_task,
+        )
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+        )
+        assert task is not None
+        desc_lower = task.description.lower()
+        # Some phrase ruling out broken-build acceptance.
+        assert (
+            "broken build" in desc_lower
+            or "do not mark this task complete" in desc_lower
+            or "blocker" in desc_lower
+        )
+
+    def test_description_requires_dev_server_probe_when_applicable(self) -> None:
+        """Server-mode projects must boot + curl the running app.
+
+        The verify-snake-3 failure mode: the agent ran a weak
+        verification that did not actually launch the dev server.
+        Marcus now names "boot dev server + curl" as the canonical
+        probe so vague verification gets rejected by the description
+        itself.
+        """
+        from src.integrations.composition_synthesis import (
+            build_composition_task,
+        )
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+        )
+        assert task is not None
+        desc_lower = task.description.lower()
+        assert "dev server" in desc_lower or "curl" in desc_lower
+
+
+class TestCompositionSelfVerify:
+    """Issue #677 (self-verify): the composition task tells the agent to RUN
+    the composed product and fix until it works — generic, no per-type
+    evidence-submission framing — and stashes ``structural_category`` on
+    ``source_context`` for any future Marcus-side check ("borrow hands")."""
+
+    def test_description_tells_agent_to_run_it_not_just_build(self) -> None:
+        from src.integrations.composition_synthesis import build_composition_task
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+            structural_category="web app",
+        )
+        assert task is not None
+        desc_lower = task.description.lower()
+        assert "run it" in desc_lower
+        assert "blank" in desc_lower  # blank screen / empty result mentioned
+        assert "fix the wiring" in desc_lower
+
+    def test_run_it_step_is_generic_no_evidence_submission(self) -> None:
+        # Self-verify framing: the agent runs and fixes; it does NOT author
+        # ``evidence`` for Marcus to judge. The step is generic across app
+        # types (no per-type ``dom``/``submit evidence`` keys).
+        from src.integrations.composition_synthesis import build_composition_task
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+            structural_category="data pipeline",
+        )
+        assert task is not None
+        desc_lower = task.description.lower()
+        assert "behavior evidence" not in desc_lower
+        assert "submit" not in desc_lower or "submit this evidence" not in desc_lower
+        assert "mandatory behavior evidence" not in desc_lower
+
+    def test_task_stashes_structural_category_on_source_context(self) -> None:
+        from src.integrations.composition_synthesis import build_composition_task
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+            structural_category="web app",
+        )
+        assert task is not None
+        assert task.source_context is not None
+        assert task.source_context["structural_category"] == "web app"
+
+    def test_run_it_step_present_for_all_types(self) -> None:
+        # The "run it, don't just build it" step is universal — it is not
+        # gated on the structural category, so unclassified projects get it too.
+        from src.integrations.composition_synthesis import build_composition_task
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+            structural_category="other",
+        )
+        assert task is not None
+        assert "RUN IT" in task.description
+
+    def test_default_category_still_has_run_it_step(self) -> None:
+        from src.integrations.composition_synthesis import build_composition_task
+
+        task = build_composition_task(
+            project_name="x",
+            impl_tasks=[_impl_task("t1"), _impl_task("t2")],
+        )
+        assert task is not None
+        assert "RUN IT" in task.description
+        assert task.source_context["structural_category"] == "unknown"

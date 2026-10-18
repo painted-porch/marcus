@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from src.core.models import Priority, Task, TaskStatus
+from src.integrations.behavior_evidence import behavior_evidence_contract
 from src.integrations.nlp_task_utils import TaskType
 
 if TYPE_CHECKING:
@@ -61,6 +62,7 @@ class IntegrationTaskGenerator:
         project_name: str = "Project",
         contract_file: Optional[str] = None,
         outcomes: Optional[List["UserOutcome"]] = None,
+        structural_category: str = "unknown",
     ) -> Optional[Task]:
         """
         Create an integration verification task.
@@ -152,6 +154,7 @@ class IntegrationTaskGenerator:
             project_name,
             contract_file=contract_file,
             in_scope_outcomes=in_scope_outcomes,
+            structural_category=structural_category,
         )
 
         acceptance_criteria = [
@@ -178,11 +181,15 @@ class IntegrationTaskGenerator:
         # Empty list when no outcomes — distinguishes "outcomes wired
         # but none in scope" from "wiring not present at all," which
         # matters for the gate's decision to apply the coverage rule.
-        source_context: Optional[Dict[str, Any]] = None
+        # Issue #677: always stash the structural category so the product
+        # smoke gate can judge submitted behavior evidence against the
+        # per-type bar (web=rendered DOM, pipeline=output, …), even when
+        # no UserOutcomes were extracted.
+        source_context: Dict[str, Any] = {
+            "structural_category": structural_category,
+        }
         if outcomes is not None:
-            source_context = {
-                "in_scope_outcome_ids": [o.id for o in in_scope_outcomes],
-            }
+            source_context["in_scope_outcome_ids"] = [o.id for o in in_scope_outcomes]
 
         task = Task(
             id=f"integration_verify_{uuid.uuid4().hex[:8]}",
@@ -286,6 +293,7 @@ class IntegrationTaskGenerator:
         project_name: str,
         contract_file: Optional[str] = None,
         in_scope_outcomes: Optional[List["UserOutcome"]] = None,
+        structural_category: str = "unknown",
     ) -> str:
         """
         Generate the integration task description.
@@ -332,535 +340,159 @@ class IntegrationTaskGenerator:
                 "boundary; silently editing it to match a broken "
                 "implementation defeats the purpose of contract-first "
                 "decomposition and will cause future regressions.\n\n"
-                "Before starting Phase 1, `Read` the contract file so "
-                "you know the authoritative interface shapes, "
-                "identifiers, and configuration values. Use the "
-                "contract as your reference when verifying cross-agent "
-                "boundaries in step 9.\n\n---\n\n"
+                "`Read` the contract file first so you know the "
+                "authoritative interface shapes, identifiers, and "
+                "configuration values, and use it as your reference when "
+                "you fix mismatches between the pieces.\n\n---\n\n"
             )
-        outcomes_section = (
-            IntegrationTaskGenerator._render_outcomes_section(in_scope_outcomes)
-            if in_scope_outcomes
-            else ""
+        # Issue #677 (self-verify, skeptic framing): the integration agent is
+        # a full-capability Claude Code harness — it can run the assembled
+        # product with whatever tools it needs (start a server, load a
+        # browser, drive a CLI), observe whether it actually works, and FIX
+        # what is broken in the same loop.  Two live e2e runs showed a
+        # *closer* incentive defeats a neutral "verify it works" prompt: the
+        # agent grabbed the cheapest success-shaped artifact (test97: the
+        # static index.html shell; test98: a green vitest/pytest run) and
+        # reported done while the running game was blank / stuck idle.  The
+        # fix is to frame the agent as a SKEPTIC — a MAS built this and always
+        # leaves integration mistakes; the job is to find and fix them — and
+        # to close the unit-test loophole explicitly (tests pass in isolation
+        # while the assembled product is dead).  The in-scope outcomes are the
+        # spine; HOW to run/observe stays the agent's (Invariant #2).  Marcus's
+        # only hard floor is the build (mechanically detected, run by Marcus,
+        # no browser needed); proving the outcomes behave is the agent's
+        # self-verification.
+        if in_scope_outcomes:
+            bullets = "\n".join(
+                f"- {o.action} — {o.success_signal}" for o in in_scope_outcomes
+            )
+            outcomes_block = (
+                '\n\n**"Done" means a user can actually do each of these:'
+                f"**\n\n{bullets}\n"
+            )
+        else:
+            outcomes_block = (
+                '\n\n**"Done" means the product actually does what the '
+                "project description asks for** when a user runs it.\n"
+            )
+
+        return (
+            preamble + "A multi-agent system built this project. Each piece was built "
+            "by a different agent working in isolation, and they ALWAYS leave "
+            "integration mistakes — components that don't connect, a UI that "
+            "renders but never starts, input wired to nothing. You are not "
+            "here to confirm it works. You are here to FIND what they got "
+            "wrong and FIX it, until the product actually starts, runs, and "
+            "performs every outcome below.\n\n"
+            "The pieces were built separately. Wire them together at the "
+            "entry point, fill any gaps, and fix the mismatches between them "
+            "so the whole thing works as one product."
+            + outcomes_block
+            + "\nVerify by actually RUNNING the product the way a user "
+            "would — use whatever tools you need (start its server, load it "
+            "in a real browser, drive its CLI, call its API; install a tool "
+            "if you have to). Then PERFORM each outcome yourself and watch "
+            "the real result happen: do the user action and confirm the "
+            "actual behavior occurs (e.g. press the keys and confirm the "
+            "thing actually moves, watch the output appear, watch the value "
+            "change).\n\n"
+            "A passing unit-test suite is NOT proof and does not count. "
+            "Unit tests check pieces in isolation with fake inputs — they go "
+            "green even when the assembled product is dead on arrival. If you "
+            "have not observed the real behavior happen with your own eyes in "
+            "the running product, the outcome is NOT done: find why, fix it, "
+            "and run it again. Keep going until every outcome genuinely "
+            "works.\n\n"
+            "You are a full-capability agent: write code, install tools, do "
+            "whatever it takes. Marcus does NOT run any build, test, or check "
+            "for you — there is no safety net behind you. YOU must build it, "
+            "run it, and confirm every outcome above actually happens before "
+            "you mark this complete. If you have not watched it work, it is "
+            "not done.\n\n"
+            "**Before you edit any file another task created, apply this "
+            "gate.** Boundary glue (imports, type alignment, adapters, "
+            "wiring): fix yourself. ANYTHING more (wrong logic, missing "
+            "behavior, an undone lane): do NOT rewrite it — call "
+            "`request_task_redo(agent_id, task_id, reason)` and re-verify "
+            "once the redo lands. Rewriting another lane yourself is the "
+            "last resort, after the redo cap (3)."
         )
-        return preamble + f"""Verify that {project_name} actually builds, starts, \
-and works end-to-end — and FIX any issues you find.
 
-**IMPORTANT**: This is an integration AND remediation task. You verify \
-the product works, and if it doesn't, YOU FIX IT. You are the last line \
-of defense — you glue components together, fill gaps left by task \
-decomposition, and ensure the product actually works as a whole. \
-Do NOT just report problems. Fix them.
+    @staticmethod
+    def _render_behavior_evidence_section(structural_category: str) -> str:
+        """Render the per-app-type behavior-evidence block (issue #677).
 
-**CRITICAL RULE — EVIDENCE REQUIRED**: Every step below MUST include \
-the actual command you ran AND its real stdout/stderr output. Do NOT \
-summarize, paraphrase, or claim a command succeeded without showing \
-the output. If you cannot run a command, say so explicitly. \
-Fabricating output is worse than reporting a failure.
+        The integration agent verifies the product *builds and starts*;
+        this section additionally requires it to RUN the assembled
+        product and capture *behavior evidence* (a rendered DOM, produced
+        output, stdout, …) proving it actually works.  Marcus's product
+        smoke gate judges the submitted evidence against the per-type bar
+        — a build that exits 0 and a server that returns 200 do not pass.
 
-## PHASE 1: VERIFY
+        Marcus authors WHAT evidence proves the outcome (tool-agnostic);
+        the agent picks HOW to capture it (Invariant #2, and the
+        ``VerificationSpec`` "coordination, not a tooling registry"
+        principle).  Fuzzy types (``other``, ``automation``, unknown)
+        have no behavior contract and get an empty section — they fall
+        back to the legacy build/serve verification only.
 
-1. **Read Context**:
-   - Review design documents and architecture decisions
-   - Check README.md for documented build/start commands
-   - Use `get_task_context` for completed implementation tasks
-   - Understand what the project is supposed to do
+        Parameters
+        ----------
+        structural_category : str
+            Marcus's setup-time classification (e.g. ``"web app"``).
 
-2. **Inspect the Project**:
-   - Look at the project structure and files
-   - Identify the language(s), framework(s), and build system
-   - Find configuration files (package.json, pyproject.toml,
-     Makefile, Dockerfile, Cargo.toml, go.mod, index.html, etc.)
-   - Determine the appropriate build, install, and start commands
-   - Verify the project's module/package structure is complete
+        Returns
+        -------
+        str
+            Markdown-formatted section, or ``""`` when this app type has
+            no behavior contract.
+        """
+        contract = behavior_evidence_contract(structural_category)
+        if not contract:
+            return ""
+        return f"""
 
-3. **Install Dependencies**:
-   - Run the appropriate install command for the project
-   - Capture the FULL terminal output
-   - Record: command, exit code, raw output
+---
 
-4. **Run Tests**:
-   - Run the project's test suite (pytest, npm test, etc.)
-   - Capture the FULL terminal output (not a summary)
-   - Record: command, exit code, pass/fail counts, raw output
-   - If tests fail, record the actual error messages
+## Behavior evidence required (#677)
 
-5. **Build the Project**:
-   - Run the appropriate build command
-   - If no build step is needed (e.g., static HTML), skip this
-   - Capture the FULL terminal output
-   - Record: command, exit code, raw output
+Building and starting the product is NOT enough — a build that exits 0
+and a server that returns 200 can still ship a blank page or empty
+output (the snake-pr667-5 / #463 / #636 failure mode).  After you have
+the assembled product running, capture evidence that it actually
+**behaves**, and submit it in the ``evidence`` field of
+``report_task_progress``.  Marcus judges the evidence you submit, not a
+command's exit code.
 
-6. **Start the Application**:
-   - Run the appropriate start command
-   - Wait for the application to be ready (5-10 seconds)
-   - Capture any startup output or errors
-   - If the app fails to start, record the exact error
-   - If the app is a static site, serve it with a simple server
+{contract}
 
-7. **Verify the Application Responds**:
-   - Run `curl` against the main page/endpoint
-   - Capture the FULL curl output including HTTP status
-   - Check that key features described in the design work
-   - Look for error states (API calls returning HTML instead of
-     JSON, missing backends, broken imports)
-   - Verify that components built by different agents connect
-   - Record each curl command and its full response
-   - **Check Content-Type on every external dependency error path**: \
-For each dependency documented as out-of-scope or unavailable (missing \
-backend, external API, third-party service), make a real HTTP request to \
-the missing endpoint — do NOT rely on mocked tests. Verify: (a) the \
-response Content-Type header is what the consumer expects (e.g., \
-`application/json` for JSON APIs — a 200 response with \
-`Content-Type: text/html` will silently corrupt any JSON parser that \
-calls `.json()` on it), and (b) the UI renders the correct error state \
-rather than a parse exception. SPA frameworks (Vite, Next.js, CRA) \
-serve `index.html` with status 200 for unmatched API routes in \
-development — this is the most common source of "Unexpected token '<'" \
-JSON parse errors that pass all mocked tests.
+**CRITICAL — WHERE the evidence goes.** Marcus reads ONLY the structured
+``evidence`` argument. It does NOT read your ``message`` text for
+verification. Pasting the rendered HTML / output into ``message`` (or
+just describing it in prose) will be treated as "no evidence submitted"
+and your completion will be rejected. Put the captured proof in
+``evidence``, not in ``message``.
 
-8. **Check for Missing Components**:
-   - **Orphan scan (REQUIRED)**: List every source file under the
-     project's source directory (e.g. `find src/ -name "*.ts" -o -name
-     "*.tsx" -o -name "*.py" -o -name "*.js"`). For each file, determine
-     whether it is reachable from the app entry point by tracing imports
-     (e.g. `grep -r "from.*<module>" src/`). Any file that is NOT
-     imported — directly or transitively — from the entry point is
-     **orphaned code**. You MUST either (a) wire it in if it was intended
-     to be used, or (b) explicitly document WHY it is intentionally
-     standalone (e.g. a CLI tool, a migration script, a future feature).
-     Do NOT silently ignore unreachable files. This is the most common
-     source of wasted agent effort — subsystems built in isolation and
-     never connected to the product.
-   - Is the app entry point wired up? (e.g., does App.jsx import
-     and render all the components that were built?)
-   - Are there API calls to endpoints that don't exist?
-   - Are there imports of modules that were never created?
-   - Are there references to services that weren't built?
-   - Does the design spec describe components that have no code?
-   - Are there duplicate/conflicting implementations that need
-     consolidation?
-   - **Composition verification — real component instantiation**: \
-For every component type, widget, view, or route listed in the design \
-spec or task list, read the container or layout file that is supposed \
-to render it. Verify the container instantiates the REAL component, not \
-a placeholder div, TODO comment, or hardcoded stub. A placeholder \
-passes all unit tests but ships a broken product. Check the actual JSX \
-/ template / handler — `<WeatherWidget />` is not the same as \
-`<div>Weather goes here</div>`.
-   - **Dead enum and union type variants** — \
-For each state machine, enum, or union type defined in the codebase \
-(e.g. a WidgetState type with LOADING | READY | ERROR | STALE variants, \
-a status enum, an event discriminated union): list every variant and \
-confirm each is reachable — some code path calls or emits it at \
-runtime. A variant that is typed, styled, or tested but never set by \
-any production code path is an unreachable dead variant. It misleads \
-developers, generates dead branches in rendering logic, and will never \
-be exercised by real users. Either implement the logic that sets it or \
-remove it and all its dead branches from the type system.
+**How to submit** (alongside any ``verifications`` you declare):
 
-   **Doc-Code Consistency** (prevents specification theater — agents \
-documenting what a spec says without verifying what actually exists):
+```python
+report_task_progress(
+    task_id=task_id,
+    status="completed",
+    progress=100,
+    message="short human summary only — NOT the proof",
+    evidence={{
+        # Use exactly the keys the contract above names for THIS app
+        # type — paste the real captured values here, do not describe
+        # them. Do not invent keys for other app types.
+    }},
+)
+```
 
-   - **Configuration values**: List every configuration key, environment \
-variable, or named setting that appears in any documentation file (README, \
-setup guides, `.env.example`, config templates). For each one, search the \
-source tree to confirm it is actually consumed — the name appears in \
-source code that reads or references it. If documented but never used in \
-source, it is a phantom — either remove it from docs or add the missing \
-source wiring. Project-appropriate search patterns vary (env vars: \
-`import.meta.env.VAR`, `os.environ["VAR"]`, `process.env.VAR`; config \
-keys: the literal key name in config-loading code; etc.).
-   - **Documented interfaces and entry points**: For every interface, \
-command, function, or entry point described in setup guides or README, \
-confirm the corresponding implementation exists in source. Project type \
-determines what this means: for a web service, every documented endpoint \
-should have an implementation; for a CLI, every documented command; for a \
-library, every documented public function; for a data pipeline, every \
-documented stage or transform. If a documented interface has no \
-implementation, either add it or remove the documentation.
-
-9. **Verify ALL Interface Boundaries (cross-agent AND intra-agent)**:
-   This is the most critical step. A boundary is any place where \
-one chunk of code produces data that another chunk of code consumes — \
-regardless of who wrote either side. You MUST trace data across \
-every boundary where output becomes input.
-
-   **Both kinds of boundaries are dangerous, but for different reasons**:
-
-   - **Cross-agent boundaries** — different authors make independent \
-assumptions about shared interfaces. Each side works in isolation, \
-breaks when connected. These are the OBVIOUS boundaries.
-
-   - **Intra-agent boundaries (SAME AUTHOR, SAME TASK)** — one agent \
-builds BOTH a producer API and a consumer frontend (or service client, \
-or caller module). Each piece works correctly in isolation, but the \
-two halves are never actually wired together because the agent had a \
-mental model of "I built this, it works" and never verified the \
-handoff. **These are the LEAST VISIBLE boundaries and the MOST LIKELY \
-to be broken**, because the author built both sides in the same head \
-and had no reason to question the connection. Dashboard-v71 shipped a \
-complete configuration API (PATCH /api/dashboard/widgets/{{id}}) \
-written by the same agent that wrote the frontend — the frontend never \
-called it, and the config API was functionally dead from the user's \
-perspective. The integration verification agent missed it because \
-they were the same person.
-
-   **How to find ALL boundaries**: Do not filter by git author. Find \
-boundaries by DATA FLOW, not by authorship:
-
-   a. **Every HTTP route handler is a producer.** For every \
-`@app.get`, `@app.post`, `@app.patch`, `@router.*`, Flask route, \
-Django view, or similar, the handler's response is data that must be \
-consumed by at least one caller. Grep the entire repo for the route's \
-URL path (as a string literal). If no caller references it, that \
-route is either dead code, an integration gap, or a public API. \
-Investigate which and fix or document.
-
-   b. **Every exported function/class/module is a producer.** \
-Everything in an `__init__.py` exports list, a `module.exports`, \
-or a named TypeScript/JavaScript export is producer surface. Check \
-that consumers exist in the repo.
-
-   c. **Every config file, environment variable, storage key, or \
-event name is a boundary.** Each one has a producer (the module \
-that writes it) and a consumer (the module that reads it). If they \
-diverge on the string, the integration is broken even if both \
-modules pass their own tests.
-
-   d. **Every file written to disk by one module and read by \
-another is a boundary.** Artifacts, caches, logs, intermediate build \
-outputs — producer writes, consumer reads, and the filenames/schemas \
-must match.
-
-   **At each boundary, verify**:
-
-   a. **Identifiers match**: If one module stores, emits, or sends \
-data under a key/name/field, the consuming module must use the \
-exact same key/name/field to retrieve it. Search for string \
-literals, dictionary keys, storage keys, event names, column \
-names, and environment variable names that appear on both sides \
-of a boundary. If they differ, the integration is broken even \
-though both modules work alone.
-
-   b. **Data shapes match**: If one module produces a data \
-structure (object, response, message, file format), the consuming \
-module must expect that exact shape. Check return types against \
-the caller's expectations. Check serialized output against the \
-parser's assumptions. Check that array vs object, nested vs flat, \
-and optional vs required fields agree.
-
-   c. **Configuration is consistent**: Ports, hostnames, file \
-paths, base URLs, timeout values, and protocol choices that are \
-referenced by multiple modules must agree. Check config files, \
-environment defaults, and hardcoded values across module \
-boundaries.
-
-   d. **Duplicate implementations are consolidated**: If multiple \
-agents implemented the same concept (e.g., validation, hashing, \
-formatting), identify which one is actually used at runtime and \
-whether callers reference the correct one. Flag any where \
-different callers use different implementations with different \
-behavior.
-
-   **How to verify**: For each boundary you find, write a short \
-trace — follow a single piece of data from where it is produced \
-to where it is consumed. If you can't prove the identifiers, \
-shapes, and config values match at every step, that boundary is \
-broken. Do not rely on tests passing — tests often exercise \
-modules in isolation and will miss cross-boundary mismatches.
-
-   **MANDATORY CONSUMER-CLOSURE CHECK**: Before you can pass this \
-step, you MUST produce a list of every HTTP route handler in the \
-project and, for each one, the exact grep/search command you ran \
-to find its consumer(s) PLUS the filename:line of at least one \
-call site. Routes with ZERO consumers are a critical finding and \
-must be reported. Example format:
-
-       Route: PATCH /api/dashboard/widgets/{{id}} \
-(src/backend/main.py:122)
-       Consumer search: grep -rn "dashboard/widgets/" src/frontend/src/
-       Consumers found: src/frontend/src/hooks/useWidgets.ts:45
-       Status: CONSUMED ✓
-
-       Route: GET /api/dashboard/layout (src/backend/main.py:49)
-       Consumer search: grep -rn "dashboard/layout" src/frontend/src/
-       Consumers found: src/frontend/src/hooks/useDashboard.ts:50
-       Status: CONSUMED ✓
-
-   If you find a route with zero consumers, investigate: is it \
-dead code (remove it), a public API (document it in README), or \
-an integration gap (wire the consumer up)? Do not pass this step \
-with unaccounted-for routes.
-
-   **MARCUS-SIDE VERIFICATION (REQUIRED DECLARATION)**: \
-When you mark this task complete, you MUST declare a \
-``start_command`` parameter on the ``report_task_progress`` call. \
-Marcus runs the declared command as an independent subprocess \
-check AFTER you mark the task complete. It is how Marcus \
-verifies — without trusting your self-report — that the \
-deliverable actually starts. This is strictly enforced: \
-integration-task completions that omit ``start_command`` are \
-rejected.
-
-   **How to declare it:**
-
-   For a one-shot command (build, type check, CLI --help, etc.) \
-— declare only ``start_command``. Marcus will run it with a 60s \
-timeout and require exit code 0:
-
-   ```python
-   report_task_progress(
-       task_id=task_id,
-       status="completed",
-       progress=100,
-       message="integration verified",
-       start_command="npm run build",
-   )
-   ```
-
-   For a long-running server (uvicorn, flask, node server, etc.) \
-— declare BOTH ``start_command`` (how to start it) AND \
-``readiness_probe`` (how to detect it's actually serving). Marcus \
-will start the server in the background, poll the probe once per \
-second for up to 15 seconds, and pass when the probe returns exit \
-0. Marcus always kills the background process afterward:
-
-   ```python
-   report_task_progress(
-       task_id=task_id,
-       status="completed",
-       progress=100,
-       message="integration verified",
-       start_command="uvicorn main:app --port 8000",
-       readiness_probe="curl -f http://localhost:8000/health",
-   )
-   ```
-
-   **Choosing the right values**: the ``start_command`` is \
-whatever YOU ran to verify the deliverable works. You already \
-ran it during Phase 1 verification. Write the EXACT command \
-that worked for you, including any flags. Marcus runs commands \
-with ``CI=true`` set in the environment — if your command needs \
-interactive prompts it will fail in Marcus's subprocess. Use \
-non-interactive flags where needed.
-
-   **REQUIRED: ``start_command`` must exercise the build \
-pipeline that produces the deliverable, not merely the test \
-suite.** A passing test suite does not prove the product builds \
-and starts — tests can pass against stubbed entry points, missing \
-templates, broken bundlers, or unsatisfied native dependencies. \
-The deliverable is the running product, not the green test bar. \
-Your declared command must be one that would FAIL if the \
-deliverable cannot actually be built and launched in a fresh \
-checkout. If your stack has both a build step and a test step, \
-declare the BUILD command — the build is the gate that catches \
-missing entry points and broken bundlers; the test suite is not.
-
-   **Declare a SINGLE command, not a shell chain.** Marcus runs \
-``start_command`` as a single subprocess invocation, not a shell \
-script. Shell operators (``&&``, ``||``, ``|``, ``$(...)``, \
-``cd``, environment variable expansion) are NOT interpreted — \
-they will be passed as literal arguments and produce confusing \
-failures. If you genuinely need to combine steps (e.g. build then \
-test, or chdir then run), commit a small wrapper script to your \
-worktree (e.g. ``./scripts/verify.sh``) and declare \
-``start_command="./scripts/verify.sh"``. The wrapper is plain \
-shell and can do whatever you need.
-
-   **What if there's no meaningful start_command?** There \
-always is. Some examples by stack:
-
-   - **Static HTML**: ``start_command="test -f index.html"`` \
-(file existence check — Marcus runs it, exit 0 passes)
-   - **Library with no entry point**: \
-``start_command="python -c 'import mypackage'"`` (import smoke)
-   - **Pure documentation project**: \
-``start_command="test -f README.md"``
-   - **Data pipeline with no server**: \
-``start_command="python -m mypipeline --dry-run"``
-   - **Two checks needed**: write a wrapper script (e.g. \
-``./scripts/verify.sh``) that runs both, commit it to the \
-worktree, and declare \
-``start_command="./scripts/verify.sh"``. Marcus runs the \
-wrapper as a single subprocess; the wrapper is plain shell \
-and can chain whatever you need.
-
-   If you genuinely cannot think of a smoke command, that is a \
-signal you don't have a clear definition of "done" for this \
-deliverable — stop and ask yourself what "working" means, then \
-write the command that proves it.
-
-   **Fabrication check**: Marcus runs the command you declare. \
-If you invent a command that sounds reasonable but doesn't \
-actually work, Marcus will catch you. Declare the command you \
-actually ran.
-
-## PHASE 2: FIX
-
-If ANY issues were found in Phase 1, fix them NOW:
-
-10. **Fix Issues**:
-   - **Missing wiring**: If the app entry point doesn't import/render
-     built components, wire them in. This is the most common gap —
-     agents build components in isolation but nobody assembles them.
-   - **Missing endpoints**: If the frontend calls APIs that don't exist
-     in the backend, create the backend routes.
-   - **Missing dependencies**: If imports reference modules that weren't
-     created, create them or fix the imports.
-   - **Build failures**: Fix compilation errors, missing configs, etc.
-   - **Duplicate structures**: If multiple agents created conflicting
-     implementations, consolidate to the best one.
-   - Commit each fix with a descriptive message.
-   - You are a full-capability agent — write code, create files,
-     modify configurations. Do whatever it takes.
-
-## PHASE 3: RE-VERIFY
-
-11. **Re-verify After Fixes**:
-    - Re-run the full verification (build, start, curl, tests)
-    - Confirm your fixes resolved the issues
-    - If new issues appear, fix those too (max 3 iterations)
-    - Record the final verification state
-
-## PHASE 4: LOG RESULTS
-
-12. **Log Verification Results**:
-    CRITICAL: Log verification results as an artifact. Every field \
-in the JSON below MUST contain real command output, not summaries.
-
-    ```
-    log_artifact(
-        task_id="<current_task_id>",
-        filename="integration_verification.json",
-        content="<json results>",
-        artifact_type="integration-verification",
-        project_root="<project_root>",
-        description="Integration verification results"
-    )
-    ```
-
-    JSON format:
-    ```json
-    {{
-      "project_name": "{project_name}",
-      "tests": {{
-        "command": "pytest tests/ -v",
-        "exit_code": 0,
-        "passed": 45,
-        "failed": 0,
-        "success": true,
-        "raw_output": "<PASTE FULL TERMINAL OUTPUT HERE>"
-      }},
-      "install": {{
-        "command": "pip install -r requirements.txt",
-        "exit_code": 0,
-        "success": true,
-        "raw_output": "<PASTE FULL TERMINAL OUTPUT HERE>"
-      }},
-      "build": {{
-        "command": "npm run build",
-        "exit_code": 0,
-        "success": true,
-        "raw_output": "<PASTE FULL TERMINAL OUTPUT HERE>"
-      }},
-      "start": {{
-        "command": "uvicorn src.backend.main:app",
-        "success": true,
-        "raw_output": "<PASTE STARTUP OUTPUT HERE>"
-      }},
-      "health_checks": [
-        {{
-          "url": "http://localhost:8000/api/health",
-          "curl_command": "curl -s http://localhost:8000/api/health",
-          "status_code": 200,
-          "success": true,
-          "raw_response": "<PASTE FULL CURL RESPONSE HERE>"
-        }}
-      ],
-      "missing_components": [],
-      "interface_contracts": [
-        {{
-          "boundary": "producer_file -> consumer_file",
-          "what_was_checked": "identifier/shape/config",
-          "producer_value": "what the producing module uses",
-          "consumer_value": "what the consuming module expects",
-          "match": true,
-          "fix_applied": null
-        }}
-      ],
-      "overall_pass": true,
-      "remediation_notes": null
-    }}
-    ```
-
-    If a command fails, set success=false and paste the error output.
-    Do NOT set success=true unless you have real output proving it.
-
-13. **Log Remediation Record** (if you fixed anything):
-    If you applied fixes in Phase 2, log a separate remediation \
-artifact for tracking purposes:
-
-    ```
-    log_artifact(
-        task_id="<current_task_id>",
-        filename="integration_remediation.json",
-        content="<json results>",
-        artifact_type="integration-remediation",
-        project_root="<project_root>",
-        description="Integration remediation record"
-    )
-    ```
-
-    JSON format:
-    ```json
-    {{
-      "project_name": "{project_name}",
-      "remediation_applied": true,
-      "issues_found": [
-        {{
-          "description": "What was wrong",
-          "severity": "critical | major | minor",
-          "category": "composition_gap | missing_endpoint "
-          "| missing_module | build_failure "
-          "| duplicate_code | config_error "
-          "| interface_contract_mismatch",
-          "root_cause": "planning_gap | agent_oversight | dependency_error"
-        }}
-      ],
-      "fixes_applied": [
-        {{
-          "description": "What you fixed",
-          "files_modified": ["path/to/file.js"],
-          "commit_hash": "abc1234"
-        }}
-      ],
-      "verification_before_fix": {{
-        "overall_pass": false,
-        "failing_checks": ["app entry point not wired", "missing API endpoint"]
-      }},
-      "verification_after_fix": {{
-        "overall_pass": true,
-        "tests_pass": true,
-        "app_starts": true,
-        "endpoints_respond": true
-      }},
-      "planning_gap_detected": true
-    }}
-    ```
-
-    The `planning_gap_detected` field is important: set it to true \
-if the fix was needed because no task was created for this work \
-(e.g., no task to wire components into the entry point, no task \
-to create a backend route that the design spec called for). This \
-helps Marcus improve task planning over time.
-
-14. **Complete the Task**:
-    - Mark this task as DONE only after verification passes
-    - If you could not fix all issues after 3 attempts, mark DONE
-      anyway but set `overall_pass` to false with details on what
-      remains broken and why you couldn't fix it
-""" + outcomes_section
+If the captured evidence does not meet the bar, FIX the composition
+until it does before reporting complete.  Marcus's product smoke gate
+will reject a completion whose evidence is empty or shows errors.
+"""
 
     @staticmethod
     def _render_outcomes_section(
@@ -956,6 +588,7 @@ def enhance_project_with_integration(
     contract_file: Optional[str] = None,
     functional_requirements: Optional[List[Dict[str, Any]]] = None,
     outcomes: Optional[List["UserOutcome"]] = None,
+    structural_category: str = "unknown",
 ) -> List[Task]:
     """
     Add integration verification task to project if appropriate.
@@ -1005,7 +638,11 @@ def enhance_project_with_integration(
         return tasks
 
     task = IntegrationTaskGenerator.create_integration_task(
-        tasks, project_name, contract_file=contract_file, outcomes=outcomes
+        tasks,
+        project_name,
+        contract_file=contract_file,
+        outcomes=outcomes,
+        structural_category=structural_category,
     )
 
     if task:
@@ -1024,6 +661,38 @@ def enhance_project_with_integration(
                 f"{len(functional_requirements)} functional "
                 f"requirement(s) as acceptance criteria"
             )
+
+        # Issue #680: surface enumerated gotchas to the skeptic. The
+        # gotcha-enumeration pass stamped known failure modes onto the
+        # implementation tasks' acceptance_criteria. The integration
+        # (skeptic) agent verifies the assembled product, so it must
+        # also know which failure modes to actively test for — not just
+        # that the code compiles. Aggregate every distinct gotcha
+        # criterion from the implementation tasks onto the integration
+        # task's checklist so the reversal-is-a-no-op class of bug gets
+        # explicitly exercised end-to-end.
+        from src.marcus_mcp.coordinator.outcome_coverage import (
+            GOTCHA_CRITERION_PREFIX,
+        )
+
+        existing = set(task.acceptance_criteria)
+        gotchas_propagated = 0
+        for src_task in tasks:
+            for criterion in src_task.acceptance_criteria or []:
+                if (
+                    criterion.startswith(GOTCHA_CRITERION_PREFIX)
+                    and criterion not in existing
+                ):
+                    task.acceptance_criteria.append(criterion)
+                    existing.add(criterion)
+                    gotchas_propagated += 1
+        if gotchas_propagated:
+            logger.info(
+                "Propagated %d gotcha criterion(s) onto integration "
+                "task's skeptic checklist (#680)",
+                gotchas_propagated,
+            )
+
         logger.info(f"Added integration verification task: {task.name}")
         return tasks + [task]
 

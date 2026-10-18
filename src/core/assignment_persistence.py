@@ -41,9 +41,19 @@ class AssignmentPersistence:
 
         self.assignments_file = self.storage_dir / "assignments.json"
         self.lock_file = self.storage_dir / ".assignments.lock"
+        # ADR-0012 D11 epoch high-water marks, keyed by TASK rather than
+        # agent so they survive the assignment removal that recovery
+        # performs.
+        self.task_epochs_file = self.storage_dir / "task_epochs.json"
 
         # In-memory cache
         self._assignments_cache: Dict[str, Dict[str, Any]] = {}
+        self._task_epochs_cache: Dict[str, int] = {}
+        # Whether task_epochs.json has been read into the cache. A write
+        # that publishes an unread cache truncates the file to whatever
+        # single mark happens to be in memory, destroying every other
+        # task's high-water mark and re-opening the fence for all of them.
+        self._task_epochs_loaded: bool = False
         self._lock_manager = EventLoopLockManager()
 
     @property
@@ -65,17 +75,217 @@ class AssignmentPersistence:
                 ID of the task being assigned.
             task_data
                 Additional task information to store.
+
+        Notes
+        -----
+        When the worker is already assigned to **this same task**, fields
+        written onto the record by other subsystems are preserved and
+        ``assigned_at`` keeps its original value.
+
+        This method previously replaced the record wholesale on every
+        call, which silently discarded everything
+        ``AssignmentLeaseManager._persist_lease`` had just written —
+        ``lease_expires``, ``lease_renewed_at``, ``renewal_count``,
+        ``progress_percentage``, ``update_timestamps``,
+        ``merge_conflict_extensions`` — and reset ``assigned_at`` to now
+        on every progress report. Because ``load_active_leases`` defaults
+        a missing ``lease_expires`` to *now*, every lease rehydrated
+        after a restart was born already expiring. Found while adding the
+        ADR-0012 D11 fencing token, which has the same durability
+        requirement.
+
+        A *different* task_id means a genuinely new assignment, so the
+        record is rebuilt and ``assigned_at`` is refreshed — otherwise a
+        reassigned worker would inherit the previous task's start time.
         """
         async with self.lock:
+            existing = self._assignments_cache.get(worker_id)
+            if existing is not None and existing.get("task_id") == task_id:
+                record: Dict[str, Any] = dict(existing)
+            else:
+                record = {"assigned_at": datetime.now(timezone.utc).isoformat()}
+
+            record["task_id"] = task_id
+            record["task_data"] = task_data
+            record.setdefault("assigned_at", datetime.now(timezone.utc).isoformat())
+
             # Update cache
-            self._assignments_cache[worker_id] = {
-                "task_id": task_id,
-                "assigned_at": datetime.now(timezone.utc).isoformat(),
-                "task_data": task_data,
-            }
+            self._assignments_cache[worker_id] = record
 
             # Persist to disk
             await self._write_assignments()
+
+    async def update_assignment_fields(
+        self,
+        worker_id: str,
+        task_id: str,
+        fields: Dict[str, Any],
+        *,
+        create_if_absent: bool = True,
+    ) -> None:
+        """
+        Merge extra fields onto a worker's assignment record.
+
+        Used by :class:`~src.core.assignment_lease.AssignmentLeaseManager`
+        to durably record lease state (expiry, renewal count, progress,
+        and the ADR-0012 D11 ``lease_epoch``) alongside the assignment.
+
+        The record is **created when absent**. A lease is created before
+        the assignment row exists, so a method that skipped missing
+        records would silently drop the fencing token for every
+        freshly-claimed task.
+
+        Parameters
+        ----------
+            worker_id
+                ID of the worker whose record should be updated.
+            task_id
+                Task the fields describe. A mismatch against the stored
+                record means a new assignment, so stale lease fields from
+                the previous task are dropped rather than carried over.
+            fields
+                Key/value pairs merged onto the record.
+            create_if_absent
+                When True (default) a missing record is created — required
+                for a freshly-claimed lease, since ``create_lease`` runs
+                before the assignment row exists.
+
+                Callers pass **False** when the write may be racing a
+                removal. A renewal or merge-conflict extension already in
+                flight when a completion, recovery, or unassignment calls
+                ``remove_assignment`` would otherwise resurrect the
+                released row, leaving a TODO task falsely assigned on disk
+                and rehydrating a stale lease after a restart. With False,
+                a missing record — or a record now pointing at a different
+                task — is left untouched.
+        """
+        async with self.lock:
+            existing = self._assignments_cache.get(worker_id)
+            if existing is not None and existing.get("task_id") == task_id:
+                record: Dict[str, Any] = dict(existing)
+            elif create_if_absent:
+                record = {
+                    "assigned_at": datetime.now(timezone.utc).isoformat(),
+                    "task_data": {},
+                }
+            else:
+                # Released or reassigned: never resurrect or clobber.
+                return
+
+            record["task_id"] = task_id
+            record.update(fields)
+
+            self._assignments_cache[worker_id] = record
+            await self._write_assignments()
+
+    async def record_task_epoch(self, task_id: str, lease_epoch: int) -> None:
+        """
+        Record the highest ADR-0012 D11 epoch ever issued for a task.
+
+        Stored in ``task_epochs.json``, **deliberately separate from the
+        assignment rows**. Assignments are keyed by agent and are deleted
+        by ``remove_assignment`` on recovery — and a recovered task is
+        the only kind that ever has a displaced agent. Seeding the
+        high-water mark from assignment rows therefore lost it for
+        exactly the tasks that need it, so after a restart the next
+        claimant was reissued epoch 1 and the displaced agent's stale
+        token compared equal. The fence failed open in precisely the
+        scenario it exists for.
+
+        The value is monotonic: a lower epoch never overwrites a higher
+        one.
+
+        Parameters
+        ----------
+            task_id
+                The task whose epoch is being recorded.
+            lease_epoch
+                The epoch just issued for it.
+        """
+        async with self.lock:
+            # Read-before-write. ``create_lease`` can run before anything
+            # calls ``load_task_epochs``, so an unguarded write would
+            # publish a cache holding only this one mark.
+            self._ensure_task_epochs_loaded()
+
+            current = self._task_epochs_cache.get(task_id, 0)
+            if lease_epoch <= current:
+                return
+            self._task_epochs_cache[task_id] = lease_epoch
+            await self._write_task_epochs()
+
+    async def load_task_epochs(self) -> Dict[str, int]:
+        """
+        Load the per-task epoch high-water marks from disk.
+
+        Returns
+        -------
+            Mapping of task_id to the highest epoch ever issued for it.
+            Empty when the store does not exist yet.
+        """
+        async with self.lock:
+            if not self.task_epochs_file.exists():
+                self._task_epochs_loaded = True
+                return {}
+            try:
+                async with aiofiles.open(self.task_epochs_file, "r") as f:
+                    content = await f.read()
+                    self._task_epochs_cache = json.loads(content) if content else {}
+                    self._task_epochs_loaded = True
+                    return dict(self._task_epochs_cache)
+            except (json.JSONDecodeError, IOError) as e:
+                # A corrupt or unreadable store must not stop startup, but
+                # losing it silently would re-open the fence. Log loudly.
+                logger.error(
+                    "Failed to load task epoch high-water marks from "
+                    f"{self.task_epochs_file}: {e}. D11 fencing will "
+                    "reissue epochs from 1 for previously-recovered "
+                    "tasks until the store is rewritten."
+                )
+                return {}
+
+    def _ensure_task_epochs_loaded(self) -> None:
+        """Read the epoch store into the cache once. Caller holds the lock.
+
+        Synchronous on purpose: it is called from inside the lock on the
+        write path, and the file is small. Failure leaves the cache empty
+        but marks it loaded, so a corrupt store degrades to "reissue from
+        the marks we can see" rather than looping on every write.
+        """
+        if self._task_epochs_loaded:
+            return
+        self._task_epochs_loaded = True
+        if not self.task_epochs_file.exists():
+            return
+        try:
+            content = self.task_epochs_file.read_text()
+            loaded = json.loads(content) if content else {}
+            if isinstance(loaded, dict):
+                # Existing marks win over anything already in memory, then
+                # in-memory values are re-applied by the caller's update.
+                merged = dict(loaded)
+                merged.update(self._task_epochs_cache)
+                self._task_epochs_cache = merged
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(
+                f"Failed to read task epoch high-water marks from "
+                f"{self.task_epochs_file}: {e}. D11 fencing may reissue "
+                "epochs for previously-recovered tasks."
+            )
+
+    async def _write_task_epochs(self) -> None:
+        """Persist the epoch high-water marks. Caller holds the lock.
+
+        Written via temp file + atomic rename, matching
+        ``_write_assignments``. An in-place write that is interrupted
+        leaves a truncated or empty file, and an empty epoch store means
+        every previously-recovered task reissues from epoch 1 — the fence
+        fails open across the whole board.
+        """
+        tmp_path = self.task_epochs_file.with_suffix(".json.tmp")
+        async with aiofiles.open(tmp_path, "w") as f:
+            await f.write(json.dumps(self._task_epochs_cache, indent=2))
+        tmp_path.replace(self.task_epochs_file)
 
     async def remove_assignment(self, worker_id: str) -> None:
         """

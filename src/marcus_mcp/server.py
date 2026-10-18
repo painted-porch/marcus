@@ -14,7 +14,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from src.telemetry import get_telemetry_client, print_first_run_notice_if_needed
 
@@ -49,6 +49,7 @@ from src.core.events import Events  # noqa: E402
 from src.core.models import (  # noqa: E402
     ProjectState,
     RiskLevel,
+    Task,
     TaskAssignment,
     TaskStatus,
     WorkerStatus,
@@ -73,6 +74,60 @@ from src.marcus_mcp.handlers import handle_tool_call  # noqa: E402
 from src.marcus_mcp.tool_groups import get_tools_for_endpoint  # noqa: E402
 from src.monitoring.assignment_monitor import AssignmentMonitor  # noqa: E402
 from src.monitoring.project_monitor import ProjectMonitor  # noqa: E402
+
+
+def _carry_forward_active_subtasks(
+    project_tasks: Optional[List[Task]], parent_ids: Set[str]
+) -> Tuple[List[Task], int]:
+    """Select which in-memory subtasks survive a project-state refresh.
+
+    Only subtasks whose parent is still on the board (``parent_ids``) are
+    carried forward in Marcus's in-memory working set. Orphaned subtasks
+    (parent removed, or left over from another project in a long-lived
+    server process) are dropped from the working set so they stop bloating
+    memory and churning the dependency-inference cache signature on the
+    ``request_next_task`` hot path (issue #667).
+
+    This trims the in-memory list ONLY. The durable record in
+    ``data/marcus_state/subtasks.json`` -- which Cato reads directly as its
+    subtask data source -- is never modified here. Issue #672 tracks moving
+    subtask storage into the database so Cato consumes a contract rather
+    than Marcus's private file.
+
+    A transient empty ``parent_ids`` (the board fetch returned no tasks --
+    the Planka provider does this on error) is treated as "no information"
+    rather than "every parent is gone": all existing subtasks are preserved
+    and nothing is dropped. Otherwise a single failed refresh would orphan
+    every subtask, and the one-time migration guard would never re-add them
+    (Codex P1 on PR #673).
+
+    Parameters
+    ----------
+    project_tasks : Optional[List[Task]]
+        Current in-memory task list (parents and subtasks), or None.
+    parent_ids : Set[str]
+        IDs of parent tasks present on the board this refresh.
+
+    Returns
+    -------
+    Tuple[List[Task], int]
+        ``(kept_subtasks, dropped_orphan_count)``.
+    """
+    subtasks = [t for t in (project_tasks or []) if getattr(t, "is_subtask", False)]
+    # Empty parent set == the board fetch returned nothing this refresh,
+    # almost always transient (Planka returns [] when get_all_tasks raises).
+    # Preserve all subtasks rather than orphan-GC them, or one failed
+    # refresh strands every subtask until restart (Codex P1 on PR #673).
+    if not parent_ids:
+        return subtasks, 0
+    kept: List[Task] = []
+    dropped = 0
+    for task in subtasks:
+        if getattr(task, "parent_task_id", None) in parent_ids:
+            kept.append(task)
+        else:
+            dropped += 1
+    return kept, dropped
 
 
 class MarcusServer:
@@ -151,6 +206,17 @@ class MarcusServer:
         self.assignment_persistence = AssignmentPersistence()
         self._lock_manager = EventLoopLockManager()
         self.tasks_being_assigned: set[str] = set()
+
+        # File-level write-lock registry (#206 MVP, v0.3.9).
+        # In-process registry tracking which file paths each
+        # in-progress task is authorized to write to.
+        # ``request_next_task`` filters candidates by it;
+        # ``report_task_progress`` releases on DONE / BLOCKED.
+        # See ``src/core/file_lock_registry.py`` and the design doc
+        # at ``docs/design/206-file-lock-registry-mvp.md``.
+        from src.core.file_lock_registry import FileLockRegistry
+
+        self.file_lock_registry = FileLockRegistry()
 
         # Subtask management for hierarchical task decomposition
         from src.marcus_mcp.coordinator import SubtaskManager
@@ -771,6 +837,38 @@ class MarcusServer:
 
         clear_validation_retry(task_id)
 
+        # #206 MVP (Codex P1 review fix): release file locks held by
+        # the recovered task. Lease recovery bypasses
+        # ``report_task_progress`` entirely — the lease manager resets
+        # the task to TODO on the board and invokes this callback so
+        # in-memory state can catch up. Without this release the
+        # recovered task's declared files stay claimed indefinitely
+        # and ``_find_optimal_task_original_logic`` keeps skipping
+        # every contending task (including the recovered task itself
+        # the next time it would be assigned), creating a stuck queue
+        # after agent silence/timeouts.
+        #
+        # ``release`` is async but this callback is sync — schedule
+        # it on the current event loop as a fire-and-forget. We are
+        # invoked from inside the lease manager's async recovery
+        # task so an event loop is guaranteed running. The release
+        # itself is idempotent and logs internally, so a never-awaited
+        # task warning is fine.
+        if hasattr(self, "file_lock_registry"):
+            try:
+                import asyncio as _asyncio
+
+                _asyncio.create_task(self.file_lock_registry.release(task_id))
+            except RuntimeError:
+                # No running event loop — should not happen given the
+                # call site, but fail closed: log and move on so
+                # recovery cleanup is not blocked by the registry.
+                logger.warning(
+                    "[#206] Could not schedule file-lock release for "
+                    "recovered task %s — no running event loop",
+                    task_id,
+                )
+
     async def ensure_lease_monitor_running(self) -> None:
         """Start the lease monitor if it exists but isn't running.
 
@@ -972,21 +1070,73 @@ class MarcusServer:
                         f"{len(parent_tasks)} parent tasks"
                     )
                 else:
-                    # After migration: preserve subtasks, update parents
-                    # Extract existing subtasks
-                    existing_subtasks = []
-                    if self.project_tasks:
-                        for task in self.project_tasks:
-                            if getattr(task, "is_subtask", False):
-                                existing_subtasks.append(task)
+                    # After migration: preserve subtasks, update parents.
+                    #
+                    # Issue #667 (Option 2, non-destructive): only carry
+                    # forward subtasks whose parent is still on the board.
+                    # Orphaned subtasks (parent removed, or left over from a
+                    # different project in a long-lived server process)
+                    # otherwise accumulate in this in-memory working set,
+                    # growing memory and -- because this list is fed to
+                    # ``Context.analyze_dependencies`` on the
+                    # ``request_next_task`` hot path -- churning the
+                    # dependency-cache signature, which triggers surprise
+                    # LLM inference calls.
+                    #
+                    # We trim the in-memory list ONLY. The durable record in
+                    # ``data/marcus_state/subtasks.json`` is left untouched:
+                    # Cato reads that file directly as its subtask data
+                    # source, so deleting from it would blank Cato's views.
+                    # Issue #672 tracks the proper fix (move subtask storage
+                    # into the DB so Cato reads a contract, not this file).
+                    parent_ids = {t.id for t in parent_tasks}
+                    existing_subtasks, dropped_orphans = _carry_forward_active_subtasks(
+                        self.project_tasks, parent_ids
+                    )
 
                     # Combine refreshed parents with preserved subtasks
                     self.project_tasks = parent_tasks + existing_subtasks
 
-                    logger.info(
+                    msg = (
                         f"Refreshed {len(parent_tasks)} parent tasks, "
                         f"preserved {len(existing_subtasks)} subtasks"
                     )
+                    if dropped_orphans:
+                        msg += (
+                            f", dropped {dropped_orphans} orphaned subtasks "
+                            f"from the in-memory working set "
+                            f"(subtasks.json unchanged)"
+                        )
+                    logger.info(msg)
+
+                # v0.3.8.post1: invalidate the foundation-contract cache
+                # whenever project_tasks is reassigned from kanban —
+                # the foundation task set might have changed and the
+                # cache would otherwise serve stale content for up to
+                # the TTL. Best-effort: never block project refresh on
+                # cache miss.
+                try:
+                    from src.marcus_mcp.tools.context import (
+                        invalidate_foundation_contract_cache,
+                    )
+
+                    _pid = getattr(self, "current_project_id", None)
+                    invalidate_foundation_contract_cache(str(_pid) if _pid else None)
+                except Exception:  # noqa: BLE001 - never break refresh
+                    pass
+
+                # Issue #626: the dependency-inference cache is NOT
+                # invalidated here. ``refresh_project_state`` runs
+                # immediately before ``analyze_dependencies`` on every
+                # ``request_next_task`` poll (see
+                # ``src/marcus_mcp/tools/task.py`` lines 1538 and 1621);
+                # explicit invalidation here would defeat the cache on
+                # every call. Instead, the signature-based cache key
+                # in ``src/core/context.py::_deps_cache_key`` invalidates
+                # naturally whenever any task's id, name, description,
+                # labels, or dependencies change between refreshes —
+                # which is exactly when the inference result could be
+                # stale. (Codex P1 on PR #631.)
 
                 # Re-apply recovery_info to refreshed tasks
                 if recovery_info_map:
@@ -1232,6 +1382,8 @@ class MarcusServer:
             role: str,
             skills: List[str] = [],
             project_id: str = "",
+            vendor: str = "",
+            principal: str = "agent",
         ) -> Dict[str, Any]:
             """Register a new agent with the Marcus system."""
             from src.logging.mcp_tool_logger import log_mcp_tool_response
@@ -1244,6 +1396,8 @@ class MarcusServer:
                 role=role,
                 skills=skills,
                 project_id=project_id,
+                vendor=vendor,
+                principal=principal,
                 state=server,
             )
 
@@ -1256,6 +1410,8 @@ class MarcusServer:
                     "role": role,
                     "skills": skills,
                     "project_id": project_id,
+                    "vendor": vendor,
+                    "principal": principal,
                 },
                 response=result,
             )
@@ -1287,6 +1443,8 @@ class MarcusServer:
             start_command: Optional[str] = None,
             readiness_probe: Optional[str] = None,
             verifications: Optional[List[Dict[str, Any]]] = None,
+            evidence: Optional[Dict[str, Any]] = None,
+            lease_epoch: Optional[int] = None,
         ) -> Dict[str, Any]:
             """Report progress on a task.
 
@@ -1297,7 +1455,17 @@ class MarcusServer:
             declared command as a subprocess and rejects the
             completion if any exits non-zero.  ``verifications``
             takes precedence over ``start_command`` when both are
-            provided.  See the report_task_progress docstring in
+            provided.
+
+            ``evidence`` (issue #677): for app types Marcus classified
+            with a behavior-evidence contract (web, data pipeline, CLI,
+            library, API service, ML), the agent must additionally
+            submit behavior evidence captured by actually RUNNING the
+            assembled product (e.g. web → ``dom`` + ``console_errors``;
+            pipeline → ``output``; CLI → ``exit_code`` + ``stdout``).
+            Marcus judges the submitted evidence against the per-type
+            bar — a build that exits 0 and a server that returns 200 do
+            not pass.  See the report_task_progress docstring in
             tools/task.py for the full contract and examples.
             """
             from .tools.task import report_task_progress as impl
@@ -1312,7 +1480,37 @@ class MarcusServer:
                 start_command=start_command,
                 readiness_probe=readiness_probe,
                 verifications=verifications,
+                evidence=evidence,
+                lease_epoch=lease_epoch,
             )
+
+        @self._fastmcp.tool()  # type: ignore[misc]
+        async def export_case(case_id: str) -> Dict[str, Any]:
+            """Export one case's complete audit bundle (#737).
+
+            Operator-facing. Evidence in the bundle includes ``raw``,
+            so in multi-endpoint deployments this tool belongs on the
+            human endpoint only; the single-endpoint pilot exposes it
+            to every connected client, which the report states as a
+            limit alongside self-declared identity.
+            """
+            from .tools.audit_tools import export_case as impl
+
+            return await impl(case_id=case_id, state=server)
+
+        @self._fastmcp.tool()  # type: ignore[misc]
+        async def get_task_context(task_id: str) -> Dict[str, Any]:
+            """Get the full context for a specific task.
+
+            Issue #737: on the core agent surface because a verify
+            worker reads the claim it must check through this tool
+            (the task's board-written ``inputs``, never the upstream
+            agent's raw output), and the worker instructions have
+            always told agents to call it before starting work.
+            """
+            from .tools.context import get_task_context as impl
+
+            return await impl(task_id=task_id, state=server)
 
         @self._fastmcp.tool()  # type: ignore[misc]
         async def report_blocker(
@@ -1329,6 +1527,22 @@ class MarcusServer:
                 task_id=task_id,
                 blocker_description=blocker_description,
                 severity=severity,
+                state=server,
+            )
+
+        @self._fastmcp.tool()  # type: ignore[misc]
+        async def request_task_redo(
+            agent_id: str,
+            task_id: str,
+            reason: str,
+        ) -> Dict[str, Any]:
+            """Send a completed task back to the board for a fresh agent to redo."""
+            from .tools.task import request_task_redo as impl
+
+            return await impl(
+                agent_id=agent_id,
+                task_id=task_id,
+                reason=reason,
                 state=server,
             )
 
@@ -1418,6 +1632,8 @@ class MarcusServer:
                 role: str,
                 skills: List[str] = [],
                 project_id: str = "",
+                vendor: str = "",
+                principal: str = "agent",
             ) -> Dict[str, Any]:
                 """Register a new agent with the Marcus system."""
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
@@ -1430,6 +1646,8 @@ class MarcusServer:
                     role=role,
                     skills=skills,
                     project_id=project_id,
+                    vendor=vendor,
+                    principal=principal,
                     state=server,
                 )
 
@@ -1442,6 +1660,8 @@ class MarcusServer:
                         "role": role,
                         "skills": skills,
                         "project_id": project_id,
+                        "vendor": vendor,
+                        "principal": principal,
                     },
                     response=result,
                 )
@@ -1494,6 +1714,8 @@ class MarcusServer:
                 start_command: Optional[str] = None,
                 readiness_probe: Optional[str] = None,
                 verifications: Optional[List[Dict[str, Any]]] = None,
+                evidence: Optional[Dict[str, Any]] = None,
+                lease_epoch: Optional[int] = None,
             ) -> Dict[str, Any]:
                 """Report progress on a task.
 
@@ -1504,8 +1726,15 @@ class MarcusServer:
                 declared command as a subprocess and rejects the
                 completion if any exits non-zero.  ``verifications``
                 takes precedence over ``start_command`` when both are
-                provided.  See the report_task_progress docstring in
-                tools/task.py for the full contract.
+                provided.
+
+                ``evidence`` (issue #677): for app types with a
+                behavior-evidence contract, submit evidence captured by
+                running the assembled product (web → ``dom`` +
+                ``console_errors``; pipeline → ``output``; CLI →
+                ``exit_code`` + ``stdout``).  Marcus judges the evidence
+                against the per-type bar.  See the report_task_progress
+                docstring in tools/task.py for the full contract.
                 """
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
 
@@ -1521,6 +1750,8 @@ class MarcusServer:
                     start_command=start_command,
                     readiness_probe=readiness_probe,
                     verifications=verifications,
+                    evidence=evidence,
+                    lease_epoch=lease_epoch,
                 )
 
                 # Log MCP tool response
@@ -1535,6 +1766,7 @@ class MarcusServer:
                         "start_command": start_command,
                         "readiness_probe": readiness_probe,
                         "verifications": verifications,
+                        "evidence": evidence,
                     },
                     response=result,
                 )
@@ -1571,6 +1803,39 @@ class MarcusServer:
                         "task_id": task_id,
                         "blocker_description": blocker_description,
                         "severity": severity,
+                    },
+                    response=result,
+                )
+
+                return result
+
+        if "request_task_redo" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def request_task_redo(
+                agent_id: str,
+                task_id: str,
+                reason: str,
+            ) -> Dict[str, Any]:
+                """Send a completed task back to the board for a fresh agent to redo."""
+                from src.logging.mcp_tool_logger import log_mcp_tool_response
+
+                from .tools.task import request_task_redo as impl
+
+                result = await impl(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    reason=reason,
+                    state=server,
+                )
+
+                # Log MCP tool response
+                log_mcp_tool_response(
+                    tool_name="request_task_redo",
+                    arguments={
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "reason": reason,
                     },
                     response=result,
                 )
@@ -1905,6 +2170,19 @@ class MarcusServer:
                     days=7,
                     state=server,
                 )
+
+        if "export_case" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def export_case(case_id: str) -> Dict[str, Any]:
+                """Export one case's complete audit bundle (#737).
+
+                Human and analytics endpoints only: the bundle keeps
+                ``raw`` evidence, which agents must never see.
+                """
+                from .tools.audit_tools import export_case as impl
+
+                return await impl(case_id=case_id, state=server)
 
         # Experiment tracking tools
         if "start_experiment" in allowed_tools:

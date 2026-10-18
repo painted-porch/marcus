@@ -85,6 +85,7 @@ ROLE_TOOLS = {
         "request_next_task",  # Get assignments
         "report_task_progress",  # Update progress
         "report_blocker",  # Report issues
+        "request_task_redo",  # Send failed completed work back (issue #627)
         # Context and collaboration
         "get_task_context",  # Full task context
         "log_decision",  # Document choices

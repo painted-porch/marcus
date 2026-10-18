@@ -562,15 +562,16 @@ class ActiveLayerSignal:
     """
     Live layered-spawning signal for the runner controller (issue #595 Fix 3).
 
-    Both fields describe the *active layer* — the earliest DAG layer with
-    incomplete work. The runner's spawn formula combines them with its own
-    live-agent count::
+    All four fields describe the *active layer* — the earliest DAG layer
+    with incomplete work — except ``max_layer_width`` which is whole-graph.
+    The runner's spawn formula uses three of them::
 
-        spawn = max(0, min(desired_agent_count - live_agents, unclaimed_tasks))
+        spawn = max(0, min(desired_agent_count - in_flight_tasks,
+                           unclaimed_tasks))
 
     The ``max(0, ...)`` clamp matters: ``desired_agent_count`` drops at a
     layer boundary while a just-finished agent is still being reaped, so
-    ``desired_agent_count - live_agents`` can briefly go negative.
+    ``desired_agent_count - in_flight_tasks`` can briefly go negative.
 
     Attributes
     ----------
@@ -581,6 +582,13 @@ class ActiveLayerSignal:
     unclaimed_tasks : int
         TODO tasks in the active layer — claimable work the runner may
         still spawn agents for. 0 when all work is DONE.
+    in_flight_tasks : int
+        IN_PROGRESS tasks in the active layer — tasks Marcus has already
+        assigned to an agent and is waiting on. The runner uses this as
+        the "coverage" signal in place of its old tmux-pane count, which
+        was wrong under the ephemeral lifecycle (issue #632): an alive
+        pane is not the same as an agent still about to claim work, and
+        a hung post-completion agent would block spawning indefinitely.
     max_layer_width : int
         Width of the *widest* DAG layer across the whole project — the
         most parallelism the graph can ever offer. A small value means a
@@ -589,6 +597,7 @@ class ActiveLayerSignal:
 
     desired_agent_count: int
     unclaimed_tasks: int
+    in_flight_tasks: int
     max_layer_width: int
 
 
@@ -634,15 +643,16 @@ def compute_active_layer_signal(
     layers = compute_dag_layers(tasks)
     max_layer_width = max((len(layer) for layer in layers), default=0)
 
-    def _signal(desired: int, unclaimed: int) -> ActiveLayerSignal:
+    def _signal(desired: int, unclaimed: int, in_flight: int) -> ActiveLayerSignal:
         return ActiveLayerSignal(
             desired_agent_count=desired,
             unclaimed_tasks=unclaimed,
+            in_flight_tasks=in_flight,
             max_layer_width=max_layer_width,
         )
 
     if max_agents is not None and max_agents <= 0:
-        return _signal(0, 0)
+        return _signal(0, 0, 0)
 
     active: Optional[List[Task]] = None
     for layer in layers:
@@ -650,12 +660,18 @@ def compute_active_layer_signal(
             active = layer
             break
     if active is None:
-        return _signal(0, 0)
+        return _signal(0, 0, 0)
 
     width = len(active)
     desired = width if max_agents is None else min(max_agents, width)
     unclaimed = sum(1 for task in active if task.status == TaskStatus.TODO)
-    return _signal(desired, unclaimed)
+    # Count by status alone, not status + assigned_to. An IN_PROGRESS
+    # task without an ``assigned_to`` is an orphan from a different bug
+    # (lease expiration should reset it to TODO). Filtering on both
+    # fields would couple this signal to "every IN_PROGRESS write sets
+    # assigned_to" — a wider invariant we don't want to audit here.
+    in_flight = sum(1 for task in active if task.status == TaskStatus.IN_PROGRESS)
+    return _signal(desired, unclaimed, in_flight)
 
 
 def compute_desired_agent_count(
