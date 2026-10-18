@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath("../.."))
 project = "Marcus AI"
 copyright = f"{datetime.now(timezone.utc).year}, Marcus AI Contributors"
 author = "Marcus AI Team"
-release = "0.3.8"  # Update from your package version
+release = "0.3.9"  # Update from your package version
 
 # -- General configuration ---------------------------------------------------
 extensions = [

@@ -5,6 +5,19 @@ All notable changes to Marcus will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9] - 2026-10-18
+
+### Added
+- On the Record: a preregistered replication of the Tow Center AI-citation study across four engines and 200 questions, run a second time through a verification checkpoint. Unchecked, the engines were wrong about 7 in 10 times and 51% of cited links were fabricated, dead, or the wrong source. Through the checkpoint, 0 fabricated links reached the reader. Includes the public site and exportable per-case audit bundles.
+- System of Record: typed task contracts, silent eligibility so an author never verifies its own work, deterministic verification, a human sign-off, and exportable audit bundles.
+
+### Changed
+- request_next_task is fast again on large boards. Task classification on the request path is memoized, and dependent-count and critical-path work is hoisted out of the hot loop (#743, #744).
+- The README front-door now explains Marcus in plain English, with the On the Record study as the worked example.
+
+### Fixed
+- A range of coordination, lease, recovery, and verification fixes landed since 0.3.8 (#706 through #746), including lease-ownership hardening, a circuit breaker after repeated silent recoveries, and test-data isolation.
+
 ## [0.3.8] - 2026-05-23
 
 **Two fundamental architectural shifts ship in this release.** How
