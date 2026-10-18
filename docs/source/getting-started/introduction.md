@@ -42,7 +42,7 @@ Marcus is agent-agnostic. Any [MCP](https://modelcontextprotocol.io/)-compatible
 Two operating modes:
 
 - **Runner mode** — one-command experiments via the `/marcus` skill in Claude Code. Skill registers the MCP server, injects the agent prompt, decomposes the project, spawns N agents in tmux panes.
-- **Attach mode** — any MCP agent connects to `http://localhost:4298/mcp`. You wire the agents yourself; same board, same coordination. See [PROTOCOL.md](https://github.com/lwgray/marcus/blob/main/PROTOCOL.md) to build a runner for a new runtime.
+- **Attach mode** — any MCP agent connects to `http://localhost:4298/mcp`. You wire the agents yourself; same board, same coordination. See [PROTOCOL.md](https://github.com/painted-porch/marcus/blob/main/PROTOCOL.md) to build a runner for a new runtime.
 
 ### 2. Context Over Control
 
@@ -92,7 +92,7 @@ The coordination server. Runs at `http://localhost:4298/mcp`. Decomposes natural
 
 ### Cato — the visual dashboard
 
-[Cato](https://github.com/lwgray/cato) is the active Marcus dashboard. Real-time visualization of agents, tasks, and board health, with a built-in kanban view. Sibling product — install separately and point at the same data store.
+[Cato](https://github.com/painted-porch/cato) is the active Marcus dashboard. Real-time visualization of agents, tasks, and board health, with a built-in kanban view. Sibling product — install separately and point at the same data store.
 
 ### Posidonius — the experiment platform
 
@@ -156,7 +156,7 @@ A Claude Code skill (`skills/marcus/SKILL.md`) that wraps experiment setup into 
 - **[Core Concepts](core-concepts.md)** — agents, tasks, projects, dependencies
 - **[Concepts](../concepts/)** — design principles in depth
 - **[Agent Workflows](../guides/agent-workflows/)** — how agents work the board
-- **[PROTOCOL.md](https://github.com/lwgray/marcus/blob/main/PROTOCOL.md)** — agent protocol spec for building new runners
+- **[PROTOCOL.md](https://github.com/painted-porch/marcus/blob/main/PROTOCOL.md)** — agent protocol spec for building new runners
 
 ---
 

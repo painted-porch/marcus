@@ -182,4 +182,4 @@ every shared file. See [16-project-scaffolding.md](16-project-scaffolding.md).
 - [Project Scaffolding](16-project-scaffolding.md) — shared infrastructure prerequisite for worktrees
 - [Design Autocomplete](../coordination/52-design-autocomplete.md) — Phase A, produces architecture doc that scaffolding reads
 - [Workspace Isolation and Feature Context](../../design/workspace-isolation-and-feature-context.md) — earlier design notes on isolation
-- GitHub Issues: [#250](https://github.com/lwgray/marcus/issues/250), [#249](https://github.com/lwgray/marcus/issues/249), [#300](https://github.com/lwgray/marcus/issues/300)
+- GitHub Issues: [#250](https://github.com/painted-porch/marcus/issues/250), [#249](https://github.com/painted-porch/marcus/issues/249), [#300](https://github.com/painted-porch/marcus/issues/300)

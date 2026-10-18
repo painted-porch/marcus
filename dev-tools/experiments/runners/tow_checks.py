@@ -257,7 +257,7 @@ def canonical_url_from_html(html: str, page_url: str) -> str:
         re.IGNORECASE,
     )
     if link:
-        return urljoin(page_url, link.group(1).strip())
+        return str(urljoin(page_url, link.group(1).strip()))
 
     og = re.search(
         r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)["\']',
@@ -269,7 +269,7 @@ def canonical_url_from_html(html: str, page_url: str) -> str:
         re.IGNORECASE,
     )
     if og:
-        return urljoin(page_url, og.group(1).strip())
+        return str(urljoin(page_url, og.group(1).strip()))
     return ""
 
 

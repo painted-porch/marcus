@@ -65,7 +65,7 @@ Marcus scales from individual developers to enterprises:
 The MCP-speaking coordination layer. Runs at `http://localhost:4298/mcp`. Decomposes natural-language project descriptions into structured task graphs, manages agent registration, routes context and artifacts, enforces the work loop, recovers from agent failures.
 
 ### Cato — the visual dashboard
-[Cato](https://github.com/lwgray/cato) is the active Marcus dashboard. Real-time visualization of agents and tasks, built-in kanban view, board health monitoring, run history. Sibling product — install separately, point at the same data store, get a UI for free.
+[Cato](https://github.com/painted-porch/cato) is the active Marcus dashboard. Real-time visualization of agents and tasks, built-in kanban view, board health monitoring, run history. Sibling product — install separately, point at the same data store, get a UI for free.
 
 ### Posidonius — the experiment platform
 [Posidonius](https://github.com/lwgray/posidonius) launches and monitors **multi-run** Marcus experiments — benchmarking, parameter sweeps, parallel batches across any CLI agent. Web UI, run history, integration with Epictetus for grading agent output.
