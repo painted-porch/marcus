@@ -60,7 +60,15 @@ python dev-tools/experiments/runners/tow_runner.py \
     --manifest ~/marcus-experiments/tow/repro/manifest-openai.json
 ```
 
-Then start the Marcus server against that board, run the finder and verifier workers until the board drains, and sign the sampled approval tasks as the human reviewer. While the server is still up, export the audit bundles (the refusal log lives in server memory and would be lost after a restart):
+Then start the Marcus server for that board on port 4777, which is the port the workers and the export command below use. The server defaults to 4298, so set it explicitly:
+
+```
+./marcus start --http --port 4777
+```
+
+Run the finder and the verifier pull-loop workers against it (`tow_finder.py` and `tow_verifier.py`, both default to `--url http://localhost:4777/mcp`). The board drains in a fixed order, because the `synthesize` task that renders a case's final answer depends on the human `approve` task. So run the finder and verifier until they idle, sign the sampled approvals with the approvals CLI (`python -m src.cli.approvals`), then run the verifier once more so the now-eligible `synthesize` tasks complete. Skipping that second verifier pass leaves the approved sample without final answers, and the grader scores them as declines.
+
+While the server is still up, export the audit bundles (the refusal log lives in server memory and would be lost after a restart):
 
 ```
 python dev-tools/experiments/runners/export_bundles.py \
@@ -93,7 +101,8 @@ python dev-tools/experiments/runners/tow_condition_c.py \
 | `dev-tools/experiments/runners/tow_engines.py` | Engine adapters and the `--engines` keys |
 | `dev-tools/experiments/runners/tow_fetch.py` | The shared fetch cache used by B and C |
 | `dev-tools/experiments/runners/export_bundles.py` | Exports one audit bundle per case |
-| `dev-tools/experiments/docs/EXPERIMENT-PROTOCOL.md` | The full experiment protocol |
+| `dev-tools/experiments/runners/tow_finder.py`, `tow_verifier.py` | The finder and verifier pull-loop workers |
+| `python -m src.cli.approvals` | The approvals CLI a human uses to sign the sampled cases |
 
 ## The rules that keep it honest
 
@@ -121,5 +130,5 @@ The dataset CSV, the manifests, and the raw audit bundles all contain the Tow ex
 ## Related
 
 - The live study and per-case evidence: https://marcus-ai.dev/on-the-record/
-- The full protocol: `dev-tools/experiments/docs/EXPERIMENT-PROTOCOL.md`
+- The detailed protocol lives in the runner docstrings listed above, and the preregistration is in the issue #737 history.
 - Issue #737 (On the Record and the System of Record that produced it)
