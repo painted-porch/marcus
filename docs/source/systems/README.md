@@ -157,7 +157,7 @@ Fault tolerance, circuit breakers, and graceful degradation.
 ## 🎨 **Visualization Systems**
 
 ### **[05 - Visualization System](visualization/05-visualization-system.md)**
-Real-time dashboards and project visualization tools. The active visualization product is [Cato](https://github.com/lwgray/cato), which reads board state directly.
+Real-time dashboards and project visualization tools. The active visualization product is [Cato](https://github.com/painted-porch/cato), which reads board state directly.
 
 ### **[02 - Logging System](visualization/02-logging-system.md)**
 Comprehensive logging infrastructure with multiple output formats.

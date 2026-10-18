@@ -15,7 +15,7 @@ Get Marcus running in 5 minutes.
 ## Step 1 — Install Marcus
 
 ```bash
-git clone https://github.com/lwgray/marcus.git
+git clone https://github.com/painted-porch/marcus.git
 cd marcus
 pip install -e .
 ```
@@ -79,7 +79,7 @@ Cato is the active Marcus dashboard. Built-in kanban board, live agent activity,
 
 ```bash
 # In a sibling directory to marcus/
-git clone https://github.com/lwgray/cato.git
+git clone https://github.com/painted-porch/cato.git
 cd cato && pip install -e . && ./cato start
 # Open http://localhost:5173
 ```
@@ -155,7 +155,7 @@ For non-Claude agents, paste the contents into the agent's system prompt.
 
 **3. Bootstrap the board.** One agent calls `create_project` with `description` and `project_name`. Marcus returns `project_id`, `recommended_agents`, and the task graph.
 
-**4. Start workers.** Each worker calls `register_agent` once, then loops: `request_next_task` → `get_task_context` → do the work → `log_decision` → `log_artifact` → `report_task_progress` (25/50/75/100) → immediately request the next task. See [Agent Workflow Guide](../guides/agent-workflows/agent-workflow.md) and [PROTOCOL.md](https://github.com/lwgray/marcus/blob/main/PROTOCOL.md).
+**4. Start workers.** Each worker calls `register_agent` once, then loops: `request_next_task` → `get_task_context` → do the work → `log_decision` → `log_artifact` → `report_task_progress` (25/50/75/100) → immediately request the next task. See [Agent Workflow Guide](../guides/agent-workflows/agent-workflow.md) and [PROTOCOL.md](https://github.com/painted-porch/marcus/blob/main/PROTOCOL.md).
 
 ## Add More Agents
 
@@ -242,14 +242,14 @@ The Planka board has no lists/columns. Open `http://localhost:3333` and create a
 1. **[Core Concepts](core-concepts.md)** — agents, tasks, projects, the board pattern
 2. **[Agent Workflow Guide](../guides/agent-workflows/agent-workflow.md)** — how agents work the board
 3. **[Configuration Reference](../developer/configuration.md)** — every option in `config_marcus.json`
-4. **[PROTOCOL.md](https://github.com/lwgray/marcus/blob/main/PROTOCOL.md)** — build a runner for a new agent runtime
+4. **[PROTOCOL.md](https://github.com/painted-porch/marcus/blob/main/PROTOCOL.md)** — build a runner for a new agent runtime
 5. **Build a custom programmatic agent** — see `examples/inspector_demo.py` in the repo
 
 ## Getting Help
 
 - [Discord](https://discord.com/channels/1409498120739487859/1409498121456848907)
-- [GitHub Issues](https://github.com/lwgray/marcus/issues)
-- [GitHub Discussions](https://github.com/lwgray/marcus/discussions)
+- [GitHub Issues](https://github.com/painted-porch/marcus/issues)
+- [GitHub Discussions](https://github.com/painted-porch/marcus/discussions)
 
 ---
 

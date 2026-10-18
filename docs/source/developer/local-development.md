@@ -28,7 +28,7 @@ Path A is what you want unless you're touching the Planka integration code or ka
 
 ```bash
 cd ~/projects   # or wherever you keep code
-git clone https://github.com/lwgray/marcus.git
+git clone https://github.com/painted-porch/marcus.git
 cd marcus
 ```
 
@@ -93,7 +93,7 @@ Use this path when you're working on the Planka integration itself, the kanban-m
 
 ```bash
 cd ~/projects
-git clone https://github.com/lwgray/marcus.git
+git clone https://github.com/painted-porch/marcus.git
 git clone https://github.com/lwgray/kanban-mcp.git
 
 # Structure:
@@ -341,7 +341,7 @@ cd ~/projects/marcus
 
 ```bash
 # SQLite (default, recommended)
-git clone https://github.com/lwgray/marcus.git
+git clone https://github.com/painted-porch/marcus.git
 cd marcus && pip install -e . && pip install -r requirements-dev.txt
 cp .env.example .env && cp config_marcus.example.json config_marcus.json
 echo "CLAUDE_API_KEY=sk-ant-..." >> .env
