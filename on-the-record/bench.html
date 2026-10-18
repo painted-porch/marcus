@@ -101,6 +101,17 @@
   .cta p{margin:0;font-size:15.5px;line-height:1.65;color:var(--body);max-width:68ch;}
   .cta b{color:var(--ink);} .cta .repo{font-family:var(--mono);color:var(--mute);}
   footer{margin-top:16px;font-size:14px;color:var(--dim);line-height:1.6;max-width:80ch;}
+  .numbers{margin-top:42px;border-top:1px solid var(--line2);padding-top:28px;}
+  .numbers h2{font-size:24px;font-weight:700;margin:0 0 10px;}
+  .numbers h3{font-size:18px;font-weight:600;margin:26px 0 8px;color:var(--ink);}
+  .numbers .note{font-size:14px;color:var(--mute);line-height:1.6;max-width:72ch;margin:10px 0 0;}
+  .numbers a{color:var(--red);}
+  .numtabwrap{overflow-x:auto;margin:14px 0 6px;}
+  .numtab{width:100%;border-collapse:collapse;font-size:14.5px;min-width:520px;}
+  .numtab th,.numtab td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);}
+  .numtab th{font-family:var(--mono);font-size:11.5px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);font-weight:600;}
+  .numtab td{color:var(--body);font-variant-numeric:tabular-nums;}
+  .numtab tbody tr:nth-child(2) td{color:var(--ink);font-weight:600;}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;animation:none !important;} }
 </style>
 </head>
@@ -194,13 +205,41 @@
     <p><b>Every check you just toggled is real.</b> They’re the verifier from Marcus, an open-source board
     where an AI agent’s answer is not accepted without evidence, is never checked by its own author, and only
     humans approve. Same engines, on the record: wrong answers reaching you fell from <b>69.5% to 12.1%</b>;
-    fabricated citations fell to <b>zero</b>; cost rose a small multiple on tokens alone, in fractions of a cent (grounded engines bill far more for search than token logging captures).<br><br>
+    fabricated citations fell to <b>zero</b>. A clean run of the full study costs about <b>$35</b>, roughly <b>$0.18</b> a question.<br><br>
     <span class="repo">github.com/painted-porch/marcus</span></p>
     <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:18px;">
       <span style="font-family:var(--mono);font-size:14.5px;color:var(--ink);">That’s the checkpoint. Put it on the record →</span>
       <a class="github-button" href="https://github.com/painted-porch/marcus" data-icon="octicon-star" data-size="large" data-show-count="true" data-color-scheme="no-preference: light; light: light; dark: light;" target="_blank" rel="noopener" aria-label="Star painted-porch/marcus on GitHub">Put it on the record</a>
     </div>
   </div>
+
+  <section class="numbers" id="numbers">
+    <h2>The full numbers</h2>
+    <p class="lead">The demo above is the idea. Here is the measured result from the full run: 200 questions, four engines, every answer graded against a source we already knew. Each engine is a leading model given a live web-search tool, at a budget price tier, not the shipped consumer product. Every rate below is among answers actually delivered, because a declined case is the system refusing to ship an unverifiable claim, not a wrong answer.</p>
+    <div class="numtabwrap">
+      <table class="numtab">
+        <thead><tr><th>Condition</th><th>Wrong (of delivered)</th><th>95% interval</th><th>Fabricated links</th><th>Declined</th></tr></thead>
+        <tbody>
+          <tr><td>Engines alone</td><td>69.5%</td><td>65.9 to 72.8%</td><td>51.2%</td><td>14%</td></tr>
+          <tr><td>Through Marcus</td><td>12.1%</td><td>7.7 to 18.5%</td><td>0%</td><td>82%</td></tr>
+          <tr><td>Verifier-only control</td><td>9.5%</td><td>5.6 to 15.6%</td><td>0%</td><td>83%</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Through Marcus, 141 of the 800 answers were delivered and the rest were declined with their fetch receipts. Marcus ships fewer answers, and the claim is about the quality of what it ships, not the quantity. The verifier-only control scores about the same as the full board, which is the honest point: the checker is what catches the errors, and the board adds that the check cannot be skipped, cannot be run by the author, and is recorded.</p>
+
+    <h3>Did it clear the bar we set in advance?</h3>
+    <p class="lead">Before the run we preregistered (<a href="https://github.com/painted-porch/marcus/issues/737" target="_blank" rel="noopener">issue #737</a>, dated and unedited since September) that fewer than 5% of delivered answers would still be wrong, and that a rate above 10% would mean our own checker was being fooled and needed a second version. The delivered-wrong rate came in at 12.1%, which crosses both, so we report the hypothesis as rejected. The 95% interval runs from 7.7% to 18.5%: 5% sits below it, so missing the 5% bar is a real result, while 10% sits inside it, so crossing 10% is within sampling noise. We built the second checker anyway.</p>
+
+    <h3>12.1%, and also 4.3%</h3>
+    <p class="lead">We inspected all 17 wrong-delivered answers one by one. None was a fabricated or non-supporting link; every cited page was real and carried the quoted sentence. Eleven were legitimate republications that a strict original-source standard rejects, meaning a real outlet that genuinely ran the story but not the one the answer key names, or a case where the dataset's own date was the outlier. Counting only genuine failures, the rate is about 4.3%. We report both: 12.1% under the strict preregistered standard, and 4.3% under a "can the reader trust and verify this" standard. Per-engine rates carry wide intervals, because each engine delivered only 18 to 62 answers, so the pooled figure and the zero-fabrication result are the sturdier numbers.</p>
+
+    <h3>What it cost</h3>
+    <p class="lead">A clean run of the full study costs about <b>$35</b>, roughly <b>$0.18 per question</b> across the four engines and both paid conditions. Our own run cost about <b>$65</b> all-in, because pilots and re-running a rate-limit-flaky engine added overhead a clean run avoids. Gemini's Google-Search grounding dominated, about $44 of the all-in total against a few cents of tokens. Cross-engine cost is not comparable, because each provider counts the web content its search pulls back as input tokens very differently; that is an accounting difference, not unequal treatment, which the matching prompt sizes across conditions confirm.</p>
+
+    <p class="note">Full method, every rate, and how to run it yourself: <a href="https://github.com/painted-porch/marcus/blob/main/REPRODUCING.md" target="_blank" rel="noopener">REPRODUCING.md</a>. By Lawrence Gray, PhD, Gray Labs; contact and press <a href="mailto:info@graylabs.ai">info@graylabs.ai</a>; cite via <a href="https://github.com/painted-porch/marcus/blob/main/CITATION.cff" target="_blank" rel="noopener">CITATION.cff</a>.</p>
+  </section>
+
   <footer>Fetches on this bench are simulated so it can run anywhere; the production verifier fetches live
   pages, respects robots.txt, and attaches its logs to every verdict. Sample answers mirror real cases from
   the October 2026 preregistered pilot, including the syndicated copy that fooled the first run.</footer>

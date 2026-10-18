@@ -110,6 +110,13 @@
     #otr-bar .otr-label{display:none;}
     h1{font-size:clamp(32px,8vw,66px);}
   }
+  .standfirst{font-size:18px;line-height:1.55;color:var(--ink);margin:14px 0 0;max-width:60ch;font-weight:500;}
+  .byline{font-size:14px;line-height:1.5;color:var(--mute);margin:8px 0 0;max-width:62ch;}
+  .read-on{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:baseline;margin-top:20px;
+           padding-top:16px;border-top:1px solid var(--line);}
+  .read-on .more-label{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);}
+  .read-on a{font-family:var(--mono);font-size:13.5px;color:var(--mute);text-decoration:none;border-bottom:1px solid transparent;}
+  .read-on a:hover{color:var(--ink);border-bottom-color:var(--ink);}
   @media (prefers-reduced-motion: reduce){ *{transition:none !important;} #scroller{scroll-behavior:auto;} }
 </style>
 </head>
@@ -138,6 +145,8 @@
     </div>
     <span class="eyebrow">A Marcus field report</span>
     <h1>The AI handed you a source. <span class="grad">We clicked it.</span></h1>
+    <p class="standfirst">Marcus is open-source software that makes AI agents prove their work before anyone has to trust it. This file is what happened when we pointed it at one hard, measurable problem: whether AI search engines cite real sources.</p>
+    <p class="byline">By Lawrence Gray, PhD, Gray Labs, who built Marcus. The dataset, the grader, and every audit record shown here are public, so you do not have to take my word for any of it.</p>
     <p class="lead">We gave four AI search engines a sentence from each of 200 real news articles and
     asked the same question every time: which article is this from? That produced 800 citations:
     headline, publisher, date, link. We knew the true source of every sentence, so we graded each
@@ -354,24 +363,23 @@
          aria-label="Star painted-porch/marcus on GitHub">Put it on the record</a>
       <span class="cta-note">One click opens GitHub in a new tab. It is the public vote that keeps open work alive.</span>
     </div>
-    <a class="cta-next" href="not-a-fact-checker.html" data-goatcounter-click="receipts-nafc">
-      <span class="lead-in">If you read one more thing</span>
-      “So it’s just a fact-checker?” <b>Here’s why it’s something bigger →</b>
-    </a>
-    <div class="cta-more">
-      <span class="more-label">Or explore it yourself</span>
-      <div class="more-chips">
-        <a class="morechip" href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener" data-goatcounter-click="receipts-runfree">Run it free in 60s ↗</a>
-        <a class="morechip" href="evidence-machine.html" data-goatcounter-click="receipts-machine">Watch the machine sort it →</a>
-        <a class="morechip" href="bench.html" data-goatcounter-click="receipts-bench">The verifier bench →</a>
-        <a class="morechip" href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener" data-goatcounter-click="receipts-release">Method &amp; code ↗</a>
-      </div>
-    </div></div>
+    <nav class="read-on" aria-label="More On the Record">
+      <span class="more-label">Read on</span>
+      <a href="not-a-fact-checker.html" data-goatcounter-click="receipts-nafc">Not a fact checker</a>
+      <a href="story.html" data-goatcounter-click="receipts-story">The Animation</a>
+      <a href="evidence-machine.html" data-goatcounter-click="receipts-machine">The Machine</a>
+      <a href="bench.html" data-goatcounter-click="receipts-bench">The Bench and the full numbers</a>
+      <a href="https://github.com/painted-porch/marcus/blob/main/REPRODUCING.md" target="_blank" rel="noopener" data-goatcounter-click="receipts-reproduce">Method and reproduce</a>
+      <a href="../" data-goatcounter-click="receipts-home">Home</a>
+      <a href="https://docs.marcus-ai.dev" target="_blank" rel="noopener" data-goatcounter-click="receipts-docs">Docs</a>
+    </nav></div>
     <p class="foot">About the excerpts: the Tow Center distributes its 200 excerpts encrypted so the
     text stays out of AI training crawlers. We keep that promise here, which is why excerpt text
     appears only as short fragments drawn into an image, never as copyable text. Study: Jaźwińska
     &amp; Chandrasekar, “AI Search Has a Citation Problem,” Tow Center for Digital Journalism, CJR,
-    March 2025. Replication: October 2026, preregistered, graded blind.</p>
+    March 2025. Replication: October 2026, preregistered, graded blind. By Lawrence Gray, PhD,
+    Gray Labs; contact and press <a href="mailto:info@graylabs.ai" style="color:var(--blue)">info@graylabs.ai</a>;
+    cite via <a href="https://github.com/painted-porch/marcus/blob/main/CITATION.cff" target="_blank" rel="noopener" style="color:var(--blue)">CITATION.cff</a>.</p>
   </div>
 </section>
 
