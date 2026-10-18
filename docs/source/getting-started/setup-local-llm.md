@@ -211,6 +211,6 @@ Or set `"ai.provider"` in `config_marcus.json`.
 
 ## Next
 
-- Browse [`good first issue`](https://github.com/lwgray/marcus/labels/good%20first%20issue) and try a contribution end-to-end on local models.
+- Browse [`good first issue`](https://github.com/painted-porch/marcus/labels/good%20first%20issue) and try a contribution end-to-end on local models.
 - See [Configuration Reference](../developer/configuration.md) for every option.
 - See [PROTOCOL.md](../../../PROTOCOL.md) if you're building a worker runner for a non-Claude agent.

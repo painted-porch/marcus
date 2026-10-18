@@ -232,7 +232,7 @@ Learn more: [AI Intelligence](../concepts/ai-intelligence.md)
 Marcus the orchestration server is the core, but several sibling tools layer on top of it:
 
 - **`/marcus` skill** — Claude Code skill (`skills/marcus/SKILL.md`) that wraps experiment setup into one command. Spawns N independent Claude CLI agents in tmux panes, each registering with the Marcus MCP server. The fastest path from idea → multi-agent run.
-- **[Cato](https://github.com/lwgray/cato)** — the active visual dashboard. Real-time agent activity, kanban view, board health. Sibling product; install separately and point at the same data store.
+- **[Cato](https://github.com/painted-porch/cato)** — the active visual dashboard. Real-time agent activity, kanban view, board health. Sibling product; install separately and point at the same data store.
 - **[Posidonius](https://github.com/lwgray/posidonius)** — multi-run experiment platform. Launches and monitors batches of independent Marcus runs (parameter sweeps, benchmarks, parallel projects). Web UI plus integration with Epictetus for grading agent output.
 - **Epictetus** — code auditor that grades software projects (and the agents that built them). Wired into the Posidonius pipeline as a post-run audit.
 
@@ -321,4 +321,4 @@ Now that you understand the core concepts:
 
 ---
 
-**Questions?** Check the [complete documentation](../README.md) or [open a discussion](https://github.com/lwgray/marcus/discussions).
+**Questions?** Check the [complete documentation](../README.md) or [open a discussion](https://github.com/painted-porch/marcus/discussions).

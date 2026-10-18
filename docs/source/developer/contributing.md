@@ -3,7 +3,7 @@
 Welcome to the Marcus contributor guide! This page provides an overview of how to contribute to Marcus, with links to detailed guides for specific topics.
 
 ```{note}
-This is the Sphinx documentation version of our contributing guide. For the complete markdown version, see [CONTRIBUTING.md](https://github.com/lwgray/marcus/blob/develop/CONTRIBUTING.md) in the repository root.
+This is the Sphinx documentation version of our contributing guide. For the complete markdown version, see [CONTRIBUTING.md](https://github.com/painted-porch/marcus/blob/develop/CONTRIBUTING.md) in the repository root.
 ```
 
 ## Quick Links
@@ -61,7 +61,7 @@ New to open source? Marcus is a great place to start!
 ### Find Your First Issue
 
 1. **Look for beginner-friendly issues**:
-   - Browse issues labeled [`good first issue`](https://github.com/lwgray/marcus/labels/good%20first%20issue)
+   - Browse issues labeled [`good first issue`](https://github.com/painted-porch/marcus/labels/good%20first%20issue)
    - These are specifically chosen for newcomers
    - Usually involve small, focused changes
 
@@ -72,7 +72,7 @@ New to open source? Marcus is a great place to start!
    - 🔧 Provider support (Jira, Trello, Linear)
 
 3. **Don't see something you like?**
-   - Ask in [GitHub Discussions](https://github.com/lwgray/marcus/discussions)
+   - Ask in [GitHub Discussions](https://github.com/painted-porch/marcus/discussions)
    - We'll help you find a suitable task!
 
 ### First Pull Request Checklist
@@ -167,7 +167,7 @@ git clone https://github.com/YOUR_USERNAME/marcus.git
 cd marcus
 
 # 3. Add upstream remote
-git remote add upstream https://github.com/lwgray/marcus.git
+git remote add upstream https://github.com/painted-porch/marcus.git
 
 # 4. Always branch from develop
 git checkout develop
@@ -344,7 +344,7 @@ pytest -m "not slow"
 - **Edge cases**: Test error conditions and boundaries
 - **Integration tests**: For features requiring external services
 
-See [CLAUDE.md - Test Writing Instructions](https://github.com/lwgray/marcus/blob/develop/CLAUDE.md#test-writing-instructions) for detailed testing guidelines.
+See [CLAUDE.md - Test Writing Instructions](https://github.com/painted-porch/marcus/blob/develop/CLAUDE.md#test-writing-instructions) for detailed testing guidelines.
 
 ## Documentation
 
@@ -381,7 +381,7 @@ docs/source/
 
 3. **Check if docs exist**: Update rather than duplicate
 
-See [CLAUDE.md - Documentation Placement Rules](https://github.com/lwgray/marcus/blob/develop/CLAUDE.md#documentation-placement-rules) for complete guidelines.
+See [CLAUDE.md - Documentation Placement Rules](https://github.com/painted-porch/marcus/blob/develop/CLAUDE.md#documentation-placement-rules) for complete guidelines.
 
 ## Pull Request Process
 
@@ -477,9 +477,9 @@ Every contribution, no matter how small, makes Marcus better!
 
 ### Where to Ask
 
-- **[GitHub Discussions](https://github.com/lwgray/marcus/discussions)**: General questions and ideas
+- **[GitHub Discussions](https://github.com/painted-porch/marcus/discussions)**: General questions and ideas
 - **Issue Comments**: Questions about specific issues
-- **[Discord](https://discord.gg/marcus)**: Real-time community chat
+- **[Discord](https://discord.gg/DZWTbXr4)**: Real-time community chat
 
 ### Tips for Getting Help
 
@@ -502,7 +502,7 @@ Every contribution, no matter how small, makes Marcus better!
 - [Local Development Setup](local-development.md)
 - [Development Workflow](development-workflow.md)
 - [Configuration Reference](configuration.md)
-- [CLAUDE.md](https://github.com/lwgray/marcus/blob/develop/CLAUDE.md) - Project-specific guidelines
+- [CLAUDE.md](https://github.com/painted-porch/marcus/blob/develop/CLAUDE.md) - Project-specific guidelines
 
 ### Learn More
 
@@ -528,5 +528,5 @@ Every contribution makes Marcus better. Whether this is your first open source c
 Welcome to the Marcus community! 🚀
 
 ```{seealso}
-For the complete contributing guide with all details, see [CONTRIBUTING.md](https://github.com/lwgray/marcus/blob/develop/CONTRIBUTING.md) in the repository root.
+For the complete contributing guide with all details, see [CONTRIBUTING.md](https://github.com/painted-porch/marcus/blob/develop/CONTRIBUTING.md) in the repository root.
 ```

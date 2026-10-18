@@ -61,6 +61,7 @@ On their own, the engines got **7 in 10 answers wrong**, and **51% of the links 
 Then we ran the same engines through Marcus, which fetched every cited page, checked it, and refused the ones that didn't hold up.
 The result: **0 fabricated links reached the reader**, because the fakes get caught, not fixed.
 See it case by case: **[On the Record →](https://marcus-ai.dev/on-the-record/)**
+Run the whole study yourself, step by step: **[REPRODUCING.md](REPRODUCING.md)**
 
 Checking news links was just an easy thing to measure.
 The same board handles any claim a script can check: code against its tests, a number against its source document, or a legal citation against the court record.
@@ -186,7 +187,7 @@ frameworks can't offer:
 ### Step 1: Install
 
 ```bash
-git clone https://github.com/lwgray/marcus.git
+git clone https://github.com/painted-porch/marcus.git
 cd marcus
 pip install -e .
 cp -r skills/marcus ~/.claude/skills/marcus  # Claude Code + Runner mode only
@@ -208,6 +209,9 @@ CLAUDE_API_KEY=sk-ant-api03-your-key-here
 > Marcus reads `CLAUDE_API_KEY` (not `ANTHROPIC_API_KEY`) so it doesn't
 > interfere with Claude Code's subscription auth.
 
+Do not have a provider key yet?
+Get an Anthropic key at [console.anthropic.com](https://console.anthropic.com), or an OpenAI key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+
 | Provider  | Cost | Setup |
 |-----------|------|-------|
 | Anthropic | Paid | Set `CLAUDE_API_KEY` in `.env` — works out of the box |
@@ -221,6 +225,9 @@ CLAUDE_API_KEY=sk-ant-api03-your-key-here
 ```bash
 ./marcus start
 ```
+
+When the server is up, Marcus prints the local address it is listening on, which defaults to `http://localhost:4298`.
+Seeing that line means the start worked; if that port is busy, pass `--port` with another number.
 
 See the board in your terminal at any time:
 
@@ -242,7 +249,7 @@ The live board (`--watch`) polls the SQLite database and re-renders in-place —
 
 ```bash
 # In a sibling directory
-git clone https://github.com/lwgray/cato.git
+git clone https://github.com/painted-porch/cato.git
 cd cato && pip install -e . && ./cato start
 # Open http://localhost:5173
 ```
@@ -390,8 +397,8 @@ By default Posidonius writes projects to `~/experiments/`.
 ## Community
 
 - [**Discord**](https://discord.gg/DZWTbXr4) — real-time help, questions, and feedback. Report errors in `#bugs`
-- [**GitHub Issues**](https://github.com/lwgray/marcus/issues) — detailed bug reports (use [bug report template](/.github/ISSUE_TEMPLATE/bug_report.md)) and feature requests
-- [**GitHub Discussions**](https://github.com/lwgray/marcus/discussions) — ideas and long-form questions
+- [**GitHub Issues**](https://github.com/painted-porch/marcus/issues) — detailed bug reports (use [bug report template](/.github/ISSUE_TEMPLATE/bug_report.md)) and feature requests
+- [**GitHub Discussions**](https://github.com/painted-porch/marcus/discussions) — ideas and long-form questions
 
 **For researchers and educators:** Board-mediated coordination extends the blackboard pattern to autonomous LLM agents - a named, citable variant for multi-agent-over-MCP systems. Marcus is MIT-licensed — use it in courses,
 papers, and experiments.  The pattern is documented in the [Architecture Docs](docs/source/architecture/).
@@ -405,7 +412,7 @@ transparency, and letting the system — not any single agent — hold the truth
 
 **[View the full sprint menu →](docs/sprints/pycon-2026.md)**
 
-26 curated issues across three tiers (appetizers 15–45 min · main courses 1–3 hr · desserts 3+ hr) plus 7 night-cap bonus explorations. All tagged [`pycon_2026`](https://github.com/lwgray/marcus/issues?q=is%3Aopen+label%3Apycon_2026). Comment on an issue to claim it before you start.
+26 curated issues across three tiers (appetizers 15–45 min · main courses 1–3 hr · desserts 3+ hr) plus 7 night-cap bonus explorations. All tagged [`pycon_2026`](https://github.com/painted-porch/marcus/issues?q=is%3Aopen+label%3Apycon_2026). Comment on an issue to claim it before you start.
 
 ---
 

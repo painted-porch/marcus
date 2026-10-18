@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath("../.."))
 project = "Marcus AI"
 copyright = f"{datetime.now(timezone.utc).year}, Marcus AI Contributors"
 author = "Marcus AI Team"
-release = "0.3.9"  # Update from your package version
+release = "0.3.10"  # Update from your package version
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -118,13 +118,13 @@ html_theme_options = {
     "icon_links": [
         {
             "name": "GitHub",
-            "url": "https://github.com/lwgray/marcus",
+            "url": "https://github.com/painted-porch/marcus",
             "icon": "fa-brands fa-github",
             "type": "fontawesome",
         },
         {
             "name": "Discord",
-            "url": "https://discord.gg/marcus",
+            "url": "https://discord.gg/DZWTbXr4",
             "icon": "fa-brands fa-discord",
             "type": "fontawesome",
         },
@@ -145,7 +145,7 @@ html_theme_options = {
 }
 
 html_context = {
-    "github_user": "lwgray",
+    "github_user": "painted-porch",
     "github_repo": "marcus",
     "github_version": "main",
     "doc_path": "docs_sphinx/source",

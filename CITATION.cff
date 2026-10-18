@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use Marcus or refer to the On the Record study, please cite it as below."
+title: Marcus
+abstract: >-
+  Marcus is open-source software that coordinates AI coding agents through a
+  shared task board and refuses to accept any result until it carries
+  verifiable evidence, an independent check the author never sees, and, where
+  it matters, a human signature. On the Record is a preregistered replication
+  of the Columbia Journalism Review / Tow Center 2025 study of AI search
+  citations, run through Marcus's verification checkpoint.
+type: software
+authors:
+  - given-names: Larry
+    family-names: Gray
+    affiliation: Gray Labs LLC
+    email: info@graylabs.ai
+repository-code: "https://github.com/painted-porch/marcus"
+url: "https://marcus-ai.dev"
+license: MIT
+version: 0.3.9
+date-released: "2026-10-18"
+keywords:
+  - multi-agent systems
+  - LLM agents
+  - coordination
+  - AI search citations
+  - verification
+references:
+  - type: article
+    title: "AI Search Has a Citation Problem"
+    authors:
+      - name: "Tow Center for Digital Journalism, Columbia University"
+    year: 2025
+    url: "https://www.cjr.org/tow_center/we-compared-eight-ai-search-engines-theyre-all-bad-at-citing-news.php"
+    notes: "The original study that On the Record replicates."

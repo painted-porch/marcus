@@ -181,6 +181,6 @@ The `/marcus` skill accepts a `--decomposer contract_first` flag:
 - [Contract Validation](../quality/contract-validation.md) -- Invariant 5 specification
 - [Task Dependency System](36-task-dependency-system.md) -- How implementation tasks depend on design ghosts
 - GitHub Issues:
-  - [#320](https://github.com/lwgray/marcus/issues/320) -- Contract-first task decomposition
-  - [#267](https://github.com/lwgray/marcus/issues/267) -- Topology-aware decomposition (predecessor)
-  - [#64](https://github.com/lwgray/marcus/issues/64) -- Upstream intent preservation (next step)
+  - [#320](https://github.com/painted-porch/marcus/issues/320) -- Contract-first task decomposition
+  - [#267](https://github.com/painted-porch/marcus/issues/267) -- Topology-aware decomposition (predecessor)
+  - [#64](https://github.com/painted-porch/marcus/issues/64) -- Upstream intent preservation (next step)

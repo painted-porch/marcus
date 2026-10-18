@@ -76,7 +76,7 @@ The fastest path from idea to working software, using the ``/marcus`` skill in C
 .. code-block:: bash
 
     # One-time install
-    git clone https://github.com/lwgray/marcus.git
+    git clone https://github.com/painted-porch/marcus.git
     cd marcus && pip install -e .
     cp -r skills/marcus ~/.claude/skills/marcus
 
@@ -97,7 +97,7 @@ The fastest path from idea to working software, using the ``/marcus`` skill in C
 For other runtimes (Codex, Gemini CLI, AutoGen, custom), use **Attach mode** — connect
 your agent to ``http://localhost:4298/mcp`` and follow the work loop in
 ``prompts/Agent_prompt.md``. See `PROTOCOL.md
-<https://github.com/lwgray/marcus/blob/main/PROTOCOL.md>`_ for the full agent protocol spec.
+<https://github.com/painted-porch/marcus/blob/main/PROTOCOL.md>`_ for the full agent protocol spec.
 
 
 .. toctree::
