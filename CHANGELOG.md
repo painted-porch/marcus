@@ -5,6 +5,16 @@ All notable changes to Marcus will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10] - 2026-10-18
+
+### Fixed
+- Corrected the GitHub links the repository move left stale: the README clone command, the Issues, Discussions, and PyCon links, and the `cato` clone now point at `painted-porch`; the docs site's Discord and repository links are fixed. `posidonius` is unchanged, because it did not move.
+- Engine cost is no longer undercounted. The Tow runner now captures OpenAI's web-search fee and Gemini's Google-Search grounding fee as `search_fee_usd`, which the token-only logging missed; a clean full run costs about $35, where the earlier token-only figure badly understated the grounded engines.
+- `REPRODUCING.md` now states the preregistration correctly (under 5% predicted, 10% the falsification line, 12.1% strict against 4.3% adjudicated), reports delivered-versus-declined coverage, and carries the real cost.
+
+### Added
+- `CITATION.cff` so the software and the On the Record study are citable, and a README link to the reproduction guide.
+
 ## [0.3.9] - 2026-10-18
 
 ### Added
