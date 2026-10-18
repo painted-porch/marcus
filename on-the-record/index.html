@@ -11,9 +11,11 @@
 <style>
   html,body{height:100%;}
   body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);}
-  #scroller{height:100%;overflow-y:auto;scroll-snap-type:y proximity;scroll-behavior:smooth;}
-  section.panel{min-height:100svh;scroll-snap-align:start;display:flex;align-items:center;
+  #scroller{height:100%;overflow-y:auto;scroll-behavior:smooth;}
+  section.panel{min-height:100svh;display:flex;align-items:center;position:relative;
     justify-content:center;padding:64px 20px 48px;box-sizing:border-box;}
+  section.panel + section.panel::before{content:"";position:absolute;top:0;left:24px;right:24px;
+    height:1px;background:var(--line);}
   .inner{width:100%;max-width:640px;display:flex;flex-direction:column;gap:22px;}
   .eyebrow{font-family:var(--mono);font-size:13px;letter-spacing:3px;text-transform:uppercase;
     color:var(--red);}
