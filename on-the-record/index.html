@@ -137,21 +137,21 @@
     <span class="eyebrow">A Marcus field report</span>
     <h1>The AI handed you a source. <span class="grad">We clicked it.</span></h1>
     <p class="lead">We gave four AI search engines a sentence from each of 200 real news articles and
-    asked the same question every time — which article is this from? That produced 800 citations:
+    asked the same question every time: which article is this from? That produced 800 citations:
     headline, publisher, date, link. We knew the true source of every sentence, so we graded each
     answer and clicked every link to see whether it even exists.</p>
     <div class="problem">
       <span class="ledg-tag">What the engines returned, unchecked · 800 answers, four engines</span>
       <div class="ledg-stat"><span class="ledg-num red count" id="c0" data-target="69.5" data-suffix="%">69.5%</span><span class="ledg-cap">of the answers came back wrong</span></div>
-      <div class="ledg-sub"><b style="color:var(--ink)">And 51% of every link they cited was fabricated, dead, or pointed to the wrong source.</b> A made-up link looks exactly like a real one — you cannot tell which until you click it, and nobody clicks.</div>
+      <div class="ledg-sub"><b style="color:var(--ink)">And 51% of every link they cited was fabricated, dead, or pointed to the wrong source.</b> A made-up link looks exactly like a real one. You cannot tell which until you click it, and nobody clicks.</div>
     </div>
     <p class="lead">So with any AI citation you get two choices: trust it blind, or re-check every one
-    by hand. We did the second — we clicked all 800. Here is what came back, three exhibits straight
+    by hand. We did the second: we clicked all 800. Here is what came back, three exhibits straight
     from the run’s audit records.</p>
     <p class="foot">The test re-runs the Tow Center’s 2025 study, “AI Search Has a Citation Problem.”
     And citations are only the version of this that is easy to measure: the same failure hides in any
-    AI answer you act on without a way to check it — numbers in a report, legal references, medical
-    claims, code.</p>
+    AI answer you act on without a way to check it, such as numbers in a report, legal references, medical
+    claims, or code.</p>
     <div class="p0-foot">
       <span class="cue">the evidence follows ↓</span>
       <span class="rubber sm" style="transform:rotate(-6deg)">Filed · On the Record</span>
@@ -162,29 +162,29 @@
 <section class="panel" id="p1">
   <div class="inner">
     <div class="rec-block">
-      <div class="record-cap"><div class="rc-title">Exhibit A <span class="rc-sub">— a perfect-looking fabrication</span></div>
+      <div class="record-cap"><div class="rc-title">Exhibit A:<span class="rc-sub"> a perfect-looking fabrication</span></div>
         <div class="rc-meta">case tow-0026 · engine: gemini-3.6-flash</div></div>
       <div class="record-rule" style="margin-top:9px"></div><div class="record-rule d"></div>
     </div>
     <div class="fragment"><span class="k">what we gave the engine</span><canvas id="frag" height="34" aria-label="Excerpt fragment, rendered as image to keep the dataset out of crawlers"></canvas>
-      <small>excerpt fragment, drawn not typed — see the note at the end</small></div>
+      <small>This excerpt fragment is drawn, not typed. See the note at the end.</small></div>
     <div><span class="k">what it answered</span>
       <div class="quote" style="margin-top:8px">
         <h3>“ ‘The Bachelor’ producers acknowledge ‘vicious cycle’ of racism…”</h3>
         <div class="meta">Los Angeles Times · June 26, 2024</div>
         <div class="url">latimes.com/entertainment-arts/tv/story/2024-06-26/the-bachelor-racism-produ…</div>
       </div></div>
-    <div><div class="record-head">the record of the check — five deterministic tests, no model</div>
+    <div><div class="record-head">the record of the check: five deterministic tests, no model</div>
       <div class="leaders" style="margin-top:10px">
         <div class="row"><span>1 &nbsp; the link resolves</span><span class="v no">FAIL · 404 not found</span></div>
-        <div class="row muted"><span>2 &nbsp; the excerpt appears on the page</span><span class="v">— not reached</span></div>
-        <div class="row muted"><span>3 &nbsp; the domain matches the named publisher</span><span class="v">— not reached</span></div>
-        <div class="row muted"><span>4 &nbsp; the page is the original, not a reprint</span><span class="v">— not reached</span></div>
-        <div class="row muted"><span>5 &nbsp; the date is within one day</span><span class="v">— not reached</span></div>
+        <div class="row muted"><span>2 &nbsp; the excerpt appears on the page</span><span class="v">not reached</span></div>
+        <div class="row muted"><span>3 &nbsp; the domain matches the named publisher</span><span class="v">not reached</span></div>
+        <div class="row muted"><span>4 &nbsp; the page is the original, not a reprint</span><span class="v">not reached</span></div>
+        <div class="row muted"><span>5 &nbsp; the date is within one day</span><span class="v">not reached</span></div>
       </div></div>
     <div class="verdict-row">
       <p class="foot" style="flex:1;min-width:260px;margin:0">The page does not exist; the real source was
-      Entertainment Weekly. Full headline, confident date, invented link — half the citations in our test
+      Entertainment Weekly. The answer carried a full headline, a confident date, and an invented link. Half the citations in our test
       died exactly here. The reader never sees it: it is refused entry, and the refusal is on the record.</p>
       <div class="verdict-stamp"><span class="rubber lg" style="transform:rotate(-9deg)">Rejected</span>
         <div class="vd">Verdict<br><b>Not entered</b></div></div>
@@ -195,11 +195,11 @@
 <section class="panel" id="p4">
   <div class="inner">
     <div class="rec-block">
-      <div class="record-cap"><div class="rc-title">Exhibit B <span class="rc-sub">— a link that is simply dead</span></div>
+      <div class="record-cap"><div class="rc-title">Exhibit B:<span class="rc-sub"> a link that is simply dead</span></div>
         <div class="rc-meta">case tow-0063 · a different engine</div></div>
       <div class="record-rule" style="margin-top:9px"></div><div class="record-rule d"></div>
     </div>
-    <p class="lead">Same question, a different engine. This time the link isn’t invented — it’s dead. Against a
+    <p class="lead">It is the same question, now put to a different engine. This time the link isn’t invented; it’s dead. Against a
     dataset of articles two years old, 47% of the pages are already gone or closed to robots.</p>
     <div><span class="k">what it answered · the cited link</span>
       <div class="quote" style="margin-top:8px">
@@ -208,14 +208,14 @@
     <div><div class="record-head">the record of the check</div>
       <div class="leaders" style="margin-top:10px">
         <div class="row"><span>1 &nbsp; the link resolves</span><span class="v no">FAIL · 404 not found</span></div>
-        <div class="row muted"><span>2 &nbsp; the excerpt appears on the page</span><span class="v">— not reached</span></div>
-        <div class="row muted"><span>3 &nbsp; the domain matches the named publisher</span><span class="v">— not reached</span></div>
-        <div class="row muted"><span>4 &nbsp; the page is the original, not a reprint</span><span class="v">— not reached</span></div>
-        <div class="row muted"><span>5 &nbsp; the date is within one day</span><span class="v">— not reached</span></div>
+        <div class="row muted"><span>2 &nbsp; the excerpt appears on the page</span><span class="v">not reached</span></div>
+        <div class="row muted"><span>3 &nbsp; the domain matches the named publisher</span><span class="v">not reached</span></div>
+        <div class="row muted"><span>4 &nbsp; the page is the original, not a reprint</span><span class="v">not reached</span></div>
+        <div class="row muted"><span>5 &nbsp; the date is within one day</span><span class="v">not reached</span></div>
       </div></div>
     <div class="verdict-row">
       <p class="foot" style="flex:1;min-width:260px;margin:0">Fabricated or dead, a wrong link looks identical
-      to a right one — you cannot tell which until you click. So the checkpoint clicks, every time, and
+      to a right one, and you cannot tell which until you click. So the checkpoint clicks, every time, and
       declines what does not resolve.</p>
       <div class="verdict-stamp"><span class="rubber lg" style="transform:rotate(-8deg)">Rejected</span>
         <div class="vd">Verdict<br><b>Not entered</b></div></div>
@@ -241,13 +241,13 @@
         knows how it will be graded can shape its answer to pass the check instead of to be true.
         Hidden from the author, the only winning move is honesty.</small></span></div>
       <div class="rule"><span class="n">3</span><span><b>People hold the final signature.</b>
-        <small>Not at every step: the scripts do the checking, at a scale no reviewer could
+        <small>People do not sign at every step: the scripts do the checking, at a scale no reviewer could
         (800 link fetches in this study). A person signs at the end, on a sampled set of
         already-verified cases, and that signature can only belong to a human. Software can
         never wave its own work through, and someone is always answerable for what shipped.</small></span></div>
     </div>
-    <p class="foot">No retraining. No prompt begging for honesty. The environment simply stopped
-    letting unverified claims ship — and when a link cannot be verified, it declines with the receipt
+    <p class="foot">The fix used no retraining and no prompt begging for honesty. The environment simply stopped
+    letting unverified claims ship, and when a link cannot be verified, it declines with the receipt
     instead of guessing. Here is what survives.</p>
   </div>
 </section>
@@ -255,7 +255,7 @@
 <section class="panel" id="p5">
   <div class="inner">
     <div class="rec-block">
-      <div class="record-cap"><div class="rc-title">Exhibit C <span class="rc-sub">— what survives, a person signs</span></div>
+      <div class="record-cap"><div class="rc-title">Exhibit C:<span class="rc-sub"> what survives, a person signs</span></div>
         <div class="rc-meta">case tow-0001 · verified &amp; signed</div></div>
       <div class="record-rule" style="margin-top:9px"></div><div class="record-rule d"></div>
     </div>
@@ -329,7 +329,7 @@
     declined with receipts, <b style="color:var(--ink)">only about 1 in 8 answers that actually
     reached you carried any error, and only about 1 in 29 was flatly wrong</b>. Without it, about 7 in 10 were.</p>
     <p class="foot">The engines are exactly as wrong as before; the caught claims arrive as labeled
-    declines instead of answers. Cost of the record: a small multiple on tokens alone, fractions of a cent per answer, and grounded engines bill far more for search than token logging captures. The
+    declines instead of answers. The record carries a cost: a small multiple on tokens alone, fractions of a cent per answer, and grounded engines bill far more for search than token logging captures. The
     effect held across every vendor and price tier tested, frontier models included.</p>
   </div>
 </section>
@@ -350,7 +350,7 @@
          data-color-scheme="no-preference: light; light: light; dark: light;"
          target="_blank" rel="noopener"
          aria-label="Star painted-porch/marcus on GitHub">Put it on the record</a>
-      <span class="cta-note">One click, opens GitHub in a new tab — the public vote that keeps open work alive.</span>
+      <span class="cta-note">One click opens GitHub in a new tab. It is the public vote that keeps open work alive.</span>
     </div>
     <a class="cta-next" href="not-a-fact-checker.html" data-goatcounter-click="receipts-nafc">
       <span class="lead-in">If you read one more thing</span>

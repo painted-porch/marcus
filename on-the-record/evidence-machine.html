@@ -110,11 +110,11 @@
 <div class="wrap">
   <div class="eyebrow">On the Record · how the checkpoint works</div>
   <h1>The AI keeps making things up.<br><span class="grad">The machine sorts the fakes out.</span></h1>
-  <p class="dek">The search engine sprays out answers, and <b>about half carry a fabricated or dead link</b> — that never changes. The checkpoint fetches the page each answer cites and <b>sorts</b>: real evidence is delivered, fakes are caught. So among the answers that reach you, <b>zero</b> have a fake link — not because the AI improved, but because the fakes got caught.</p>
+  <p class="dek">The search engine sprays out answers, and <b>about half carry a fabricated or dead link</b>. That never changes. The checkpoint fetches the page each answer cites and <b>sorts</b>: real evidence is delivered, and fakes are caught. So among the answers that reach you, <b>zero</b> have a fake link, not because the AI improved, but because the fakes got caught.</p>
 
   <div class="counters">
     <div class="counter in"><div class="n" id="cIn">0</div><div class="lbl">answers the AI produced</div></div>
-    <div class="counter out"><div class="n" id="cOut">0</div><div class="lbl">delivered to you &mdash; <b style="color:var(--green)">0 with a fake link</b></div></div>
+    <div class="counter out"><div class="n" id="cOut">0</div><div class="lbl">delivered to you: <b style="color:var(--green)">0 with a fake link</b></div></div>
     <div class="counter caught"><div class="n" id="cCaught">0</div><div class="lbl">fabricated / dead links caught</div></div>
   </div>
 
@@ -122,7 +122,7 @@
     <div class="rail">
       <div class="zone engine">
         <div class="ztag">AI search engine</div>
-        <div class="engine-mouth">Answers a question, cites a link.<br><b>You cannot tell</b> which of its links are real by looking — half aren't.</div>
+        <div class="engine-mouth">It answers a question and cites a link.<br><b>You cannot tell</b> which of its links are real just by looking, and half of them are not.</div>
       </div>
       <div class="zone scanner">
         <div class="ztag">The checkpoint &middot; fetches the cited page</div>
@@ -136,11 +136,11 @@
 
   <div class="trays">
     <div class="tray delivered">
-      <div class="thead"><span class="ztag">Delivered &mdash; with receipts</span><span class="tnum" id="dNum">0</span></div>
+      <div class="thead"><span class="ztag">Delivered, with receipts</span><span class="tnum" id="dNum">0</span></div>
       <div class="tgrid" id="deliveredTray"></div>
     </div>
     <div class="tray caught">
-      <div class="thead"><span class="ztag">Caught &mdash; declined</span><span class="tnum" id="cNum">0</span></div>
+      <div class="thead"><span class="ztag">Caught, declined</span><span class="tnum" id="cNum">0</span></div>
       <div class="tgrid" id="caughtTray"></div>
     </div>
   </div>
@@ -163,21 +163,21 @@
 (function(){
   var DATA=[
     {t:"Rainfall totals for New England last week", u:"bostonglobe.com/metro/weather", ok:true},
-    {t:"City council vote on the housing ordinance", u:"citywire.news/vote-2025-housing", ok:false, why:"404 — page not found"},
+    {t:"City council vote on the housing ordinance", u:"citywire.news/vote-2025-housing", ok:false, why:"404: page not found"},
     {t:"Quarterly earnings for the chipmaker", u:"reuters.com/markets/earnings", ok:true},
-    {t:"Who won the regional spelling bee", u:"heraldpress.org/schools/bee", ok:false, why:"fabricated — URL never existed"},
+    {t:"Who won the regional spelling bee", u:"heraldpress.org/schools/bee", ok:false, why:"fabricated: URL never existed"},
     {t:"Recall notice on the infant car seat", u:"nhtsa.gov/recalls/2025", ok:true},
-    {t:"Statement from the hospital system", u:"statnews.com/health/statement", ok:false, why:"mismatch — excerpt not on page"},
-    {t:"Court ruling on the zoning appeal", u:"lawreporter.com/zoning-appeal", ok:false, why:"404 — page not found"},
+    {t:"Statement from the hospital system", u:"statnews.com/health/statement", ok:false, why:"mismatch: excerpt not on page"},
+    {t:"Court ruling on the zoning appeal", u:"lawreporter.com/zoning-appeal", ok:false, why:"404: page not found"},
     {t:"New transit line opening date", u:"transitwire.org/line-opening", ok:true},
     {t:"University research on sleep", u:"nature.com/articles/sleep-study", ok:true},
-    {t:"Wildfire containment update", u:"kqed.org/news/wildfire", ok:false, why:"fabricated — URL never existed"},
+    {t:"Wildfire containment update", u:"kqed.org/news/wildfire", ok:false, why:"fabricated: URL never existed"},
     {t:"School board budget decision", u:"edweek.org/budget-vote", ok:true},
-    {t:"Interview with the retiring CEO", u:"businessdaily.co/ceo-exit", ok:false, why:"mismatch — different company"},
+    {t:"Interview with the retiring CEO", u:"businessdaily.co/ceo-exit", ok:false, why:"mismatch: different company"},
     {t:"Air quality readings downtown", u:"airnow.gov/city/readings", ok:true},
-    {t:"Election certification timeline", u:"voteinfo.news/certification", ok:false, why:"404 — page not found"},
+    {t:"Election certification timeline", u:"voteinfo.news/certification", ok:false, why:"404: page not found"},
     {t:"Museum exhibit closing this month", u:"artsjournal.org/exhibit", ok:true},
-    {t:"Highway reopening after repairs", u:"roadwatch.io/highway-7", ok:false, why:"fabricated — URL never existed"}
+    {t:"Highway reopening after repairs", u:"roadwatch.io/highway-7", ok:false, why:"fabricated: URL never existed"}
   ];
   var stage=document.getElementById('stage'),lens=document.getElementById('lens'),lensMark=document.getElementById('lensMark'),
       probe=document.getElementById('probe'),deliveredTray=document.getElementById('deliveredTray'),caughtTray=document.getElementById('caughtTray'),
