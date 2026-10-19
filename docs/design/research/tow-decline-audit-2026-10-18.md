@@ -2,7 +2,7 @@
 
 # On the Record: the decline audit (false-decline rate)
 
-*2026-10-18. A human audit of the citations Marcus declined in the full-200 run, measuring the one axis the main readout did not: recall.*
+*2026-10-18. A human audit of the citations Marcus declined in the full-200 run, measuring the one axis the main readout did not: whether the declines themselves were warranted.*
 
 ## What is this, briefly
 
@@ -15,7 +15,8 @@ When the verifier could not confirm a citation, Marcus declined it: it withheld 
 The full-200 readout measured two things: how often a delivered answer was still wrong (precision), and how often Marcus declined (coverage).
 It never measured whether the declines were correct.
 A decline is the right call when the citation really was bad, but it is a mistake when the citation was good and the verifier refused it anyway.
-A good citation wrongly refused is a false decline, and the share of declines that are false is the recall cost of a strict verifier.
+A good citation wrongly refused is a false decline, and the share of declines that are false is the false-decline rate.
+This is a decline-conditioned quantity, the probability that a citation was good given that Marcus declined it, so it is not recall itself; the connection to recall, which also needs the delivered citations, is worked out in the results.
 This audit measures that number for the first time.
 
 ## Method
@@ -52,20 +53,26 @@ The pattern is clear: the dominant cause of false declines is the verifier's fet
 ## What this changes, and what it does not
 
 It does not change the delivered-answer results, and it corroborates them: the delivered set is trustworthy.
-It adds the recall cost the study was missing: the 82% decline rate is not all correct refusals, because about 1 in 10 of the declines with a citation were good answers lost.
+It adds the false-decline measurement the study was missing: the 82% decline rate is not all correct refusals, because about 1 in 10 of the declines with a citation were good answers lost.
+That 10% is the false-decline rate, not recall, because recall is the share of all good citations that were delivered rather than withheld, so it also needs the delivered side.
+Of the 141 delivered answers, roughly 124 to 135 carried good citations (from the 12.1% strict and 4.3% adjudicated delivered-wrong rates), set against the roughly 50 good citations wrongly withheld, which puts a rough recall near 124 / (124 + 50), about 71%.
+That recall figure combines two separate estimates and should be read as illustrative magnitude, not an exact number.
 It refines the "sorting, not fixing" framing rather than weakening it, because the sorting errs in both directions: a little wrong gets through, and some right gets blocked.
-The same verifier runs in Condition C, so the recall cost applies there too.
+The same verifier runs in Condition C, but this audit sampled only Condition B's declines; because Condition C reuses Condition A's engine answers while Condition B draws fresh ones, the mix of citations among C's declines can differ, so the 10% cannot be assumed for C without separately sampling C's declines.
 
 ## The fix
 
 A more robust fetcher (follow redirects including grounding-redirect wrappers, handle 403s and soft paywalls gracefully, render pages that need JavaScript) and a fuzzier quote match (tolerate paraphrase and truncation) would recover most of the roughly 50 wrongly-withheld citations.
-Crucially, recovering them adds no fabrications, because these are citations that are already correct.
-This is the top item for the verifier's next version, and it would raise coverage without touching delivered quality.
+Recovering those five already-adjudicated citations adds no fabrications, because they are known to be correct.
+The broader rules are a different matter: looser redirect, fetch, and quote-match logic applies to every future citation, including bad ones that currently fail closed, and a fuzzier quote match could accept a wrong page whose text merely resembles the quote.
+So the zero-new-fabrication claim is safe only for the already-adjudicated cases; any such relaxation has to be re-measured against precision and fabrication before it can be said to raise coverage without touching delivered quality.
+This is the top item for the verifier's next version (#752), to be evaluated against delivered quality after the change rather than assumed free.
 
 ## Honest limitations
 
 The judge was the study's author, not an independent reviewer, which is the independence gap the methodology review named; a second reviewer would strengthen this.
 The sample is 50 declines, so the interval is wide ([4.3%, 21.4%]).
+The recall figure is derived by combining the delivered-good count with the extrapolated withheld-good count, so it carries the uncertainty of both and is offered only as a rough magnitude.
 The "can a reader trust and verify this" standard is a judgment call, which is why the borderline band and both rates are reported.
 
 ## Data handling
