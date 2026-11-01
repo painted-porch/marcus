@@ -17,7 +17,11 @@ from mcp.types import Tool
 from src.core.models import Task, TaskStatus, WorkerStatus
 
 from ..audit import get_audit_logger
-from ..coordinator.eligibility import REFUSALS_COLLECTION
+from ..coordinator.eligibility import (
+    LEGACY_REFUSALS_COLLECTION,
+    public_fields,
+    refusals_collection,
+)
 
 
 async def get_usage_report(
@@ -132,9 +136,10 @@ def _case_tasks(case_id: str, state: Any) -> List[Task]:
 
 # Refusals are read back from persistence as well as memory (issue
 # #740), so a bundle exported after a server restart still carries them.
-# The persistence query scans newest-first up to a limit before
-# filtering, so the limit must comfortably exceed one board's refusals.
-REFUSAL_QUERY_LIMIT = 50_000
+# Records live in one collection per task, so an export reads only its
+# own tasks' collections (an index lookup) instead of scanning the board.
+REFUSAL_ROWS_PER_TASK = 10_000
+LEGACY_REFUSAL_SCAN_LIMIT = 50_000
 
 
 async def _persisted_refusals(state: Any, task_ids: Set[str]) -> List[Dict[str, Any]]:
@@ -157,14 +162,20 @@ async def _persisted_refusals(state: Any, task_ids: Set[str]) -> List[Dict[str, 
     query = getattr(persistence, "query", None)
     if not inspect.iscoroutinefunction(query) or not task_ids:
         return []
-    rows = await query(
-        REFUSALS_COLLECTION,
+    rows: List[Dict[str, Any]] = []
+    for task_id in sorted(task_ids):
+        found = await query(refusals_collection(task_id), limit=REFUSAL_ROWS_PER_TASK)
+        rows.extend(public_fields(row) for row in found)
+    # Rows written by the first version live in one flat collection until
+    # a later refusal migrates them; read them too so an upgraded server
+    # exports its history.
+    legacy = await query(
+        LEGACY_REFUSALS_COLLECTION,
         lambda r: r.get("task_id") in task_ids,
-        limit=REFUSAL_QUERY_LIMIT,
+        limit=LEGACY_REFUSAL_SCAN_LIMIT,
     )
-    return [
-        {k: v for k, v in row.items() if not str(k).startswith("_")} for row in rows
-    ]
+    rows.extend(public_fields(row) for row in legacy)
+    return rows
 
 
 def _merge_refusals(

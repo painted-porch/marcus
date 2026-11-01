@@ -14,7 +14,7 @@ tested separately.
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import Mock
 
 import pytest
@@ -22,10 +22,12 @@ import pytest
 from src.core.models import Priority, Task, TaskStatus, WorkerStatus
 from src.core.persistence import MemoryPersistence, Persistence
 from src.marcus_mcp.coordinator.eligibility import (
-    REFUSALS_COLLECTION,
+    LEGACY_REFUSALS_COLLECTION,
     drain_refusal_writes,
     filter_eligible_tasks,
     is_eligible,
+    refusal_key,
+    refusals_collection,
 )
 
 pytestmark = pytest.mark.unit
@@ -335,18 +337,60 @@ class TestFilterEligibleTasks:
         assert result == [implement]
 
 
+class _GatedPersistence:
+    """A persistence layer whose reads can be held open or made to fail once.
+
+    Wraps a memory backend so tests can reproduce the two orderings that
+    matter: a slow carry read while more refusals arrive, and a first
+    write that fails before the carry completed.
+    """
+
+    def __init__(self) -> None:
+        self.inner = Persistence(backend=MemoryPersistence())
+        self.gate = asyncio.Event()
+        self.gate.set()
+        self.fail_retrieve_once = False
+        self.store_calls = 0
+
+    async def store(self, collection: str, key: str, data: dict) -> None:
+        self.store_calls += 1
+        await self.inner.store(collection, key, data)
+
+    async def retrieve(self, collection: str, key: str) -> Any:
+        await self.gate.wait()
+        if self.fail_retrieve_once:
+            self.fail_retrieve_once = False
+            raise RuntimeError("database is locked")
+        return await self.inner.retrieve(collection, key)
+
+    async def query(
+        self, collection: str, filter_func: Any = None, limit: int = 100
+    ) -> Any:
+        return await self.inner.query(collection, filter_func, limit)
+
+    async def delete(self, collection: str, key: str) -> None:
+        await self.inner.delete(collection, key)
+
+
 class TestRefusalPersistence:
     """Test suite for refusals surviving a server restart (issue #740).
 
-    In-memory refusals vanish when the server restarts, and the audit
-    bundle exported afterwards silently loses the evidence that nobody
-    verified their own claim. Each first-seen refusal is written through
-    the persistence layer under a deterministic key, repeats update the
-    persisted count, and a fresh process continues the count from the
-    persisted record.
+    Refusals are written through the persistence layer by one serialized
+    writer per server state: writes for a record never interleave, the
+    prior process's count is carried in exactly once and only after a
+    successful read, repeats coalesce into the latest count, and a
+    failed write is retried rather than silently dropped.
     """
 
-    def _verify_setup(self) -> tuple:
+    def _verify_setup(self) -> Tuple[WorkerStatus, Task, Mock]:
+        """Build an author worker, a verify task it may not take, and state.
+
+        Returns
+        -------
+        Tuple[WorkerStatus, Task, Mock]
+            The author, the verify task, and a state with an empty
+            in-memory refusal list and a gated persistence layer.
+        """
         find = _make_task(
             "find-1", "find", status=TaskStatus.DONE, assigned_to="finder-pplx-1"
         )
@@ -354,18 +398,27 @@ class TestRefusalPersistence:
         author = _make_worker("finder-pplx-1", vendor="perplexity")
         state = _make_state([find, verify], [author])
         state.eligibility_refusals = []
-        state.persistence = Persistence(backend=MemoryPersistence())
+        state.persistence = _GatedPersistence()
         return author, verify, state
+
+    async def _rows(
+        self, state: Mock, task_id: str = "verify-1"
+    ) -> List[Dict[str, Any]]:
+        """Read the persisted refusals for one task."""
+        rows: List[Dict[str, Any]] = await state.persistence.query(
+            refusals_collection(task_id), limit=10
+        )
+        return rows
 
     @pytest.mark.asyncio
     async def test_first_refusal_is_written_through_persistence(self) -> None:
-        """A new refusal lands in the persisted collection with its fields."""
+        """A new refusal lands in the task's collection with its fields."""
         author, verify, state = self._verify_setup()
 
         filter_eligible_tasks(author, [verify], state)
         await drain_refusal_writes(state)
 
-        rows = await state.persistence.query(REFUSALS_COLLECTION, limit=10)
+        rows = await self._rows(state)
         assert len(rows) == 1
         row = rows[0]
         assert row["agent_id"] == "finder-pplx-1"
@@ -376,8 +429,8 @@ class TestRefusalPersistence:
         assert row["first_refused_at"] <= row["last_refused_at"]
 
     @pytest.mark.asyncio
-    async def test_repeat_refusal_updates_the_persisted_count(self) -> None:
-        """Polling again updates one persisted record; it never appends a second."""
+    async def test_repeat_refusals_coalesce_into_the_latest_count(self) -> None:
+        """Polling again updates one persisted record to the latest count."""
         author, verify, state = self._verify_setup()
 
         filter_eligible_tasks(author, [verify], state)
@@ -385,7 +438,7 @@ class TestRefusalPersistence:
         filter_eligible_tasks(author, [verify], state)
         await drain_refusal_writes(state)
 
-        rows = await state.persistence.query(REFUSALS_COLLECTION, limit=10)
+        rows = await self._rows(state)
         assert len(rows) == 1
         assert rows[0]["count"] == 3
 
@@ -396,9 +449,7 @@ class TestRefusalPersistence:
         filter_eligible_tasks(author, [verify], state)
         filter_eligible_tasks(author, [verify], state)
         await drain_refusal_writes(state)
-        persisted_first = (
-            await state.persistence.query(REFUSALS_COLLECTION, limit=10)
-        )[0]["first_refused_at"]
+        persisted_first = (await self._rows(state))[0]["first_refused_at"]
 
         restarted = _make_state(state.project_tasks, [author])
         restarted.eligibility_refusals = []
@@ -406,11 +457,166 @@ class TestRefusalPersistence:
         filter_eligible_tasks(author, [verify], restarted)
         await drain_refusal_writes(restarted)
 
-        rows = await restarted.persistence.query(REFUSALS_COLLECTION, limit=10)
+        rows = await self._rows(restarted)
         assert len(rows) == 1
         assert rows[0]["count"] == 3
         assert rows[0]["first_refused_at"] == persisted_first
         assert restarted.eligibility_refusals[0]["count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_refusals_arriving_during_a_slow_carry_keep_the_prior_count(
+        self,
+    ) -> None:
+        """Codex finding on PR #757: a second poll during the carry read must not win.
+
+        With a persisted count of 100 and two new refusals while the first
+        read is still pending, the record must end at 102 with the original
+        first-seen time, not at 2.
+        """
+        author, verify, state = self._verify_setup()
+        reason_probe_state = _make_state(state.project_tasks, [author])
+        reason_probe_state.eligibility_refusals = []
+        filter_eligible_tasks(author, [verify], reason_probe_state)
+        reason = reason_probe_state.eligibility_refusals[0]["reason"]
+        key = refusal_key(author.worker_id, verify.id, reason)
+        await state.persistence.inner.store(
+            refusals_collection(verify.id),
+            key,
+            {
+                "agent_id": author.worker_id,
+                "task_id": verify.id,
+                "task_type": "verify",
+                "reason": reason,
+                "count": 100,
+                "first_refused_at": "2026-10-14T01:00:00+00:00",
+                "last_refused_at": "2026-10-14T01:30:00+00:00",
+            },
+        )
+        state.persistence.gate.clear()  # hold every read open
+
+        filter_eligible_tasks(author, [verify], state)
+        await asyncio.sleep(0)  # let the writer start and park on the read
+        filter_eligible_tasks(author, [verify], state)
+        state.persistence.gate.set()
+        await drain_refusal_writes(state)
+
+        rows = await self._rows(state)
+        assert rows[0]["count"] == 102
+        assert rows[0]["first_refused_at"] == "2026-10-14T01:00:00+00:00"
+        assert state.eligibility_refusals[0]["count"] == 102
+
+    @pytest.mark.asyncio
+    async def test_failed_first_write_retries_the_carry(self) -> None:
+        """A failed read before the carry must not disable the carry.
+
+        If the first attempt fails, the next attempt still reads the prior
+        process's count; otherwise one transient error overwrites 5 with 1.
+        """
+        author, verify, state = self._verify_setup()
+        probe = _make_state(state.project_tasks, [author])
+        probe.eligibility_refusals = []
+        filter_eligible_tasks(author, [verify], probe)
+        reason = probe.eligibility_refusals[0]["reason"]
+        await state.persistence.inner.store(
+            refusals_collection(verify.id),
+            refusal_key(author.worker_id, verify.id, reason),
+            {
+                "agent_id": author.worker_id,
+                "task_id": verify.id,
+                "task_type": "verify",
+                "reason": reason,
+                "count": 5,
+                "first_refused_at": "2026-10-14T01:00:00+00:00",
+                "last_refused_at": "2026-10-14T01:30:00+00:00",
+            },
+        )
+        state.persistence.fail_retrieve_once = True
+
+        filter_eligible_tasks(author, [verify], state)
+        await drain_refusal_writes(state)
+
+        rows = await self._rows(state)
+        assert rows[0]["count"] == 6
+        assert rows[0]["first_refused_at"] == "2026-10-14T01:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_legacy_flat_collection_row_is_carried_and_migrated(self) -> None:
+        """Codex finding on PR #758: rows written by the first version still count.
+
+        The first version kept every refusal in one flat collection. A server
+        upgraded in place must continue that history: the carry reads the
+        legacy row when the per-task collection has none, and the legacy row
+        is removed once the per-task record is written.
+        """
+        author, verify, state = self._verify_setup()
+        probe = _make_state(state.project_tasks, [author])
+        probe.eligibility_refusals = []
+        filter_eligible_tasks(author, [verify], probe)
+        reason = probe.eligibility_refusals[0]["reason"]
+        key = refusal_key(author.worker_id, verify.id, reason)
+        await state.persistence.inner.store(
+            LEGACY_REFUSALS_COLLECTION,
+            key,
+            {
+                "agent_id": author.worker_id,
+                "task_id": verify.id,
+                "task_type": "verify",
+                "reason": reason,
+                "count": 5,
+                "first_refused_at": "2026-10-14T01:00:00+00:00",
+                "last_refused_at": "2026-10-14T01:30:00+00:00",
+            },
+        )
+
+        filter_eligible_tasks(author, [verify], state)
+        await drain_refusal_writes(state)
+
+        rows = await self._rows(state)
+        assert rows[0]["count"] == 6
+        assert rows[0]["first_refused_at"] == "2026-10-14T01:00:00+00:00"
+        assert (
+            await state.persistence.inner.retrieve(LEGACY_REFUSALS_COLLECTION, key)
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_null_first_seen_in_the_prior_row_is_ignored(self) -> None:
+        """A prior row with no first-seen time must not produce the string 'None'."""
+        author, verify, state = self._verify_setup()
+        probe = _make_state(state.project_tasks, [author])
+        probe.eligibility_refusals = []
+        filter_eligible_tasks(author, [verify], probe)
+        reason = probe.eligibility_refusals[0]["reason"]
+        await state.persistence.inner.store(
+            refusals_collection(verify.id),
+            refusal_key(author.worker_id, verify.id, reason),
+            {
+                "agent_id": author.worker_id,
+                "task_id": verify.id,
+                "task_type": "verify",
+                "reason": reason,
+                "count": 2,
+                "first_refused_at": None,
+                "last_refused_at": None,
+            },
+        )
+
+        filter_eligible_tasks(author, [verify], state)
+        await drain_refusal_writes(state)
+
+        rows = await self._rows(state)
+        assert rows[0]["first_refused_at"].startswith("20")
+        assert rows[0]["count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_in_memory_record_carries_no_private_bookkeeping(self) -> None:
+        """The audit record stays a pure fact; writer state lives elsewhere."""
+        author, verify, state = self._verify_setup()
+
+        filter_eligible_tasks(author, [verify], state)
+        await drain_refusal_writes(state)
+
+        assert not any(str(k).startswith("_") for k in state.eligibility_refusals[0])
 
     @pytest.mark.asyncio
     async def test_different_reasons_persist_as_separate_records(self) -> None:
@@ -423,8 +629,21 @@ class TestRefusalPersistence:
         filter_eligible_tasks(same_vendor, [verify], state)
         await drain_refusal_writes(state)
 
-        rows = await state.persistence.query(REFUSALS_COLLECTION, limit=10)
+        rows = await self._rows(state)
         assert {r["agent_id"] for r in rows} == {"finder-pplx-1", "verifier-pplx-2"}
+
+    @pytest.mark.asyncio
+    async def test_drain_with_timeout_returns_while_a_write_is_stuck(self) -> None:
+        """An orderly shutdown waits a bounded time, never forever."""
+        author, verify, state = self._verify_setup()
+        state.persistence.gate.clear()
+
+        filter_eligible_tasks(author, [verify], state)
+        await drain_refusal_writes(state, timeout=0.05)
+
+        state.persistence.gate.set()
+        await drain_refusal_writes(state)
+        assert (await self._rows(state))[0]["count"] == 1
 
     def test_no_persistence_on_state_still_records_in_memory(self) -> None:
         """A state without a persistence layer keeps today's behaviour."""
