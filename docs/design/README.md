@@ -7,6 +7,8 @@ They are the context for the `feat/system-of-record` branch and the issue that t
 Read them in the order below; each one builds on the one before it.
 If you have ten minutes, read [system-of-record-brief.md](system-of-record-brief.md) first: it is the short version of document 5.
 The same brief with the first pilot result added is [system-of-record-brief-with-pilot-result.md](system-of-record-brief-with-pilot-result.md); the readout itself is in [research/](research/).
+The full-200 readout is [research/tow-full-200-readout-2026-10-16.md](research/tow-full-200-readout-2026-10-16.md).
+The as-built reference, mapping each enforced rule to the code that enforces it, is [on-the-record-as-built.md](on-the-record-as-built.md).
 
 | Order | Document | What it is | Published page |
 |---|---|---|---|
