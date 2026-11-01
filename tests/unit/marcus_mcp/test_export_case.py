@@ -20,7 +20,7 @@ import pytest
 
 from src.core.models import Priority, Task, TaskStatus, WorkerStatus
 from src.core.persistence import MemoryPersistence, Persistence
-from src.marcus_mcp.coordinator.eligibility import REFUSALS_COLLECTION, refusal_key
+from src.marcus_mcp.coordinator.eligibility import refusal_key, refusals_collection
 from src.marcus_mcp.tools.audit_tools import export_case
 
 pytestmark = pytest.mark.unit
@@ -318,12 +318,12 @@ class TestRefusalsSurviveRestart:
         persistence = Persistence(backend=MemoryPersistence())
         reason = "author of the claim under check"
         await persistence.store(
-            REFUSALS_COLLECTION,
+            refusals_collection(verify_id),
             refusal_key("finder-pplx-1", verify_id, reason),
             _persisted("finder-pplx-1", verify_id, reason, count=7),
         )
         await persistence.store(
-            REFUSALS_COLLECTION,
+            refusals_collection("verify-other-case"),
             refusal_key("finder-pplx-1", "verify-other-case", reason),
             _persisted("finder-pplx-1", "verify-other-case", reason, count=2),
         )
@@ -357,7 +357,7 @@ class TestRefusalsSurviveRestart:
         ]
         persistence = Persistence(backend=MemoryPersistence())
         await persistence.store(
-            REFUSALS_COLLECTION,
+            refusals_collection(verify_id),
             refusal_key("finder-pplx-1", verify_id, reason),
             _persisted("finder-pplx-1", verify_id, reason, count=5),
         )

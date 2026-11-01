@@ -70,6 +70,9 @@ from src.cost_tracking.token_tracker import token_tracker  # noqa: E402
 from src.integrations.ai_analysis_engine import AIAnalysisEngine  # noqa: E402
 from src.integrations.kanban_factory import KanbanFactory  # noqa: E402
 from src.integrations.kanban_interface import KanbanInterface  # noqa: E402
+from src.marcus_mcp.coordinator.eligibility import (  # noqa: E402
+    drain_refusal_writes,
+)
 from src.marcus_mcp.handlers import handle_tool_call  # noqa: E402
 from src.marcus_mcp.tool_groups import get_tools_for_endpoint  # noqa: E402
 from src.monitoring.assignment_monitor import AssignmentMonitor  # noqa: E402
@@ -528,6 +531,10 @@ class MarcusServer:
             # Stop lease monitor if running
             if self.lease_monitor:
                 await self.lease_monitor.stop()
+
+            # Refusal writes are scheduled on the loop (issue #740); give
+            # them a bounded chance to reach disk before the process exits.
+            await drain_refusal_writes(self, timeout=5.0)
 
             # Close realtime log
             if hasattr(self, "realtime_log") and self.realtime_log:
