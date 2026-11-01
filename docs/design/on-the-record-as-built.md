@@ -82,7 +82,7 @@ Run the free rehearsal in [REPRODUCING.md](../../REPRODUCING.md) (fake engine, z
 
 ## Known gaps
 
-Refusal durability across server restarts is tracked in issue #740.
+Refusals are written through the persistence layer (collection `eligibility_refusals` in `data/marcus.db`) as they happen and read back by `export_case`, so they survive a server restart (issue #740); the October 2026 full-200 bundles predate that fix and carry empty refusal lists.
 Full board citizenship for experiment workers is tracked in issue #741.
 
 ## Related

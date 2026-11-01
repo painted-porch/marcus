@@ -19,6 +19,8 @@ from unittest.mock import Mock
 import pytest
 
 from src.core.models import Priority, Task, TaskStatus, WorkerStatus
+from src.core.persistence import MemoryPersistence, Persistence
+from src.marcus_mcp.coordinator.eligibility import REFUSALS_COLLECTION, refusal_key
 from src.marcus_mcp.tools.audit_tools import export_case
 
 pytestmark = pytest.mark.unit
@@ -274,3 +276,107 @@ class TestExportCase:
         assert cost["agent_id"] == "finder-pplx-1"
         assert cost["task_id"] == "t-find"
         assert cost["input_tokens"] == 120
+
+
+def _verify_task_id(state: Mock) -> str:
+    """The case's verify task id, read from the fixture rather than assumed."""
+    return next(
+        t.id
+        for t in state.project_tasks
+        if t.task_type == "verify" and f"case:{CASE}" in (t.labels or [])
+    )
+
+
+def _persisted(agent_id: str, task_id: str, reason: str, count: int) -> Dict[str, Any]:
+    """One refusal record as the persistence layer would hold it."""
+    return {
+        "agent_id": agent_id,
+        "task_id": task_id,
+        "task_type": "verify",
+        "reason": reason,
+        "count": count,
+        "first_refused_at": "2026-10-14T01:00:00+00:00",
+        "last_refused_at": "2026-10-14T01:30:00+00:00",
+    }
+
+
+class TestRefusalsSurviveRestart:
+    """Test suite for refusals read back from persistence (issue #740).
+
+    The October 2026 full run exported 200 bundles with empty refusal
+    lists because the export ran after a server restart. A bundle must
+    carry persisted refusals when memory is empty, and a live server
+    must export the same list it does today.
+    """
+
+    @pytest.mark.asyncio
+    async def test_persisted_refusals_appear_when_memory_is_empty(self) -> None:
+        """After a restart the bundle still names who was refused and why."""
+        state = _closed_case_state()
+        state.eligibility_refusals = []
+        verify_id = _verify_task_id(state)
+        persistence = Persistence(backend=MemoryPersistence())
+        reason = "author of the claim under check"
+        await persistence.store(
+            REFUSALS_COLLECTION,
+            refusal_key("finder-pplx-1", verify_id, reason),
+            _persisted("finder-pplx-1", verify_id, reason, count=7),
+        )
+        await persistence.store(
+            REFUSALS_COLLECTION,
+            refusal_key("finder-pplx-1", "verify-other-case", reason),
+            _persisted("finder-pplx-1", "verify-other-case", reason, count=2),
+        )
+        state.persistence = persistence
+
+        bundle = await export_case(CASE, state)
+
+        assert len(bundle["refusals"]) == 1
+        refusal = bundle["refusals"][0]
+        assert refusal["agent_id"] == "finder-pplx-1"
+        assert refusal["task_id"] == verify_id
+        assert refusal["count"] == 7
+        assert "_key" not in refusal
+
+    @pytest.mark.asyncio
+    async def test_live_and_persisted_refusals_merge_without_duplicates(self) -> None:
+        """The same refusal held in memory and on disk is one entry, highest count."""
+        state = _closed_case_state()
+        verify_id = _verify_task_id(state)
+        reason = "author of the claim under check"
+        state.eligibility_refusals = [
+            {
+                "agent_id": "finder-pplx-1",
+                "task_id": verify_id,
+                "task_type": "verify",
+                "reason": reason,
+                "count": 2,
+                "first_refused_at": "2026-10-14T01:10:00+00:00",
+                "last_refused_at": "2026-10-14T01:40:00+00:00",
+            }
+        ]
+        persistence = Persistence(backend=MemoryPersistence())
+        await persistence.store(
+            REFUSALS_COLLECTION,
+            refusal_key("finder-pplx-1", verify_id, reason),
+            _persisted("finder-pplx-1", verify_id, reason, count=5),
+        )
+        state.persistence = persistence
+
+        bundle = await export_case(CASE, state)
+
+        assert len(bundle["refusals"]) == 1
+        refusal = bundle["refusals"][0]
+        assert refusal["count"] == 5
+        assert refusal["first_refused_at"] == "2026-10-14T01:00:00+00:00"
+        assert refusal["last_refused_at"] == "2026-10-14T01:40:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_state_without_persistence_exports_memory_only(self) -> None:
+        """A server with no persistence layer behaves exactly as before."""
+        state = _closed_case_state()
+        state.persistence = None
+
+        bundle = await export_case(CASE, state)
+
+        assert len(bundle["refusals"]) == 1

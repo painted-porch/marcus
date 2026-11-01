@@ -26,9 +26,12 @@ Both assignment entry points (``_find_optimal_task_original_logic`` in
 obvious function to call and refusals are logged in one place.
 """
 
+import asyncio
+import hashlib
+import inspect
 import logging
 from datetime import datetime, timezone
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from src.core.models import Task, TaskStatus, WorkerStatus
 
@@ -177,6 +180,131 @@ def filter_eligible_tasks(
     return eligible
 
 
+# Refusals must survive a server restart (issue #740): the October 2026
+# full run exported 200 bundles with empty refusal lists because the
+# export ran after a restart. Each first-seen refusal is written through
+# the persistence layer under a deterministic key; repeats update the
+# same record; a fresh process resumes the count from it. The write is
+# scheduled on the running loop because both assignment entry points
+# call the filter synchronously, and it is best-effort: a state without
+# a persistence layer, or no running loop, keeps today's in-memory path.
+REFUSALS_COLLECTION = "eligibility_refusals"
+
+
+def refusal_key(agent_id: str, task_id: str, reason: str) -> str:
+    """Build the persistence key for one (agent, task, reason) refusal.
+
+    Parameters
+    ----------
+    agent_id : str
+        The refused worker.
+    task_id : str
+        The task that was not offered.
+    reason : str
+        The human-readable reason from :func:`is_eligible`.
+
+    Returns
+    -------
+    str
+        ``"<task_id>:<agent_id>:<reason digest>"``; the same triple
+        always maps to the same key, which is what makes repeats update
+        rather than append.
+    """
+    digest = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:12]
+    return f"{task_id}:{agent_id}:{digest}"
+
+
+async def _persist_refusal(persistence: Any, record: Dict[str, Any]) -> None:
+    """Write one refusal through persistence, continuing any prior count.
+
+    Parameters
+    ----------
+    persistence : Any
+        The server's persistence layer (``store`` and ``retrieve``).
+    record : Dict[str, Any]
+        The in-memory refusal record; its ``count`` and
+        ``first_refused_at`` are raised to the persisted values when a
+        prior process already recorded this refusal, so memory and disk
+        agree afterwards.
+    """
+    key = refusal_key(record["agent_id"], record["task_id"], record["reason"])
+    # Carry a prior process's count into this record exactly once. The
+    # flag is set before the first await so concurrent writes for the
+    # same record (one per poll) cannot each add the prior count.
+    carry = not record.get("_carried")
+    record["_carried"] = True
+    prior = await persistence.retrieve(REFUSALS_COLLECTION, key) if carry else None
+    if prior:
+        record["count"] = int(record["count"]) + int(prior.get("count", 0))
+        record["first_refused_at"] = min(
+            str(prior.get("first_refused_at", record["first_refused_at"])),
+            record["first_refused_at"],
+        )
+    await persistence.store(
+        REFUSALS_COLLECTION,
+        key,
+        {k: v for k, v in record.items() if not str(k).startswith("_")},
+    )
+
+
+def _schedule_refusal_write(state: Any, record: Dict[str, Any]) -> None:
+    """Schedule the persistence write for a refusal, if it can be done.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state; needs an awaitable ``persistence`` and a
+        running event loop, otherwise nothing is scheduled.
+    record : Dict[str, Any]
+        The in-memory refusal record.
+    """
+    persistence = getattr(state, "persistence", None)
+    store = getattr(persistence, "store", None)
+    retrieve = getattr(persistence, "retrieve", None)
+    if not (
+        inspect.iscoroutinefunction(store) and inspect.iscoroutinefunction(retrieve)
+    ):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    pending = getattr(state, "_refusal_writes", None)
+    if not isinstance(pending, set):
+        pending = set()
+        try:
+            state._refusal_writes = pending
+        except AttributeError:
+            pass
+    write = loop.create_task(_persist_refusal(persistence, record))
+    pending.add(write)
+    write.add_done_callback(pending.discard)
+    write.add_done_callback(_report_write_failure)
+
+
+def _report_write_failure(write: "asyncio.Task[None]") -> None:
+    """Log a failed refusal write; the in-memory record still stands."""
+    if write.cancelled():
+        return
+    error = write.exception()
+    if error is not None:
+        logger.warning("[eligibility] refusal write failed: %s", error)
+
+
+async def drain_refusal_writes(state: Any) -> None:
+    """Wait for every scheduled refusal write on ``state`` to finish.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state. Used by tests and by an orderly shutdown so
+        no refusal is lost between the offer and the write.
+    """
+    pending = getattr(state, "_refusal_writes", None)
+    if isinstance(pending, set) and pending:
+        await asyncio.gather(*list(pending), return_exceptions=True)
+
+
 def _record_refusal(agent: WorkerStatus, task: Task, reason: str, state: Any) -> None:
     """Log one refusal and dedup it into ``state.eligibility_refusals``.
 
@@ -230,15 +358,16 @@ def _record_refusal(agent: WorkerStatus, task: Task, reason: str, state: Any) ->
     if existing:
         existing["count"] += 1
         existing["last_refused_at"] = now_iso
+        _schedule_refusal_write(state, existing)
         return
-    refusals.append(
-        {
-            "agent_id": agent.worker_id,
-            "task_id": task.id,
-            "task_type": task.task_type,
-            "reason": reason,
-            "count": 1,
-            "first_refused_at": now_iso,
-            "last_refused_at": now_iso,
-        }
-    )
+    record = {
+        "agent_id": agent.worker_id,
+        "task_id": task.id,
+        "task_type": task.task_type,
+        "reason": reason,
+        "count": 1,
+        "first_refused_at": now_iso,
+        "last_refused_at": now_iso,
+    }
+    refusals.append(record)
+    _schedule_refusal_write(state, record)

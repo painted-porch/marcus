@@ -78,7 +78,7 @@ Then start the Marcus server for that board on port 4777, which is the port the 
 
 Run the finder and the verifier pull-loop workers against it (`tow_finder.py` and `tow_verifier.py`, both default to `--url http://localhost:4777/mcp`). The board drains in a fixed order, because the `synthesize` task that renders a case's final answer depends on the human `approve` task. So run the finder and verifier until they idle, sign the sampled approvals with the approvals CLI (`python -m src.cli.approvals`), then run the verifier once more so the now-eligible `synthesize` tasks complete. Skipping that second verifier pass leaves the approved sample without final answers, and the grader scores them as declines.
 
-While the server is still up, export the audit bundles (the refusal log lives in server memory and would be lost after a restart):
+Export the audit bundles (the refusal log is written through to `data/marcus.db` as it happens, so a restart between the run and the export no longer empties it; the October 2026 full-200 bundles predate that fix and were exported with empty refusal lists):
 
 ```
 python dev-tools/experiments/runners/export_bundles.py \
