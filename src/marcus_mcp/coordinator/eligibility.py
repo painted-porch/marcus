@@ -193,6 +193,9 @@ def filter_eligible_tasks(
 # loop; a state without an awaitable persistence layer, or no running
 # loop, keeps the in-memory path.
 REFUSALS_COLLECTION = "eligibility_refusals"
+# The first version (PR #757) kept every refusal in this one flat
+# collection. It is read as a fallback and migrated on touch.
+LEGACY_REFUSALS_COLLECTION = REFUSALS_COLLECTION
 REFUSAL_WRITE_ATTEMPTS = 3
 REFUSAL_RETRY_DELAY_SECONDS = 0.2
 
@@ -329,10 +332,21 @@ class RefusalWriter:
                 await asyncio.sleep(REFUSAL_RETRY_DELAY_SECONDS)
 
     async def _write(self, key: str, record: Dict[str, Any]) -> None:
-        """Carry the prior count once, then store the record."""
+        """Carry the prior count once, then store the record.
+
+        The prior is read from the per-task collection, or from the first
+        version's flat collection when the per-task one has nothing; a
+        legacy row is deleted once the per-task record exists.
+        """
         collection = refusals_collection(record["task_id"])
+        legacy_row = None
         if key not in self._carried:
             prior = await self.persistence.retrieve(collection, key)
+            if prior is None:
+                legacy_row = await self.persistence.retrieve(
+                    LEGACY_REFUSALS_COLLECTION, key
+                )
+                prior = legacy_row
             if prior:
                 record["count"] = int(record["count"]) + int(prior.get("count") or 0)
                 prior_first = prior.get("first_refused_at")
@@ -342,6 +356,10 @@ class RefusalWriter:
                     )
             self._carried.add(key)
         await self.persistence.store(collection, key, public_fields(record))
+        if legacy_row is not None:
+            delete = getattr(self.persistence, "delete", None)
+            if inspect.iscoroutinefunction(delete):
+                await delete(LEGACY_REFUSALS_COLLECTION, key)
 
     async def drain(self, timeout: Optional[float] = None) -> None:
         """Wait for the writer to finish, up to ``timeout`` seconds.
