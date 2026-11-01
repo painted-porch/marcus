@@ -1,0 +1,89 @@
+"""
+The heartbeat on any tool call, for every transport (issue #765).
+
+Marcus never asks agents for explicit heartbeats. Any MCP tool call that
+carries an ``agent_id`` proves the agent alive and extends its lease
+(``touch_lease``), which under ADR-0012 D3 is the whole liveness signal.
+The hook used to live only in the stdio dispatcher; HTTP mode serves tools
+through FastMCP registrations that never reached it, so over HTTP only a
+progress report extended a lease and a live, chatty agent could be
+recovered as dead. :class:`HeartbeatFastMCP` puts the same hook on the
+HTTP path, once, covering every registered tool.
+"""
+
+import logging
+from typing import Any, Dict, Optional, Sequence, Union
+
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ContentBlock
+
+logger = logging.getLogger(__name__)
+
+
+async def touch_on_tool_call(arguments: Optional[Dict[str, Any]], state: Any) -> None:
+    """Extend the calling agent's lease after a tool call, best-effort.
+
+    Parameters
+    ----------
+    arguments : Optional[Dict[str, Any]]
+        The tool call's arguments; only ``agent_id`` is read.
+    state : Any
+        Marcus server state. Nothing happens without a lease manager.
+
+    Notes
+    -----
+    Failures are logged and swallowed: the agent must still receive its
+    tool result, and the lease monitor remains the authority on liveness.
+    """
+    agent_id = arguments.get("agent_id") if arguments else None
+    lease_manager = getattr(state, "lease_manager", None)
+    if not agent_id or not lease_manager:
+        return
+    try:
+        await lease_manager.touch_lease(agent_id)
+    except Exception as error:  # noqa: BLE001 - a heartbeat must never fail the call
+        logger.warning(f"[heartbeat] touch_lease failed for {agent_id}: {error}")
+
+
+# FastMCP is typed in the project's environment and untyped in the pre-commit
+# hook's; the ignore covers the second and is marked unused for the first.
+class HeartbeatFastMCP(FastMCP):  # type: ignore[misc,unused-ignore]
+    """A FastMCP whose every successful tool call is a heartbeat.
+
+    Parameters
+    ----------
+    *args : Any
+        Passed to :class:`FastMCP`.
+    state : Any
+        Marcus server state, consulted for the lease manager on each call.
+    **kwargs : Any
+        Passed to :class:`FastMCP`.
+    """
+
+    def __init__(self, *args: Any, state: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.marcus_state = state
+
+    async def call_tool(
+        self, name: str, arguments: Dict[str, Any]
+    ) -> Union[Sequence[ContentBlock], Dict[str, Any]]:
+        """Run the tool, then record the heartbeat for the calling agent.
+
+        Parameters
+        ----------
+        name : str
+            Tool name.
+        arguments : Dict[str, Any]
+            Tool arguments.
+
+        Returns
+        -------
+        Union[Sequence[ContentBlock], Dict[str, Any]]
+            The tool's own result, unchanged. A failing tool propagates
+            its error and records no heartbeat.
+        """
+        result: Union[Sequence[ContentBlock], Dict[str, Any]] = await super().call_tool(
+            name, arguments
+        )
+        await touch_on_tool_call(arguments, self.marcus_state)
+        return result

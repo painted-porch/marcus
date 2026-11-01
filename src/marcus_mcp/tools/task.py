@@ -2988,6 +2988,15 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                 assigned_lease_epoch = 0
 
                 # Create lease for this assignment if lease manager available
+                if not (hasattr(state, "lease_manager") and state.lease_manager):
+                    # Issue #763: a deployment without a lease manager
+                    # cannot recover a dead agent's task. Say so, once per
+                    # assignment, instead of failing silently.
+                    logger.warning(
+                        f"No lease manager: task {optimal_task.id} assigned to "
+                        f"{agent_id} without a lease; if this agent dies its "
+                        f"task will not be recovered (issue #763)."
+                    )
                 if hasattr(state, "lease_manager") and state.lease_manager:
                     lease = await state.lease_manager.create_lease(
                         optimal_task.id, agent_id, optimal_task
