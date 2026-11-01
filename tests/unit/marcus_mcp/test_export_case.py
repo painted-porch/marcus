@@ -20,7 +20,11 @@ import pytest
 
 from src.core.models import Priority, Task, TaskStatus, WorkerStatus
 from src.core.persistence import MemoryPersistence, Persistence
-from src.marcus_mcp.coordinator.eligibility import refusal_key, refusals_collection
+from src.marcus_mcp.coordinator.eligibility import (
+    LEGACY_REFUSALS_COLLECTION,
+    refusal_key,
+    refusals_collection,
+)
 from src.marcus_mcp.tools.audit_tools import export_case
 
 pytestmark = pytest.mark.unit
@@ -370,6 +374,31 @@ class TestRefusalsSurviveRestart:
         assert refusal["count"] == 5
         assert refusal["first_refused_at"] == "2026-10-14T01:00:00+00:00"
         assert refusal["last_refused_at"] == "2026-10-14T01:40:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_legacy_flat_collection_rows_are_exported_too(self) -> None:
+        """Refusals persisted by the first version (one flat collection) still export."""
+        state = _closed_case_state()
+        state.eligibility_refusals = []
+        verify_id = _verify_task_id(state)
+        reason = "author of the claim under check"
+        persistence = Persistence(backend=MemoryPersistence())
+        await persistence.store(
+            LEGACY_REFUSALS_COLLECTION,
+            refusal_key("finder-pplx-1", verify_id, reason),
+            _persisted("finder-pplx-1", verify_id, reason, count=4),
+        )
+        await persistence.store(
+            LEGACY_REFUSALS_COLLECTION,
+            refusal_key("finder-pplx-1", "verify-other-case", reason),
+            _persisted("finder-pplx-1", "verify-other-case", reason, count=1),
+        )
+        state.persistence = persistence
+
+        bundle = await export_case(CASE, state)
+
+        assert len(bundle["refusals"]) == 1
+        assert bundle["refusals"][0]["count"] == 4
 
     @pytest.mark.asyncio
     async def test_state_without_persistence_exports_memory_only(self) -> None:

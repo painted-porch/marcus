@@ -22,6 +22,7 @@ import pytest
 from src.core.models import Priority, Task, TaskStatus, WorkerStatus
 from src.core.persistence import MemoryPersistence, Persistence
 from src.marcus_mcp.coordinator.eligibility import (
+    LEGACY_REFUSALS_COLLECTION,
     drain_refusal_writes,
     filter_eligible_tasks,
     is_eligible,
@@ -367,6 +368,9 @@ class _GatedPersistence:
     ) -> Any:
         return await self.inner.query(collection, filter_func, limit)
 
+    async def delete(self, collection: str, key: str) -> None:
+        await self.inner.delete(collection, key)
+
 
 class TestRefusalPersistence:
     """Test suite for refusals surviving a server restart (issue #740).
@@ -534,6 +538,46 @@ class TestRefusalPersistence:
         rows = await self._rows(state)
         assert rows[0]["count"] == 6
         assert rows[0]["first_refused_at"] == "2026-10-14T01:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_legacy_flat_collection_row_is_carried_and_migrated(self) -> None:
+        """Codex finding on PR #758: rows written by the first version still count.
+
+        The first version kept every refusal in one flat collection. A server
+        upgraded in place must continue that history: the carry reads the
+        legacy row when the per-task collection has none, and the legacy row
+        is removed once the per-task record is written.
+        """
+        author, verify, state = self._verify_setup()
+        probe = _make_state(state.project_tasks, [author])
+        probe.eligibility_refusals = []
+        filter_eligible_tasks(author, [verify], probe)
+        reason = probe.eligibility_refusals[0]["reason"]
+        key = refusal_key(author.worker_id, verify.id, reason)
+        await state.persistence.inner.store(
+            LEGACY_REFUSALS_COLLECTION,
+            key,
+            {
+                "agent_id": author.worker_id,
+                "task_id": verify.id,
+                "task_type": "verify",
+                "reason": reason,
+                "count": 5,
+                "first_refused_at": "2026-10-14T01:00:00+00:00",
+                "last_refused_at": "2026-10-14T01:30:00+00:00",
+            },
+        )
+
+        filter_eligible_tasks(author, [verify], state)
+        await drain_refusal_writes(state)
+
+        rows = await self._rows(state)
+        assert rows[0]["count"] == 6
+        assert rows[0]["first_refused_at"] == "2026-10-14T01:00:00+00:00"
+        assert (
+            await state.persistence.inner.retrieve(LEGACY_REFUSALS_COLLECTION, key)
+            is None
+        )
 
     @pytest.mark.asyncio
     async def test_null_first_seen_in_the_prior_row_is_ignored(self) -> None:
