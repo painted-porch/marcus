@@ -168,7 +168,7 @@ def _parse_iso_prefix(value: str) -> Optional[date]:
 def parse_claim_date(value: str) -> Optional[date]:
     """Parse a claimed or dataset date in its common formats.
 
-    Handles ISO (2025-03-06), US numeric (12/11/2024), and long form
+    Handles ISO (2025-03-06), US numeric (03/14/2024), and long form
     (March 6, 2025).
 
     Parameters

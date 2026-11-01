@@ -52,12 +52,14 @@ class TestExtractClaimFields:
     def test_citation_fallback_supplies_the_url(self) -> None:
         """Without a labeled URL, the first citation stands in."""
         claim = extract_claim_fields(
-            'The quote comes from "A Big Storm" in the Boston Globe.',
-            ["https://www.bostonglobe.com/2024/12/11/metro/storm/"],
+            'The quote comes from "A Ferry Vote" in the Harbor Gazette.',
+            ["https://www.harborgazette.example/2024/03/14/local/ferry/"],
         )
 
-        assert claim["url"] == "https://www.bostonglobe.com/2024/12/11/metro/storm/"
-        assert claim["headline"] == "A Big Storm"
+        assert (
+            claim["url"] == "https://www.harborgazette.example/2024/03/14/local/ferry/"
+        )
+        assert claim["headline"] == "A Ferry Vote"
 
     def test_all_keys_always_present(self) -> None:
         """Missing information yields empty strings, never missing keys."""
@@ -69,26 +71,28 @@ class TestExtractClaimFields:
     def test_prose_answer_from_the_live_smoke_parses(self) -> None:
         """The real OpenAI prose shape yields all four fields.
 
-        Captured verbatim from the first live smoke call: quoted
-        title, 'published on <date>, by <publisher>', markdown link.
+        Shaped exactly like the first live smoke call's answer (quoted
+        title, 'published on <date>, by <publisher>', markdown link,
+        APA-style citation line) but about an invented article, because
+        the Tow dataset's rows may not appear in this repository.
         """
         prose = (
             "The quote you provided is from an article titled "
-            '"New England rainfall totals from storm as flooding '
-            'persists," published on December 11, 2024, by The '
-            "Boston Globe. ([bostonglobe.com](https://www.bostonglobe.com"
-            "/2024/12/11/metro/new-england-rain-storm-flash-flooding/"
-            "?utm_source=openai))\n\n**Citation:**\nMahan, K. (2024, "
-            "December 11). New England rainfall totals from storm as "
-            "flooding persists. *The Boston Globe*."
+            '"Winter ferry keeps weekend service as council '
+            'votes," published on March 14, 2024, by The '
+            "Harbor Gazette. ([harborgazette.example](https://www.harborgazette.example"
+            "/2024/03/14/local/winter-ferry-weekend-service/"
+            "?utm_source=openai))\n\n**Citation:**\nRivera, J. (2024, "
+            "March 14). Winter ferry keeps weekend service as council "
+            "votes. *The Harbor Gazette*."
         )
 
         claim = extract_claim_fields(prose, [])
 
-        assert claim["headline"].startswith("New England rainfall totals")
-        assert "Boston Globe" in claim["publisher"]
-        assert claim["date"] == "December 11, 2024"
-        assert "bostonglobe.com/2024/12/11" in claim["url"]
+        assert claim["headline"].startswith("Winter ferry keeps weekend service")
+        assert "Harbor Gazette" in claim["publisher"]
+        assert claim["date"] == "March 14, 2024"
+        assert "harborgazette.example/2024/03/14" in claim["url"]
 
 
 class TestPerplexityAdapter:
@@ -524,7 +528,7 @@ class TestFakeEngine:
         claim = {
             "headline": "H",
             "publisher": "P",
-            "date": "2024-12-11",
+            "date": "2024-03-14",
             "url": "https://example.org/x",
         }
         answer = FakeEngine(claim=claim).query("any query")

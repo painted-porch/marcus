@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 PAGE_HTML = (
     "<html><head><title>Example Page</title>"
     "<script>var x = 'ignore me';</script></head>"
-    "<body><p>Some good news is that this storm should help.</p></body></html>"
+    "<body><p>The harbor council voted on the winter ferry.</p></body></html>"
 )
 
 
@@ -102,7 +102,7 @@ class TestRobots:
 
         assert result.robots_blocked is False
         assert result.status == 200
-        assert "storm" in result.text
+        assert "ferry" in result.text
 
     def test_missing_robots_means_allowed(self, tmp_path: Path) -> None:
         """No robots.txt (404) means fetching is permitted."""
@@ -176,7 +176,7 @@ class TestHtmlToText:
         """Scripts and markup vanish; the prose stays."""
         text = html_to_text(PAGE_HTML)
 
-        assert "storm" in text
+        assert "ferry" in text
         assert "ignore me" not in text
         assert "<p>" not in text
 

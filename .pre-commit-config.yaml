@@ -86,6 +86,16 @@ repos:
         types: [python]
         exclude: '^(migrations/|\.mypy_cache/|\.pytest_cache/|__pycache__/)'
 
+      # Tow dataset protection (#737): the Tow Center keeps its excerpts
+      # out of crawlers, so no excerpt, ground-truth URL, or headline may
+      # enter the repository. Runs only when the local dataset exists.
+      - id: tow-dataset-leak-scan
+        name: No Tow dataset text in the repository
+        entry: python dev-tools/experiments/runners/dataset_leak_scan.py
+        language: system
+        types: [text]
+        exclude: '^(\.mypy_cache/|\.pytest_cache/|__pycache__/)'
+
       # Version bump reminders
       - id: version-reminder
         name: Version Bump Reminder
