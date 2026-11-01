@@ -16,10 +16,13 @@ from typing import Optional
 
 import pytest
 from runners.tow_checks import (
+    MIN_EXCERPT_COVERAGE,
+    MIN_EXCERPT_RUN,
     date_within_tolerance,
     decide_verdict,
     domain_matches_publisher,
     excerpt_on_page,
+    match_excerpt,
     normalize,
     parse_claim_date,
     published_date_from_html,
@@ -77,6 +80,270 @@ class TestExcerptOnPage:
     def test_absent_excerpt_is_not_found(self) -> None:
         """A page without the excerpt fails the check."""
         assert excerpt_on_page("this exact sentence", "entirely other text") is False
+
+
+class TestMatchExcerpt:
+    """Test suite for the ordered-alignment excerpt match (#752).
+
+    The exact-substring check declined correct pages whenever one word
+    in a long excerpt differed from the page (a dash, a dropped word, an
+    inline link). The decline audit measured a 10% false-decline rate
+    from exactly this. The replacement scores how much of the excerpt
+    appears on the page, in order, and requires a contiguous run so a
+    page that merely quotes a phrase still fails.
+    """
+
+    EXCERPT = (
+        "The harbor council voted on Tuesday night to keep the winter ferry "
+        "running on weekends after residents of the outer islands told the "
+        "board that the weekday-only schedule had left them stranded twice "
+        "in January"
+    )
+
+    def test_exact_text_scores_full_coverage(self) -> None:
+        """A verbatim page scores 1.0 with the whole excerpt as one run."""
+        result = match_excerpt(self.EXCERPT, f"header {self.EXCERPT} footer")
+
+        assert result.found is True
+        assert result.coverage == 1.0
+        assert result.longest_run == result.excerpt_words
+
+    def test_one_dropped_word_still_matches(self) -> None:
+        """A page missing one mid-sentence word is the same sentence."""
+        page = self.EXCERPT.replace("on Tuesday night ", "on Tuesday ")
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is True
+        assert result.coverage >= MIN_EXCERPT_COVERAGE
+
+    def test_inline_link_text_mid_sentence_still_matches(self) -> None:
+        """Markup noise inside the sentence (an inline link) does not break it."""
+        page = self.EXCERPT.replace(
+            "winter ferry", "winter ferry (see our earlier coverage) ferry"
+        )
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is True
+
+    def test_truncated_tail_within_tolerance_matches(self) -> None:
+        """A page that ends a little early still carries the sentence."""
+        words = self.EXCERPT.split()
+        page = " ".join(words[: int(len(words) * 0.9)])
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is True
+
+    def test_short_quoted_phrase_is_not_enough(self) -> None:
+        """A page quoting six words of a forty-word excerpt is not the source."""
+        page = "As one report put it, the winter ferry running on weekends matters."
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is False
+        assert result.coverage < MIN_EXCERPT_COVERAGE
+
+    def test_same_words_out_of_order_do_not_match(self) -> None:
+        """Coverage is in-order alignment, not a bag of words."""
+        words = self.EXCERPT.split()
+        page = " ".join(reversed(words))
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is False
+
+    def test_half_the_sentence_is_not_enough(self) -> None:
+        """Half the excerpt, even contiguous, stays below the coverage floor."""
+        words = self.EXCERPT.split()
+        page = " ".join(words[: len(words) // 2])
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is False
+
+    def test_short_excerpt_needs_its_whole_length(self) -> None:
+        """An excerpt shorter than the run floor must appear in full."""
+        assert match_excerpt(
+            "ferry runs on weekends", "the ferry runs on weekends now"
+        ).found
+        assert not match_excerpt(
+            "ferry runs on weekends", "the ferry runs on weekdays"
+        ).found
+
+    def test_excerpt_deep_inside_a_long_page_is_found(self) -> None:
+        """A long page with the sentence near the end is still matched."""
+        filler = " ".join(f"word{i} filler text and more" for i in range(20000))
+        page = f"{filler} {self.EXCERPT} {filler[:5000]}"
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is True
+        assert result.coverage == 1.0
+
+    def test_run_floor_is_eight_words(self) -> None:
+        """The contiguous-run floor is the documented constant."""
+        assert MIN_EXCERPT_RUN == 8
+
+    def test_empty_inputs_are_not_found(self) -> None:
+        """No excerpt or no page text never verifies."""
+        assert match_excerpt("", "anything").found is False
+        assert match_excerpt(self.EXCERPT, "").found is False
+
+
+class TestDeclineReasons:
+    """Test suite for the recorded decline reason (#752).
+
+    Every verdict now carries ``decline_reason`` so a readout can say
+    why a case was withheld: a publisher that blocks fetchers and a
+    dead link are both declines, but they indict different parties.
+    """
+
+    EXCERPT = "The harbor council voted to keep the winter ferry running on weekends"
+    PAGE = (
+        '<meta property="og:site_name" content="The Harbor Gazette"/>'
+        '<meta property="article:published_time" content="2024-03-14T09:00:00-05:00"/>'
+    )
+    CLAIM = {
+        "publisher": "Harbor Gazette",
+        "date": "03/14/2024",
+        "url": "https://www.harborgazette.example/2024/03/14/local/ferry/",
+    }
+
+    def test_robots_block_reason(self) -> None:
+        """A robots refusal is recorded as such."""
+        _, checks = decide_verdict(
+            _fetch(status=None, robots_blocked=True), self.EXCERPT, self.CLAIM
+        )
+        assert checks["decline_reason"] == "robots_blocked"
+
+    def test_grounding_redirect_wrapper_is_an_opaque_redirect(self) -> None:
+        """A search-grounding redirect the fetcher may not follow is named.
+
+        The wrapper host disallows its redirect path for every agent,
+        so an honest fetcher cannot resolve it; the decline is the
+        engine's citation format, not a bad source.
+        """
+        wrapper = (
+            "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AbCdEf"
+        )
+        fetch = FetchResult(
+            url=wrapper,
+            final_url=wrapper,
+            status=None,
+            html="",
+            text="",
+            robots_blocked=True,
+            error="",
+            fetched_at="2026-10-04T00:00:00+00:00",
+        )
+        verdict, checks = decide_verdict(fetch, self.EXCERPT, self.CLAIM)
+        assert verdict == "unverifiable"
+        assert checks["decline_reason"] == "opaque_redirect"
+
+    def test_forbidden_is_publisher_blocked(self) -> None:
+        """HTTP 403 means the publisher refused the fetcher."""
+        _, checks = decide_verdict(_fetch(status=403), self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "publisher_blocked"
+
+    def test_not_found_is_a_dead_link(self) -> None:
+        """HTTP 404 and 410 are dead links."""
+        _, checks = decide_verdict(_fetch(status=404), self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "dead_link"
+        _, checks = decide_verdict(_fetch(status=410), self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "dead_link"
+
+    def test_other_http_errors_are_http_error(self) -> None:
+        """A 400 or 500 is an HTTP error without a more specific name."""
+        _, checks = decide_verdict(_fetch(status=400), self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "http_error"
+
+    def test_network_failure_is_fetch_error(self) -> None:
+        """No response at all is a fetch error."""
+        fetch = FetchResult(
+            url="https://www.harborgazette.example/x",
+            final_url="https://www.harborgazette.example/x",
+            status=None,
+            html="",
+            text="",
+            robots_blocked=False,
+            error="timed out",
+            fetched_at="2026-10-04T00:00:00+00:00",
+        )
+        _, checks = decide_verdict(fetch, self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "fetch_error"
+
+    def test_missing_excerpt_records_coverage(self) -> None:
+        """A live page without the sentence says so, with the scores."""
+        verdict, checks = decide_verdict(
+            _fetch(html=self.PAGE, text="totally different content"),
+            self.EXCERPT,
+            self.CLAIM,
+        )
+        assert verdict == "contradicted"
+        assert checks["decline_reason"] == "excerpt_missing"
+        assert checks["excerpt_coverage"] < MIN_EXCERPT_COVERAGE
+        assert "excerpt_longest_run" in checks
+
+    def test_near_verbatim_excerpt_verifies(self) -> None:
+        """A page with one word of drift in the sentence now verifies."""
+        drifted = self.EXCERPT.replace("to keep the", "to keep its")
+        verdict, checks = decide_verdict(
+            _fetch(
+                html=self.PAGE,
+                text=f"intro {drifted} outro",
+                final_url=self.CLAIM["url"],
+            ),
+            self.EXCERPT,
+            self.CLAIM,
+        )
+        assert verdict == "verified"
+        assert checks["excerpt_found"] is True
+        assert checks["decline_reason"] is None
+
+    def test_publisher_mismatch_reason(self) -> None:
+        """Right sentence on the wrong publisher's page."""
+        _, checks = decide_verdict(
+            _fetch(
+                html='<meta property="og:site_name" content="Other Outlet"/>',
+                text=f"intro {self.EXCERPT} outro",
+                final_url="https://www.otheroutlet.example/a",
+            ),
+            self.EXCERPT,
+            self.CLAIM,
+        )
+        assert checks["decline_reason"] == "publisher_mismatch"
+
+    def test_date_mismatch_reason(self) -> None:
+        """Right sentence, right publisher, wrong date."""
+        _, checks = decide_verdict(
+            _fetch(
+                html=self.PAGE,
+                text=f"intro {self.EXCERPT} outro",
+                final_url=self.CLAIM["url"],
+            ),
+            self.EXCERPT,
+            {**self.CLAIM, "date": "01/02/2023"},
+        )
+        assert checks["decline_reason"] == "date_mismatch"
+
+    def test_syndicated_copy_reason(self) -> None:
+        """A page whose canonical lives elsewhere is a syndicated copy."""
+        page = (
+            '<link rel="canonical" href="https://www.original.example/story/"/>'
+            + self.PAGE
+        )
+        _, checks = decide_verdict(
+            _fetch(
+                html=page,
+                text=f"intro {self.EXCERPT} outro",
+                final_url=self.CLAIM["url"],
+            ),
+            self.EXCERPT,
+            self.CLAIM,
+        )
+        assert checks["decline_reason"] == "syndicated_copy"
 
 
 class TestSiteAndDates:
