@@ -74,6 +74,7 @@ from src.marcus_mcp.coordinator.eligibility import (  # noqa: E402
     drain_refusal_writes,
 )
 from src.marcus_mcp.handlers import handle_tool_call  # noqa: E402
+from src.marcus_mcp.heartbeat import HeartbeatFastMCP  # noqa: E402
 from src.marcus_mcp.tool_groups import get_tools_for_endpoint  # noqa: E402
 from src.monitoring.assignment_monitor import AssignmentMonitor  # noqa: E402
 from src.monitoring.project_monitor import ProjectMonitor  # noqa: E402
@@ -1325,23 +1326,25 @@ class MarcusServer:
             use_all_tools = "--all-tools" in sys.argv
 
             if use_all_tools:
-                self._fastmcp = FastMCP(
+                self._fastmcp = HeartbeatFastMCP(
                     "marcus",
                     instructions=(
                         "Marcus - Multi-Agent Resource Coordination and "
                         "Understanding System (All Tools)"
                     ),
+                    state=self,
                 )
                 # Register all tools with FastMCP
                 self._register_fastmcp_tools()
             else:
                 # Default to agent tools for new users
-                self._fastmcp = FastMCP(
+                self._fastmcp = HeartbeatFastMCP(
                     "marcus-agent",
                     instructions=(
                         "Marcus - Multi-Agent Resource Coordination and "
                         "Understanding System (Agent Mode)"
                     ),
+                    state=self,
                 )
                 # Register only agent tools
                 self._register_endpoint_tools(self._fastmcp, "agent")
@@ -1360,7 +1363,7 @@ class MarcusServer:
             }.get(endpoint_type, "Marcus MCP Server")
 
             # Create FastMCP instance
-            app = FastMCP(app_name, instructions=instructions)
+            app = HeartbeatFastMCP(app_name, instructions=instructions, state=self)
 
             # Register only tools allowed for this endpoint
             self._register_endpoint_tools(app, endpoint_type)

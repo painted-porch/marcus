@@ -16,6 +16,7 @@ import mcp.types as types
 
 from src.cost_tracking.cost_recorder import PlannerContext, get_recorder
 from src.logging.mcp_tool_logger import log_mcp_tool_response
+from src.marcus_mcp.heartbeat import touch_on_tool_call
 
 from .audit import get_audit_logger
 from .tools import (  # Agent tools; Task tools; Project tools; System tools; NLP tools
@@ -1741,10 +1742,9 @@ async def handle_tool_call(
             },
         )
 
-        # Touch lease on any agent tool activity (proves agent is alive)
-        agent_id = arguments.get("agent_id") if arguments else None
-        if agent_id and hasattr(state, "lease_manager") and state.lease_manager:
-            await state.lease_manager.touch_lease(agent_id)
+        # Touch lease on any agent tool activity (proves agent is alive).
+        # Shared with the HTTP transport (issue #765).
+        await touch_on_tool_call(arguments, state)
 
         response: List[
             types.TextContent | types.ImageContent | types.EmbeddedResource
