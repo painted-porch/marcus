@@ -114,6 +114,18 @@ class TestScanText:
         snippet = "('The lighthouse keeper counted eleven'\n 'boats before the fog rolled in')"
         assert scan_text(snippet, facts).excerpt_windows > 0
 
+    def test_fragment_across_several_short_lines_is_found(
+        self, facts: DatasetFacts
+    ) -> None:
+        """Codex finding on PR #760: the carried tail must accumulate across short lines.
+
+        A six-word fragment spread over three two-word lines, with a blank
+        line inside, still forms the window.
+        """
+        hits = scan_text("counted eleven\nboats before\n\nthe fog", facts)
+        assert hits.excerpt_windows > 0
+        assert 4 in hits.lines
+
     def test_base64_payload_is_found(self, facts: DatasetFacts) -> None:
         """An excerpt hidden in a base64 payload is decoded and caught."""
         encoded = base64.b64encode(FAKE_EXCERPT.encode()).decode()
