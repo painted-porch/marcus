@@ -642,6 +642,12 @@ class MarcusServer:
             # Migrate to multi-project if needed
             await self._migrate_to_multi_project()
 
+            # Issue #763: this branch never built the assignment monitor
+            # or the lease manager, so in the default mode no lease was
+            # ever created and dead agents were never recovered. The
+            # helper is idempotent and guards on a kanban client.
+            await self._initialize_monitoring_systems()
+
         # If still no kanban client in multi-project mode, check project registry
         if not self.kanban_client and not get_config().single_project_mode:
             # Get active project from registry
