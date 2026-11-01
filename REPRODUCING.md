@@ -38,6 +38,53 @@ Cross-engine cost is not comparable, because each provider counts the web conten
 3. **Engine API keys.** The run uses four engines: an OpenAI model, Google Gemini, Perplexity, and Anthropic Claude Haiku. The exact `--engines` keys are defined in `dev-tools/experiments/runners/tow_engines.py`. Grounded engines bill for web search or grounding separately from tokens; the runner now records those fees as `search_fee_usd` on every answer, so the cost log no longer undercounts OpenAI's search or Gemini's grounding the way the first full run did.
 4. **Cost.** A clean run of the full study costs about $35, roughly $0.18 per question across the four engines and the two paid conditions; our own run cost about $65 all-in, because pilots and re-running a rate-limit-flaky Gemini added overhead a clean run avoids. Gemini's grounding dominated, about $44 of the all-in total against a few cents of tokens, so grounded-engine fees are the thing to budget for. Conditions A and B each make roughly 800 paid engine calls (four engines times 200 questions); Condition C is free, because it only fetches pages. Get a cost estimate approved before running; the Condition A runner refuses to start without `--confirm-paid` for exactly this reason.
 
+## The free rehearsal (start here)
+
+Every moving part runs end to end with a fake engine and zero API calls, so you can see the board enforce its rules before spending anything.
+The commands below were run as written on 2026-11-01: four cases, thirteen tasks, every one reached done, and each exported bundle named the finder, the verifier's checks, the refusals, and the human approval.
+
+```bash
+EXP=~/marcus-experiments/tow/rehearsal && mkdir -p $EXP/run
+
+# 1. Seed a 4-case board; this also registers it in Marcus's project registry.
+python dev-tools/experiments/runners/tow_runner.py \
+  --dataset /path/to/GenAISearch_Data.csv \
+  --db $EXP/kanban.db --project tow-rehearsal \
+  --limit 4 --approval-rate 0.25 --seed 737 --manifest $EXP/manifest.json
+
+# 2. Write $EXP/config.json: copy config_marcus.example.json and set
+#    kanban.provider = "sqlite", kanban.sqlite_db_path = "$EXP/kanban.db",
+#    default_project_name = "tow-rehearsal - Main Board", project_name = "tow-rehearsal",
+#    ai.enabled = false, features.context = false, transport.http_port = 4777.
+
+# 3. Start the server FROM THE REPO ROOT (persistence paths are cwd-relative)
+#    with every engine key stripped from its environment.
+env -u OPENAI_API_KEY -u GEMINI_API_KEY -u PERPLEXITY_API_KEY -u CLAUDE_API_KEY -u ANTHROPIC_API_KEY \
+  MARCUS_CONFIG=$EXP/config.json python -m src.marcus_mcp.server --http --all-tools
+
+# 4. In another shell (a new shell starts without EXP, so set it again): the fake
+#    finder, the verifier, the human approval, the verifier again.
+EXP=~/marcus-experiments/tow/rehearsal
+python dev-tools/experiments/runners/tow_finder.py --url http://localhost:4777/mcp \
+  --project tow-rehearsal --agent-id finder-fake-1 --vendor fakevendor --engine fake --idle-exits 3
+python dev-tools/experiments/runners/tow_verifier.py --url http://localhost:4777/mcp \
+  --project tow-rehearsal --agent-id verifier-fetch-1 --vendor fetchcheck \
+  --cache-dir $EXP/fetch-cache --idle-exits 3
+python -m src.cli.approvals --url http://localhost:4777/mcp --project tow-rehearsal \
+  --reviewer you --decide approved
+python dev-tools/experiments/runners/tow_verifier.py --url http://localhost:4777/mcp \
+  --project tow-rehearsal --agent-id verifier-fetch-1 --vendor fetchcheck \
+  --cache-dir $EXP/fetch-cache --idle-exits 2
+
+# 5. Export the audit bundles.
+python dev-tools/experiments/runners/export_bundles.py --url http://localhost:4777/mcp \
+  --manifest $EXP/manifest.json --out-dir $EXP/bundles
+```
+
+Expected: the finder reports four finds and is then offered nothing (its refusals are in the bundles), the verifier closes the four verify tasks as `unverifiable` (the fake engine cites invented pages) and the synthesize tasks that do not wait on a person, the approval command records one decision, the second verifier pass closes the last synthesize task, and `export_bundles.py` writes four bundles.
+Then try to cheat: report a find task completed without evidence and watch the board reject the close, or request work as the finder after its finds are done and watch it be offered nothing.
+The manifest and the board hold the excerpts, so keep `$EXP` outside the repository.
+
 ## The three conditions, in plain terms
 
 - **Condition A** is each engine answering alone, with no board and no verification. This is the baseline the original study measured.

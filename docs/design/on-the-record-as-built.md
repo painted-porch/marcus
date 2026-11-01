@@ -48,7 +48,7 @@ An invisible gate cannot be iterated against, which is the structural reason ver
 
 ## How to verify it works
 
-Run the free rehearsal in [REPRODUCING.md](../../REPRODUCING.md) (fake engine, zero API calls), then try to cheat:
+Run the free rehearsal in [REPRODUCING.md, "The free rehearsal"](../../REPRODUCING.md#the-free-rehearsal-start-here) (fake engine, zero API calls, verified end to end on 2026-11-01), then try to cheat:
 
 1. Report a find task completed without evidence → expect a rejection naming the missing fields.
 2. Keep submitting bad evidence → expect terminalization after the retry ceiling, not an infinite loop.

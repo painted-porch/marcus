@@ -31,7 +31,9 @@ The single sturdiest statement is the fabrication result: **51% of delivered lin
 Two honest refinements of the headline, both from the category data below:
 
 - Of the delivered answers that were wrong through Marcus, most were *partially* incorrect (a real, on-topic source with a wrong detail), which a link-fetch verifier cannot catch; **flatly wrong answers reaching the user were only 3.5% (about 1 in 29)**, and "any inaccuracy including partial" is the 12.1%.
-- The pilot slice had reported roughly "1 in 20" for Condition B; the full run's completely-wrong rate (1 in 29) is consistent with that, and the 12.1% simply also counts partial errors the pilot framing did not.
+- The re-pilot of 2026-10-13 measured the same metric (any inaccuracy among delivered answers, partial errors included) at 4.8%: one partially incorrect answer among 21 kept, from two engines on a stratified 50-excerpt slice.
+  On those same two engines the full run measures 11.3% (9 of 80 delivered), and across all four engines 12.1%.
+  The pilot's figure rests on 21 answers, whose 95% interval runs from about 1% to 23%, so the two runs are consistent; the difference is sample size and the two added engines, not a change in what was counted.
 
 Gemini is the clearest single demonstration: it fabricated the most links when alone (65.6%) and delivered **zero** fabricated links through Marcus, at an 11.1% wrong-delivered rate.
 
