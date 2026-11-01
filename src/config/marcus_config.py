@@ -212,46 +212,58 @@ class TransportSettings:
 class TaskLeaseSettings:
     """Task lease configuration for agent task management.
 
-    Defaults are aggressive (90s lease, 30s grace) for experiment use.
-    Marcus agents run in tmux panes and poll every ~30s, so fast
-    recovery from dead agents is critical. Override via project config
-    for long-running production agents that need conservative timeouts.
+    ADR-0012 D3 splits the lease into two dials. The **silence timeout**
+    is how long an agent may make no MCP call before Marcus presumes it
+    dead and recovers its task. The **budget ceiling** is how long an
+    agent may hold a task at all: ``budget_multiplier`` times the task's
+    estimate, floored at one silence window and capped at
+    ``max_lease_hours``. Heartbeats reset the first and never pass the
+    second.
 
     Parameters
     ----------
+    silence_timeout_minutes : float
+        Minutes of MCP silence after which the agent is presumed dead
+        (default 45). Must be at least twice ``checkpoint_cadence_minutes``.
+    budget_multiplier : float
+        The budget is this many times the estimate (default 3.0).
+    checkpoint_cadence_minutes : float
+        How often the session contract obliges an agent to checkpoint
+        (default 20); validates the silence timeout.
     default_hours : float
-        Default lease duration in hours (0.025 = 90 seconds)
-    max_renewals : int
-        Maximum number of lease renewals
+        Estimate used for the budget when a task carries none.
     warning_hours : float
-        Hours before expiry to warn
+        Hours before expiry to warn.
     grace_period_minutes : float
-        Grace period after expiry in minutes (0.5 = 30 seconds)
-    renewal_decay_factor : float
-        Decay factor for renewal duration
+        Grace period after expiry in minutes.
     min_lease_hours : float
-        Minimum lease duration (0.0167 = 60 seconds)
+        Lower bound on the budget.
     max_lease_hours : float
-        Maximum lease duration (0.0833 = 5 minutes)
-    stuck_threshold_renewals : int
-        Renewals before considering task stuck
+        Upper bound on the budget; no task is held longer.
     enable_adaptive : bool
-        Enable adaptive lease durations
+        Scale the budget by estimate, priority, and complexity.
     priority_multipliers : dict[str, float]
-        Priority-based duration multipliers
+        Priority-based budget multipliers
     complexity_multipliers : dict[str, float]
-        Complexity-based duration multipliers
+        Complexity-based budget multipliers
+    max_renewals, stuck_threshold_renewals, renewal_decay_factor, silence_multiplier
+        Pre-D3 knobs. Accepted so existing config files still load;
+        ignored.
     """
 
-    default_hours: float = 0.0667  # 240 seconds (matches Phase 1)
-    max_renewals: int = 10
+    silence_timeout_minutes: float = 45.0
+    budget_multiplier: float = 3.0
+    checkpoint_cadence_minutes: float = 20.0
+    default_hours: float = 4.0
     warning_hours: float = 0.0167  # ~60 seconds before expiry
     grace_period_minutes: float = 1.0  # 60 seconds grace
-    renewal_decay_factor: float = 0.9
-    min_lease_hours: float = 0.05  # 180 seconds minimum
-    max_lease_hours: float = 0.1  # 360 seconds maximum (matches Phase 3)
-    stuck_threshold_renewals: int = 5
+    min_lease_hours: float = 0.0
+    max_lease_hours: float = 24.0
     enable_adaptive: bool = True
+    # Pre-D3 knobs: accepted, ignored.
+    max_renewals: int = 10
+    renewal_decay_factor: float = 0.9
+    stuck_threshold_renewals: int = 5
     silence_multiplier: float = 1.5
     priority_multipliers: dict[str, float] = field(
         default_factory=lambda: {

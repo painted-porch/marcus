@@ -4307,19 +4307,12 @@ async def _observe_epoch_collision(
     Record — but do not act on — a superseded-claim completion.
 
     ADR-0012 D11 specifies fencing such completions. That is deliberately
-    NOT implemented here. Marcus already ships a documented compensation
-    for false-positive recovery: the agent's next ``report_task_progress``
-    recreates the lease (see
-    ``docs/source/systems/coordination/34-agent-recovery-system.md``).
-    That mechanism asserts *"recovery may have been wrong, let the agent
-    back in"*; a fence asserts *"recovery happened, this agent is
-    displaced"*. Both cannot be authoritative, and layering the fence on
-    top of the re-grant relocates the contradiction rather than resolving
-    it.
-
-    Resolving it belongs with D3's liveness retune, which is what makes
-    recovery reliable enough to *delete* the re-grant compensation instead
-    of fencing around it.
+    NOT implemented yet. D3 (the two liveness dials) made recovery
+    trustworthy and deleted the re-grant compensation that used to
+    contradict a fence; the fence itself lands in Milestone B of the
+    session-model migration, enforced at the resource (the DONE write
+    and the merge) and sized to the collision rate this function
+    records.
 
     Meanwhile this gives us the number nobody has: how often a completion
     actually arrives under a superseded epoch. Note the failure mode
@@ -4372,7 +4365,7 @@ def _live_lease_held_by_other(state: Any, task_id: str, agent_id: str) -> bool:
     """
     Report whether a live lease on this task belongs to a different agent.
 
-    Used to gate the ``report_task_progress`` re-grant, which is a second
+    Used by the ``in_progress`` ownership guard, which is a second
     claim site with no holder check of its own. Applies regardless of
     whether the reporter supplied a D11 epoch, so epoch-less agents get
     the same ownership protection as migrated ones.
@@ -4613,32 +4606,19 @@ async def report_task_progress(
         # at merge time. Dashboard-v70 produced 341 lines of ghost
         # source + 506 lines of ghost tests this way.
         #
-        # The guard fires on ``status == "completed"`` only. Agents
-        # can still report intermediate progress even if their
-        # assignment was cleared — that path recreates the lease
-        # (see "No active lease" fallback below) rather than
-        # producing a persistent kanban mutation. Completions, by
-        # contrast, write DONE to kanban and trigger branch merges
-        # that cannot be undone cleanly.
+        # The guard fires on ``status == "completed"`` only. An
+        # intermediate report with no live lease is refused up front
+        # (ADR-0012 D3, see the in_progress branch). Completions
+        # write DONE to kanban and trigger branch merges that cannot
+        # be undone cleanly, so they get the stricter check here.
         if status == "completed":
             # ADR-0012 D11 epoch: RECORDED, NOT ENFORCED.
             #
-            # The fence was removed deliberately. Marcus already ships a
-            # documented compensation for false-positive recovery — the
-            # agent's next report_task_progress recreates the lease (see
-            # docs/source/systems/coordination/34-agent-recovery-system.md).
-            # That mechanism asserts "recovery may have been wrong, let the
-            # agent back in"; a fence asserts "recovery happened, this agent
-            # is displaced". They have opposite polarity and cannot both be
-            # authoritative, so fencing on top of the re-grant moved the
-            # contradiction around rather than resolving it.
-            #
-            # Resolving it belongs with D3's liveness retune, which is what
-            # makes recovery reliable enough to DELETE the re-grant rather
-            # than fence around it. Until then we log the collision so the
-            # real rate is measurable instead of assumed — nobody currently
-            # knows how often this fires, and the failure mode cannot occur
-            # at all under spawn-per-task, where recovery kills the agent.
+            # D3 deleted the re-grant compensation that used to contradict
+            # a fence. The fence itself is Milestone B work, enforced at
+            # the resource (the DONE write and the merge) and sized to the
+            # collision rate recorded here; until then the collision is
+            # logged so the real rate is measurable instead of assumed.
             await _observe_epoch_collision(state, task_id, agent_id, lease_epoch)
 
             current_assignment = state.agent_tasks.get(agent_id)
@@ -5368,6 +5348,32 @@ async def report_task_progress(
                             )
 
         elif status == "in_progress":
+            # ADR-0012 D3: no live lease means this agent's claim was
+            # recovered (or it never held the card). The old branch at
+            # the end of this function re-granted a lease here, Marcus's
+            # apology for false recovery. D3 makes recovery trustworthy,
+            # so the apology is gone: refuse before anything reaches the
+            # board, and tell the agent what to do instead.
+            if (
+                hasattr(state, "lease_manager")
+                and state.lease_manager
+                and state.lease_manager.active_leases.get(task_id) is None
+            ):
+                logger.warning(
+                    f"report_task_progress(in_progress) refused: agent "
+                    f"{agent_id} holds no live lease on {task_id}; the task "
+                    f"was recovered or never claimed by this agent."
+                )
+                return {
+                    "success": False,
+                    "status": "lease_recovered",
+                    "message": (
+                        f"Task {task_id} is no longer yours: its lease was "
+                        "recovered after the silence timeout or budget "
+                        "ceiling passed. Do not continue it. Request your "
+                        "next task with request_next_task."
+                    ),
+                }
             update_data["status"] = TaskStatus.IN_PROGRESS
             # Include assigned_to for Planka provider compatibility.
             #
@@ -5502,8 +5508,7 @@ async def report_task_progress(
         # covers the work it's meant to cover.
         #
         # ``status != "completed"`` — normal progress milestone.
-        # Call ``renew_lease`` which uses the progressive-timeout
-        # curve based on progress%.
+        # ``renew_lease`` resets the D3 silence clock (ADR-0012).
         if (
             hasattr(state, "lease_manager")
             and state.lease_manager
@@ -5518,58 +5523,15 @@ async def report_task_progress(
                     f"(expires: {renewed_lease.lease_expires.isoformat()})"
                 )
             else:
-                # No active lease — check whether the task is already DONE
-                # before recreating.  A stale agent reporting intermediate
-                # progress after another agent completed the task must not
-                # reopen the lease; doing so creates an orphaned watchdog
-                # that expires and turns the finished task into a zombie.
-                task_obj = next(
-                    (t for t in state.project_tasks if t.id == task_id),
-                    None,
+                # ADR-0012 D3: nothing is re-granted. ``renew_lease``
+                # returns None when the lease lapsed past grace (the
+                # monitor owns recovery) or when the caller is not the
+                # holder; a missing lease was already refused above.
+                logger.info(
+                    f"No lease renewed for task {task_id} on report from "
+                    f"{agent_id}: lapsed past grace or not the holder; "
+                    f"recovery belongs to the lease monitor."
                 )
-                # ``TaskStatus`` is a plain Enum, not a str-mixin, so
-                # comparing the member against string literals was always
-                # False and this zombie guard had never executed. Compare
-                # the value.
-                _task_status = getattr(task_obj, "status", None)
-                _status_value = getattr(_task_status, "value", _task_status)
-                if task_obj is not None and _status_value in {
-                    "done",
-                    "completed",
-                }:
-                    logger.warning(
-                        f"Stale agent {agent_id} reported progress on "
-                        f"task {task_id} which is already DONE. "
-                        "Skipping lease recreation to prevent zombie."
-                    )
-                elif _live_lease_held_by_other(state, task_id, agent_id):
-                    # Ownership check that applies to EVERY reporter, not
-                    # just epoch-carrying ones. Adding the holder check to
-                    # renew_lease made this branch reachable for
-                    # non-holders, and the epoch fence deliberately passes
-                    # epoch-less agents — so an un-migrated displaced
-                    # agent could overwrite the live holder's lease
-                    # outright. Leniency means "behaves as before", and
-                    # before D11 a non-holder could not take ownership.
-                    logger.warning(
-                        f"Refusing lease re-grant on task {task_id} to "
-                        f"agent {agent_id}: another agent holds the live "
-                        f"lease. Reporting on a card it does not own."
-                    )
-                else:
-                    # No preserve_epoch. Reissuing a token breaks the
-                    # monotonicity that makes an epoch a fencing token at
-                    # all — it was the mechanism by which an agent that
-                    # was never issued an epoch could present one and take
-                    # a card. Every grant advances the sequence.
-                    new_lease = await state.lease_manager.create_lease(
-                        task_id, agent_id, task_obj
-                    )
-                    logger.info(
-                        f"Recreated lease for task {task_id} "
-                        f"after recovery (expires: "
-                        f"{new_lease.lease_expires.isoformat()})"
-                    )
 
         # Log response
         conversation_logger.log_worker_message(

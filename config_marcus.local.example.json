@@ -1,15 +1,13 @@
 {
-  "_comment": "Marcus example config — local LLM (Ollama / LM Studio) + SQLite kanban",
+  "_comment": "Marcus example config \u2014 local LLM (Ollama / LM Studio) + SQLite kanban",
   "_comment2": "Copy to config_marcus.json. Fully offline: no API keys, no remote services, no Planka container needed.",
   "_comment3": "Start Ollama (`ollama serve`) and pull the model (`ollama pull qwen2.5:7b-instruct`) before launching Marcus.",
   "_comment4": "local_url is the OpenAI-compatible endpoint exposed by Ollama at /v1; LM Studio uses http://localhost:1234/v1.",
-
   "single_project_mode": true,
   "default_project_name": "Marcus Development",
   "project_name": "Marcus Todo Demo",
   "board_name": "Marcus Todo Demo",
   "auto_find_board": false,
-
   "ai": {
     "provider": "local",
     "local_model": "qwen2.5:7b-instruct",
@@ -19,31 +17,26 @@
     "max_tokens": 4096,
     "enabled": true
   },
-
   "kanban": {
     "provider": "sqlite",
     "board_name": "Marcus Todo Demo"
   },
-
   "mcp": {
     "kanban_client_path": "~/dev/kanban-mcp/dist/index.js",
     "timeout": 30,
     "retry_attempts": 3
   },
-
   "features": {
     "events": true,
     "context": true,
     "memory": true,
     "visibility": false
   },
-
   "memory": {
     "learning_rate": 0.1,
     "min_samples": 3,
     "use_v2_predictions": false
   },
-
   "transport": {
     "type": "http",
     "http_host": "0.0.0.0",
@@ -53,16 +46,15 @@
     "dual_mode": false,
     "http_enabled": true
   },
-
   "task_lease": {
-    "default_hours": 2.0,
-    "max_renewals": 10,
+    "silence_timeout_minutes": 45.0,
+    "budget_multiplier": 3.0,
+    "checkpoint_cadence_minutes": 20.0,
+    "default_hours": 4.0,
     "warning_hours": 0.5,
     "grace_period_minutes": 30,
-    "renewal_decay_factor": 0.9,
-    "min_lease_hours": 1.0,
+    "min_lease_hours": 0.0,
     "max_lease_hours": 24.0,
-    "stuck_threshold_renewals": 5,
     "enable_adaptive": true,
     "priority_multipliers": {
       "critical": 0.5,
@@ -77,12 +69,10 @@
       "epic": 3.0
     }
   },
-
   "board_health": {
     "stale_task_days": 7,
     "max_tasks_per_agent": 3
   },
-
   "multi_endpoint": {
     "human": {
       "port": 4298,
@@ -103,7 +93,6 @@
       "enabled": true
     }
   },
-
   "hybrid_inference": {
     "pattern_confidence_threshold": 0.8,
     "ai_confidence_threshold": 0.7,

@@ -14,7 +14,6 @@ Key features:
 
 import asyncio
 import logging
-import statistics
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -24,6 +23,11 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 from src.core.assignment_persistence import AssignmentPersistence
 from src.core.event_loop_utils import EventLoopLockManager
+from src.core.lease_invariants import (
+    DEFAULT_CHECKPOINT_CADENCE_MINUTES,
+    DEFAULT_SILENCE_TIMEOUT_MINUTES,
+    validate_silence_checkpoint_invariant,
+)
 from src.core.models import RecoveryInfo, Task, TaskStatus
 from src.integrations.kanban_interface import KanbanInterface
 
@@ -96,24 +100,11 @@ class AssignmentLease:
     # so reports from un-migrated agents and leases rehydrated from
     # pre-migration assignment records fail the fence closed.
     lease_epoch: int = 0
-
-    @property
-    def median_update_interval(self) -> Optional[float]:
-        """Calculate median seconds between progress updates.
-
-        Returns
-        -------
-        Optional[float]
-            Median interval in seconds, or None if fewer than 2 timestamps.
-        """
-        if len(self.update_timestamps) < 2:
-            return None
-        sorted_ts = sorted(self.update_timestamps)
-        intervals = [
-            (sorted_ts[i] - sorted_ts[i - 1]).total_seconds()
-            for i in range(1, len(sorted_ts))
-        ]
-        return statistics.median(intervals)
+    # ADR-0012 D3, the second dial: the moment this chore must be given
+    # back regardless of heartbeats. ``lease_expires`` is the first dial
+    # (silence) and never extends past this. None on rows persisted
+    # before D3, which are governed by silence alone.
+    budget_deadline: Optional[datetime] = None
 
     @property
     def time_remaining(self) -> timedelta:
@@ -139,56 +130,6 @@ class AssignmentLease:
             return LeaseStatus.EXPIRING_SOON
         else:
             return LeaseStatus.ACTIVE
-
-    def calculate_renewal_duration(
-        self, lease_manager: Optional["AssignmentLeaseManager"] = None
-    ) -> timedelta:
-        """
-        Calculate renewal duration based on progress and history.
-
-        Parameters
-        ----------
-            lease_manager
-                Optional reference to lease manager for config.
-
-        Returns
-        -------
-            Renewal duration (adaptive based on multiple factors)
-        """
-        base_hours = 4.0
-
-        # Adjust based on progress
-        if self.progress_percentage > 75:
-            # Near completion, shorter renewal
-            base_hours = 2.0
-        elif self.progress_percentage > 50:
-            base_hours = 3.0
-        elif self.progress_percentage < 25 and self.renewal_count > 2:
-            # Low progress with multiple renewals - might be stuck
-            base_hours = 2.0
-
-        # Adjust based on task complexity
-        if self.estimated_hours > 8:
-            # Complex task, allow more time
-            base_hours *= 1.5
-
-        # Apply renewal decay if configured
-        if lease_manager and hasattr(lease_manager, "renewal_decay_factor"):
-            decay_factor = lease_manager.renewal_decay_factor**self.renewal_count
-            base_hours *= decay_factor
-
-        # Cap renewals for tasks that are taking too long
-        if self.renewal_count > 5:
-            base_hours = min(base_hours, 2.0)
-
-        # Apply bounds if lease manager available
-        if lease_manager:
-            base_hours = max(
-                lease_manager.min_lease_hours,
-                min(lease_manager.max_lease_hours, base_hours),
-            )
-
-        return timedelta(hours=base_hours)
 
 
 def _ensure_timezone_aware(dt: datetime) -> datetime:
@@ -221,23 +162,30 @@ class AssignmentLeaseManager:
         self,
         kanban_client: KanbanInterface,
         assignment_persistence: AssignmentPersistence,
-        default_lease_hours: float = 0.0667,  # 240s (matches Phase 1)
-        max_renewals: int = 10,
-        warning_threshold_hours: float = 0.0167,  # 1 min (was 1.0 hr)
+        default_lease_hours: float = 4.0,
+        warning_threshold_hours: float = 0.0167,  # 1 min
         priority_multipliers: Optional[Dict[str, float]] = None,
         complexity_multipliers: Optional[Dict[str, float]] = None,
         grace_period_minutes: float = 1.0,  # 60 seconds grace period
-        renewal_decay_factor: float = 0.9,
-        min_lease_hours: float = 0.05,  # Minimum 180 seconds
-        max_lease_hours: float = 0.1,  # Maximum 360 seconds (Phase 3)
-        stuck_task_threshold_renewals: int = 5,
+        min_lease_hours: float = 0.0,
+        max_lease_hours: float = 24.0,
         enable_adaptive_leases: bool = True,
         task_list: Optional[List[Task]] = None,
-        silence_multiplier: float = 5.0,
         max_silent_recoveries: int = 3,
+        silence_timeout_minutes: float = DEFAULT_SILENCE_TIMEOUT_MINUTES,
+        budget_multiplier: float = 3.0,
+        checkpoint_cadence_minutes: float = DEFAULT_CHECKPOINT_CADENCE_MINUTES,
     ):
         """
         Initialize the lease manager.
+
+        ADR-0012 D3 splits the old single lease into two dials. The
+        **silence timeout** answers "is the worker alive?": a lease
+        expires when the agent has made no MCP call for that long,
+        whatever the size of its chore. The **budget ceiling** answers
+        "how long may it hold the chore?": a generous, estimate-scaled
+        bound that catches a chatty zombie. Heartbeats move the first
+        and never pass the second.
 
         Parameters
         ----------
@@ -246,27 +194,24 @@ class AssignmentLeaseManager:
             assignment_persistence
                 Assignment persistence layer.
             default_lease_hours
-                Default lease duration in hours.
-            max_renewals
-                Maximum allowed renewals before escalation.
+                Estimate used for the budget when a task carries none.
             warning_threshold_hours
                 Hours before expiry to warn.
             priority_multipliers
-                Lease duration multipliers by priority.
+                Budget multipliers by priority.
             complexity_multipliers
-                Lease duration multipliers by label/type.
+                Budget multipliers by label/type.
             grace_period_minutes
                 Grace period in minutes (float) after expiry before recovery.
-            renewal_decay_factor
-                Factor to reduce renewal duration over time.
             min_lease_hours
-                Minimum allowed lease duration.
+                Lower bound on the budget (the silence timeout is always a
+                floor as well).
             max_lease_hours
-                Maximum allowed lease duration.
-            stuck_task_threshold_renewals
-                Renewals before considering task stuck.
+                Upper bound on the budget; no chore is held longer.
             enable_adaptive_leases
-                Enable smart lease duration adjustments.
+                Scale the budget by the task's estimate, priority, and
+                complexity; when False every chore budgets from
+                ``default_lease_hours``.
             task_list
                 Optional reference to project tasks for recovery info updates.
             max_silent_recoveries
@@ -277,13 +222,32 @@ class AssignmentLeaseManager:
                 reclaim/re-assign runaway loop regardless of who supplies
                 agents. A recovery where the agent reported progress resets
                 the streak.
+            silence_timeout_minutes
+                D3 dial one: minutes of MCP silence after which the agent
+                is presumed dead. Must be at least twice
+                ``checkpoint_cadence_minutes`` (ADR-0012 D11 part 3).
+            budget_multiplier
+                D3 dial two: the budget is this many times the estimate.
+            checkpoint_cadence_minutes
+                How often the session contract obliges an agent to
+                checkpoint (D8); only used to validate the silence timeout.
+
+        Raises
+        ------
+        ValueError
+            If the silence timeout is under twice the checkpoint cadence.
         """
         self.kanban_client = kanban_client
         self.assignment_persistence = assignment_persistence
         self.task_list = task_list if task_list is not None else []
         self.default_lease_hours = default_lease_hours
-        self.max_renewals = max_renewals
         self.warning_threshold_hours = warning_threshold_hours
+        validate_silence_checkpoint_invariant(
+            silence_timeout_minutes, checkpoint_cadence_minutes
+        )
+        self.silence_timeout_minutes = silence_timeout_minutes
+        self.budget_multiplier = budget_multiplier
+        self.checkpoint_cadence_minutes = checkpoint_cadence_minutes
 
         # Advanced configuration
         self.priority_multipliers = priority_multipliers or {
@@ -299,12 +263,9 @@ class AssignmentLeaseManager:
             "epic": 3.0,
         }
         self.grace_period_minutes = grace_period_minutes
-        self.renewal_decay_factor = renewal_decay_factor
         self.min_lease_hours = min_lease_hours
         self.max_lease_hours = max_lease_hours
-        self.stuck_task_threshold_renewals = stuck_task_threshold_renewals
         self.enable_adaptive_leases = enable_adaptive_leases
-        self.silence_multiplier = silence_multiplier
         self.max_silent_recoveries = max_silent_recoveries
 
         # Circuit breaker state (issue #667 Fix 3a): consecutive SILENT
@@ -343,6 +304,124 @@ class AssignmentLeaseManager:
 
         # Lock manager for event loop safe operations
         self._lock_manager = EventLoopLockManager()
+
+    # Settings keys the manager understands, by constructor parameter.
+    # Anything else in a settings object or project dict (including the
+    # pre-D3 knobs ``max_renewals``, ``stuck_threshold_renewals``,
+    # ``renewal_decay_factor``, ``silence_multiplier``) is ignored.
+    _SETTINGS_FIELDS: Dict[str, str] = {
+        "default_hours": "default_lease_hours",
+        "warning_hours": "warning_threshold_hours",
+        "priority_multipliers": "priority_multipliers",
+        "complexity_multipliers": "complexity_multipliers",
+        "grace_period_minutes": "grace_period_minutes",
+        "min_lease_hours": "min_lease_hours",
+        "max_lease_hours": "max_lease_hours",
+        "enable_adaptive": "enable_adaptive_leases",
+        "silence_timeout_minutes": "silence_timeout_minutes",
+        "budget_multiplier": "budget_multiplier",
+        "checkpoint_cadence_minutes": "checkpoint_cadence_minutes",
+    }
+
+    @classmethod
+    def from_settings(
+        cls,
+        kanban_client: KanbanInterface,
+        assignment_persistence: AssignmentPersistence,
+        settings: Any,
+        task_list: Optional[List[Task]] = None,
+    ) -> "AssignmentLeaseManager":
+        """Build a manager from ``TaskLeaseSettings`` or a project config dict.
+
+        Parameters
+        ----------
+        kanban_client : KanbanInterface
+            Interface to kanban board.
+        assignment_persistence : AssignmentPersistence
+            Assignment persistence layer.
+        settings : Any
+            A ``TaskLeaseSettings`` dataclass or a plain dict from a
+            project's config. Unknown and pre-D3 keys are ignored.
+        task_list : Optional[List[Task]]
+            Project tasks for recovery info updates.
+
+        Returns
+        -------
+        AssignmentLeaseManager
+            The configured manager.
+        """
+        if isinstance(settings, dict):
+            raw: Dict[str, Any] = dict(settings)
+        else:
+            raw = {
+                key: getattr(settings, key)
+                for key in cls._SETTINGS_FIELDS
+                if hasattr(settings, key)
+            }
+        kwargs: Dict[str, Any] = {
+            param: raw[key] for key, param in cls._SETTINGS_FIELDS.items() if key in raw
+        }
+        return cls(kanban_client, assignment_persistence, task_list=task_list, **kwargs)
+
+    @property
+    def silence_window(self) -> timedelta:
+        """D3 dial one as a duration."""
+        return timedelta(minutes=self.silence_timeout_minutes)
+
+    def budget_for(self, task: Optional[Task]) -> timedelta:
+        """Compute D3 dial two: how long a chore may be held in total.
+
+        Parameters
+        ----------
+        task : Optional[Task]
+            The task being claimed; its estimate, priority, and labels
+            scale the budget when adaptive leases are enabled.
+
+        Returns
+        -------
+        timedelta
+            ``budget_multiplier`` times the (scaled) estimate, never less
+            than one silence window or ``min_lease_hours``, never more
+            than ``max_lease_hours``.
+        """
+        base_hours = float(self.default_lease_hours)
+        if task is not None and self.enable_adaptive_leases:
+            if task.estimated_hours:
+                base_hours = float(task.estimated_hours)
+            priority = getattr(task, "priority", None)
+            if priority is not None:
+                base_hours *= self.priority_multipliers.get(
+                    str(getattr(priority, "value", priority)).lower(), 1.0
+                )
+            for label in getattr(task, "labels", None) or []:
+                multiplier = self.complexity_multipliers.get(str(label).lower())
+                if multiplier is not None:
+                    base_hours *= multiplier
+                    break
+        hours = base_hours * self.budget_multiplier
+        hours = max(hours, self.silence_timeout_minutes / 60.0, self.min_lease_hours)
+        hours = min(hours, self.max_lease_hours)
+        return timedelta(hours=hours)
+
+    def _expiry_after_activity(self, lease: AssignmentLease, now: datetime) -> datetime:
+        """Where a heartbeat at ``now`` moves the lease's expiry.
+
+        Parameters
+        ----------
+        lease : AssignmentLease
+            The lease being touched or renewed.
+        now : datetime
+            The moment of activity.
+
+        Returns
+        -------
+        datetime
+            ``now`` plus the silence window, capped at the budget deadline.
+        """
+        candidate = now + self.silence_window
+        if lease.budget_deadline is not None and lease.budget_deadline < candidate:
+            return lease.budget_deadline
+        return candidate
 
     @property
     def lease_lock(self) -> asyncio.Lock:
@@ -387,45 +466,11 @@ class AssignmentLeaseManager:
         async with self.lease_lock:
             now = datetime.now(timezone.utc)
 
-            # Calculate initial lease duration
-            # Use progressive timeout phase-1 if in aggressive mode
-            if self.default_lease_hours < 1.0:
-                # Aggressive mode: Use phase-1 timeout for unproven agents
-                lease_seconds, _ = self.calculate_adaptive_timeout(
-                    progress=0, update_count=0, has_recent_activity=False
-                )
-                base_hours = lease_seconds / 3600
-            else:
-                # Conservative mode: Use default or task-based estimation
-                base_hours = self.default_lease_hours
-
-            # Only use task-based estimation if default is conservative (> 1 hour)
-            if task and self.enable_adaptive_leases and self.default_lease_hours > 1.0:
-                # Use task estimation if available
-                if task.estimated_hours:
-                    base_hours = task.estimated_hours
-
-                # Apply priority multiplier
-                if hasattr(task, "priority"):
-                    priority_mult = self.priority_multipliers.get(
-                        task.priority.value.lower(), 1.0
-                    )
-                    base_hours *= priority_mult
-
-                # Apply complexity multiplier based on labels
-                if hasattr(task, "labels"):
-                    for label in task.labels:
-                        label_lower = label.lower()
-                        if label_lower in self.complexity_multipliers:
-                            base_hours *= self.complexity_multipliers[label_lower]
-                            break  # Use first matching complexity
-
-            # Enforce min/max bounds
-            base_hours = max(
-                self.min_lease_hours, min(self.max_lease_hours, base_hours)
-            )
-
-            initial_duration = timedelta(hours=base_hours)
+            # ADR-0012 D3: the two dials. Silence decides liveness and sets
+            # the expiry; the budget decides how long the chore may be
+            # held at all and caps every later extension.
+            budget_deadline = now + self.budget_for(task)
+            initial_expiry = min(now + self.silence_window, budget_deadline)
 
             # ADR-0012 D11: issue the next fencing token for this card.
             # Monotonic across release and across restart, so a session
@@ -437,10 +482,8 @@ class AssignmentLeaseManager:
             # under a live holder is silently fatal: the agent is told
             # its epoch exactly once (by request_next_task), so it keeps
             # sending the old value and is fenced on its own completion.
-            # The window is real — report_task_progress re-grants a lease
-            # whose grace has elapsed but which the monitor has not yet
-            # recovered. Same rule the renewal path follows: "the same
-            # agent continuing the same claim" keeps its token.
+            # Same rule the renewal path follows: "the same agent
+            # continuing the same claim" keeps its token.
             existing = self.active_leases.get(task_id)
             if existing is not None and existing.agent_id == agent_id:
                 # The same agent already holds this card: a continuation,
@@ -463,10 +506,15 @@ class AssignmentLeaseManager:
                 task_id=task_id,
                 agent_id=agent_id,
                 assigned_at=now,
-                lease_expires=now + initial_duration,
+                lease_expires=initial_expiry,
                 last_renewed=now,
-                estimated_hours=task.estimated_hours if task else base_hours,
+                estimated_hours=(
+                    float(task.estimated_hours)
+                    if task is not None and task.estimated_hours
+                    else float(self.default_lease_hours)
+                ),
                 lease_epoch=epoch,
+                budget_deadline=budget_deadline,
             )
 
             # Store lease
@@ -554,14 +602,10 @@ class AssignmentLeaseManager:
                 # grace is precisely the window in which Marcus has not
                 # yet given up on this agent. Let it renew.
                 #
-                # Refusing here dropped the caller into
-                # report_task_progress's re-grant branch, which calls
-                # create_lease and mints a NEW epoch for the same agent.
                 # The agent is only ever told its epoch once, by
-                # request_next_task, so it kept sending the old value and
-                # was fenced on its own completion — punishing exactly
-                # the agents that follow the protocol. Fixing the renewal
-                # means the re-grant never fires for the holder at all.
+                # request_next_task, so a refusal here would strand an
+                # agent that follows the protocol (ADR-0012 D3 deleted
+                # the re-grant that used to paper over this).
                 logger.info(
                     f"Renewing lapsed lease for task {task_id} held by "
                     f"{agent_id}: still within grace, not yet recovered."
@@ -606,40 +650,16 @@ class AssignmentLeaseManager:
             lease.progress_percentage = progress
             lease.last_progress_message = message
 
-            # Track update timestamp for cadence-based recovery
-            lease.update_timestamps.append(datetime.now(timezone.utc))
-
-            # Use progressive timeout if in aggressive mode (< 1 hour default)
-            if self.default_lease_hours < 1.0:
-                # Progressive timeout mode: calculate based on progress
-                lease_seconds, grace_seconds = self.calculate_adaptive_timeout(
-                    progress=progress,
-                    update_count=lease.renewal_count + 1,  # +1 for this renewal
-                    has_recent_activity=True,  # Just reported progress
-                )
-                renewal_duration = timedelta(seconds=lease_seconds)
-                lease.grace_period_seconds = float(grace_seconds)
-
-                logger.info(
-                    f"Progressive timeout for {task_id}: {lease_seconds}s "
-                    f"+ {grace_seconds}s grace "
-                    f"(progress={progress}%, updates={lease.renewal_count + 1})"
-                )
-            else:
-                # Conservative mode: use old calculation logic
-                renewal_duration = lease.calculate_renewal_duration(self)
-
-            # Renew lease
-            lease.last_renewed = datetime.now(timezone.utc)
-            lease.lease_expires = lease.last_renewed + renewal_duration
+            # Record the activity. ADR-0012 D3: a progress report is a
+            # heartbeat; it resets the silence clock and never passes the
+            # budget ceiling. Renewals are unlimited: a healthy long chore
+            # reports as often as it likes, and the ceiling, not a count,
+            # is what ends an overlong hold.
+            now = datetime.now(timezone.utc)
+            lease.update_timestamps.append(now)
+            lease.last_renewed = now
+            lease.lease_expires = self._expiry_after_activity(lease, now)
             lease.renewal_count += 1
-
-            # Check for excessive renewals
-            if lease.renewal_count >= self.max_renewals:
-                logger.warning(
-                    f"Task {task_id} has been renewed {lease.renewal_count} times. "
-                    f"Consider escalation or reassignment."
-                )
 
             # Update persistence
             await self._persist_lease(lease)
@@ -817,22 +837,10 @@ class AssignmentLeaseManager:
                 if lease.is_expired:
                     continue
 
-                # Extend by the current phase timeout
-                lease_seconds, _ = self.calculate_adaptive_timeout(
-                    progress=lease.progress_percentage,
-                    update_count=max(lease.renewal_count, 1),
-                    has_recent_activity=True,
-                )
+                # ADR-0012 D3: a heartbeat resets the silence clock, capped
+                # at the budget ceiling, and never SHORTENS the lease.
                 lease.last_renewed = now
-                # A heartbeat proves liveness; it must never SHORTEN the
-                # lease. ``calculate_adaptive_timeout`` returns the
-                # progressive-timeout window (minutes), while a lease
-                # created in conservative mode (``default_lease_hours >=
-                # 1.0`` — what the shipped example configs set) runs for
-                # hours. Assigning unconditionally meant every MCP call an
-                # agent made cut its own multi-hour lease down to the next
-                # few minutes.
-                extended_to = now + timedelta(seconds=lease_seconds)
+                extended_to = self._expiry_after_activity(lease, now)
                 if extended_to > lease.lease_expires:
                     lease.lease_expires = extended_to
                     advanced.append(lease)
@@ -1795,6 +1803,13 @@ class AssignmentLeaseManager:
                 # failure would be silent, because a reissued epoch
                 # compares equal rather than raising.
                 "lease_epoch": lease.lease_epoch,
+                # ADR-0012 D3: the budget ceiling. Without it a restart
+                # would let a chatty zombie start a fresh budget.
+                "budget_deadline": (
+                    lease.budget_deadline.isoformat()
+                    if lease.budget_deadline is not None
+                    else None
+                ),
             },
             create_if_absent=is_live,
         )
@@ -1872,6 +1887,13 @@ class AssignmentLeaseManager:
                 # claim, so a legacy lease fails the fence closed rather
                 # than being mistaken for the current holder.
                 lease_epoch=assignment.get("lease_epoch", 0),
+                budget_deadline=(
+                    _ensure_timezone_aware(
+                        datetime.fromisoformat(assignment["budget_deadline"])
+                    )
+                    if assignment.get("budget_deadline")
+                    else None
+                ),
             )
 
             # Seed the per-task high-water mark so the next claim of this
@@ -1890,7 +1912,6 @@ class AssignmentLeaseManager:
             "total_active": len(self.active_leases),
             "expired": 0,
             "expiring_soon": 0,
-            "high_renewal_count": 0,
             "by_status": {},
             "average_renewal_count": 0,
         }
@@ -1911,10 +1932,6 @@ class AssignmentLeaseManager:
                 expiring_count: int = stats["expiring_soon"]
                 stats["expiring_soon"] = expiring_count + 1
 
-            if lease.renewal_count >= self.max_renewals:
-                high_renewal_count: int = stats["high_renewal_count"]
-                stats["high_renewal_count"] = high_renewal_count + 1
-
             total_renewals += lease.renewal_count
 
         if self.active_leases:
@@ -1922,96 +1939,17 @@ class AssignmentLeaseManager:
 
         return stats
 
-    def calculate_adaptive_timeout(
-        self, progress: int, update_count: int, has_recent_activity: bool
-    ) -> tuple[int, int]:
-        """
-        Calculate adaptive timeout based on task state (progressive timeout).
-
-        Parameters
-        ----------
-        progress : int
-            Current progress percentage (0-100)
-        update_count : int
-            Number of progress updates received
-        has_recent_activity : bool
-            Whether task shows recent activity
-
-        Returns
-        -------
-        tuple[int, int]
-            (lease_seconds, grace_seconds) timeout configuration
-
-        Notes
-        -----
-        Progressive timeout phases (widened 2026-04-12 after experiment
-        66 evidence showed agents routinely go 2+ minutes between
-        progress reports during implementation bursts — the previous
-        90-120s timeouts caused leases to expire mid-implementation,
-        recovering in-progress tasks and reassigning them to other
-        agents):
-
-        - Phase 1 (Unproven): No updates yet → 180s + 60s = 240s total
-        - Phase 2 (Working): First update → 240s + 60s = 300s total
-        - Phase 3 (Proven): 25-75% progress → 300s + 60s = 360s total
-        - Phase 4 (Finishing): >75% progress → 360s + 90s = 450s total
-
-        Phase 4 was widened 2026-04-25 (snake_game-v1 cascade).
-        The original "near completion = faster recovery" intuition was
-        backwards: tail-phase activities (test runs, builds, commits,
-        push, conflict resolution) take LONGER between progress
-        reports than the middle phase, not shorter. Empirical evidence
-        showed 161-215s gaps during the final 25% routinely tripped
-        the old 210s window, causing recovery on tasks that were
-        actually completing successfully. Phase 4 is now the longest
-        window, not the shortest. The 90s grace also covers silent
-        validator LLM calls (60-120s each) that run after 100% is
-        reported; touch_lease is called before each attempt.
-
-        These tolerances accommodate the observed 116-120s gap between
-        progress reports during contract-first implementation work,
-        plus a comfortable buffer for agents reading contract files
-        and running tests locally without touching MCP tools.
-        """
-        # Phase 1: No updates yet - strict but tolerant of setup time
-        if update_count == 0:
-            return (180, 60)
-
-        # Phase 2: First update received - moderate timeout
-        if update_count == 1:
-            return (240, 60)
-
-        # Phase 4: Near completion — LONGEST window. Tail-phase activities
-        # (final tests, build, commit, push, conflict resolution) routinely
-        # run 2-4 minutes between progress reports; validator LLM calls add
-        # another 60-120s each. Shorter windows here cause spurious recovery
-        # on tasks that are actively completing.
-        if progress >= 75:
-            return (360, 90)
-
-        # Phase 3: Good progress (25-75%)
-        if progress >= 25:
-            return (300, 60)
-
-        # Default: working state
-        return (240, 60)
-
     async def should_recover_expired_lease(self, lease: AssignmentLease) -> bool:
         """
-        Determine if expired lease should be recovered using cadence detection.
+        Decide whether an expired lease is recovered.
 
-        Compares time since last progress update against the agent's own
-        median update interval * silence_multiplier. If the agent has been
-        silent for longer than expected based on its established cadence,
-        it's considered dead and the task should be recovered.
-
-        Defense-in-depth guard (Simon decision 011b3fad): if the task
-        is already in a terminal state (DONE/BLOCKED) on the board,
-        skip recovery regardless of cadence. The lease is stale
-        bookkeeping at that point — recovering a finished task only
-        causes a fresh agent to redo work that's already complete
-        (snake_game-v1 cascade). The lease will be cleared on the
-        next monitor pass; we just don't reassign.
+        ADR-0012 D3: expiry *is* the liveness decision. A lease expires
+        only when the agent has been silent for the whole silence window
+        or has spent its budget, so there is no further cadence to
+        consult. The one remaining guard is defense in depth (Simon
+        decision 011b3fad): never recover a task the board already shows
+        as terminal (DONE/BLOCKED); the lease is stale bookkeeping and
+        recovering it would hand finished work to a fresh agent.
 
         Parameters
         ----------
@@ -2021,38 +1959,17 @@ class AssignmentLeaseManager:
         Returns
         -------
         bool
-            True if task should be recovered, False to give more time
-            or because the task is already terminal.
-
-        Notes
-        -----
-        Real data from logs: median progress interval ~47s, mean ~60s.
-        Default silence_multiplier is 1.5x — configurable via constructor.
-
-        Fallback: if fewer than 2 progress updates exist (can't compute
-        median), always recover since the agent has no established cadence.
+            True to recover, False when the task is already terminal.
         """
-        # Defense-in-depth: never recover a task that's already terminal.
-        # The board status flips to DONE/BLOCKED before lease bookkeeping
-        # has caught up; recovering at that point reassigns finished work
-        # to a fresh agent and produces duplicate output.
         if hasattr(self.kanban_client, "get_task_by_id"):
             try:
                 task_obj = await self.kanban_client.get_task_by_id(lease.task_id)
                 if task_obj is not None:
                     status_value = getattr(task_obj, "status", None)
-                    # Accept either TaskStatus enum or string forms
                     status_str = (
                         getattr(status_value, "value", None) or str(status_value)
                     ).lower()
                     if status_str in {"done", "completed", "blocked"}:
-                        # Observability counter — every hit here is a
-                        # latent coordination bug elsewhere (lease
-                        # bookkeeping fell behind the board status flip).
-                        # The guard prevents the bad outcome (recovering
-                        # a finished task), but the metric makes the
-                        # underlying bug visible instead of swallowing
-                        # it silently.
                         self.recoveries_skipped_terminal_status += 1
                         logger.warning(
                             f"Task {lease.task_id} is terminal "
@@ -2065,46 +1982,15 @@ class AssignmentLeaseManager:
                         )
                         return False
             except Exception as e:
-                # Don't block recovery on a kanban lookup hiccup — fall
-                # through to the cadence check.
                 logger.debug(f"Terminal-status check failed for {lease.task_id}: {e}")
 
         now = datetime.now(timezone.utc)
-        median_interval = lease.median_update_interval
-
-        # Not enough data to compute cadence — recover
-        if median_interval is None:
-            logger.info(
-                f"Task {lease.task_id}: no established update cadence "
-                f"(updates={len(lease.update_timestamps)}), recovering"
-            )
-            return True
-
-        # Calculate silence duration from last update
-        if lease.update_timestamps:
-            last_update = max(lease.update_timestamps)
-            silence_seconds = (now - last_update).total_seconds()
+        if lease.budget_deadline is not None and now > lease.budget_deadline:
+            reason = f"budget ceiling passed at {lease.budget_deadline.isoformat()}"
         else:
-            silence_seconds = (now - lease.assigned_at).total_seconds()
-
-        threshold = median_interval * self.silence_multiplier
-
-        if silence_seconds > threshold:
-            logger.info(
-                f"Task {lease.task_id}: silence={silence_seconds:.0f}s > "
-                f"threshold={threshold:.0f}s "
-                f"(median={median_interval:.0f}s * "
-                f"{self.silence_multiplier}x), recovering"
-            )
-            return True
-
-        logger.info(
-            f"Task {lease.task_id}: silence={silence_seconds:.0f}s <= "
-            f"threshold={threshold:.0f}s "
-            f"(median={median_interval:.0f}s * "
-            f"{self.silence_multiplier}x), extending grace"
-        )
-        return False
+            reason = f"silent past the {self.silence_timeout_minutes:g}-minute window"
+        logger.info(f"Task {lease.task_id}: {reason}, recovering")
+        return True
 
     async def _create_recovery_handoff_comment(
         self, lease: AssignmentLease, recovery_info: RecoveryInfo

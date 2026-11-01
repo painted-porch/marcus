@@ -24,28 +24,13 @@ all ("D3's timeout (15-30 min) overlapped D8's checkpoint cadence
 Epoch fencing and board-mediated reconciliation (D11 parts 1 and 2) would
 make false recovery *safe*; this invariant is what would keep it *rare*.
 
-**Neither half ships today.** The fence was deferred pending D3 (see the
-D11 amendment in the ADR), and this invariant is not enforced at startup
-either — see below. That is deliberate and consistent: the two halves are
-sized for each other, so shipping one alone leaves the survivor carrying
-load it was never designed for.
-
-Status: NOT YET ENFORCED AT STARTUP
------------------------------------
-Nothing in ``src/`` calls :func:`validate_silence_checkpoint_invariant`
-today, and that is not an oversight to be fixed by wiring it up here.
-**Neither dial exists as a configuration field yet.** The silence timeout
-and the checkpoint cadence are introduced by D3's liveness retune —
-replacing the current progressive-timeout curve and ``max_renewals`` —
-which is Phase-3 work, not gate 2. ``MarcusConfig`` currently exposes
-``silence_multiplier`` and a lease-duration curve, neither of which is
-the quantity this rule constrains.
-
-Validating a value that no operator can set would be theatre. This module
-is the decided rule plus its tests, ready to be called from config load
-the moment D3 lands the two fields it governs. The Phase-3 lease-retune
-work item owns that wiring; until then the rule is enforced only against
-the defaults recorded here.
+Status: ENFORCED AT MANAGER CONSTRUCTION (D3 landed)
+--------------------------------------------------
+``AssignmentLeaseManager.__init__`` calls
+:func:`validate_silence_checkpoint_invariant` with the configured
+``silence_timeout_minutes`` and ``checkpoint_cadence_minutes``
+(``TaskLeaseSettings`` fields), so a config that designs false recovery in
+refuses to start. The D11 fence itself remains Milestone B work.
 """
 
 # Defaults from ADR-0012: checkpoint obligation at most every 20 minutes,

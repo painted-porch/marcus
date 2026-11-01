@@ -366,6 +366,62 @@ class TestReGrantOwnership:
         assert task.id not in manager.active_leases
 
 
+class TestTheReGrantIsGone:
+    """ADR-0012 D3: a recovered agent is told, not quietly let back in.
+
+    The re-grant was Marcus's apology for false recovery: a displaced
+    agent's next progress report recreated its lease. D3 makes recovery
+    trustworthy, so the apology is deleted. A report with no live lease
+    is refused with a reason the agent can act on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_report_after_recovery_is_refused_and_creates_no_lease(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """No lease is created, no epoch is spent, and the agent is told to move on."""
+        task = _make_task()
+        await manager.create_lease(task.id, "agent-a")
+        await manager.release_lease(task.id, reason="lease_expired")
+        epoch_before = await manager.get_highest_epoch(task.id)
+        state = _make_state(manager, task, agent_id=None)
+
+        result = await report_task_progress(
+            agent_id="agent-a",
+            task_id=task.id,
+            status="in_progress",
+            progress=50,
+            message="still going",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "lease_recovered"
+        assert "request" in result["message"].lower()
+        assert task.id not in manager.active_leases
+        assert await manager.get_highest_epoch(task.id) == epoch_before
+
+    @pytest.mark.asyncio
+    async def test_a_report_with_no_lease_and_no_history_is_refused_too(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """Even a task never leased is not leased by a progress report."""
+        task = _make_task()
+        state = _make_state(manager, task, agent_id=None)
+
+        result = await report_task_progress(
+            agent_id="agent-a",
+            task_id=task.id,
+            status="in_progress",
+            progress=10,
+            message="starting",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert task.id not in manager.active_leases
+
+
 class TestBoardOwnershipIsProtected:
     """A displaced agent must not take the card's name on the board."""
 
