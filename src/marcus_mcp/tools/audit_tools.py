@@ -8,14 +8,16 @@ the approvals, the eligibility refusals, identity changes, and the
 cost rows. The bundle is a query over what the board already holds.
 """
 
+import inspect
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from mcp.types import Tool
 
 from src.core.models import Task, TaskStatus, WorkerStatus
 
 from ..audit import get_audit_logger
+from ..coordinator.eligibility import REFUSALS_COLLECTION
 
 
 async def get_usage_report(
@@ -128,6 +130,102 @@ def _case_tasks(case_id: str, state: Any) -> List[Task]:
     ]
 
 
+# Refusals are read back from persistence as well as memory (issue
+# #740), so a bundle exported after a server restart still carries them.
+# The persistence query scans newest-first up to a limit before
+# filtering, so the limit must comfortably exceed one board's refusals.
+REFUSAL_QUERY_LIMIT = 50_000
+
+
+async def _persisted_refusals(state: Any, task_ids: Set[str]) -> List[Dict[str, Any]]:
+    """Read this case's refusals from the persistence layer.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state; a state without an awaitable
+        ``persistence.query`` yields no rows.
+    task_ids : Set[str]
+        The case's task ids.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Persisted refusal records for those tasks, storage key removed.
+    """
+    persistence = getattr(state, "persistence", None)
+    query = getattr(persistence, "query", None)
+    if not inspect.iscoroutinefunction(query) or not task_ids:
+        return []
+    rows = await query(
+        REFUSALS_COLLECTION,
+        lambda r: r.get("task_id") in task_ids,
+        limit=REFUSAL_QUERY_LIMIT,
+    )
+    return [
+        {k: v for k, v in row.items() if not str(k).startswith("_")} for row in rows
+    ]
+
+
+def _merge_refusals(
+    live: List[Dict[str, Any]], persisted: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Combine in-memory and persisted refusals into one deduplicated list.
+
+    Parameters
+    ----------
+    live : List[Dict[str, Any]]
+        Refusals held by the running server.
+    persisted : List[Dict[str, Any]]
+        Refusals read back from persistence.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        One entry per (agent, task, reason): the highest count, the
+        earliest first sighting, the latest last sighting, ordered by
+        first sighting.
+    """
+    merged: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for record in list(persisted) + list(live):
+        key = (
+            str(record.get("agent_id")),
+            str(record.get("task_id")),
+            str(record.get("reason")),
+        )
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = {
+                k: v for k, v in record.items() if not str(k).startswith("_")
+            }
+            continue
+        existing["count"] = max(
+            int(existing.get("count", 0)), int(record.get("count", 0))
+        )
+        firsts = [
+            x
+            for x in (existing.get("first_refused_at"), record.get("first_refused_at"))
+            if x
+        ]
+        lasts = [
+            x
+            for x in (existing.get("last_refused_at"), record.get("last_refused_at"))
+            if x
+        ]
+        if firsts:
+            existing["first_refused_at"] = min(firsts)
+        if lasts:
+            existing["last_refused_at"] = max(lasts)
+    return sorted(
+        merged.values(),
+        key=lambda r: (
+            str(r.get("first_refused_at", "")),
+            str(r.get("task_id")),
+            str(r.get("agent_id")),
+        ),
+    )
+
+
 async def export_case(case_id: str, state: Any) -> Dict[str, Any]:
     """Export one case's complete audit bundle (issue #737, step 8).
 
@@ -190,11 +288,14 @@ async def export_case(case_id: str, state: Any) -> Dict[str, Any]:
     task_ids = {t.id for t in tasks}
     involved_agents = {t.assigned_to for t in tasks if t.assigned_to}
 
-    refusals = [
-        r
-        for r in (getattr(state, "eligibility_refusals", None) or [])
-        if r.get("task_id") in task_ids
-    ]
+    refusals = _merge_refusals(
+        [
+            r
+            for r in (getattr(state, "eligibility_refusals", None) or [])
+            if r.get("task_id") in task_ids
+        ],
+        await _persisted_refusals(state, task_ids),
+    )
     identity_changes = [
         c
         for c in (getattr(state, "identity_changes", None) or [])
