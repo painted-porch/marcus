@@ -66,6 +66,30 @@ def normalize(text: str) -> str:
     return " ".join(out.split())
 
 
+_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
+
+
+def words(text: str) -> List[str]:
+    """Split text into comparable words, dropping punctuation entirely.
+
+    Punctuation glued to a word ("January.", "said,", "weekday-only") is
+    not a different word; treating it as one was the root cause of the
+    audited false declines, so the matcher compares words, not tokens.
+
+    Parameters
+    ----------
+    text : str
+        Raw text; normalized here (entities, typographic quotes, case).
+
+    Returns
+    -------
+    List[str]
+        Lower-case words in any script, with internal apostrophes kept;
+        underscores and all other punctuation are separators.
+    """
+    return _WORD_RE.findall(normalize(text))
+
+
 # Excerpt matching (#752). The exact-substring rule declined correct
 # pages whenever one word of a long excerpt differed from the page (a
 # dash, a dropped word, an inline link); the decline audit measured a
@@ -73,8 +97,9 @@ def normalize(text: str) -> str:
 # excerpt's words against the page in order and requires both a high
 # share of them and a contiguous run, so a page that merely quotes a
 # phrase still fails (the run floor is eight words, or half the excerpt
-# when the excerpt is shorter than sixteen). Thresholds were set against
-# the audited cases:
+# when the excerpt is shorter than sixteen). Words are compared with
+# punctuation removed, so a dash or a trailing period never costs a
+# word. Thresholds were set against the audited cases:
 # judged-wrong pages scored at most 0.32, judged-correct pages at least
 # 0.95, so 0.85 sits in the gap with margin on both sides.
 MIN_EXCERPT_COVERAGE = 0.85
@@ -134,37 +159,85 @@ def _align(needle: List[str], hay: List[str]) -> Tuple[float, int]:
     return matched / len(needle), longest
 
 
-def _candidate_windows(needle: List[str], hay: List[str]) -> List[Tuple[int, int]]:
+def _candidate_windows(
+    needle: List[str], hay: List[str], anchor: int
+) -> List[Tuple[int, int]]:
     """Find page regions worth aligning, anchored on shared word runs.
+
+    Votes are bucketed into half-excerpt steps so a dropped word inside
+    the quoted run does not split one region's votes across adjacent
+    starts, and each window spans the excerpt's length on either side.
 
     Parameters
     ----------
     needle : List[str]
-        Normalized excerpt words.
+        Excerpt words.
     hay : List[str]
-        Normalized page words.
+        Page words.
+    anchor : int
+        Length of the shared word run that counts as an anchor.
 
     Returns
     -------
     List[Tuple[int, int]]
-        ``(start, end)`` slices of ``hay``, at most ``_MAX_WINDOWS``.
+        ``(start, end)`` slices of ``hay``, at most ``_MAX_WINDOWS``,
+        most-voted first; empty when no run is shared.
     """
     n = len(needle)
-    size = _ANCHOR_WORDS
+    if n < anchor or len(hay) < anchor:
+        return []
     index: Dict[Tuple[str, ...], List[int]] = {}
-    for i in range(len(hay) - size + 1):
-        index.setdefault(tuple(hay[i : i + size]), []).append(i)
+    for i in range(len(hay) - anchor + 1):
+        index.setdefault(tuple(hay[i : i + anchor]), []).append(i)
+    step = max(1, n // 2)
     votes: Dict[int, int] = {}
-    for j in range(n - size + 1):
-        for pos in index.get(tuple(needle[j : j + size]), ()):
-            start = max(0, pos - j - n)
-            votes[start] = votes.get(start, 0) + 1
-    starts = sorted(votes, key=lambda s: (-votes[s], s))[:_MAX_WINDOWS]
-    return [(s, min(len(hay), s + 3 * n)) for s in sorted(starts)]
+    for j in range(n - anchor + 1):
+        for pos in index.get(tuple(needle[j : j + anchor]), ()):
+            bucket = max(0, pos - j) // step
+            votes[bucket] = votes.get(bucket, 0) + 1
+    buckets = sorted(votes, key=lambda b: (-votes[b], b))[:_MAX_WINDOWS]
+    return [
+        (max(0, b * step - n), min(len(hay), b * step + step + 2 * n)) for b in buckets
+    ]
+
+
+def _windows_for(needle: List[str], hay: List[str]) -> List[Tuple[int, int]]:
+    """Choose the page slices to align the excerpt against.
+
+    Every page is scored inside windows around shared word runs, never
+    against the whole page, so words scattered far from the quoted run
+    cannot inflate coverage and a page scores the same on either side of
+    any length limit. Four-word anchors first; two-word anchors when none
+    are shared (the score is then diagnostic, since passing needs an
+    eight-word run); the page itself, bounded, when the excerpt is too
+    short to anchor or nothing at all is shared.
+
+    Parameters
+    ----------
+    needle : List[str]
+        Excerpt words.
+    hay : List[str]
+        Page words.
+
+    Returns
+    -------
+    List[Tuple[int, int]]
+        Non-empty list of ``(start, end)`` slices.
+    """
+    for anchor in (_ANCHOR_WORDS, 2):
+        found = _candidate_windows(needle, hay, anchor)
+        if found:
+            return found
+    return [(0, min(len(hay), _WHOLE_PAGE_LIMIT))]
 
 
 def match_excerpt(excerpt: str, page_text: str) -> ExcerptMatch:
     """Score how much of the excerpt appears on the page, in order.
+
+    Each candidate window is judged on its own: a window that clears both
+    floors wins over a window with higher coverage that does not (Codex
+    on PR #756), so a passing quotation is never discarded because a
+    looser paraphrase elsewhere on the page scored higher.
 
     Parameters
     ----------
@@ -178,27 +251,24 @@ def match_excerpt(excerpt: str, page_text: str) -> ExcerptMatch:
     ExcerptMatch
         The match decision with the scores behind it.
     """
-    needle = normalize(excerpt).split()
-    hay = normalize(page_text).split()
+    needle = words(excerpt)
+    hay = words(page_text)
     n = len(needle)
     if not needle or not hay:
         return ExcerptMatch(False, 0.0, 0, n)
     if f" {' '.join(needle)} " in f" {' '.join(hay)} ":
         return ExcerptMatch(True, 1.0, n, n)
 
-    if len(hay) <= _WHOLE_PAGE_LIMIT or n < _ANCHOR_WORDS:
-        windows = [(0, len(hay))]
-    else:
-        windows = _candidate_windows(needle, hay) or [(0, min(len(hay), 3 * n))]
-
-    coverage, longest = 0.0, 0
-    for start, end in windows:
-        cov, run = _align(needle, hay[start:end])
-        if (cov, run) > (coverage, longest):
-            coverage, longest = cov, run
     run_floor = min(MIN_EXCERPT_RUN, max(1, n // 2))
-    found = coverage >= MIN_EXCERPT_COVERAGE and longest >= run_floor
-    return ExcerptMatch(found, round(coverage, 4), longest, n)
+    best: Tuple[bool, float, int] = (False, 0.0, 0)
+    for start, end in _windows_for(needle, hay):
+        cov, run = _align(needle, hay[start:end])
+        passes = cov >= MIN_EXCERPT_COVERAGE and run >= run_floor
+        candidate = (passes, cov, run)
+        if candidate > best:
+            best = candidate
+    passes, coverage, longest = best
+    return ExcerptMatch(passes, round(coverage, 4), longest, n)
 
 
 def excerpt_on_page(excerpt: str, page_text: str) -> bool:
@@ -557,17 +627,26 @@ def _unverifiable_reason(fetch: FetchResult) -> str:
     Returns
     -------
     str
-        One of ``opaque_redirect``, ``robots_blocked``,
-        ``publisher_blocked`` (401, 403, 429, 451), ``dead_link``
-        (404, 410), ``http_error`` (any other 4xx/5xx), ``fetch_error``
-        (no response), or ``empty_page``.
+        One of ``opaque_redirect`` (a grounding wrapper the fetcher may
+        not follow, and it never left the wrapper host),
+        ``robots_blocked``, ``no_url`` (the engine cited nothing),
+        ``address_blocked`` (refused on policy: non-http scheme, private
+        or loopback address), ``publisher_blocked`` (401, 403, 429, 451),
+        ``dead_link`` (404, 410), ``http_error`` (any other 4xx/5xx),
+        ``fetch_error`` (no response), or ``empty_page`` (2xx, no body).
     """
     if fetch.robots_blocked:
         host = urlsplit(fetch.url).netloc.lower()
-        if host in GROUNDING_REDIRECT_HOSTS:
+        landed = urlsplit(fetch.final_url or fetch.url).netloc.lower()
+        if host in GROUNDING_REDIRECT_HOSTS and landed == host:
             return "opaque_redirect"
         return "robots_blocked"
     if fetch.status is None:
+        error = (fetch.error or "").lower()
+        if not fetch.url or error.startswith("no url"):
+            return "no_url"
+        if error.startswith("blocked:"):
+            return "address_blocked"
         return "fetch_error"
     if fetch.status in (401, 403, 429, 451):
         return "publisher_blocked"
