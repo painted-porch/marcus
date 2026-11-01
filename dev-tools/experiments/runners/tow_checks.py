@@ -18,10 +18,12 @@ preregistered thresholds (a Condition B confident-wrong rate above
 them, and the grader, not the verifier, sees the ground truth.
 """
 
+import difflib
 import html as html_module
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from runners.tow_fetch import FetchResult
@@ -64,8 +66,143 @@ def normalize(text: str) -> str:
     return " ".join(out.split())
 
 
+# Excerpt matching (#752). The exact-substring rule declined correct
+# pages whenever one word of a long excerpt differed from the page (a
+# dash, a dropped word, an inline link); the decline audit measured a
+# 10% false-decline rate from exactly this. The replacement aligns the
+# excerpt's words against the page in order and requires both a high
+# share of them and a contiguous run, so a page that merely quotes a
+# phrase still fails (the run floor is eight words, or half the excerpt
+# when the excerpt is shorter than sixteen). Thresholds were set against
+# the audited cases:
+# judged-wrong pages scored at most 0.32, judged-correct pages at least
+# 0.95, so 0.85 sits in the gap with margin on both sides.
+MIN_EXCERPT_COVERAGE = 0.85
+MIN_EXCERPT_RUN = 8
+_ANCHOR_WORDS = 4
+_MAX_WINDOWS = 24
+_WHOLE_PAGE_LIMIT = 4000
+
+# Hosts whose URLs are opaque redirect wrappers around a cited page and
+# whose robots policy disallows the wrapper path for every agent, so an
+# honest fetcher cannot resolve them. Recorded as their own decline
+# reason: the citation format, not the source, is what failed.
+GROUNDING_REDIRECT_HOSTS = frozenset({"vertexaisearch.cloud.google.com"})
+
+
+@dataclass(frozen=True)
+class ExcerptMatch:
+    """How well an excerpt matches a page, for the audit record.
+
+    Parameters
+    ----------
+    found : bool
+        True when coverage and the contiguous run both clear the floors.
+    coverage : float
+        Share of the excerpt's words matched on the page, in order.
+    longest_run : int
+        Longest contiguous run of matched words.
+    excerpt_words : int
+        Number of normalized words in the excerpt.
+    """
+
+    found: bool
+    coverage: float
+    longest_run: int
+    excerpt_words: int
+
+
+def _align(needle: List[str], hay: List[str]) -> Tuple[float, int]:
+    """Align the excerpt words against a page slice, in order.
+
+    Parameters
+    ----------
+    needle : List[str]
+        Normalized excerpt words.
+    hay : List[str]
+        Normalized page words (the whole page or a window of it).
+
+    Returns
+    -------
+    Tuple[float, int]
+        ``(coverage, longest_run)``.
+    """
+    matcher = difflib.SequenceMatcher(a=needle, b=hay, autojunk=False)
+    blocks = [b for b in matcher.get_matching_blocks() if b.size]
+    matched = sum(b.size for b in blocks)
+    longest = max((b.size for b in blocks), default=0)
+    return matched / len(needle), longest
+
+
+def _candidate_windows(needle: List[str], hay: List[str]) -> List[Tuple[int, int]]:
+    """Find page regions worth aligning, anchored on shared word runs.
+
+    Parameters
+    ----------
+    needle : List[str]
+        Normalized excerpt words.
+    hay : List[str]
+        Normalized page words.
+
+    Returns
+    -------
+    List[Tuple[int, int]]
+        ``(start, end)`` slices of ``hay``, at most ``_MAX_WINDOWS``.
+    """
+    n = len(needle)
+    size = _ANCHOR_WORDS
+    index: Dict[Tuple[str, ...], List[int]] = {}
+    for i in range(len(hay) - size + 1):
+        index.setdefault(tuple(hay[i : i + size]), []).append(i)
+    votes: Dict[int, int] = {}
+    for j in range(n - size + 1):
+        for pos in index.get(tuple(needle[j : j + size]), ()):
+            start = max(0, pos - j - n)
+            votes[start] = votes.get(start, 0) + 1
+    starts = sorted(votes, key=lambda s: (-votes[s], s))[:_MAX_WINDOWS]
+    return [(s, min(len(hay), s + 3 * n)) for s in sorted(starts)]
+
+
+def match_excerpt(excerpt: str, page_text: str) -> ExcerptMatch:
+    """Score how much of the excerpt appears on the page, in order.
+
+    Parameters
+    ----------
+    excerpt : str
+        The excerpt the case is about.
+    page_text : str
+        The fetched page's extracted text.
+
+    Returns
+    -------
+    ExcerptMatch
+        The match decision with the scores behind it.
+    """
+    needle = normalize(excerpt).split()
+    hay = normalize(page_text).split()
+    n = len(needle)
+    if not needle or not hay:
+        return ExcerptMatch(False, 0.0, 0, n)
+    if f" {' '.join(needle)} " in f" {' '.join(hay)} ":
+        return ExcerptMatch(True, 1.0, n, n)
+
+    if len(hay) <= _WHOLE_PAGE_LIMIT or n < _ANCHOR_WORDS:
+        windows = [(0, len(hay))]
+    else:
+        windows = _candidate_windows(needle, hay) or [(0, min(len(hay), 3 * n))]
+
+    coverage, longest = 0.0, 0
+    for start, end in windows:
+        cov, run = _align(needle, hay[start:end])
+        if (cov, run) > (coverage, longest):
+            coverage, longest = cov, run
+    run_floor = min(MIN_EXCERPT_RUN, max(1, n // 2))
+    found = coverage >= MIN_EXCERPT_COVERAGE and longest >= run_floor
+    return ExcerptMatch(found, round(coverage, 4), longest, n)
+
+
 def excerpt_on_page(excerpt: str, page_text: str) -> bool:
-    """Check whether the excerpt appears on the page, normalized.
+    """Check whether the excerpt appears on the page.
 
     Parameters
     ----------
@@ -77,11 +214,9 @@ def excerpt_on_page(excerpt: str, page_text: str) -> bool:
     Returns
     -------
     bool
-        True when the full normalized excerpt is a substring of the
-        normalized page text.
+        True when :func:`match_excerpt` finds it.
     """
-    needle = normalize(excerpt)
-    return bool(needle) and needle in normalize(page_text)
+    return match_excerpt(excerpt, page_text).found
 
 
 def site_name_from_html(html: str) -> str:
@@ -365,10 +500,14 @@ def decide_verdict(
         or fetch.status >= 400
         or not fetch.html
     ):
+        checks["decline_reason"] = _unverifiable_reason(fetch)
         return "unverifiable", checks
 
-    found = excerpt_on_page(excerpt, fetch.text)
+    match = match_excerpt(excerpt, fetch.text)
+    found = match.found
     checks["excerpt_found"] = found
+    checks["excerpt_coverage"] = match.coverage
+    checks["excerpt_longest_run"] = match.longest_run
 
     # Gate-2 fix (pilot 2026-10-05): a page whose declared canonical
     # lives on another domain is a syndicated copy; it verifies the
@@ -392,11 +531,48 @@ def decide_verdict(
     checks["page_date"] = declared_date.isoformat() if declared_date else None
 
     if not found:
+        checks["decline_reason"] = "excerpt_missing"
         return "contradicted", checks
     if syndicated:
+        checks["decline_reason"] = "syndicated_copy"
         return "contradicted", checks
     if not domain_ok:
+        checks["decline_reason"] = "publisher_mismatch"
         return "contradicted", checks
     if date_ok is False:
+        checks["decline_reason"] = "date_mismatch"
         return "contradicted", checks
+    checks["decline_reason"] = None
     return "verified", checks
+
+
+def _unverifiable_reason(fetch: FetchResult) -> str:
+    """Name why a page could not be read at all.
+
+    Parameters
+    ----------
+    fetch : FetchResult
+        The failed fetch.
+
+    Returns
+    -------
+    str
+        One of ``opaque_redirect``, ``robots_blocked``,
+        ``publisher_blocked`` (401, 403, 429, 451), ``dead_link``
+        (404, 410), ``http_error`` (any other 4xx/5xx), ``fetch_error``
+        (no response), or ``empty_page``.
+    """
+    if fetch.robots_blocked:
+        host = urlsplit(fetch.url).netloc.lower()
+        if host in GROUNDING_REDIRECT_HOSTS:
+            return "opaque_redirect"
+        return "robots_blocked"
+    if fetch.status is None:
+        return "fetch_error"
+    if fetch.status in (401, 403, 429, 451):
+        return "publisher_blocked"
+    if fetch.status in (404, 410):
+        return "dead_link"
+    if fetch.status >= 400:
+        return "http_error"
+    return "empty_page"
