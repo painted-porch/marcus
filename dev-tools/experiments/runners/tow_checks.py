@@ -66,7 +66,7 @@ def normalize(text: str) -> str:
     return " ".join(out.split())
 
 
-_WORD_RE = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)*")
+_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 
 
 def words(text: str) -> List[str]:
@@ -84,7 +84,8 @@ def words(text: str) -> List[str]:
     Returns
     -------
     List[str]
-        Lower-case words with internal apostrophes kept.
+        Lower-case words in any script, with internal apostrophes kept;
+        underscores and all other punctuation are separators.
     """
     return _WORD_RE.findall(normalize(text))
 

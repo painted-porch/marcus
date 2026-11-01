@@ -258,6 +258,29 @@ class TestMatchExcerpt:
         assert result.coverage == 1.0
         assert result.found is True
 
+    def test_non_latin_letters_are_words_too(self) -> None:
+        """Codex finding on PR #759: word extraction must keep Unicode letters.
+
+        A non-Latin excerpt must match an identical page, and a mixed-script
+        excerpt whose non-Latin part differs must not be scored as a match.
+        """
+        assert (
+            match_excerpt(
+                "部长说 不同意 这个 计划", "昨天 部长说 不同意 这个 计划 。"
+            ).found
+            is True
+        )
+        assert (
+            match_excerpt("The minister said 不同意", "The minister said 同意").found
+            is False
+        )
+        assert (
+            match_excerpt(
+                "café müde naïve façade", "the café müde naïve façade"
+            ).coverage
+            == 1.0
+        )
+
     def test_run_floor_is_eight_words(self) -> None:
         """The contiguous-run floor is the documented constant."""
         assert MIN_EXCERPT_RUN == 8
