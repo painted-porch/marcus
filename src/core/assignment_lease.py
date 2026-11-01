@@ -107,14 +107,31 @@ class AssignmentLease:
     budget_deadline: Optional[datetime] = None
 
     @property
+    def effective_expiry(self) -> datetime:
+        """The moment this lease actually ends: the earlier of the two dials.
+
+        ``lease_expires`` is the silence dial and may have been pushed out
+        by a renewal, a heartbeat, or a validation window; the budget
+        ceiling bounds all of them. Reading expiry through this property
+        is what makes the ceiling hard: no extension path can outlive it
+        (Codex on PR #767).
+        """
+        if (
+            self.budget_deadline is not None
+            and self.budget_deadline < self.lease_expires
+        ):
+            return self.budget_deadline
+        return self.lease_expires
+
+    @property
     def time_remaining(self) -> timedelta:
         """Calculate time remaining on lease."""
-        return self.lease_expires - datetime.now(timezone.utc)
+        return self.effective_expiry - datetime.now(timezone.utc)
 
     @property
     def is_expired(self) -> bool:
-        """Check if lease has expired."""
-        return datetime.now(timezone.utc) > self.lease_expires
+        """Check if lease has expired (silence or budget)."""
+        return datetime.now(timezone.utc) > self.effective_expiry
 
     @property
     def is_expiring_soon(self) -> bool:
@@ -752,7 +769,14 @@ class AssignmentLeaseManager:
 
             now = datetime.now(timezone.utc)
             lease.last_renewed = now
-            lease.lease_expires = now + timedelta(seconds=window_seconds)
+            window_end = now + timedelta(seconds=window_seconds)
+            # ADR-0012 D3: the validation window is bounded by the budget
+            # ceiling like every other extension; otherwise an agent whose
+            # completion keeps being rejected buys a fresh window each
+            # time and holds the chore forever (Codex on PR #767).
+            if lease.budget_deadline is not None and lease.budget_deadline < window_end:
+                window_end = lease.budget_deadline
+            lease.lease_expires = window_end
             # ``progress_percentage`` deliberately NOT touched —
             # completion was already reported at 100% and the next
             # ``touch_lease`` should continue from phase 4, not
@@ -946,7 +970,7 @@ class AssignmentLeaseManager:
             grace = timedelta(seconds=lease.grace_period_seconds)
         else:
             grace = timedelta(minutes=self.grace_period_minutes)
-        return datetime.now(timezone.utc) <= lease.lease_expires + grace
+        return datetime.now(timezone.utc) <= lease.effective_expiry + grace
 
     async def get_highest_epoch(self, task_id: str) -> int:
         """
@@ -1086,7 +1110,7 @@ class AssignmentLeaseManager:
                     grace_delta = timedelta(seconds=lease.grace_period_seconds)
                 else:
                     grace_delta = default_grace_delta
-                grace_deadline = lease.lease_expires + grace_delta
+                grace_deadline = lease.effective_expiry + grace_delta
                 if now > grace_deadline:
                     candidates.append((lease, grace_deadline))
                 else:

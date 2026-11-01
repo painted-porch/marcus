@@ -411,6 +411,71 @@ class TestBudgetCeiling:
         assert await manager.should_recover_expired_lease(lease) is True
 
 
+class TestTheCeilingIsHard:
+    """Test suite for Codex's finding on PR #767: no path may outlive the budget.
+
+    Renewals and heartbeats were capped at the budget, but the validation
+    window after a completion report was not, so an agent whose completion
+    kept being rejected could buy ten more minutes each time, forever.
+    Budget exhaustion is now an expiry condition in its own right.
+    """
+
+    @pytest.mark.asyncio
+    async def test_validation_window_cannot_extend_past_the_budget(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """A completion near the ceiling gets only what is left of the budget."""
+        lease = await manager.create_lease(
+            "t1", "agent-a", _task("t1", estimated_hours=0.05)
+        )
+        now = datetime.now(timezone.utc)
+        lease.budget_deadline = now + 5 * MINUTE
+        lease.lease_expires = now + 2 * MINUTE
+
+        extended = await manager.extend_for_validation("t1", window_seconds=600)
+
+        assert extended is not None
+        assert extended.lease_expires == lease.budget_deadline
+
+    @pytest.mark.asyncio
+    async def test_budget_exhaustion_expires_the_lease_whatever_lease_expires_says(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """An expiry pushed past the ceiling by any path still ends at the ceiling."""
+        lease = await manager.create_lease(
+            "t1", "agent-a", _task("t1", estimated_hours=0.05)
+        )
+        now = datetime.now(timezone.utc)
+        lease.lease_expires = (
+            now + 10 * MINUTE
+        )  # as if a validation window had been granted
+        lease.budget_deadline = now - 2 * MINUTE
+
+        assert lease.is_expired is True
+        assert lease.time_remaining < timedelta(0)
+        expired = await manager.check_expired_leases()
+        assert [x.task_id for x in expired] == ["t1"]
+        assert await manager.should_recover_expired_lease(lease) is True
+
+    @pytest.mark.asyncio
+    async def test_repeated_rejected_completions_do_not_outlive_the_budget(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """Once the budget is spent, a further completion report gets no window."""
+        lease = await manager.create_lease(
+            "t1", "agent-a", _task("t1", estimated_hours=0.05)
+        )
+        now = datetime.now(timezone.utc)
+        lease.budget_deadline = now - 1 * MINUTE
+        lease.lease_expires = (
+            now + 9 * MINUTE
+        )  # a window granted just before the ceiling
+
+        assert await manager.extend_for_validation("t1", window_seconds=600) is None
+        assert await manager.touch_lease("agent-a", "t1") is False
+        assert await manager.renew_lease("t1", 90, "", agent_id="agent-a") is None
+
+
 class TestPersistence:
     """Test suite for the ceiling surviving a restart."""
 
