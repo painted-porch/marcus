@@ -12,7 +12,7 @@ verified.
 """
 
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
 import pytest
 from runners.tow_checks import (
@@ -182,6 +182,82 @@ class TestMatchExcerpt:
         assert result.found is True
         assert result.coverage == 1.0
 
+    def test_passing_window_beats_a_higher_coverage_failing_window(self) -> None:
+        """Codex finding on PR #756: keep a passing region over a better-scoring failing one.
+
+        A decoy region carries every excerpt word with a stray token every
+        six words (coverage 1.0, run 6, fails the run floor); another region
+        carries the first ninety percent verbatim (passes). The page passes.
+        """
+        words = self.EXCERPT.split()
+        decoy_words: List[str] = []
+        for i, w in enumerate(words):
+            decoy_words.append(w)
+            if i % 6 == 5:
+                decoy_words.append("stray")
+        decoy = " ".join(decoy_words)
+        passing = " ".join(words[: int(len(words) * 0.9)])
+        filler = " ".join(f"filler{i} words here" for i in range(2000))
+        page = f"{filler} {decoy} {filler} {passing} {filler}"
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is True
+        assert result.longest_run >= MIN_EXCERPT_RUN
+
+    def test_scattered_words_outside_the_quoted_run_do_not_count(self) -> None:
+        """Coverage is measured near the quoted run, not across the whole page.
+
+        A short page quoting the first three quarters of the excerpt, with the
+        remaining words sprinkled hundreds of words later, is a partial quote
+        and must not pass on the strength of the sprinkles.
+        """
+        words = self.EXCERPT.split()
+        cut = int(len(words) * 0.75)
+        quoted = " ".join(words[:cut])
+        rest = words[cut:]
+        sprinkled = " ".join(
+            f"{w} " + " ".join(f"other{i}{k}" for k in range(40))
+            for i, w in enumerate(rest)
+        )
+        page = (
+            f"intro text. {quoted}. "
+            + " ".join(f"unrelated{i}" for i in range(500))
+            + f" {sprinkled}"
+        )
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.found is False
+
+    def test_edge_punctuation_does_not_cost_a_word(self) -> None:
+        """Punctuation glued to a word is not a different word.
+
+        The old substring check accepted 'weekends now.' for 'weekends now';
+        the alignment must too, or short excerpts regress.
+        """
+        assert match_excerpt(
+            "ferry runs on weekends now", "the ferry runs on weekends now."
+        ).found
+        assert match_excerpt(
+            "ferry runs on weekends now", 'she said "ferry runs on weekends now" twice'
+        ).found
+        assert (
+            match_excerpt(
+                "ferry runs on weekends now", "the ferry runs on weekends now"
+            ).coverage
+            == 1.0
+        )
+
+    def test_hyphen_and_dash_variants_match(self) -> None:
+        """'weekday-only' and 'weekday only' are the same words."""
+        page = self.EXCERPT.replace("weekday-only", "weekday only")
+
+        result = match_excerpt(self.EXCERPT, page)
+
+        assert result.coverage == 1.0
+        assert result.found is True
+
     def test_run_floor_is_eight_words(self) -> None:
         """The contiguous-run floor is the documented constant."""
         assert MIN_EXCERPT_RUN == 8
@@ -273,6 +349,58 @@ class TestDeclineReasons:
         )
         _, checks = decide_verdict(fetch, self.EXCERPT, self.CLAIM)
         assert checks["decline_reason"] == "fetch_error"
+
+    def test_no_url_claimed_is_its_own_reason(self) -> None:
+        """An engine that cited nothing is not a fetch error."""
+        fetch = FetchResult(
+            url="",
+            final_url="",
+            status=None,
+            html="",
+            text="",
+            robots_blocked=False,
+            error="no URL claimed",
+            fetched_at="2026-10-04T00:00:00+00:00",
+        )
+        _, checks = decide_verdict(fetch, self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "no_url"
+
+    def test_address_blocked_is_its_own_reason(self) -> None:
+        """A URL the fetcher refused on policy (file://, loopback) is named."""
+        fetch = FetchResult(
+            url="file:///etc/passwd",
+            final_url="file:///etc/passwd",
+            status=None,
+            html="",
+            text="",
+            robots_blocked=False,
+            error="blocked: scheme 'file' is not http(s)",
+            fetched_at="2026-10-04T00:00:00+00:00",
+        )
+        _, checks = decide_verdict(fetch, self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "address_blocked"
+
+    def test_empty_body_is_empty_page(self) -> None:
+        """A 2xx with no body cannot be checked and says so."""
+        _, checks = decide_verdict(
+            _fetch(status=200, html=""), self.EXCERPT, self.CLAIM
+        )
+        assert checks["decline_reason"] == "empty_page"
+
+    def test_robots_block_after_leaving_the_wrapper_is_robots_blocked(self) -> None:
+        """A publisher's robots refusal behind a wrapper is the publisher's, not the wrapper's."""
+        fetch = FetchResult(
+            url="https://vertexaisearch.cloud.google.com/grounding-api-redirect/AbCdEf",
+            final_url="https://www.harborgazette.example/2024/03/14/local/ferry/",
+            status=None,
+            html="",
+            text="",
+            robots_blocked=True,
+            error="",
+            fetched_at="2026-10-04T00:00:00+00:00",
+        )
+        _, checks = decide_verdict(fetch, self.EXCERPT, self.CLAIM)
+        assert checks["decline_reason"] == "robots_blocked"
 
     def test_missing_excerpt_records_coverage(self) -> None:
         """A live page without the sentence says so, with the scores."""

@@ -129,9 +129,9 @@ python dev-tools/experiments/runners/tow_condition_c.py \
 ## Glossary
 
 - **Case:** one excerpt and the chain of tasks that answers it (find, verify, approve, synthesize).
-- **Decline reason:** every verify verdict records `decline_reason` in its checks: `opaque_redirect` (a search-grounding redirect wrapper whose robots policy forbids every agent), `robots_blocked`, `publisher_blocked` (HTTP 401, 403, 429, 451), `dead_link` (404, 410), `http_error`, `fetch_error`, `excerpt_missing`, `syndicated_copy`, `publisher_mismatch`, `date_mismatch`, or `None` when verified.
-  Read declines net of `publisher_blocked`, `dead_link` and `opaque_redirect` when you want the verifier's own error rate rather than the web's.
-- **Excerpt coverage:** the verify checks also record `excerpt_coverage` (share of the excerpt's words found on the page, in order) and `excerpt_longest_run`; the excerpt counts as present at coverage 0.85 with a run of eight words (half the excerpt when shorter).
+- **Decline reason:** every verify verdict records `decline_reason` in its checks: `opaque_redirect` (a search-grounding redirect wrapper whose robots policy forbids every agent), `robots_blocked`, `no_url` (the engine cited nothing), `address_blocked` (a URL the fetcher refuses on policy: non-http scheme, private or loopback address), `publisher_blocked` (HTTP 401, 403, 429, 451), `dead_link` (404, 410), `http_error`, `fetch_error` (no response), `empty_page` (a 2xx with no body), `excerpt_missing`, `syndicated_copy`, `publisher_mismatch`, `date_mismatch`, or `None` when verified.
+  Read declines net of `publisher_blocked`, `dead_link`, `opaque_redirect`, `no_url` and `address_blocked` when you want the verifier's own error rate rather than the web's or the engine's.
+- **Excerpt coverage:** the verify checks also record `excerpt_coverage` (share of the excerpt's words found on the page, in order) and `excerpt_longest_run`; the excerpt counts as present at coverage 0.85 with a run of eight words (half the excerpt when shorter), measured inside windows around the quoted run with punctuation ignored.
 - **Finder:** the agent that answers a question with a citation.
 - **Verifier:** the deterministic script that fetches the cited page and runs the five checks.
 - **Manifest:** the file the runner writes holding each case's ground truth and task ids, read only by the grader.
