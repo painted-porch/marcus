@@ -62,7 +62,9 @@ python dev-tools/experiments/runners/tow_runner.py \
 env -u OPENAI_API_KEY -u GEMINI_API_KEY -u PERPLEXITY_API_KEY -u CLAUDE_API_KEY -u ANTHROPIC_API_KEY \
   MARCUS_CONFIG=$EXP/config.json python -m src.marcus_mcp.server --http --all-tools
 
-# 4. In another shell: the fake finder, the verifier, the human approval, the verifier again.
+# 4. In another shell (a new shell starts without EXP, so set it again): the fake
+#    finder, the verifier, the human approval, the verifier again.
+EXP=~/marcus-experiments/tow/rehearsal
 python dev-tools/experiments/runners/tow_finder.py --url http://localhost:4777/mcp \
   --project tow-rehearsal --agent-id finder-fake-1 --vendor fakevendor --engine fake --idle-exits 3
 python dev-tools/experiments/runners/tow_verifier.py --url http://localhost:4777/mcp \
