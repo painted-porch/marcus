@@ -258,8 +258,9 @@ def scan_text(text: str, facts: DatasetFacts) -> Hits:
     lines = text.split("\n")
     offsets = [i for i, ch in enumerate(text) if ch == "\n"]
 
-    # Excerpt runs: slide over the words of each line, carrying the tail
-    # of the previous line so a run split across two lines still forms.
+    # Excerpt runs: slide over the words of each line, carrying the last
+    # WINDOW-1 words seen so far (not just the previous line's) so a run
+    # split across several short or blank lines still forms.
     carry: List[str] = []
     for number, line in enumerate(lines, 1):
         toks = carry + words(line)
@@ -267,7 +268,7 @@ def scan_text(text: str, facts: DatasetFacts) -> Hits:
             if " ".join(toks[i : i + WINDOW]) in facts.excerpt_windows:
                 hits.excerpt_windows += 1
                 hits.lines.add(number)
-        carry = words(line)[-(WINDOW - 1) :]
+        carry = toks[-(WINDOW - 1) :]
 
     for offset, payload in decoded_payloads(text):
         found = sum(1 for w in word_windows(payload) if w in facts.excerpt_windows)
