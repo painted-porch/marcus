@@ -734,68 +734,15 @@ class MarcusServer:
                 global_config = get_config()
                 lease_config = global_config.task_lease
 
-            # Extract values from dataclass or dict
-            if isinstance(lease_config, TaskLeaseSettings):
-                # It's a TaskLeaseSettings dataclass
-                self.lease_manager = AssignmentLeaseManager(
-                    self.kanban_client,
-                    self.assignment_persistence,
-                    default_lease_hours=lease_config.default_hours,
-                    max_renewals=lease_config.max_renewals,
-                    warning_threshold_hours=lease_config.warning_hours,
-                    priority_multipliers=lease_config.priority_multipliers,
-                    complexity_multipliers=lease_config.complexity_multipliers,
-                    grace_period_minutes=lease_config.grace_period_minutes,
-                    renewal_decay_factor=lease_config.renewal_decay_factor,
-                    min_lease_hours=lease_config.min_lease_hours,
-                    max_lease_hours=lease_config.max_lease_hours,
-                    stuck_task_threshold_renewals=lease_config.stuck_threshold_renewals,
-                    enable_adaptive_leases=lease_config.enable_adaptive,
-                    task_list=self.project_tasks,
-                    silence_multiplier=lease_config.silence_multiplier,
-                )
-            else:
-                # It's a dict from project config
-                # Fallbacks match TaskLeaseSettings aggressive defaults
-                defaults = TaskLeaseSettings()
-                self.lease_manager = AssignmentLeaseManager(
-                    self.kanban_client,
-                    self.assignment_persistence,
-                    default_lease_hours=lease_config.get(
-                        "default_hours", defaults.default_hours
-                    ),
-                    max_renewals=lease_config.get(
-                        "max_renewals", defaults.max_renewals
-                    ),
-                    warning_threshold_hours=lease_config.get(
-                        "warning_hours", defaults.warning_hours
-                    ),
-                    priority_multipliers=lease_config.get("priority_multipliers"),
-                    complexity_multipliers=lease_config.get("complexity_multipliers"),
-                    grace_period_minutes=lease_config.get(
-                        "grace_period_minutes", defaults.grace_period_minutes
-                    ),
-                    renewal_decay_factor=lease_config.get(
-                        "renewal_decay_factor", defaults.renewal_decay_factor
-                    ),
-                    min_lease_hours=lease_config.get(
-                        "min_lease_hours", defaults.min_lease_hours
-                    ),
-                    max_lease_hours=lease_config.get(
-                        "max_lease_hours", defaults.max_lease_hours
-                    ),
-                    stuck_task_threshold_renewals=lease_config.get(
-                        "stuck_threshold_renewals",
-                        defaults.stuck_threshold_renewals,
-                    ),
-                    enable_adaptive_leases=lease_config.get(
-                        "enable_adaptive", defaults.enable_adaptive
-                    ),
-                    task_list=self.project_tasks,
-                    silence_multiplier=lease_config.get(
-                        "silence_multiplier", defaults.silence_multiplier
-                    ),
-                )
+            # ADR-0012 D3: one mapping for both the dataclass and a
+            # project's dict; unknown and pre-D3 keys are ignored.
+            self.lease_manager = AssignmentLeaseManager.from_settings(
+                self.kanban_client,
+                self.assignment_persistence,
+                lease_config,
+                task_list=self.project_tasks,
+            )
+
             self.lease_monitor = LeaseMonitor(self.lease_manager)
 
             # Wire up recovery callback so in-memory tracking is cleaned

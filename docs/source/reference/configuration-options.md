@@ -214,15 +214,16 @@ Use preset configurations:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `task_lease.default_hours` | float | 2.0 | Default lease duration in hours |
-| `task_lease.max_renewals` | integer | 10 | Maximum times a lease can be renewed |
-| `task_lease.warning_hours` | float | 0.5 | Hours before expiry to show warning |
-| `task_lease.grace_period_minutes` | integer | 30 | Grace period after expiry |
-| `task_lease.renewal_decay_factor` | float | 0.9 | Lease duration multiplier per renewal |
-| `task_lease.min_lease_hours` | float | 1.0 | Minimum lease duration |
-| `task_lease.max_lease_hours` | float | 24.0 | Maximum lease duration |
-| `task_lease.stuck_threshold_renewals` | integer | 5 | Renewals before task considered stuck |
-| `task_lease.enable_adaptive` | boolean | true | Enable adaptive lease duration |
+| `task_lease.silence_timeout_minutes` | float | 45.0 | Minutes of MCP silence after which the agent is presumed dead (ADR-0012 D3) |
+| `task_lease.budget_multiplier` | float | 3.0 | Budget ceiling as a multiple of the task's estimate |
+| `task_lease.checkpoint_cadence_minutes` | float | 20.0 | Checkpoint interval; the silence timeout must be at least twice it |
+| `task_lease.default_hours` | float | 4.0 | Estimate used for the budget when a task has none |
+| `task_lease.warning_hours` | float | 0.0167 | Hours before expiry to show warning |
+| `task_lease.grace_period_minutes` | float | 1.0 | Grace period after expiry |
+| `task_lease.min_lease_hours` | float | 0.0 | Lower bound on the budget |
+| `task_lease.max_lease_hours` | float | 24.0 | Upper bound on the budget |
+| `task_lease.enable_adaptive` | boolean | true | Scale the budget by estimate, priority and complexity |
+| `task_lease.max_renewals`, `stuck_threshold_renewals`, `renewal_decay_factor`, `silence_multiplier` | | | Pre-D3 keys; accepted and ignored |
 
 ### Priority Multipliers
 

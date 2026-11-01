@@ -1,9 +1,7 @@
 # 35. Assignment Lease System
 
-> **Primary spec:** This document focuses on the lease data model, adaptive
-> duration math, and renewal mechanics. For the end-to-end liveness
-> detection, cadence-based recovery, touch-on-any-tool behavior, and the
-> recovery handoff flow, see
+> **Primary spec:** This document focuses on the lease data model, the two liveness dials, and renewal mechanics.
+> For the end-to-end liveness detection, touch-on-any-tool behavior, and the recovery handoff flow, see
 > [Resilience and Task Recovery System](34-agent-recovery-system.md).
 
 ## Executive Summary
@@ -14,12 +12,10 @@ agent: while the lease is fresh, Marcus trusts that the agent is working;
 once the lease expires past its grace period, the lease is evaluated for
 recovery.
 
-Marcus runs in an **aggressive** lease mode — lease durations are measured
-in **seconds to minutes**, not hours. The defaults are tuned to detect dead
-tmux panes, killed processes, and dropped network connections within one
-to two monitor cycles. Adaptive duration math, priority and complexity
-multipliers, and renewal decay still exist, but they operate within a
-much tighter timing envelope than older versions of the system.
+Since ADR-0012 D3 a lease carries two dials.
+`lease_expires` answers "is the agent alive?": it sits one **silence timeout** (default 45 minutes) after the agent's last MCP call and moves forward on every call.
+`budget_deadline` answers "how long may it hold the task?": `budget_multiplier` (default 3) times the estimate, fixed at claim time, and `lease_expires` never passes it.
+Detecting a dead agent therefore no longer depends on how big or how chatty its task is.
 
 ## Source Files
 
@@ -28,7 +24,7 @@ much tighter timing envelope than older versions of the system.
 | Lease data model + manager + monitor | `src/core/assignment_lease.py` |
 | Default configuration | `src/config/marcus_config.py` — `TaskLeaseSettings` |
 | Server wiring + recovery callback | `src/marcus_mcp/server.py` |
-| Lease creation + progress renewal + recreation | `src/marcus_mcp/tools/task.py` |
+| Lease creation + progress renewal + the no-lease refusal | `src/marcus_mcp/tools/task.py` |
 | Touch-on-any-tool-call | `src/marcus_mcp/handlers.py` |
 
 ## Lease Data Model
@@ -51,51 +47,42 @@ class AssignmentLease:
 
 Key properties:
 
-- `update_timestamps` — every progress update appends a timestamp. The
-  lease exposes `median_update_interval`, the median seconds between
-  updates, which powers cadence-based recovery (see
-  [Resilience and Task Recovery System](34-agent-recovery-system.md)).
-- `grace_period_seconds` — per-lease adaptive grace, set by the current
-  progressive timeout phase.
-- `renewal_count` — used by renewal decay and by the stuck-task detector.
+- `lease_expires` — the silence dial: last activity plus `silence_timeout_minutes`.
+- `budget_deadline` — the budget dial, set once at claim time; `None` on rows persisted before D3, which are governed by silence alone.
+- `update_timestamps` — every heartbeat and progress report appends a timestamp, for the audit record.
+- `grace_period_seconds` — optional per-lease grace; the global `grace_period_minutes` applies when unset.
+- `renewal_count` — informational; renewals are unlimited.
+- `lease_epoch` — the D11 fencing token, recorded on every report (see the ADR).
 
-## Aggressive Defaults
+## Defaults
 
 All tuning lives in `TaskLeaseSettings` in `src/config/marcus_config.py`.
-The current defaults are:
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `default_hours` | `0.025` | ~90 seconds base lease. |
-| `grace_period_minutes` | `0.5` | 30 seconds of grace after expiry. |
-| `min_lease_hours` | `0.0167` | 60 seconds — the floor. |
-| `max_lease_hours` | `0.0833` | 5 minutes — the ceiling. |
-| `warning_hours` | `0.01` | ~36 seconds before expiry, emit a warning. |
-| `max_renewals` | `10` | Safety cap on renewal count. |
-| `stuck_threshold_renewals` | `5` | Flag for stuck-task detection. |
-| `silence_multiplier` | `1.5` | Cadence threshold multiplier. |
-| `enable_adaptive` | `true` | Enable progressive phases. |
-| `renewal_decay_factor` | `0.9` | Decay applied on each renewal. |
+| `silence_timeout_minutes` | `45.0` | Minutes of MCP silence after which the agent is presumed dead. |
+| `budget_multiplier` | `3.0` | The budget ceiling is this many times the task's estimate. |
+| `checkpoint_cadence_minutes` | `20.0` | Checkpoint interval the silence timeout must be at least twice of. |
+| `default_hours` | `4.0` | Estimate used for the budget when a task carries none. |
+| `grace_period_minutes` | `1.0` | Grace after expiry before recovery. |
+| `min_lease_hours` | `0.0` | Lower bound on the budget. |
+| `max_lease_hours` | `24.0` | Upper bound on the budget. |
+| `warning_hours` | `0.0167` | Hours before expiry to emit a warning. |
+| `enable_adaptive` | `true` | Scale the budget by estimate, priority and complexity. |
 
-The dict-path fallback in `server.py` mirrors these values so config-less
-startup still matches the dataclass defaults.
+`AssignmentLeaseManager.from_settings` builds the manager from the dataclass or from a project's config dict, ignoring unknown and pre-D3 keys (`max_renewals`, `stuck_threshold_renewals`, `renewal_decay_factor`, `silence_multiplier`).
+The manager refuses to start if `silence_timeout_minutes` is under twice `checkpoint_cadence_minutes` (`src/core/lease_invariants.py`).
 
-## Progressive Timeout Phases
+## The budget ceiling
 
-When `default_hours < 1.0` (the aggressive mode path), `create_lease` and
-`renew_lease` call `calculate_adaptive_timeout` to pick a phase-specific
-lease + grace based on where the task is in its lifecycle:
+`budget_for(task)` computes the ceiling at claim time.
 
-| Phase | Trigger | Lease | Grace | Total | Rationale |
-|-------|---------|-------|-------|-------|-----------|
-| 1. Unproven | 0 updates | 60s | 20s | 80s | Detect startup failures fast. |
-| 2. Working | 1 update | 90s | 30s | 120s | Agent is alive, be moderate. |
-| 3. Proven | 25–75% progress | 120s | 30s | 150s | Protect in-flight work. |
-| 4. Finishing | >75% progress | 60s | 15s | 75s | Detect final stalls quickly. |
+1. Start from the task's `estimated_hours`, or `default_hours` when the task has none.
+2. When `enable_adaptive` is true, multiply by the matching `priority_multipliers` entry and by the first matching `complexity_multipliers` label.
+3. Multiply by `budget_multiplier`.
+4. Floor at one silence window and at `min_lease_hours`; cap at `max_lease_hours`.
 
-A new task starts in Phase 1. As soon as the first
-`report_task_progress` arrives, the lease transitions to Phase 2 and
-subsequent phases follow the progress percentage.
+A two-hour task on defaults gets a six-hour budget; a five-minute task gets forty-five minutes; a forty-hour task gets twenty-four.
 
 ## Lease Lifecycle
 
@@ -103,19 +90,18 @@ subsequent phases follow the progress percentage.
 Task Assigned
      │
      ▼
-create_lease() ──────────► Phase 1 lease (60s + 20s grace)
-     │
-     │ ◄─── touch_lease(agent_id)    (any MCP tool call extends lease)
+create_lease() ──────────► lease_expires = now + silence timeout
+     │                          budget_deadline = now + budget_for(task)
+     │ ◄─── touch_lease(agent_id)    (any MCP tool call resets the silence clock)
      │
      ▼
 Agent reports progress
      │
      ▼
-renew_lease(task_id, progress) ──► Phase 2–4 based on progress
+renew_lease(task_id, progress) ──► lease_expires = min(now + silence timeout, budget_deadline)
      │
      ├──── on each renewal: update_timestamps append
-     │     renewal_count += 1
-     │     renewal_decay applied
+     │     renewal_count += 1 (informational, unlimited)
      │
      ▼
 Task completes → lease removed from active_leases
@@ -136,29 +122,16 @@ if agent_id and hasattr(state, "lease_manager") and state.lease_manager:
     await state.lease_manager.touch_lease(agent_id)
 ```
 
-### `renew_lease(task_id, progress, message)`
+### `renew_lease(task_id, progress, message, *, agent_id)`
 
-The full renewal path used by `report_task_progress`. It appends a new
-`update_timestamps` entry, recomputes the phase, applies decay, and pushes
-out `lease_expires`.
+The full renewal path used by `report_task_progress`.
+It records the progress, appends an `update_timestamps` entry, and moves `lease_expires` to now plus the silence timeout, capped at `budget_deadline`.
+Only the holder may renew; a lapsed lease still inside grace renews normally.
 
-### Lease Recreation on Progress Report
+### No lease, no progress
 
-If `report_task_progress` runs and the lease is **missing** (because the
-monitor already recovered the task due to a cadence false-positive), the
-progress handler recreates the lease instead of failing:
-
-```python
-# src/marcus_mcp/tools/task.py
-renewed_lease = await state.lease_manager.renew_lease(task_id, progress, message)
-if renewed_lease is None:
-    # Lease was recovered — recreate so monitoring resumes.
-    task_obj = next((t for t in state.project_tasks if t.id == task_id), None)
-    new_lease = await state.lease_manager.create_lease(task_id, agent_id, task_obj)
-```
-
-This makes false positives **self-healing**: the next progress update
-re-attaches a lease and the monitor resumes watching.
+If `report_task_progress` finds no live lease for the task, the report is refused before anything reaches the board (`status: "lease_recovered"`), and the agent is told to request its next task.
+Earlier versions recreated the lease here; D3 deleted that, because the apology for a wrong recovery contradicted any ownership fence, and D3 makes recovery trustworthy enough not to need it.
 
 ### `recover_expired_lease(lease)`
 
@@ -169,7 +142,7 @@ task_id)`.
 
 See [Resilience and Task Recovery System](34-agent-recovery-system.md) for
 the full recovery flow, including `RecoveryInfo`, worktree-aware handoff
-instructions, and the cadence check that gates recovery.
+instructions, and the terminal-status guard that gates recovery.
 
 ## LeaseMonitor
 
@@ -181,7 +154,7 @@ class LeaseMonitor:
 ```
 
 On each poll it walks `active_leases`, identifies expired leases (past
-grace), calls `should_recover_expired_lease` for the cadence-aware check,
+grace), calls `should_recover_expired_lease` (the terminal-status guard),
 and invokes `recover_expired_lease` when the check says to recover.
 
 ### Lazy start on the correct event loop
@@ -219,14 +192,9 @@ self.lease_manager.on_recovery_callback = _on_recovery
 Without this, the assignment filter would keep the recovered task marked
 as taken and no agent could pick it up.
 
-## Adaptive Duration (Conservative Mode Only)
+## Multipliers
 
-When `default_hours >= 1.0`, the manager falls back to classic adaptive
-duration math using the task's `estimated_hours`, `priority_multipliers`,
-and `complexity_multipliers`, bounded by `min_lease_hours` and
-`max_lease_hours`. The Marcus production default is aggressive mode, so
-this path is primarily a configuration escape hatch for long-running
-non-agent workflows.
+`priority_multipliers` and `complexity_multipliers` scale the budget ceiling, never the silence timeout.
 
 ### Priority Multipliers
 
@@ -269,23 +237,20 @@ non-agent workflows.
 # bounded by min_lease_hours
 ```
 
-Decay discourages tasks from being held indefinitely by agents that keep
-renewing without finishing.
 
 ## Configuration
 
 ```json
 {
   "task_lease": {
-    "default_hours": 0.025,
-    "max_renewals": 10,
-    "warning_hours": 0.01,
-    "grace_period_minutes": 0.5,
-    "renewal_decay_factor": 0.9,
-    "min_lease_hours": 0.0167,
-    "max_lease_hours": 0.0833,
-    "stuck_threshold_renewals": 5,
-    "silence_multiplier": 1.5,
+    "silence_timeout_minutes": 45.0,
+    "budget_multiplier": 3.0,
+    "checkpoint_cadence_minutes": 20.0,
+    "default_hours": 4.0,
+    "warning_hours": 0.0167,
+    "grace_period_minutes": 1.0,
+    "min_lease_hours": 0.0,
+    "max_lease_hours": 24.0,
     "enable_adaptive": true,
     "priority_multipliers": {
       "critical": 0.5,
@@ -316,8 +281,8 @@ visibility.
 ## Related Documentation
 
 - [Resilience and Task Recovery System](34-agent-recovery-system.md) — the
-  primary spec describing cadence-based recovery, touch-on-any-tool-call,
-  lease recreation, the recovery callback, the lazy monitor start,
+  primary spec describing the two liveness dials, touch-on-any-tool-call,
+  the no-lease refusal, the recovery callback, the lazy monitor start,
   worktree-aware handoff, and the full kill → recover → reassign flow.
 - [Orphan Task Recovery](33-orphan-task-recovery.md) — the startup
   reconciler and assignment monitor that act as a safety net for

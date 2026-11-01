@@ -9,10 +9,8 @@ happens, the tasks those agents held must be detected, released, and handed
 off to other agents so work continues — without losing the committed progress
 the dead agent already made.
 
-The **Resilience and Task Recovery System** is how Marcus does that. It uses
-**lease-based liveness detection** with **cadence-aware false-positive
-prevention**, a **worktree-aware handoff protocol**, and an **in-memory state
-cleanup callback** to safely return recovered tasks to the assignment pool.
+The **Resilience and Task Recovery System** is how Marcus does that.
+It uses **lease-based liveness detection on two dials** (ADR-0012 D3: a silence timeout and a budget ceiling), a **worktree-aware handoff protocol**, and an **in-memory state cleanup callback** to safely return recovered tasks to the assignment pool.
 
 This document describes the final implementation landed on the
 `feature/resilience-wiring-cleanup` branch.
@@ -98,19 +96,22 @@ Three important methods drive lease lifecycle:
   `assigned_to`, builds a `RecoveryInfo` object, dual-writes to the board,
   and invokes `on_recovery_callback`.
 
-#### Progressive Timeout Phases
+#### The two liveness dials (ADR-0012 D3)
 
-Instead of a single fixed timeout, Marcus uses progressive timeouts that
-match where the task is in its lifecycle. A task that has not yet produced a
-first progress update is treated very differently from one that is 80%
-complete.
+The lease used to be one dial that meant both "is the agent alive?" and "how long may it hold the task?", so detecting a dead agent was tied to how big and how chatty its task was.
+D3 splits it in two.
 
-| Phase | Trigger | Lease | Grace | Total | Rationale |
-|-------|---------|-------|-------|-------|-----------|
-| 1. Unproven | 0 updates | 60s | 20s | 80s | Detect startup failures fast. |
-| 2. Working | 1 update | 90s | 30s | 120s | Agent is alive, be moderate. |
-| 3. Proven | 25–75% progress | 120s | 30s | 150s | Protect in-flight work. |
-| 4. Finishing | >75% progress | 60s | 15s | 75s | Detect final stalls quickly. |
+| Dial | Question | Default | How it moves |
+|------|----------|---------|--------------|
+| Silence timeout | Is the agent alive? | 45 minutes | Every MCP call (`touch_lease`) and every progress report (`renew_lease`) resets `lease_expires` to now plus the timeout. |
+| Budget ceiling | How long may it hold the task? | 3x the estimate | Fixed at claim time as `budget_deadline`; heartbeats never extend `lease_expires` past it. |
+
+The budget is `budget_multiplier` times the task's estimate, scaled by `priority_multipliers` and `complexity_multipliers`, never less than one silence window, and never more than `max_lease_hours`.
+A quiet agent doing focused work for forty minutes is not recovered.
+A dead agent's task is reclaimed when the silence timeout elapses.
+A chatty agent that never finishes is reclaimed when its budget runs out.
+
+The silence timeout must be at least twice the checkpoint cadence the session contract obliges (`checkpoint_cadence_minutes`, default 20); `src/core/lease_invariants.py` enforces that when the manager is built.
 
 ### 2. LeaseMonitor
 
@@ -135,26 +136,14 @@ if hasattr(state, "ensure_lease_monitor_running"):
     await state.ensure_lease_monitor_running()
 ```
 
-### 3. Cadence-Based Recovery
+### 3. What expiry means
 
 **File**: `src/core/assignment_lease.py` — `should_recover_expired_lease`
 
-Fixed timeouts produce false positives for agents that naturally update on a
-slower cadence (e.g., a research-heavy task with long think time). Rather
-than asking "has the timeout expired?", Marcus asks "is this silence
-abnormal for **this specific agent**?"
-
-The algorithm:
-
-1. Compute the agent's median interval between progress updates.
-2. Compare the current silence (time since last update) to
-   `median_interval * silence_multiplier`.
-3. If silence exceeds the threshold, the agent is probably dead — recover.
-4. Otherwise, extend grace and try again next cycle.
-
-The default `silence_multiplier` is `1.5`. An agent whose median update
-interval is 60 seconds will only be recovered after more than 90 seconds of
-silence. An agent whose median is 180 seconds gets 270 seconds.
+Under D3, expiry *is* the liveness decision.
+A lease expires only when the agent has been silent for the whole silence window or has spent its budget, so there is no further cadence heuristic to consult.
+The one remaining check is defense in depth: a task the board already shows as `DONE` or `BLOCKED` is never recovered, because its lease is stale bookkeeping and recovering it would hand finished work to a fresh agent.
+Each such skip increments `recoveries_skipped_terminal_status`, since it points at a lease that should have been released upstream.
 
 ### 4. Recovery Callback Pattern
 
@@ -195,17 +184,13 @@ This means `log_decision`, `log_artifact`, `report_blocker`,
 `get_task_context`, and every other tool the agent might call all keep the
 lease alive. Agents prove they are working by working.
 
-### 6. Lease Recreation on Progress Report
+### 6. No lease, no progress (the re-grant is gone)
 
-There is one edge case the touch pattern can't cover: an agent survives a
-**false-positive recovery**. The cadence check misjudged their silence, the
-monitor recovered the task, then the agent calls `report_task_progress` —
-but there is no longer a lease to renew.
-
-The fix: when `report_task_progress` runs and the agent's lease is gone, it
-**recreates** the lease instead of failing. This means the agent continues
-their work, the monitor starts watching again, and at worst the task
-briefly showed as `TODO` on the board.
+Earlier versions recreated an agent's lease when it reported progress after a recovery, as an apology for recovery having been wrong.
+That apology and any ownership fence contradict each other, which is why the D11 fence could not be enforced while it existed.
+D3 makes recovery trustworthy, so the apology is deleted.
+An `in_progress` report from an agent with no live lease is refused before anything reaches the board, with `status: "lease_recovered"` and a message telling the agent to request its next task.
+A holder whose lease lapsed but is still inside the grace period may still renew; grace is exactly the window in which Marcus has not yet given up on it.
 
 ### 7. RecoveryInfo
 
@@ -290,27 +275,22 @@ gridlocked. It also tracks distinct requesting agents for metrics.
 
 ## Configuration
 
-All resilience tuning lives in `src/config/marcus_config.py` under
-`TaskLeaseSettings`. The aggressive defaults that match Marcus's real-world
-agent cadence are:
+All resilience tuning lives in `src/config/marcus_config.py` under `TaskLeaseSettings`.
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `default_hours` | `0.025` | ~90 seconds base lease. |
-| `grace_period_minutes` | `0.5` | 30 seconds of grace after expiry. |
-| `min_lease_hours` | `0.0167` | 60 seconds — the floor. |
-| `max_lease_hours` | `0.0833` | 5 minutes — the ceiling. |
-| `warning_hours` | `0.01` | ~36s before expiry, emit a warning. |
-| `max_renewals` | `10` | Safety cap on renewal count. |
-| `stuck_threshold_renewals` | `5` | Flag for stuck-task detection. |
-| `silence_multiplier` | `1.5` | Cadence threshold multiplier. |
-| `enable_adaptive` | `true` | Enable progressive phases. |
-| `renewal_decay_factor` | `0.9` | Decay applied on renewal. |
+| `silence_timeout_minutes` | `45.0` | Minutes of MCP silence after which the agent is presumed dead. |
+| `budget_multiplier` | `3.0` | The budget ceiling is this many times the task's estimate. |
+| `checkpoint_cadence_minutes` | `20.0` | The session contract's checkpoint interval; the silence timeout must be at least twice it. |
+| `default_hours` | `4.0` | Estimate used for the budget when a task carries none. |
+| `grace_period_minutes` | `1.0` | Grace after expiry before recovery. |
+| `min_lease_hours` | `0.0` | Lower bound on the budget (the silence window is always a floor too). |
+| `max_lease_hours` | `24.0` | Upper bound on the budget; no task is held longer. |
+| `warning_hours` | `0.0167` | Hours before expiry to emit a warning. |
+| `enable_adaptive` | `true` | Scale the budget by estimate, priority and complexity. |
 
-`priority_multipliers` and `complexity_multipliers` scale lease duration for
-high-priority or complex tasks. The dict-path fallback defaults in
-`server.py` mirror these values so config-less startup still matches the
-dataclass defaults.
+`priority_multipliers` and `complexity_multipliers` scale the budget, not the heartbeat.
+The pre-D3 keys `max_renewals`, `stuck_threshold_renewals`, `renewal_decay_factor` and `silence_multiplier` are still accepted so older config files load, and are ignored.
 
 ## Full Recovery Flow (Agent Dies)
 
@@ -321,23 +301,20 @@ handoff.
 T+0s    Agent-A requests a task.
         ├─ Task assigned: status=IN_PROGRESS, assigned_to=Agent-A
         ├─ state.agent_tasks[Agent-A] = task
-        └─ AssignmentLeaseManager creates lease (Phase 1: 60s + 20s grace)
+        └─ AssignmentLeaseManager creates lease (expires in 45 min of silence; budget 3x estimate)
 
 T+15s   Agent-A calls log_decision(...)
         └─ handlers.py touches lease → extended
 
 T+40s   Agent-A calls report_task_progress(progress=15)
         ├─ lease renewed with progress
-        └─ Phase transitions to 2 (90s + 30s grace)
+        └─ silence clock reset: expires 45 min from now (never past the budget)
 
 T+55s   ☠️  Agent-A's tmux pane is killed. No more tool calls.
 
-T+175s  Lease expires past grace. LeaseMonitor wakes up (60s interval).
+T+46m   Lease expires past grace (45 min of silence + 1 min grace). LeaseMonitor wakes up (60s interval).
         ├─ should_recover_expired_lease(lease):
-        │   ├─ median_update_interval(Agent-A) = 25s
-        │   ├─ silence_threshold = 25s * 1.5 = 37.5s
-        │   ├─ current silence = 120s
-        │   └─ 120s > 37.5s → RECOVER
+        │   ├─ board status is IN_PROGRESS (not terminal) → recover
         │
         └─ recover_expired_lease(lease):
             ├─ Build RecoveryInfo(
@@ -375,7 +352,7 @@ T+180s  Agent-B calls request_next_task.
         │        git log marcus/Agent-A
         │        Previous agent reached 15% ..."
         │
-        └─ Lease created for Agent-B (Phase 1 again)
+        └─ Lease created for Agent-B (fresh 45-minute silence window, fresh budget)
 
 T+181s  Agent-B runs git merge marcus/Agent-A, sees Agent-A's commits,
         continues the task from 15%.
@@ -403,12 +380,11 @@ Adding a parallel heartbeat channel would introduce a second source of
 truth with its own failure modes. Polling the leases every 60 seconds fits
 the existing pattern and is cheap: it's an in-memory walk of a dict.
 
-### Cadence-based recovery over fixed timeouts
+### Two dials over one lease (ADR-0012 D3)
 
-Fixed timeouts force a choice between "fast detection" and "low false
-positive rate." Cadence-based recovery breaks the trade-off by adapting to
-each agent individually. An agent with a 20-second median update gets a
-30-second silence window; an agent with a 3-minute median gets 4.5 minutes.
+One lease that meant both "alive?" and "how long?" forced a choice: a short lease recovered quiet-but-working agents, a long lease let a dead agent hold a large task for hours.
+There is no single value that avoids both, which is why the silence timeout and the budget ceiling are separate settings.
+An earlier cadence heuristic (median update interval times a multiplier) tried to adapt one dial per agent; it was removed with D3 because the explicit timeout is the liveness decision and needs no inference.
 
 ### Touch-on-any-tool as the liveness signal
 
@@ -418,13 +394,10 @@ heartbeat is implicit in real work. Agents that are doing things stay
 alive. Agents that are stuck or dead stop touching. That is exactly the
 signal we want.
 
-### Lease recreation on progress report
+### No re-grant on progress report (ADR-0012 D3)
 
-Even a 3–5% false positive rate is unacceptable if it means the agent
-keeps running with no monitor watching. Recreating the lease on
-`report_task_progress` makes false positives **self-healing**: the system
-notices its mistake on the next progress update and resumes normal
-monitoring.
+Earlier versions recreated a lease when an agent reported progress after a recovery, treating recovery as possibly wrong.
+That compensation contradicted any ownership fence, so D3 deleted it: a report with no live lease is refused and the agent is told to request its next task.
 
 ### Callback for state cleanup
 
@@ -448,8 +421,8 @@ tests.
 
 | Test | Path | Covers |
 |------|------|--------|
-| Assignment lease unit | `tests/unit/core/test_assignment_lease.py` | Lease lifecycle, touch/renew, progressive phases. |
-| Progressive timeout | `tests/unit/core/test_progressive_timeout.py` | Phase transitions and timeout calculation. |
+| Assignment lease unit | `tests/unit/core/test_assignment_lease.py` | Lease lifecycle, touch/renew, persistence, circuit breaker. |
+| D3 liveness | `tests/unit/core/test_d3_liveness.py` | The silence timeout, the budget ceiling, their persistence, the invariant. |
 | Gridlock detector | `tests/unit/core/test_gridlock_detector.py` | Task-state gridlock detection. |
 | Recovery handoff | `tests/unit/mcp/test_recovery_handoff.py` | Layer 1.1 instructions and 24h expiry. |
 | Resilience end-to-end | `tests/integration/test_resilience_e2e.py` | Full kill → recover → reassign flow. |
@@ -478,13 +451,12 @@ monitor's poll loop to verify it is ticking.
 
 ### Recovery fires on agents that are actually alive
 
-Either the cadence check is too aggressive for your workload, or agents
-are not touching the lease frequently enough. Options:
+Either the silence timeout is shorter than your agents' quiet stretches, or agents are not touching the lease at all.
+Options:
 
-1. Increase `silence_multiplier` (default `1.5` → try `2.0`).
-2. Increase `default_hours` or `min_lease_hours` in `TaskLeaseSettings`.
-3. Confirm that the tool the agent is calling passes `agent_id` in its
-   arguments — if it doesn't, `touch_lease` is never called.
+1. Raise `silence_timeout_minutes` (default `45`); keep it at least twice `checkpoint_cadence_minutes`.
+2. If recovery fires at the budget ceiling, raise `budget_multiplier` or check the task's estimate.
+3. Confirm that the tool the agent is calling passes `agent_id` in its arguments; if it does not, `touch_lease` is never called.
 
 ### `recovery_info` disappears after a refresh
 

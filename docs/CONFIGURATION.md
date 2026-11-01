@@ -167,26 +167,28 @@ Configure MCP (Model Context Protocol) transport:
 
 ### Task Lease Settings
 
-Configure agent task assignment and leasing:
+Configure agent task leasing.
+Since ADR-0012 D3 a lease has two dials: the silence timeout (is the agent alive?) and the budget ceiling (how long may it hold the task?).
+The pre-D3 keys `max_renewals`, `stuck_threshold_renewals`, `renewal_decay_factor` and `silence_multiplier` are still accepted and ignored.
 
 ```json
 {
   "task_lease": {
-    "default_hours": 2.0,
-    "max_renewals": 10,
-    "warning_hours": 0.5,
-    "grace_period_minutes": 30,
-    "renewal_decay_factor": 0.9,
-    "min_lease_hours": 1.0,
+    "silence_timeout_minutes": 45.0,
+    "budget_multiplier": 3.0,
+    "checkpoint_cadence_minutes": 20.0,
+    "default_hours": 4.0,
+    "warning_hours": 0.0167,
+    "grace_period_minutes": 1.0,
+    "min_lease_hours": 0.0,
     "max_lease_hours": 24.0,
-    "stuck_threshold_renewals": 5,
     "enable_adaptive": true,
 
     "priority_multipliers": {
-      "critical": 0.5,    // Critical tasks get shorter leases
+      "critical": 0.5,    // Critical tasks get a tighter budget ceiling
       "high": 0.75,
       "medium": 1.0,
-      "low": 1.5         // Low priority tasks get longer leases
+      "low": 1.5         // Low priority tasks get a looser one
     },
 
     "complexity_multipliers": {
