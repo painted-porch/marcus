@@ -72,3 +72,6 @@ skills/council/
 # Local experiment configs and exports (never commit; may hold credentials)
 config_marcus.openai.json
 marcus-issues.json
+
+# Playwright MCP plugin scratch output (screenshots, snapshots)
+.playwright-mcp/

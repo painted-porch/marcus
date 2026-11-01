@@ -59,7 +59,7 @@ _LABEL_RES = {
 _QUOTED_TITLE_RE = re.compile(r"[\"“]([^\"”]{10,200})[\"”]")
 
 # Prose fallbacks, shaped by real engine answers from the live smoke:
-# 'published on December 11, 2024, by The Boston Globe.' and an
+# 'published on <Month D, YYYY>, by The <Outlet>.' and an
 # italicized outlet name in an APA-style citation line.
 _PROSE_DATE_RE = re.compile(
     r"(?:published|dated)(?:\s+on)?\s+([A-Z][a-z]+ \d{1,2},? \d{4})"

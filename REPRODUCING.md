@@ -138,6 +138,9 @@ python dev-tools/experiments/runners/tow_condition_c.py \
 ## Data handling
 
 The dataset CSV, the manifests, and the raw audit bundles all contain the Tow excerpts and raw engine output. Never commit any of them. Keep every output under `~/marcus-experiments/`, never inside the repository. If you publish bundles, strip the excerpt text and raw engine prose first.
+The same rule covers test fixtures, documents, and web pages: not even a fragment of an excerpt, and not a ground-truth URL, because an agent that reads the source can decode anything a page encodes.
+Before committing, run `python dev-tools/experiments/runners/dataset_leak_scan.py` against your local dataset; it scans for excerpt fragments, encoded payloads, split URLs, and headlines, and reports file names only.
+The pre-commit hook `tow-dataset-leak-scan` runs it automatically whenever the dataset is present on your machine.
 
 ## Related
 

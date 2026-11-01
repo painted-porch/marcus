@@ -25,9 +25,9 @@ from runners.tow_grader import (
 pytestmark = pytest.mark.unit
 
 TRUTH = {
-    "publication": "Boston Globe",
-    "date": "12/11/2024",
-    "source_url": "https://www.bostonglobe.com/2024/12/11/metro/storm/",
+    "publication": "Harbor Gazette",
+    "date": "03/14/2024",
+    "source_url": "https://www.harborgazette.example/2024/03/14/local/ferry/",
 }
 
 
@@ -75,14 +75,14 @@ class TestUrlsMatch:
     def test_scheme_www_slash_and_query_do_not_matter(self) -> None:
         """Cosmetic URL differences are not wrongness."""
         assert urls_match(
-            "http://bostonglobe.com/2024/12/11/metro/storm/?ref=x",
+            "http://harborgazette.example/2024/03/14/local/ferry/?ref=x",
             TRUTH["source_url"],
         )
 
     def test_different_paths_do_not_match(self) -> None:
         """A different article is a different URL."""
         assert not urls_match(
-            "https://www.bostonglobe.com/other-article/", TRUTH["source_url"]
+            "https://www.harborgazette.example/other-article/", TRUTH["source_url"]
         )
 
 
@@ -94,8 +94,8 @@ class TestCategorize:
         record = _record(
             {
                 "headline": "whatever",
-                "publisher": "The Boston Globe",
-                "date": "December 11, 2024",
+                "publisher": "The Harbor Gazette",
+                "date": "March 14, 2024",
                 "url": TRUTH["source_url"],
             }
         )
@@ -106,7 +106,7 @@ class TestCategorize:
         record = _record(
             {
                 "headline": "",
-                "publisher": "Boston Globe",
+                "publisher": "Harbor Gazette",
                 "date": "",
                 "url": TRUTH["source_url"],
             }
@@ -119,7 +119,7 @@ class TestCategorize:
             {
                 "headline": "x",
                 "publisher": "New York Times",
-                "date": "12/11/2024",
+                "date": "03/14/2024",
                 "url": TRUTH["source_url"],
             }
         )
@@ -154,7 +154,7 @@ class TestBlindPool:
     def test_blinded_records_carry_no_condition_or_engine(self) -> None:
         """The scorer's view has answers and nothing to cheat with."""
         records = [
-            _record({"publisher": "Boston Globe", "date": "", "url": ""}),
+            _record({"publisher": "Harbor Gazette", "date": "", "url": ""}),
             AnswerRecord(
                 case_id="tow-0002",
                 condition="A",
@@ -224,7 +224,7 @@ class TestFabricatedUrl:
         from runners.tow_grader import url_is_fabricated
 
         record = _record(
-            {"publisher": "Boston Globe", "date": "", "url": "https://x.org/gone"}
+            {"publisher": "Harbor Gazette", "date": "", "url": "https://x.org/gone"}
         )
 
         assert (

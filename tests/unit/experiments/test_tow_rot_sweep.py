@@ -17,7 +17,7 @@ from runners.tow_rot_sweep import classify_fetch, summarize
 
 pytestmark = pytest.mark.unit
 
-EXCERPT = "Some good news is that this storm should make a lasting impact"
+EXCERPT = "The harbor council voted to keep the winter ferry running on weekends"
 
 
 def _fetch(

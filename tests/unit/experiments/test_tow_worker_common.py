@@ -24,11 +24,11 @@ pytestmark = pytest.mark.unit
 
 CLAIM_INPUTS = {
     "case_id": "tow-0001",
-    "excerpt": "Some good news is that this storm",
-    "headline": "Storm brings relief",
-    "publisher": "Boston Globe",
-    "date": "12/11/2024",
-    "url": "https://www.bostonglobe.com/2024/12/11/metro/storm/",
+    "excerpt": "The harbor council voted to keep the winter ferry",
+    "headline": "Winter ferry keeps weekend service",
+    "publisher": "Harbor Gazette",
+    "date": "03/14/2024",
+    "url": "https://www.harborgazette.example/2024/03/14/local/ferry/",
 }
 
 

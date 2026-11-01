@@ -35,7 +35,7 @@ def _fetch(
     html: str = "",
     text: str = "",
     robots_blocked: bool = False,
-    final_url: str = "https://www.bostonglobe.com/2024/12/11/metro/storm/",
+    final_url: str = "https://www.harborgazette.example/2024/03/14/local/ferry/",
 ) -> FetchResult:
     """Build a FetchResult for verdict tests."""
     return FetchResult(
@@ -67,8 +67,10 @@ class TestExcerptOnPage:
 
     def test_finds_excerpt_despite_markup_noise(self) -> None:
         """A normalized substring match survives quote and space drift."""
-        excerpt = "Some good news is that this storm should make a lasting impact"
-        page = "nav menu … Some  good news is that this storm\nshould make a lasting impact on the drought. footer"
+        excerpt = (
+            "The harbor council voted to keep the winter ferry running on weekends"
+        )
+        page = "nav menu … The  harbor council voted to keep the winter ferry\nrunning on weekends through March. footer"
 
         assert excerpt_on_page(excerpt, page) is True
 
@@ -83,23 +85,23 @@ class TestSiteAndDates:
     def test_site_name_prefers_og_meta(self) -> None:
         """og:site_name is the page's own declaration of its publisher."""
         html = (
-            '<head><meta property="og:site_name" content="The Boston Globe"/>'
-            "<title>Storm hits - The Boston Globe</title></head>"
+            '<head><meta property="og:site_name" content="The Harbor Gazette"/>'
+            "<title>Ferry vote - The Harbor Gazette</title></head>"
         )
-        assert site_name_from_html(html) == "The Boston Globe"
+        assert site_name_from_html(html) == "The Harbor Gazette"
 
     def test_site_name_falls_back_to_title(self) -> None:
         """Without og:site_name the title is better than nothing."""
-        html = "<head><title>Storm hits | Example News</title></head>"
+        html = "<head><title>Ferry vote | Example News</title></head>"
         assert "Example News" in site_name_from_html(html)
 
     def test_published_date_from_meta(self) -> None:
         """article:published_time yields a date."""
         html = (
             '<meta property="article:published_time" '
-            'content="2024-12-11T09:30:00-05:00"/>'
+            'content="2024-03-14T09:30:00-05:00"/>'
         )
-        assert published_date_from_html(html) == date(2024, 12, 11)
+        assert published_date_from_html(html) == date(2024, 3, 14)
 
     def test_published_date_from_json_ld(self) -> None:
         """datePublished inside JSON-LD yields a date."""
@@ -112,15 +114,15 @@ class TestSiteAndDates:
 
     def test_parse_claim_date_formats(self) -> None:
         """The three formats the dataset and engines use all parse."""
-        assert parse_claim_date("12/11/2024") == date(2024, 12, 11)
+        assert parse_claim_date("03/14/2024") == date(2024, 3, 14)
         assert parse_claim_date("2025-03-06") == date(2025, 3, 6)
         assert parse_claim_date("March 6, 2025") == date(2025, 3, 6)
 
     def test_date_tolerance(self) -> None:
         """One day of drift passes; two days fail; missing is None."""
-        d = date(2024, 12, 11)
-        assert date_within_tolerance(d, date(2024, 12, 12)) is True
-        assert date_within_tolerance(d, date(2024, 12, 13)) is False
+        d = date(2024, 3, 14)
+        assert date_within_tolerance(d, date(2024, 3, 15)) is True
+        assert date_within_tolerance(d, date(2024, 3, 16)) is False
         assert date_within_tolerance(None, d) is None
         assert date_within_tolerance(d, None) is None
 
@@ -161,10 +163,10 @@ class TestCanonicalUrl:
         """A relative href is same-site by construction."""
         from runners.tow_checks import canonical_url_from_html
 
-        html = '<link rel="canonical" href="/2024/12/11/metro/storm/"/>'
+        html = '<link rel="canonical" href="/2024/03/14/local/ferry/"/>'
         assert (
-            canonical_url_from_html(html, "https://www.bostonglobe.com/some/page")
-            == "https://www.bostonglobe.com/2024/12/11/metro/storm/"
+            canonical_url_from_html(html, "https://www.harborgazette.example/some/page")
+            == "https://www.harborgazette.example/2024/03/14/local/ferry/"
         )
 
     def test_absent_canonical_is_empty(self) -> None:
@@ -209,22 +211,22 @@ class TestSyndicationVerdict:
     def test_same_domain_canonical_still_verifies(self) -> None:
         """A normal self-canonical page is untouched by the check."""
         page = (
-            '<link rel="canonical" href="https://www.bostonglobe.com/2024/12/11/metro/storm/"/>'
-            '<meta property="og:site_name" content="The Boston Globe"/>'
-            '<meta property="article:published_time" content="2024-12-11T09:00:00-05:00"/>'
+            '<link rel="canonical" href="https://www.harborgazette.example/2024/03/14/local/ferry/"/>'
+            '<meta property="og:site_name" content="The Harbor Gazette"/>'
+            '<meta property="article:published_time" content="2024-03-14T09:00:00-05:00"/>'
         )
-        excerpt = "Some good news is that this storm"
+        excerpt = "The harbor council voted to keep the winter ferry"
         verdict, checks = decide_verdict(
             _fetch(
                 html=page,
                 text=f"intro {excerpt} outro",
-                final_url="https://www.bostonglobe.com/2024/12/11/metro/storm/",
+                final_url="https://www.harborgazette.example/2024/03/14/local/ferry/",
             ),
             excerpt,
             {
-                "publisher": "Boston Globe",
-                "date": "12/11/2024",
-                "url": "https://www.bostonglobe.com/2024/12/11/metro/storm/",
+                "publisher": "Harbor Gazette",
+                "date": "03/14/2024",
+                "url": "https://www.harborgazette.example/2024/03/14/local/ferry/",
             },
         )
 
@@ -236,11 +238,11 @@ class TestDomainMatch:
     """Test suite for the publisher-versus-domain check."""
 
     def test_matches_via_og_site_name(self) -> None:
-        """The page saying 'The Boston Globe' settles it."""
-        html = '<meta property="og:site_name" content="The Boston Globe"/>'
+        """The page saying 'The Harbor Gazette' settles it."""
+        html = '<meta property="og:site_name" content="The Harbor Gazette"/>'
         assert (
             domain_matches_publisher(
-                "Boston Globe", "https://www.bostonglobe.com/x", html
+                "Harbor Gazette", "https://www.harborgazette.example/x", html
             )
             is True
         )
@@ -258,7 +260,7 @@ class TestDomainMatch:
         """A claim citing the wrong outlet fails the check."""
         assert (
             domain_matches_publisher(
-                "Boston Globe", "https://www.example-aggregator.com/x", ""
+                "Harbor Gazette", "https://www.example-aggregator.com/x", ""
             )
             is False
         )
@@ -267,17 +269,17 @@ class TestDomainMatch:
 class TestVerdict:
     """Test suite for the verdict rules."""
 
-    EXCERPT = "Some good news is that this storm should make a lasting impact"
+    EXCERPT = "The harbor council voted to keep the winter ferry running on weekends"
     PAGE = (
-        '<meta property="og:site_name" content="The Boston Globe"/>'
-        '<meta property="article:published_time" content="2024-12-11T09:00:00-05:00"/>'
+        '<meta property="og:site_name" content="The Harbor Gazette"/>'
+        '<meta property="article:published_time" content="2024-03-14T09:00:00-05:00"/>'
     )
 
     def _claim(self) -> dict:
         return {
-            "publisher": "Boston Globe",
-            "date": "12/11/2024",
-            "url": "https://www.bostonglobe.com/2024/12/11/metro/storm/",
+            "publisher": "Harbor Gazette",
+            "date": "03/14/2024",
+            "url": "https://www.harborgazette.example/2024/03/14/local/ferry/",
         }
 
     def test_robots_block_is_unverifiable(self) -> None:

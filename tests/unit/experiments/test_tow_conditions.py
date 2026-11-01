@@ -17,7 +17,7 @@ from runners.tow_engines import EngineAnswer
 
 pytestmark = pytest.mark.unit
 
-EXCERPT = "Some good news is that this storm should make a lasting impact"
+EXCERPT = "The harbor council voted to keep the winter ferry running on weekends"
 
 
 class FakeCache:
@@ -50,7 +50,7 @@ class TestBuildARow:
         answer = EngineAnswer(
             headline="H",
             publisher="P",
-            date="12/11/2024",
+            date="03/14/2024",
             url="https://example.org/a",
             raw="RAW",
             model="sonar",
@@ -78,7 +78,7 @@ class TestFilterAnswer:
             "engine": "perplexity",
             "headline": "H",
             "publisher": "Example",
-            "date": "12/11/2024",
+            "date": "03/14/2024",
             "url": url,
             "raw": "RAW",
             "cost_usd": 0.0001,
