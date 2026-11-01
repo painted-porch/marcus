@@ -6248,7 +6248,28 @@ async def report_blocker(
             # Only after MAX_BLOCKER_REPAIR_ATTEMPTS independent agents have
             # given up is the lane recorded as genuinely dead.
             repair_attempt = _record_repair_attempt(task_id, agent_id)
-            requeued_for_repair = repair_attempt <= MAX_BLOCKER_REPAIR_ATTEMPTS
+
+            # Issue #769 floor: a requeue only helps if some currently-
+            # available agent has NOT already given up on this task. The
+            # ceiling alone counts DISTINCT give-ups, so when the agent pool
+            # is smaller than the ceiling it can never be reached — a lone
+            # agent is handed back the exact task it just failed, forever,
+            # burning an instruction-generation and a blocker-analysis AI
+            # call every loop (a "write a README" task cycled 7 times in 140
+            # seconds with one incapable bot). When no fresh agent remains,
+            # re-offering is pointless: mark the lane dead now instead of
+            # looping. All registered agents count as the pool (a busy agent
+            # has not given up and may free up to retry), so this never ends
+            # a lane a genuinely different agent could still attempt.
+            gave_up_agents = _blocker_repair_agents.get(task_id, set())
+            available_agents = set(getattr(state, "agent_status", None) or {}) | {
+                agent_id
+            }
+            has_fresh_agent = bool(available_agents - gave_up_agents)
+
+            requeued_for_repair = (
+                repair_attempt <= MAX_BLOCKER_REPAIR_ATTEMPTS and has_fresh_agent
+            )
 
             if requeued_for_repair:
                 now = datetime.now(timezone.utc)
@@ -6298,6 +6319,18 @@ async def report_blocker(
                     MAX_BLOCKER_REPAIR_ATTEMPTS,
                 )
             else:
+                # Lane death: either the ceiling was reached (enough distinct
+                # agents gave up) or no fresh agent remains to re-offer it to
+                # (issue #769 floor). Record which so the log and the agent
+                # reply are accurate for both.
+                lane_death_reason = (
+                    "every available agent has already given up on it (#769)"
+                    if not has_fresh_agent
+                    else (
+                        f"{MAX_BLOCKER_REPAIR_ATTEMPTS} independent agents "
+                        "gave up on it"
+                    )
+                )
                 # Update task status
                 await state.kanban_client.update_task(
                     task_id,
@@ -6305,10 +6338,12 @@ async def report_blocker(
                 )
                 await _release_task_file_locks(state, task_id, "lane death")
                 logger.warning(
-                    "LANE DEAD: task %s blocked after %d independent agents "
-                    "gave up.",
+                    "LANE DEAD: task %s blocked because %s (distinct give-ups: "
+                    "%d, available agents: %d).",
                     task_id,
+                    lane_death_reason,
                     repair_attempt,
+                    len(available_agents),
                 )
 
             # Release coordination state — a blocked task is terminal for the
@@ -6409,6 +6444,14 @@ async def report_blocker(
                         "your next task."
                     ),
                 }
+            lane_death_detail = (
+                "no other available agent can attempt it"
+                if not has_fresh_agent
+                else (
+                    f"{MAX_BLOCKER_REPAIR_ATTEMPTS + 1} independent agents "
+                    "have now given up"
+                )
+            )
             return {
                 "success": True,
                 "advisory": False,
@@ -6416,8 +6459,7 @@ async def report_blocker(
                 "suggestions": suggestions,
                 "message": (
                     f"Blocker recorded and task {task_id} handed back "
-                    "(status BLOCKED) — independent agents have now given up "
-                    f"{MAX_BLOCKER_REPAIR_ATTEMPTS + 1} times, so the lane is "
+                    f"(status BLOCKED) — {lane_death_detail}, so the lane is "
                     "recorded as dead. You no longer hold it — request your "
                     "next task."
                 ),

@@ -230,13 +230,16 @@ class TestReportBlockerReleasesCoordination:
         update_call = state.kanban_client.update_task.call_args
         assert update_call is not None
         update_payload = update_call[0][1]
-        # First give-up requeues for repair (TODO); an exhausted repair
-        # budget writes BLOCKED. Both are pinned in
-        # tests/unit/mcp/test_blocker_repair_requeue.py — what matters here
-        # is that the board write happens in the same call that releases
+        # A requeue for a fresh agent writes TODO (and clears assigned_to);
+        # a terminal lane death writes BLOCKED. Which one fires depends on
+        # the repair rung and the agent pool — a lone-agent board with no
+        # fresh agent left dies immediately (issue #769). Both are pinned in
+        # tests/unit/mcp/test_blocker_repair_requeue.py; what matters HERE is
+        # that the board write happens in the same call that releases
         # coordination state.
-        assert update_payload["status"] == TaskStatus.TODO
-        assert update_payload["assigned_to"] is None
+        assert update_payload["status"] in {TaskStatus.TODO, TaskStatus.BLOCKED}
+        if update_payload["status"] == TaskStatus.TODO:
+            assert update_payload["assigned_to"] is None
 
 
 class TestCompletionReleasesLeaseEvenOnMergeFailure:
