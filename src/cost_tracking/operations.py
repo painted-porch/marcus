@@ -281,6 +281,15 @@ OPERATIONS: Dict[str, Operation] = {
         "category": "monitoring",
     },
     # -- runtime (per-task agent work) -------------------------------------
+    "generate_instructions": {
+        "label": "Generate task instructions",
+        "description": (
+            "Writes the per-task agent instructions Marcus hands back "
+            "when an agent calls ``request_next_task``. Fires once per "
+            "task assignment."
+        ),
+        "category": "runtime",
+    },
     "analyze_blocker": {
         "label": "Analyze blocker",
         "description": (

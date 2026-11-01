@@ -1257,3 +1257,139 @@ Write unit tests for auth flow
                 # Note: Error logging removed to avoid MCP stdio interference
                 # Verify client is disabled on failure
                 assert engine.client is None
+
+
+@pytest.mark.unit
+class TestCallClaudeCostRecording:
+    """``_call_claude`` must write a ``token_events`` row (#768).
+
+    Run-time planner calls — ``generate_task_instructions`` and
+    ``analyze_blocker`` — reach the model through
+    :meth:`AIAnalysisEngine._call_claude`, which uses a raw Anthropic
+    SDK client. Before the fix this path recorded nothing to the cost
+    store (``token_events``), so Cato under-reported every project's
+    spend. These tests pin the recording and its attribution.
+    """
+
+    @pytest.fixture
+    def cost_store(self, tmp_path):
+        """A throwaway on-disk CostStore with seed prices loaded."""
+        from src.cost_tracking.cost_store import CostStore
+
+        store = CostStore(db_path=tmp_path / "costs.db")
+        store.load_seed_prices()
+        return store
+
+    @pytest.fixture
+    def recorder(self, cost_store):
+        """Bind a fresh enabled recorder to the module singleton."""
+        from src.cost_tracking.cost_recorder import CostRecorder, set_recorder
+
+        rec = CostRecorder(store=cost_store, enabled=True)
+        set_recorder(rec)
+        yield rec
+        set_recorder(None)
+
+    @staticmethod
+    def _mock_sdk_response(
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_creation: int = 0,
+        cache_read: int = 0,
+        text: str = '{"ok": true}',
+        model: str = "claude-3-5-sonnet-20241022",
+        request_id: str = "msg_abc",
+    ) -> Mock:
+        """Build a Mock mimicking anthropic SDK ``messages.create`` output."""
+        usage = Mock()
+        usage.input_tokens = input_tokens
+        usage.output_tokens = output_tokens
+        usage.cache_creation_input_tokens = cache_creation
+        usage.cache_read_input_tokens = cache_read
+        resp = Mock()
+        resp.usage = usage
+        resp.model = model
+        resp.id = request_id
+        resp.content = [Mock(text=text)]
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_call_claude_records_token_event(self, recorder, cost_store):
+        """A successful call writes one row with the response's token counts."""
+        from src.cost_tracking.cost_recorder import PlannerContext
+
+        engine = AIAnalysisEngine.__new__(AIAnalysisEngine)
+        engine.model = "claude-3-5-sonnet-20241022"
+        engine.current_project_id = None
+        engine.current_agent_id = None
+        engine.client = Mock()
+        engine.client.messages.create.return_value = self._mock_sdk_response(
+            input_tokens=120,
+            output_tokens=45,
+            cache_creation=10,
+            cache_read=5,
+        )
+
+        with recorder.planner_context(
+            PlannerContext(run_id="run_abc", project_id="projhex")
+        ):
+            await engine._call_claude("prompt", operation="generate_instructions")
+
+        row = cost_store.conn.execute(
+            "SELECT run_id, project_id, input_tokens, cache_creation_tokens, "
+            "cache_read_tokens, output_tokens, operation, provider, request_id "
+            "FROM token_events"
+        ).fetchone()
+        assert row == (
+            "run_abc",
+            "projhex",
+            120,
+            10,
+            5,
+            45,
+            "generate_instructions",
+            "anthropic",
+            "msg_abc",
+        )
+
+    @pytest.mark.asyncio
+    async def test_call_claude_uses_default_operation(self, recorder, cost_store):
+        """When no operation is passed, the row still records under a label."""
+        engine = AIAnalysisEngine.__new__(AIAnalysisEngine)
+        engine.model = "claude-3-5-sonnet-20241022"
+        engine.current_project_id = None
+        engine.current_agent_id = None
+        engine.client = Mock()
+        engine.client.messages.create.return_value = self._mock_sdk_response(
+            input_tokens=7, output_tokens=3
+        )
+
+        await engine._call_claude("prompt")
+
+        (count,) = cost_store.conn.execute(
+            "SELECT COUNT(*) FROM token_events"
+        ).fetchone()
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_call_claude_survives_nonnumeric_usage(self, recorder, cost_store):
+        """A Mock/garbage usage object must never break the call path.
+
+        The recorder is best-effort: a provider response whose usage
+        fields are not plain integers must not raise into the caller.
+        """
+        engine = AIAnalysisEngine.__new__(AIAnalysisEngine)
+        engine.model = "claude-3-5-sonnet-20241022"
+        engine.current_project_id = None
+        engine.current_agent_id = None
+        engine.client = Mock()
+        # A bare Mock response: .usage is an auto-Mock whose token
+        # attributes are Mocks, not ints.
+        bare = Mock()
+        bare.content = [Mock(text="plain text")]
+        engine.client.messages.create.return_value = bare
+
+        # Must not raise despite non-numeric usage fields.
+        result = await engine._call_claude("prompt", operation="analyze_blocker")
+        assert result == "plain text"

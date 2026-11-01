@@ -1333,6 +1333,56 @@ class CostStore:
             (run_id,),
         )
 
+    def get_latest_open_run_for_project(self, project_id: str) -> Optional[str]:
+        """Return the most recently started still-open run for a project.
+
+        Run-time planner LLM calls (generating a task's instructions,
+        analyzing a blocker, validating completed work) must attribute
+        their ``token_events`` rows to the same ``run`` that
+        ``create_project`` opened for the project at setup time. That run
+        is the latest row in ``runs`` for the project whose ``ended_at``
+        is still NULL -- it stays open until ``end_experiment`` closes
+        it (#768).
+
+        This is the read-only sibling of
+        :meth:`close_latest_open_run_for_project`: identical row
+        selection (``MAX(started_at)`` among open runs), but it only
+        reads the ``run_id`` instead of stamping close state.
+
+        The incoming ``project_id`` is normalized via
+        :func:`src.cost_tracking.cost_recorder.canonical_project_id` so
+        callers can pass either the dashed UUID form (ProjectRegistry)
+        or the dashless hex form (SQLiteKanban auto-discovery); both
+        resolve to the dashless form actually stored in ``runs``.
+
+        Parameters
+        ----------
+        project_id : str
+            Project identifier in either dashed or dashless form.
+
+        Returns
+        -------
+        Optional[str]
+            The ``run_id`` of the latest open run, or ``None`` when the
+            project has no open run (never created, or already closed).
+        """
+        from src.cost_tracking.cost_recorder import canonical_project_id
+
+        normalized = canonical_project_id(project_id) or project_id
+        row = self.conn.execute(
+            """
+            SELECT run_id FROM runs
+             WHERE project_id = ? AND ended_at IS NULL
+             ORDER BY started_at DESC
+             LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+        if row is None:
+            return None
+        (run_id,) = row
+        return str(run_id)
+
     def close_latest_open_run_for_project(
         self,
         project_id: str,
