@@ -45,7 +45,9 @@ async def touch_on_tool_call(arguments: Optional[Dict[str, Any]], state: Any) ->
         logger.warning(f"[heartbeat] touch_lease failed for {agent_id}: {error}")
 
 
-class HeartbeatFastMCP(FastMCP):  # type: ignore[misc]
+# FastMCP is typed in the project's environment and untyped in the pre-commit
+# hook's; the ignore covers the second and is marked unused for the first.
+class HeartbeatFastMCP(FastMCP):  # type: ignore[misc,unused-ignore]
     """A FastMCP whose every successful tool call is a heartbeat.
 
     Parameters
