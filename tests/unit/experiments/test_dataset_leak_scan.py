@@ -12,6 +12,8 @@ import base64
 import os
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import quote, quote_plus
 
 import pytest
 from runners.dataset_leak_scan import (
@@ -151,9 +153,18 @@ class TestScanText:
         assert scan_text(f's = "{uni_escaped}"', facts).payload_windows > 0
 
     def test_percent_encoding_is_decoded(self, facts: DatasetFacts) -> None:
-        """URL percent-encoding of the excerpt is caught."""
-        pct = "".join(f"%{ord(c):02X}" for c in FAKE_EXCERPT)
-        assert scan_text(f"?q={pct}", facts).payload_windows > 0
+        """URL percent-encoding of the excerpt is caught, fully or partially encoded.
+
+        Standard encoders leave letters alone and encode only spaces and
+        punctuation (Codex on PR #762), so the common form has very few
+        escapes and must still be decoded.
+        """
+        full = "".join(f"%{ord(c):02X}" for c in FAKE_EXCERPT)
+        assert scan_text(f"?q={full}", facts).payload_windows > 0
+        assert scan_text(f"?q={quote(FAKE_EXCERPT)}", facts).payload_windows > 0
+        # quote_plus encodes spaces as "+" with no escapes at all; the plain
+        # word scan catches that form, so the assertion is on any hit.
+        assert scan_text(f"?q={quote_plus(FAKE_EXCERPT)}", facts).total > 0
 
     def test_split_literal_url_is_found(self, facts: DatasetFacts) -> None:
         """A ground-truth URL split across string literals is still caught."""
@@ -174,6 +185,17 @@ class TestScanFile:
         png = tmp_path / "x.png"
         png.write_bytes(b"\x89PNG\r\n\x1a\n" + FAKE_EXCERPT.encode())
         assert scan_file(png, facts) is None
+
+    def test_binary_suffix_is_skipped_without_reading_the_file(
+        self, facts: DatasetFacts, tmp_path: Path
+    ) -> None:
+        """A known binary suffix is skipped before any bytes are read (Codex on PR #762)."""
+        big = tmp_path / "state.sqlite3"
+        big.write_bytes(b"x")
+        with patch.object(
+            Path, "read_bytes", side_effect=AssertionError("read_bytes called")
+        ):
+            assert scan_file(big, facts) is None
 
     def test_binary_content_with_unknown_suffix_is_skipped(
         self, facts: DatasetFacts, tmp_path: Path
@@ -233,6 +255,46 @@ class TestScanRef:
         assert leaking == 1
         assert "On the Record.md" in out
         assert FAKE_EXCERPT not in out
+
+    def test_ref_scan_does_not_fetch_blobs_with_binary_suffixes(
+        self, facts: DatasetFacts, tmp_path: Path
+    ) -> None:
+        """Known binary suffixes are skipped before ``git show`` (Codex on PR #762)."""
+        repo = self._repo(tmp_path)
+        (repo / "big.sqlite3").write_bytes(b"\x00" * 16)
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "y",
+            ],
+            check=True,
+        )
+        import runners.dataset_leak_scan as module
+
+        shown: list = []
+        real_git = module._git
+
+        def counting_git(args: list, repo_path: object) -> bytes:
+            if args and args[0] == "show":
+                shown.append(args[1])
+            return real_git(args, repo_path)
+
+        with patch.object(module, "_git", side_effect=counting_git):
+            scan_ref("HEAD", facts, repo=repo)
+
+        assert not any(s.endswith("big.sqlite3") for s in shown)
 
 
 class TestMain:

@@ -95,7 +95,10 @@ BINARY_SUFFIXES = {
 _B64 = re.compile(r"[A-Za-z0-9+/=]{40,}")
 _CHARCODES = re.compile(r"(?:\d{2,3}\s*,\s*){8,}\d{2,3}")
 _ESCAPES = re.compile(r"(?:\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}){6,}")
-_PERCENT = re.compile(r"(?:%[0-9A-Fa-f]{2}){6,}")
+# Any URL-safe run holding at least one escape: standard encoders leave
+# letters alone and encode only spaces and punctuation, so a fully
+# escaped run is the rare form, not the common one.
+_PERCENT = re.compile(r"[A-Za-z0-9._~+%-]*%[0-9A-Fa-f]{2}[A-Za-z0-9._~+%-]*")
 
 
 def word_windows(text: str, size: int = WINDOW) -> Iterator[str]:
@@ -231,7 +234,9 @@ def decoded_payloads(text: str) -> Iterator[Tuple[int, str]]:
         if decoded is not None:
             yield match.start(), decoded
     for match in _PERCENT.finditer(text):
-        yield match.start(), unquote(match.group(0))
+        run = match.group(0)
+        if len(run) >= 24:
+            yield match.start(), unquote(run.replace("+", " "))
 
 
 def _line_of(offsets: List[int], position: int) -> int:
@@ -287,22 +292,36 @@ def scan_text(text: str, facts: DatasetFacts) -> Hits:
     return hits
 
 
-def is_binary(path: Path, head: bytes) -> bool:
-    """Decide whether a file is binary from its suffix or a NUL byte.
+def has_binary_suffix(path: Path) -> bool:
+    """Decide from the name alone whether a file is binary, before reading it.
 
     Parameters
     ----------
     path : Path
-        The file's path (suffix is checked).
+        The file's path.
+
+    Returns
+    -------
+    bool
+        True when the suffix is a known binary type.
+    """
+    return path.suffix.lower() in BINARY_SUFFIXES
+
+
+def looks_binary(head: bytes) -> bool:
+    """Decide from the first bytes whether content is binary.
+
+    Parameters
+    ----------
     head : bytes
         The first bytes of the file.
 
     Returns
     -------
     bool
-        True when the file should not be text-scanned.
+        True when a NUL byte appears in the first 4 KiB.
     """
-    return path.suffix.lower() in BINARY_SUFFIXES or b"\x00" in head[:4096]
+    return b"\x00" in head[:4096]
 
 
 def scan_file(path: Path, facts: DatasetFacts) -> Optional[Hits]:
@@ -325,8 +344,10 @@ def scan_file(path: Path, facts: DatasetFacts) -> Optional[Hits]:
     OSError
         When the file cannot be read.
     """
+    if has_binary_suffix(path):
+        return None
     data = path.read_bytes()
-    if is_binary(path, data):
+    if looks_binary(data):
         return None
     return scan_text(data.decode("utf-8", "ignore"), facts)
 
@@ -414,8 +435,10 @@ def scan_ref(ref: str, facts: DatasetFacts, repo: Optional[Path] = None) -> int:
         if not raw:
             continue
         path = raw.decode("utf-8", "surrogateescape")
+        if has_binary_suffix(Path(path)):
+            continue
         blob = _git(["show", f"{ref}:{path}"], repo)
-        if is_binary(Path(path), blob):
+        if looks_binary(blob):
             continue
         hits = scan_text(blob.decode("utf-8", "ignore"), facts)
         if hits.total:
