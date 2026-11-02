@@ -1590,10 +1590,12 @@ Return JSON with this format:
         and other single-shot analysis helpers). Unlike the decomposition
         path, it talks to the Anthropic SDK client directly rather than
         through :class:`~src.ai.providers.llm_abstraction.LLMAbstraction`.
-        To keep Cato's cost view complete, every successful call records a
-        ``token_events`` row via the shared cost recorder, attributed to
-        whichever :class:`~src.cost_tracking.cost_recorder.PlannerContext`
-        is active at the call site (#768).
+        To keep Cato's cost view complete, a successful call records a
+        ``token_events`` row via the shared cost recorder when a
+        :class:`~src.cost_tracking.cost_recorder.PlannerContext` is active at
+        the call site (the run-time planner operations wrap their call in
+        ``_planner_cost_context``). Calls made with no active context are not
+        recorded (#768).
 
         Parameters
         ----------
@@ -1602,9 +1604,9 @@ Return JSON with this format:
         operation : str, optional
             Cost-tracking operation label stamped onto the recorded
             ``token_events`` row (for example ``"generate_instructions"``
-            or ``"analyze_blocker"``). Defaults to the generic
-            ``"analyze"`` bucket. An active ``PlannerContext`` with an
-            ``operation_override`` still wins over this value.
+            or ``"analyze_blocker"``). Defaults to ``"analyze"``. Only used
+            when a ``PlannerContext`` is active; an ``operation_override`` on
+            that context still wins over this value.
 
         Returns
         -------
@@ -1701,8 +1703,9 @@ Return JSON with this format:
         run-time planner spend reaches the Cato cost dashboard. The row is
         attributed to whichever
         :class:`~src.cost_tracking.cost_recorder.PlannerContext` the call
-        site pushed; with no active context it lands in the ``'unassigned'``
-        bucket (the recorder's honest default).
+        site pushed. A call made with no active context is skipped, so the
+        unrelated callers of ``_call_claude`` never write an ``'unassigned'``
+        row (#768).
 
         This helper is strictly best-effort: it never raises into the
         caller. Token counts are coerced defensively because a mocked or
@@ -1734,8 +1737,18 @@ Return JSON with this format:
 
             from src.cost_tracking.cost_recorder import get_recorder
 
+            recorder = get_recorder()
+            # Record only when the call site set up attribution (an active
+            # PlannerContext). The run-time planner operations wrap their call
+            # in ``_planner_cost_context`` (instructions, blocker analysis);
+            # the other, unrelated callers of ``_call_claude`` (for example
+            # ``analyze_task``) run without a context and must not manufacture
+            # an 'unassigned' row (#768).
+            if recorder.current() is None:
+                return
+
             request_id = getattr(response, "id", None)
-            get_recorder().record_planner_call(
+            recorder.record_planner_call(
                 operation=operation,
                 provider="anthropic",
                 model=str(getattr(response, "model", None) or self.model),

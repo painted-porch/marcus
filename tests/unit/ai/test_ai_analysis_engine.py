@@ -1354,8 +1354,15 @@ class TestCallClaudeCostRecording:
         )
 
     @pytest.mark.asyncio
-    async def test_call_claude_uses_default_operation(self, recorder, cost_store):
-        """When no operation is passed, the row still records under a label."""
+    async def test_call_claude_skips_recording_without_context(
+        self, recorder, cost_store
+    ):
+        """No active PlannerContext means no row.
+
+        ``_call_claude`` has callers unrelated to the run-time planner
+        operations (for example ``analyze_task``). They run with no active
+        context and must not manufacture an ``'unassigned'`` cost row (#768).
+        """
         engine = AIAnalysisEngine.__new__(AIAnalysisEngine)
         engine.model = "claude-3-5-sonnet-20241022"
         engine.current_project_id = None
@@ -1365,20 +1372,25 @@ class TestCallClaudeCostRecording:
             input_tokens=7, output_tokens=3
         )
 
+        # No ``recorder.planner_context(...)`` wrap: no attribution was set up.
         await engine._call_claude("prompt")
 
         (count,) = cost_store.conn.execute(
             "SELECT COUNT(*) FROM token_events"
         ).fetchone()
-        assert count == 1
+        assert count == 0
 
     @pytest.mark.asyncio
     async def test_call_claude_survives_nonnumeric_usage(self, recorder, cost_store):
         """A Mock/garbage usage object must never break the call path.
 
         The recorder is best-effort: a provider response whose usage
-        fields are not plain integers must not raise into the caller.
+        fields are not plain integers must not raise into the caller. The
+        call runs under an active context so the recording path, and its
+        defensive coercion, is actually exercised.
         """
+        from src.cost_tracking.cost_recorder import PlannerContext
+
         engine = AIAnalysisEngine.__new__(AIAnalysisEngine)
         engine.model = "claude-3-5-sonnet-20241022"
         engine.current_project_id = None
@@ -1391,5 +1403,8 @@ class TestCallClaudeCostRecording:
         engine.client.messages.create.return_value = bare
 
         # Must not raise despite non-numeric usage fields.
-        result = await engine._call_claude("prompt", operation="analyze_blocker")
+        with recorder.planner_context(
+            PlannerContext(run_id="run_x", project_id="projx")
+        ):
+            result = await engine._call_claude("prompt", operation="analyze_blocker")
         assert result == "plain text"
