@@ -22,6 +22,7 @@ Examples
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -541,7 +542,9 @@ Identify risks and provide JSON:
         )
 
         try:
-            instructions = await self._call_claude(prompt)
+            instructions = await self._call_claude(
+                prompt, operation="generate_instructions", record_cost=True
+            )
             return instructions
         except Exception as e:
             print(f"AI instruction generation failed: {e}", file=sys.stderr)
@@ -753,7 +756,9 @@ Task Details:
         # response are distinct problems; both fall back, but the cause
         # should be visible. Behavior is unchanged (always falls back).
         try:
-            response = await self._call_claude(prompt)
+            response = await self._call_claude(
+                prompt, operation="analyze_blocker", record_cost=True
+            )
         except Exception as e:
             print(f"AI blocker analysis: LLM call failed: {e}", file=sys.stderr)
             return self._generate_fallback_blocker_analysis(
@@ -1578,24 +1583,48 @@ Return JSON with this format:
             "rationale": "Based on task label matching and project progress",
         }
 
-    async def _call_claude(self, prompt: str) -> str:
+    async def _call_claude(
+        self, prompt: str, *, operation: str = "analyze", record_cost: bool = False
+    ) -> str:
         """
-        Call Claude API with error handling and token tracking.
+        Call Claude API with error handling and cost recording.
+
+        This is the raw-SDK call path used by Marcus's run-time planner
+        operations (``generate_task_instructions``, ``analyze_blocker``,
+        and other single-shot analysis helpers). Unlike the decomposition
+        path, it talks to the Anthropic SDK client directly rather than
+        through :class:`~src.ai.providers.llm_abstraction.LLMAbstraction`.
+        To keep Cato's cost view complete, a successful call records a
+        ``token_events`` row via the shared cost recorder when the caller
+        opts in with ``record_cost=True`` (the run-time planner operations,
+        which also wrap their call in ``_planner_cost_context``). Every other
+        caller leaves ``record_cost`` at its default and records nothing, so
+        this path is unchanged for them (#768).
 
         Parameters
         ----------
         prompt : str
-            The prompt to send to Claude
+            The prompt to send to Claude.
+        operation : str, optional
+            Cost-tracking operation label stamped onto the recorded
+            ``token_events`` row (for example ``"generate_instructions"``
+            or ``"analyze_blocker"``). Defaults to ``"analyze"``. Only used
+            when ``record_cost`` is set; an ``operation_override`` on the
+            active context still wins over this value.
+        record_cost : bool, optional
+            When ``True`` (the run-time planner operations), a successful call
+            records a ``token_events`` row. Defaults to ``False`` so every
+            other caller of this method records nothing.
 
         Returns
         -------
         str
-            Claude's response text
+            Claude's response text.
 
         Raises
         ------
         Exception
-            If the API call fails or client is unavailable
+            If the API call fails or client is unavailable.
         """
         if not self.client:
             raise Exception("Anthropic client not available")
@@ -1607,12 +1636,30 @@ Return JSON with this format:
                     self.current_agent_id, self.current_project_id
                 )
 
+            _start = time.monotonic()
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
                 temperature=0.7,
                 messages=[{"role": "user", "content": prompt}],
             )
+            _latency_ms = int((time.monotonic() - _start) * 1000)
+
+            # Record a cost-store ``token_events`` row for this call so the
+            # Cato dashboard sees run-time planner spend, not just setup /
+            # decomposition spend (#768). Only when the caller opts in:
+            # the run-time planner operations pass ``record_cost=True``; the
+            # other callers of ``_call_claude`` (including ones that run
+            # inside create_project's PlannerContext, such as dependency
+            # inference and completeness validation) leave it False and are
+            # left exactly as before. Best-effort and fully guarded: the
+            # recorder never raises, and a provider response whose usage
+            # fields are not plain integers must not break the call path, so
+            # token extraction is coerced defensively.
+            if record_cost:
+                self._record_cost_event(
+                    response, operation=operation, latency_ms=_latency_ms
+                )
 
             # Extract token usage if available
             if hasattr(response, "usage"):
@@ -1656,6 +1703,83 @@ Return JSON with this format:
         except Exception as e:
             print(f"Error calling Claude: {e}", file=sys.stderr)
             raise
+
+    def _record_cost_event(
+        self,
+        response: Any,
+        *,
+        operation: str,
+        latency_ms: Optional[int] = None,
+    ) -> None:
+        """Record one ``token_events`` row for a raw-SDK Claude call (#768).
+
+        Mirrors the decomposition path's provider-level recording so that
+        run-time planner spend reaches the Cato cost dashboard. The row is
+        attributed to whichever
+        :class:`~src.cost_tracking.cost_recorder.PlannerContext` the call
+        site pushed. A call made with no active context is skipped, so the
+        unrelated callers of ``_call_claude`` never write an ``'unassigned'``
+        row (#768).
+
+        This helper is strictly best-effort: it never raises into the
+        caller. Token counts are coerced defensively because a mocked or
+        non-standard SDK response may expose usage fields that are not
+        plain integers.
+
+        Parameters
+        ----------
+        response : Any
+            The object returned by ``anthropic`` ``messages.create``; its
+            ``usage`` attribute supplies the token counts.
+        operation : str
+            Cost-tracking operation label for the recorded row.
+        latency_ms : Optional[int]
+            Wall-clock latency of the call in milliseconds, if measured.
+        """
+
+        def _coerce_int(value: Any) -> int:
+            """Best-effort int coercion; non-numeric values become 0."""
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
+
+        try:
+            usage = getattr(response, "usage", None)
+            if usage is None:
+                return
+
+            from src.cost_tracking.cost_recorder import get_recorder
+
+            recorder = get_recorder()
+            # Record only when the call site set up attribution (an active
+            # PlannerContext). The run-time planner operations wrap their call
+            # in ``_planner_cost_context`` (instructions, blocker analysis);
+            # the other, unrelated callers of ``_call_claude`` (for example
+            # ``analyze_task``) run without a context and must not manufacture
+            # an 'unassigned' row (#768).
+            if recorder.current() is None:
+                return
+
+            request_id = getattr(response, "id", None)
+            recorder.record_planner_call(
+                operation=operation,
+                provider="anthropic",
+                model=str(getattr(response, "model", None) or self.model),
+                input_tokens=_coerce_int(getattr(usage, "input_tokens", 0)),
+                cache_creation_tokens=_coerce_int(
+                    getattr(usage, "cache_creation_input_tokens", 0)
+                ),
+                cache_read_tokens=_coerce_int(
+                    getattr(usage, "cache_read_input_tokens", 0)
+                ),
+                output_tokens=_coerce_int(getattr(usage, "output_tokens", 0)),
+                latency_ms=latency_ms,
+                request_id=str(request_id) if request_id else None,
+            )
+        except Exception as exc:  # pragma: no cover - defensive; never raised
+            # Cost recording must never break the provider call path.
+            print(f"Cost recording skipped for {operation}: {exc}", file=sys.stderr)
 
     async def generate_structured_response(
         self,

@@ -14,6 +14,7 @@ import os
 import subprocess
 import threading
 import time
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -916,6 +917,113 @@ async def get_project_board_context(state: Any) -> Dict[str, Optional[str]]:
         logger.debug(f"Error extracting project/board context: {e}")
 
     return context
+
+
+async def _planner_cost_context(
+    state: Any,
+    *,
+    task: Optional[Task] = None,
+    agent_id: Optional[str] = None,
+) -> AbstractContextManager[Any]:
+    """Build a cost-attribution context for a run-time planner LLM call (#768).
+
+    Marcus makes several AI calls *while a project is running* -- it
+    generates a task's instructions when an agent requests work, analyzes
+    a reported blocker, and validates completed work. Each of those calls
+    spends tokens that must appear on the Cato cost dashboard attributed
+    to the right project and run. The attribution is carried by a
+    :class:`~src.cost_tracking.cost_recorder.PlannerContext`, which the
+    recorder reads when it writes a ``token_events`` row. This helper
+    resolves that context and returns it ready to use in a ``with``
+    block; the three run-time call sites wrap their AI call in it.
+
+    The project id is resolved by
+    :func:`src.marcus_mcp.handlers._resolve_project_for_cost`, the same
+    resolver the MCP request path uses, so a run-time call can never
+    attribute to a different project than its handler does. It checks, in
+    order, the task's own ``project_id``, the agent's registered project
+    (``state.agent_project_map``), then the server's selected / active
+    project.
+
+    The run id is the project's open setup run -- the row
+    ``create_project`` opened in the ``runs`` table and left open for the
+    duration of the project (see
+    :meth:`~src.cost_tracking.cost_store.CostStore.get_latest_open_run_for_project`).
+    Using that run means run-time spend lands on the same run as the
+    setup/decomposition spend, which is what Cato groups by. If a project
+    is resolvable but its open run is not (an edge case, e.g. the run was
+    already closed), the call is still attributed to the project with the
+    run id ``"unassigned"`` so the project total stays correct.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state. Supplies ``cost_store`` and the fields the
+        shared cost resolver reads (``agent_project_map`` and the
+        selected / active project).
+    task : Optional[Task]
+        The task the AI call is about, if any. Its ``project_id`` and
+        ``id`` seed the attribution.
+    agent_id : Optional[str]
+        The agent the call is being made on behalf of, if any.
+
+    Returns
+    -------
+    contextlib.AbstractContextManager
+        A context manager that pushes the resolved ``PlannerContext`` for
+        the duration of the ``with`` block, or a no-op
+        :func:`contextlib.nullcontext` when no project can be resolved
+        (the call then falls through to the ``'unassigned'`` bucket,
+        which is the honest default).
+    """
+    from src.cost_tracking.cost_recorder import PlannerContext, get_recorder
+
+    # 1. Resolve the project id. Reuse the one cost-attribution resolver the
+    #    MCP handler uses (explicit project_id -> agent_project_map ->
+    #    selected/active project) so this run-time context cannot drift from
+    #    the handler's (#768 review). Imported here, not at module scope,
+    #    to avoid a circular import: handlers imports this module's tools.
+    from src.marcus_mcp.handlers import _resolve_project_for_cost
+
+    project_id: Optional[str] = _resolve_project_for_cost(
+        {
+            "project_id": (
+                getattr(task, "project_id", None) if task is not None else None
+            ),
+            "agent_id": agent_id,
+        },
+        state,
+    )
+    if not project_id:
+        # No project to attribute against -- fall through to 'unassigned'
+        # so the attribution gap stays visible rather than being
+        # silently misassigned.
+        return nullcontext()
+
+    # 2. Resolve the run id -- the project's open setup run.
+    run_id = "unassigned"
+    cost_store = getattr(state, "cost_store", None)
+    if cost_store is not None:
+        try:
+            resolved_run = cost_store.get_latest_open_run_for_project(str(project_id))
+        except Exception:  # pragma: no cover - defensive, never break caller
+            resolved_run = None
+        if resolved_run:
+            run_id = resolved_run
+
+    # PlannerContext normalizes project_id to the canonical dashless form
+    # on construction, matching how the decomposition path records.
+    return get_recorder().planner_context(
+        PlannerContext(
+            run_id=run_id,
+            project_id=str(project_id),
+            # PlannerContext.agent_id is non-optional and defaults to
+            # 'planner' (Marcus's own LLM calls); keep that default when
+            # no agent is in scope.
+            agent_id=agent_id or "planner",
+            task_id=getattr(task, "id", None) if task is not None else None,
+        )
+    )
 
 
 def _get_task_type(task: Task) -> str:
@@ -2778,13 +2886,19 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
 
                 _mark("memory_predictions")
 
-                # Generate detailed instructions with AI
+                # Generate detailed instructions with AI. Attribute the
+                # planner LLM cost to the task's project and open run so it
+                # reaches Cato instead of 'unassigned' (#768).
                 try:
-                    base_instructions = (
-                        await state.ai_engine.generate_task_instructions(
-                            optimal_task, state.agent_status.get(agent_id)
-                        )
+                    _instr_cost_ctx = await _planner_cost_context(
+                        state, task=optimal_task, agent_id=agent_id
                     )
+                    with _instr_cost_ctx:
+                        base_instructions = (
+                            await state.ai_engine.generate_task_instructions(
+                                optimal_task, state.agent_status.get(agent_id)
+                            )
+                        )
 
                     # Build tiered instructions based on context
                     instructions = build_tiered_instructions(
@@ -3417,9 +3531,18 @@ async def _validate_task_completion(task: Task, agent_id: str, state: Any) -> An
     # Pass agent_id explicitly so worktree resolution uses the authoritative
     # caller ID rather than task.assigned_to, which names the recovering agent
     # after task recovery and would point to the wrong worktree.
-    validation_result = await _work_analyzer.validate_implementation_task(
-        task, state, agent_id=agent_id
+    #
+    # Attribute the validation LLM cost to the task's project and open run
+    # so it reaches Cato instead of 'unassigned' (#768). WorkAnalyzer calls
+    # the model through LLMAbstraction, which already records a
+    # token_events row; this context is what gives that row a project/run.
+    _validate_cost_ctx = await _planner_cost_context(
+        state, task=task, agent_id=agent_id
     )
+    with _validate_cost_ctx:
+        validation_result = await _work_analyzer.validate_implementation_task(
+            task, state, agent_id=agent_id
+        )
 
     return validation_result
 
@@ -6076,9 +6199,16 @@ async def report_blocker(
             agent = state.agent_status.get(agent_id)
             task = current_task  # already fetched above
 
-            suggestions = await state.ai_engine.analyze_blocker(
-                task_id, blocker_description, severity, agent, task
+            # Attribute the blocker-analysis LLM cost to the task's
+            # project and open run so it reaches Cato instead of
+            # 'unassigned' (#768).
+            _blocker_cost_ctx = await _planner_cost_context(
+                state, task=task, agent_id=agent_id
             )
+            with _blocker_cost_ctx:
+                suggestions = await state.ai_engine.analyze_blocker(
+                    task_id, blocker_description, severity, agent, task
+                )
 
         # Issue #719: decide advisory vs terminal. ``report_blocker`` is a
         # help channel — the worker prompt's ERROR_RECOVERY contract is

@@ -1655,3 +1655,85 @@ class TestCloseLatestOpenRunForProject:
             "SELECT ended_at FROM runs WHERE run_id = ?", ("r_canon",)
         ).fetchone()
         assert row[0] == end.isoformat()
+
+
+class TestGetLatestOpenRunForProject:
+    """``get_latest_open_run_for_project`` resolves the setup run (#768).
+
+    Run-time planner LLM calls (instruction generation, blocker
+    analysis, work validation) must attribute their ``token_events`` to
+    the same ``run`` that ``create_project`` opened at setup time. That
+    run is the most recently started still-open row in ``runs`` for the
+    project. This read-only lookup is how the run-time call sites find
+    it.
+    """
+
+    def test_returns_latest_open_run(self, store: CostStore) -> None:
+        """Among several open runs, the MAX(started_at) run_id is returned."""
+        store.record_run(
+            Run(
+                run_id="r_old",
+                project_id="proj_x",
+                project_name="x",
+                started_at=datetime(2026, 5, 13, 10, tzinfo=timezone.utc),
+            )
+        )
+        store.record_run(
+            Run(
+                run_id="r_new",
+                project_id="proj_x",
+                project_name="x",
+                started_at=datetime(2026, 5, 13, 11, tzinfo=timezone.utc),
+            )
+        )
+        # Different project — must not be returned.
+        store.record_run(
+            Run(
+                run_id="r_other",
+                project_id="other",
+                project_name="o",
+                started_at=datetime(2026, 5, 13, 12, tzinfo=timezone.utc),
+            )
+        )
+
+        assert store.get_latest_open_run_for_project("proj_x") == "r_new"
+
+    def test_returns_none_when_no_open_runs(self, store: CostStore) -> None:
+        """Never-recorded or fully-closed project returns None."""
+        # Never recorded.
+        assert store.get_latest_open_run_for_project("ghost") is None
+
+        # Recorded but already closed — not an *open* run.
+        store.record_run(
+            Run(
+                run_id="r_done",
+                project_id="proj_y",
+                project_name="y",
+                started_at=datetime(2026, 5, 13, 10, tzinfo=timezone.utc),
+                ended_at=datetime(2026, 5, 13, 11, tzinfo=timezone.utc),
+            )
+        )
+        assert store.get_latest_open_run_for_project("proj_y") is None
+
+    def test_dashed_project_id_canonicalizes_to_dashless(
+        self, store: CostStore
+    ) -> None:
+        """A dashed UUID from the caller still matches the dashless row.
+
+        ``record_run`` stores the dashless form via
+        ``canonical_project_id``. ProjectRegistry hands out the dashed
+        form, so without canonicalization here the lookup would silently
+        miss and the run-time calls would fall back to 'unassigned'.
+        """
+        dashless = "4cca814b47024489a914a9868da9e4fc"
+        dashed = "4cca814b-4702-4489-a914-a9868da9e4fc"
+        store.record_run(
+            Run(
+                run_id="r_canon",
+                project_id=dashless,
+                project_name="canon",
+                started_at=datetime(2026, 5, 13, 10, tzinfo=timezone.utc),
+            )
+        )
+
+        assert store.get_latest_open_run_for_project(dashed) == "r_canon"
