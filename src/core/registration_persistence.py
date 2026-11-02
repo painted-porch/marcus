@@ -271,6 +271,38 @@ class RegistrationPersistence:
             self._last_written_seen.pop(agent_id, None)
             await self._write()
 
+    async def remove_if_stale(self, agent_id: str, cutoff: datetime) -> bool:
+        """Drop a record only if it is still stale once the lock is held.
+
+        The eviction decision and the removal happen under one lock, so a
+        re-registration that lands in between (its ``save`` refreshes
+        ``last_seen``) wins and nothing is removed (Codex P2 on PR #772).
+
+        Parameters
+        ----------
+        agent_id : str
+            The worker whose record may be removed.
+        cutoff : datetime
+            Records whose ``last_seen`` is before this moment are stale.
+
+        Returns
+        -------
+        bool
+            True when the record was removed.
+        """
+        async with self.lock:
+            await self._ensure_loaded_locked()
+            record = self._cache.get(agent_id)
+            if record is None:
+                return False
+            seen = _parse_when(record.get("last_seen"))
+            if seen is not None and seen >= cutoff:
+                return False
+            self._cache.pop(agent_id, None)
+            self._last_written_seen.pop(agent_id, None)
+            await self._write()
+            return True
+
     async def touch(self, agent_id: str, now: Optional[datetime] = None) -> bool:
         """Record that Marcus heard from a worker.
 

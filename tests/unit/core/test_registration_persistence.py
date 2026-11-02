@@ -210,6 +210,58 @@ class TestSaveAndLoad:
         assert "unknown" not in loaded
 
 
+class TestRemoveIfStale:
+    """The eviction decision and the removal happen under one lock."""
+
+    @pytest.mark.asyncio
+    async def test_stale_record_is_removed(self, tmp_path: Path) -> None:
+        """Older than the cutoff: removed, True."""
+        store = RegistrationPersistence(tmp_path)
+        t0 = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
+        await store.save(
+            record_from_worker(
+                _worker(), project_id="p", registered_at=t0, last_seen=t0
+            )
+        )
+
+        removed = await store.remove_if_stale("agent-a", cutoff=t0 + timedelta(hours=1))
+
+        assert removed is True
+        assert await RegistrationPersistence(tmp_path).load() == {}
+
+    @pytest.mark.asyncio
+    async def test_record_refreshed_in_the_meantime_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        """A re-registration that saved first makes the removal a no-op."""
+        store = RegistrationPersistence(tmp_path)
+        t0 = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
+        await store.save(
+            record_from_worker(
+                _worker(),
+                project_id="p",
+                registered_at=t0,
+                last_seen=t0 + timedelta(hours=2),
+            )
+        )
+
+        removed = await store.remove_if_stale("agent-a", cutoff=t0 + timedelta(hours=1))
+
+        assert removed is False
+        assert "agent-a" in await RegistrationPersistence(tmp_path).load()
+
+    @pytest.mark.asyncio
+    async def test_unknown_agent_is_false(self, tmp_path: Path) -> None:
+        """Nothing to remove, nothing written."""
+        store = RegistrationPersistence(tmp_path)
+
+        assert (
+            await store.remove_if_stale("ghost", cutoff=datetime.now(timezone.utc))
+            is False
+        )
+        assert not (tmp_path / "registrations.json").exists()
+
+
 class TestTouch:
     """last_seen is the eviction clock; writes are debounced."""
 

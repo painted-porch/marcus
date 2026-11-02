@@ -403,6 +403,63 @@ class TestEviction:
         assert "agent-stale" not in server.agent_status
 
     @pytest.mark.asyncio
+    async def test_a_worker_re_registering_during_the_sweep_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-registration publishes in memory first, then awaits the store.
+
+        If the sweep's removal completes in between, the in-memory entry
+        must not be popped, because it is no longer the one judged stale
+        (Codex P2 on PR #772); the re-registration's pending save restores
+        the record.
+        """
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a", last_seen=NOW - timedelta(days=2))
+        server = _fake_server(tmp_path)
+        await server.ensure_registrations_loaded(now=NOW - timedelta(days=2))
+        fresh = _worker("agent-a")
+        real_remove = server.registration_persistence.remove_if_stale
+
+        async def _remove_with_race(agent_id: str, cutoff: datetime) -> bool:
+            # register_agent runs while the removal awaits disk.
+            server.agent_status["agent-a"] = fresh
+            server.agent_project_map["agent-a"] = "proj-1"
+            return await real_remove(agent_id, cutoff)
+
+        server.registration_persistence.remove_if_stale = _remove_with_race
+
+        evicted = await server.evict_stale_registrations(now=NOW)
+
+        assert evicted == []
+        assert server.agent_status["agent-a"] is fresh
+        assert server.agent_project_map["agent-a"] == "proj-1"
+
+    @pytest.mark.asyncio
+    async def test_a_record_refreshed_before_removal_is_not_evicted(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-registration that saved first: the store refuses the removal."""
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a", last_seen=NOW - timedelta(days=2))
+        server = _fake_server(tmp_path)
+        await server.ensure_registrations_loaded(now=NOW - timedelta(days=2))
+        # The re-registration's save lands with a fresh last_seen.
+        await server.registration_persistence.save(
+            record_from_worker(
+                _worker("agent-a"),
+                project_id="proj-1",
+                registered_at=NOW,
+                last_seen=NOW,
+            )
+        )
+
+        evicted = await server.evict_stale_registrations(now=NOW)
+
+        assert evicted == []
+        assert "agent-a" in server.agent_status
+        assert "agent-a" in await RegistrationPersistence(tmp_path).load()
+
+    @pytest.mark.asyncio
     async def test_evict_returns_the_evicted_ids(self, tmp_path: Path) -> None:
         """The sweep reports what it removed, for the log line."""
         store = RegistrationPersistence(tmp_path)

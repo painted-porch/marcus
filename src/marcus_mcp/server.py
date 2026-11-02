@@ -1019,17 +1019,29 @@ class MarcusServer:
         ttl = timedelta(hours=self.registration_ttl_hours)
         active = getattr(lease_manager, "active_leases", None) or {}
         holders = {getattr(lease, "agent_id", None) for lease in active.values()}
+        cutoff = moment - ttl
         evicted: List[str] = []
         for agent_id in list(store.records()):
             if agent_id in holders:
                 continue
             seen = store.last_seen(agent_id)
-            if seen is not None and moment - seen < ttl:
+            if seen is not None and seen >= cutoff:
                 continue
-            await store.remove(agent_id)
-            self.agent_status.pop(agent_id, None)
-            self.agent_project_map.pop(agent_id, None)
-            evicted.append(agent_id)
+            # A re-registration can land while the removal awaits disk
+            # (Codex P2 on PR #772). The store re-checks staleness under
+            # its lock, so a re-registration that saved first wins; and
+            # the in-memory entry is dropped only if it is still the one
+            # that was judged stale, so a re-registration that published
+            # in memory first is kept and its pending save restores the
+            # record.
+            judged_stale = self.agent_status.get(agent_id)
+            removed = await store.remove_if_stale(agent_id, cutoff)
+            if not removed:
+                continue
+            if self.agent_status.get(agent_id) is judged_stale:
+                self.agent_status.pop(agent_id, None)
+                self.agent_project_map.pop(agent_id, None)
+                evicted.append(agent_id)
         if evicted:
             logger.info(
                 f"Evicted {len(evicted)} silent worker registration(s) after "
