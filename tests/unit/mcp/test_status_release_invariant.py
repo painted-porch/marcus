@@ -210,9 +210,12 @@ class TestReportBlockerReleasesCoordination:
         guards is that the board is updated at all, in the same call that
         releases coordination state.
         """
-        from src.marcus_mcp.tools.task import report_blocker
+        from src.marcus_mcp.tools.task import clear_repair_attempts, report_blocker
 
         task = _make_task()
+        # Repair counters are module-level; make this the task's FIRST give-up
+        # whatever other tests in the session did with the same id.
+        clear_repair_attempts(task.id)
         state = _make_state(task)
 
         with patch(
@@ -230,11 +233,10 @@ class TestReportBlockerReleasesCoordination:
         update_call = state.kanban_client.update_task.call_args
         assert update_call is not None
         update_payload = update_call[0][1]
-        # First give-up requeues for repair (TODO); an exhausted repair
-        # budget writes BLOCKED. Both are pinned in
-        # tests/unit/mcp/test_blocker_repair_requeue.py — what matters here
-        # is that the board write happens in the same call that releases
-        # coordination state.
+        # A first give-up always requeues for repair (TODO, assigned_to
+        # cleared), whatever the agent pool looks like: #769 bounds the
+        # total requeues and never kills a lane on the first give-up.
+        # Lane death is pinned in tests/unit/mcp/test_blocker_repair_requeue.py.
         assert update_payload["status"] == TaskStatus.TODO
         assert update_payload["assigned_to"] is None
 

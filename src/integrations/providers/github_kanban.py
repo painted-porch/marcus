@@ -4,11 +4,14 @@ GitHub Projects implementation of KanbanInterface.
 Uses GitHub MCP Server to manage tasks.
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from src.core.models import Priority, Task, TaskStatus
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
+
+logger = logging.getLogger(__name__)
 
 
 class GitHubKanban(KanbanInterface):
@@ -282,31 +285,86 @@ class GitHubKanban(KanbanInterface):
                 },
             )
         elif column_lower in ["in progress", "in-progress"]:
-            # Add in-progress label
-            result = await self.mcp_caller(
-                "github.update_issue",
-                {
-                    "owner": self.owner,
-                    "repo": self.repo,
-                    "issue_number": int(task_id),
-                    "labels": ["in-progress"],
-                },
-            )
-            return bool(result.get("success", True))
+            return await self._replace_status_label(task_id, "in-progress")
         elif column_lower == "blocked":
-            # Add blocked label
-            result = await self.mcp_caller(
-                "github.update_issue",
-                {
-                    "owner": self.owner,
-                    "repo": self.repo,
-                    "issue_number": int(task_id),
-                    "labels": ["blocked"],
-                },
-            )
-            return bool(result.get("success", True))
+            return await self._replace_status_label(task_id, "blocked")
 
         return True
+
+    # Labels that encode the board column. Anything else on the issue
+    # (priority/*, domain/*, user-managed labels) is not ours to touch.
+    _STATUS_LABEL_PREFIXES = ("blocked", "in-progress", "in progress", "ready")
+
+    def _is_status_label(self, label: str) -> bool:
+        """Return True when ``label`` encodes a board column.
+
+        Parameters
+        ----------
+        label : str
+            A GitHub label name.
+
+        Returns
+        -------
+        bool
+            True for ``blocked``, ``blocked/<severity>``, ``in-progress``,
+            ``in progress`` and ``ready``; False for everything else.
+        """
+        lowered = label.lower()
+        return any(lowered.startswith(prefix) for prefix in self._STATUS_LABEL_PREFIXES)
+
+    async def _replace_status_label(self, task_id: str, status_label: str) -> bool:
+        """Set the issue's status label without disturbing its other labels.
+
+        ``github.update_issue`` replaces the whole label set, so the issue
+        is read first and every non-status label is carried over (Codex P2
+        on PR #770: the old ``labels: ["blocked"]`` write deleted priority,
+        domain and user-managed labels on every lane death). If the issue
+        cannot be read, the status label is written alone rather than not
+        at all, because the column change is the thing callers rely on.
+
+        Parameters
+        ----------
+        task_id : str
+            Issue number as a string.
+        status_label : str
+            The status label to end up with (``blocked`` or ``in-progress``).
+
+        Returns
+        -------
+        bool
+            True when the update call reported success.
+        """
+        if not self.mcp_caller:
+            return False
+        kept: List[str] = []
+        try:
+            current = await self.mcp_caller(
+                "github.get_issue",
+                {"owner": self.owner, "repo": self.repo, "issue_number": int(task_id)},
+            )
+            raw_labels = (current.get("issue") or {}).get("labels") or []
+            for label in raw_labels:
+                name = label.get("name", "") if isinstance(label, dict) else str(label)
+                if name and not self._is_status_label(name):
+                    kept.append(name)
+        except Exception as read_error:  # noqa: BLE001 - fall back to status-only
+            logger.warning(
+                "Could not read labels for issue %s before setting %s: %s",
+                task_id,
+                status_label,
+                read_error,
+            )
+            kept = []
+        result = await self.mcp_caller(
+            "github.update_issue",
+            {
+                "owner": self.owner,
+                "repo": self.repo,
+                "issue_number": int(task_id),
+                "labels": kept + [status_label],
+            },
+        )
+        return bool(result.get("success", True))
 
     async def add_comment(self, task_id: str, comment: str) -> bool:
         """Add comment to issue."""
