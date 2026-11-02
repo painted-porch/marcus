@@ -207,7 +207,9 @@ The server method is idempotent; after the first load it only re-runs the evicti
 Three rules keep the roster honest:
 
 - **Memory wins over disk.** A worker that re-registered after the restart is left alone.
-- **Ownership comes from the lease store, never the roster file.** A rehydrated worker's `current_tasks` is rebuilt from the live leases, so the one-task-per-agent rule still holds and there is one authority on who holds what.
+- **Ownership comes from the lease store, never the roster file.** On every call a worker's `current_tasks` is reconciled with the live leases in both directions: a rehydrated worker mid-chore gets its task back, and a task whose lease is gone (completed, recovered, or now held by someone else) is dropped.
+  A task still being assigned is left alone, because its lease is created after `current_tasks` is set.
+  `request_next_task` runs this after it has refreshed the board and before its one-task-per-agent check.
 - **Silent registrations are evicted.** Every tool call moves `last_seen` (the same hook as the heartbeat, with disk writes debounced).
   A registration not heard from for `registration.ttl_hours` (default 24) is removed from memory and disk, swept at load and then at most once per `registration.sweep_interval_seconds`.
   A worker holding a live lease is never evicted, whatever the clock says.

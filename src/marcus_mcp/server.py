@@ -895,7 +895,7 @@ class MarcusServer:
             # Ownership is reconciled on every call, not once: project_tasks
             # is filled by refresh_project_state after the first hook ran,
             # and request_next_task calls this again once it has.
-            self._attach_live_leases_to_registrations()
+            self._reconcile_registrations_with_leases()
             swept_at = self._registrations_swept_at
             if (
                 swept_at is not None
@@ -924,7 +924,7 @@ class MarcusServer:
                 self.agent_project_map[agent_id] = project_id
             restored += 1
         self._registrations_loaded = True
-        self._attach_live_leases_to_registrations()
+        self._reconcile_registrations_with_leases()
         if restored:
             logger.info(
                 f"Rehydrated {restored} worker registration(s) from "
@@ -932,25 +932,60 @@ class MarcusServer:
             )
         await self.evict_stale_registrations(now=moment)
 
-    def _attach_live_leases_to_registrations(self) -> None:
-        """Give each rehydrated worker its live task back as ``current_tasks``.
+    def _reconcile_registrations_with_leases(self) -> None:
+        """Make every worker's ``current_tasks`` agree with the live leases.
 
         The roster file deliberately carries no task ownership; the lease
-        store does. Without this, a restarted worker mid-chore would look
-        idle to the one-task-per-agent rule.
+        store does. Both directions are applied:
+
+        - A worker with no current task that holds a live lease gets that
+          task back (a rehydrated worker mid-chore must not look idle to
+          the one-task-per-agent rule).
+        - A worker whose current task has no live lease held by it drops
+          that task. This is what makes the attach safe under concurrent
+          HTTP calls (Codex P2 on PR #772): completion clears
+          ``current_tasks`` and only then releases the lease, so a hook
+          running in between re-attaches the task; the next call, which
+          ``request_next_task`` makes before its one-task check, removes
+          it again because the lease is gone.
+
+        A task still being assigned (``tasks_being_assigned``) is left
+        alone, because its lease is created after ``current_tasks`` is
+        set. Without a lease manager nothing is touched.
         """
         lease_manager = getattr(self, "lease_manager", None)
+        if lease_manager is None:
+            return
         active = getattr(lease_manager, "active_leases", None) or {}
+        in_flight = getattr(self, "tasks_being_assigned", None) or set()
         tasks_by_id = {
             task.id: task for task in (getattr(self, "project_tasks", None) or [])
         }
+        held_by: Dict[str, List[str]] = {}
         for task_id, lease in list(active.items()):
-            worker = self.agent_status.get(getattr(lease, "agent_id", ""))
-            if worker is None or worker.current_tasks:
-                continue
-            task = tasks_by_id.get(task_id)
-            if task is not None:
-                worker.current_tasks = [task]
+            held_by.setdefault(getattr(lease, "agent_id", ""), []).append(task_id)
+
+        for agent_id, worker in list(self.agent_status.items()):
+            holds = held_by.get(agent_id, [])
+            if worker.current_tasks:
+                kept = [
+                    task
+                    for task in worker.current_tasks
+                    if task.id in holds or task.id in in_flight
+                ]
+                if len(kept) != len(worker.current_tasks):
+                    dropped = [
+                        task.id for task in worker.current_tasks if task not in kept
+                    ]
+                    worker.current_tasks = kept
+                    logger.info(
+                        f"Reconciled {agent_id}: dropped {dropped} from "
+                        "current_tasks, no live lease held"
+                    )
+            if not worker.current_tasks and holds:
+                task = tasks_by_id.get(holds[0])
+                if task is not None:
+                    worker.current_tasks = [task]
 
     async def evict_stale_registrations(
         self, now: Optional[datetime] = None

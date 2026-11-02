@@ -124,8 +124,9 @@ def _fake_server(
     fake.evict_stale_registrations = MarcusServer.evict_stale_registrations.__get__(
         fake, MarcusServer
     )
-    fake._attach_live_leases_to_registrations = (
-        MarcusServer._attach_live_leases_to_registrations.__get__(fake, MarcusServer)
+    fake.tasks_being_assigned = set()
+    fake._reconcile_registrations_with_leases = (
+        MarcusServer._reconcile_registrations_with_leases.__get__(fake, MarcusServer)
     )
     return fake
 
@@ -232,6 +233,78 @@ class TestRehydration:
 
         task = _task("task-1")
         server.project_tasks = [task]  # refresh_project_state ran
+        await server.ensure_registrations_loaded(now=NOW + timedelta(seconds=1))
+
+        assert server.agent_status["agent-a"].current_tasks == [task]
+
+    @pytest.mark.asyncio
+    async def test_a_task_re_attached_during_completion_is_dropped_next_call(
+        self, tmp_path: Path
+    ) -> None:
+        """Completion clears current_tasks, then releases the lease.
+
+        A hook running between the two re-attaches the task (the lease is
+        still live). Once the lease is gone the next call must drop it
+        again, or the worker is busy forever (Codex P2 on PR #772).
+        """
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a")
+        task = _task("task-1")
+        server = _fake_server(tmp_path, leases={"task-1": "agent-a"}, tasks=[task])
+        await server.ensure_registrations_loaded(now=NOW)
+        assert server.agent_status["agent-a"].current_tasks == [task]
+
+        server.lease_manager.active_leases.clear()  # completion released it
+        await server.ensure_registrations_loaded(now=NOW + timedelta(seconds=1))
+
+        assert server.agent_status["agent-a"].current_tasks == []
+
+    @pytest.mark.asyncio
+    async def test_a_task_still_being_assigned_is_not_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """During assignment current_tasks is set before the lease exists."""
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a")
+        task = _task("task-1")
+        server = _fake_server(tmp_path, tasks=[task])
+        await server.ensure_registrations_loaded(now=NOW)
+        server.agent_status["agent-a"].current_tasks = [task]
+        server.tasks_being_assigned.add("task-1")
+
+        await server.ensure_registrations_loaded(now=NOW + timedelta(seconds=1))
+
+        assert server.agent_status["agent-a"].current_tasks == [task]
+
+    @pytest.mark.asyncio
+    async def test_a_task_now_held_by_another_agent_is_dropped(
+        self, tmp_path: Path
+    ) -> None:
+        """A recovered and reassigned task leaves the old holder's list."""
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a")
+        task = _task("task-1")
+        server = _fake_server(tmp_path, leases={"task-1": "agent-b"}, tasks=[task])
+        await server.ensure_registrations_loaded(now=NOW)
+        server.agent_status["agent-a"].current_tasks = [task]
+
+        await server.ensure_registrations_loaded(now=NOW + timedelta(seconds=1))
+
+        assert server.agent_status["agent-a"].current_tasks == []
+
+    @pytest.mark.asyncio
+    async def test_without_a_lease_manager_current_tasks_are_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """No lease store means no authority to drop anything."""
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a")
+        task = _task("task-1")
+        server = _fake_server(tmp_path, tasks=[task])
+        server.lease_manager = None
+        await server.ensure_registrations_loaded(now=NOW)
+        server.agent_status["agent-a"].current_tasks = [task]
+
         await server.ensure_registrations_loaded(now=NOW + timedelta(seconds=1))
 
         assert server.agent_status["agent-a"].current_tasks == [task]
