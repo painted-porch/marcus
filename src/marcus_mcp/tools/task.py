@@ -6873,6 +6873,234 @@ async def find_optimal_task_for_agent(agent_id: str, state: Any) -> Optional[Tas
     )
 
 
+def apply_board_wide_gates(
+    available_tasks: List[Task],
+    scoped_tasks: List[Task],
+    tasks_by_id: Dict[str, Task],
+    state: Any,
+) -> List[Task]:
+    """Apply the gates that depend on the board, not on the asking agent.
+
+    Two gates run after the dependency filter and before any agent-specific
+    choice: README documentation waits until the project is 90% complete
+    (unless it is the only thing left), and a task may not start while an
+    earlier phase of the same feature has no completed task, or while a
+    same-feature task of an earlier phase is in progress. Because neither
+    gate can be satisfied by choosing a different worker, the drain verdict
+    (``src/marcus_mcp/coordinator/drain.py``) applies exactly this function
+    too; the two must never disagree (Codex P2 on PR #773).
+
+    Parameters
+    ----------
+    available_tasks : List[Task]
+        Tasks that passed status, ownership and dependency filtering.
+    scoped_tasks : List[Task]
+        Every task in the project, for completion and phase bookkeeping.
+    tasks_by_id : Dict[str, Task]
+        ``scoped_tasks`` indexed by id.
+    state : Any
+        Marcus server state; only its classification cache is touched.
+
+    Returns
+    -------
+    List[Task]
+        The subset of ``available_tasks`` the board allows right now.
+    """
+    # Special handling for README documentation
+    # Calculate project completion percentage
+    # Exclude README documentation tasks from the calculation since they should only
+    # be assigned after other tasks are complete
+    total_non_doc_tasks = len(
+        [
+            t
+            for t in scoped_tasks
+            if "README" not in t.name
+            and not any(
+                label in (t.labels or [])
+                for label in ["documentation", "final", "verification"]
+            )
+        ]
+    )
+    completed_non_doc_tasks = len(
+        [
+            t
+            for t in scoped_tasks
+            if t.status == TaskStatus.DONE
+            and "README" not in t.name
+            and not any(
+                label in (t.labels or [])
+                for label in ["documentation", "final", "verification"]
+            )
+        ]
+    )
+
+    # Special case: If README documentation is the only task left, make it available
+    readme_doc_tasks = [t for t in available_tasks if "README" in t.name]
+    if readme_doc_tasks and len(available_tasks) == len(readme_doc_tasks):
+        # All available tasks are README documentation tasks, don't filter them
+        logger.debug(
+            "README documentation is the only available task - making it assignable"
+        )
+    elif total_non_doc_tasks > 0:
+        completion_percentage = (completed_non_doc_tasks / total_non_doc_tasks) * 100
+
+        # Filter out README documentation tasks if not nearly complete
+        # Using 90% threshold since some tasks might be blocked
+        if completion_percentage < 90:
+            available_tasks = [t for t in available_tasks if "README" not in t.name]
+            logger.debug(
+                f"Filtering out README documentation tasks - project only "
+                f"{completion_percentage:.1f}% complete"
+            )
+
+    # Apply phase-based task filtering
+    from src.core.phase_dependency_enforcer import PhaseDependencyEnforcer
+    from src.integrations.enhanced_task_classifier import EnhancedTaskClassifier
+
+    phase_enforcer = PhaseDependencyEnforcer()
+    classifier = EnhancedTaskClassifier()
+
+    # System/metadata labels that Marcus adds internally (e.g. for Cato
+    # visualisation).  These are NOT feature identifiers and must not be
+    # used to group tasks into the same phase-enforcement feature group.
+    # Without this exclusion, all pre-fork foundation tasks (which share
+    # labels=["pre-fork"]) would be treated as one feature and serialised
+    # by the Design→Infrastructure phase rule, preventing second agents
+    # from receiving any foundation tasks.  (GH: v82 swim-lane bug)
+    _SYSTEM_LABELS: frozenset[str] = frozenset(
+        {"pre-fork", "foundation", "pre_fork_synthesis"}
+    )
+
+    # Get in-progress tasks to check phase constraints
+    in_progress_task_ids = {
+        t.id for t in scoped_tasks if t.status == TaskStatus.IN_PROGRESS
+    }
+
+    # Further filter available tasks based on phase constraints.
+    # Classification is memoized per task content across requests
+    # (issue #743): it is a pure function of task text that never
+    # changes after creation, and recomputing it for every task on
+    # every request dominated request latency on large boards.
+    # isinstance(dict) rather than ``is None`` so a test double whose
+    # attribute access auto-creates a Mock still yields a real dict.
+    classify_cache = getattr(state, "_task_type_cache", None)
+    if not isinstance(classify_cache, dict):
+        classify_cache = {}
+        try:
+            state._task_type_cache = classify_cache
+        except Exception:
+            pass
+    phase_eligible_tasks = []
+    for task in available_tasks:
+        task_type = _classify_task_cached(task, classifier, classify_cache)
+        task_phase = phase_enforcer._get_task_phase(task_type)
+
+        # Check if this phase is allowed given current in-progress tasks
+        phase_allowed = True
+
+        # First check against in-progress tasks
+        for ip_task_id in in_progress_task_ids:
+            ip_task = tasks_by_id.get(ip_task_id)
+            if ip_task:
+                ip_type = _classify_task_cached(ip_task, classifier, classify_cache)
+                ip_phase = phase_enforcer._get_task_phase(ip_type)
+
+                # Check if tasks share the same FEATURE (by labels).
+                # Exclude system labels so "pre-fork" and similar internal
+                # tags do not create false feature groupings.
+                if task.labels and ip_task.labels:
+                    task_feature_labels = set(task.labels) - _SYSTEM_LABELS
+                    ip_feature_labels = set(ip_task.labels) - _SYSTEM_LABELS
+                    shared_labels = task_feature_labels & ip_feature_labels
+                    if shared_labels:
+                        # Same feature - check phase order
+                        if phase_enforcer._should_depend_on_phase(task_phase, ip_phase):
+                            # This task's phase should wait for
+                            # in-progress phase
+                            phase_allowed = False
+                            logger.debug(
+                                f"Task '{task.name}' "
+                                f"({task_phase.value}) blocked by "
+                                f"in-progress task '{ip_task.name}' "
+                                f"({ip_phase.value}) in same feature"
+                            )
+                            break
+
+        # Also check if all required earlier phases have been completed
+        if phase_allowed and task.labels:
+            # Only consider non-system labels as feature identifiers
+            task_feature_labels = set(task.labels) - _SYSTEM_LABELS
+            if task_feature_labels:
+                # Get all settled tasks in the same feature. Issue #629
+                # / Codex P1 on PR #718: for the terminal integration
+                # task a BLOCKED earlier-phase task counts as settled,
+                # matching the dependency gate. Counting only DONE here
+                # reintroduced the hang through a second door — the
+                # integration task stayed phase-ineligible forever while
+                # the gridlock detector (sharing deps_allow_claim)
+                # reported no gridlock, so the run hung with the alarm
+                # switched off. Ordinary tasks keep the strict DONE rule.
+                satisfying_statuses = phase_satisfied_by(task)
+                feature_completed_tasks = [
+                    t
+                    for t in scoped_tasks
+                    if t.status in satisfying_statuses
+                    and t.labels
+                    and (set(t.labels) - _SYSTEM_LABELS) & task_feature_labels
+                ]
+
+                # Check which phases have been completed
+                completed_phases = set()
+                for comp_task in feature_completed_tasks:
+                    comp_type = _classify_task_cached(
+                        comp_task, classifier, classify_cache
+                    )
+                    comp_phase = phase_enforcer._get_task_phase(comp_type)
+                    completed_phases.add(comp_phase)
+
+                # Check if all required earlier phases are complete
+                required_phases = [
+                    p for p in phase_enforcer.PHASE_ORDER if p.value < task_phase.value
+                ]
+                for req_phase in required_phases:
+                    if req_phase not in completed_phases:
+                        # Check if there are any tasks of this phase
+                        phase_exists = any(
+                            phase_enforcer._get_task_phase(
+                                _classify_task_cached(t, classifier, classify_cache)
+                            )
+                            == req_phase
+                            for t in scoped_tasks
+                            if t.labels
+                            and (set(t.labels) - _SYSTEM_LABELS) & task_feature_labels
+                        )
+
+                        if phase_exists:
+                            phase_allowed = False
+                            logger.info(
+                                f"Task '{task.name}' "
+                                f"({task_phase.value}) blocked - waiting "
+                                f"for {req_phase.name} phase to complete "
+                                f"in same feature. Task labels: "
+                                f"{task.labels}, Required phase: "
+                                f"{req_phase.name}"
+                            )
+                            break
+
+        if phase_allowed:
+            phase_eligible_tasks.append(task)
+
+    # Log filtering results
+    if len(available_tasks) != len(phase_eligible_tasks):
+        logger.info(
+            f"Phase enforcement filtered tasks: {len(available_tasks)} -> "
+            f"{len(phase_eligible_tasks)} eligible"
+        )
+
+    available_tasks = phase_eligible_tasks
+    return available_tasks
+
+
 async def _find_optimal_task_original_logic(
     agent_id: str, state: Any
 ) -> Optional[Task]:
@@ -7115,205 +7343,9 @@ async def _find_optimal_task_original_logic(
 
             available_tasks.append(t)
 
-        # Special handling for README documentation
-        # Calculate project completion percentage
-        # Exclude README documentation tasks from the calculation since they should only
-        # be assigned after other tasks are complete
-        total_non_doc_tasks = len(
-            [
-                t
-                for t in scoped_tasks
-                if "README" not in t.name
-                and not any(
-                    label in (t.labels or [])
-                    for label in ["documentation", "final", "verification"]
-                )
-            ]
+        available_tasks = apply_board_wide_gates(
+            available_tasks, scoped_tasks, tasks_by_id, state
         )
-        completed_non_doc_tasks = len(
-            [
-                t
-                for t in scoped_tasks
-                if t.status == TaskStatus.DONE
-                and "README" not in t.name
-                and not any(
-                    label in (t.labels or [])
-                    for label in ["documentation", "final", "verification"]
-                )
-            ]
-        )
-
-        # Special case: If README documentation is the only task left, make it available
-        readme_doc_tasks = [t for t in available_tasks if "README" in t.name]
-        if readme_doc_tasks and len(available_tasks) == len(readme_doc_tasks):
-            # All available tasks are README documentation tasks, don't filter them
-            logger.debug(
-                "README documentation is the only available task - making it assignable"
-            )
-        elif total_non_doc_tasks > 0:
-            completion_percentage = (
-                completed_non_doc_tasks / total_non_doc_tasks
-            ) * 100
-
-            # Filter out README documentation tasks if not nearly complete
-            # Using 90% threshold since some tasks might be blocked
-            if completion_percentage < 90:
-                available_tasks = [t for t in available_tasks if "README" not in t.name]
-                logger.debug(
-                    f"Filtering out README documentation tasks - project only "
-                    f"{completion_percentage:.1f}% complete"
-                )
-
-        # Apply phase-based task filtering
-        from src.core.phase_dependency_enforcer import PhaseDependencyEnforcer
-        from src.integrations.enhanced_task_classifier import EnhancedTaskClassifier
-
-        phase_enforcer = PhaseDependencyEnforcer()
-        classifier = EnhancedTaskClassifier()
-
-        # System/metadata labels that Marcus adds internally (e.g. for Cato
-        # visualisation).  These are NOT feature identifiers and must not be
-        # used to group tasks into the same phase-enforcement feature group.
-        # Without this exclusion, all pre-fork foundation tasks (which share
-        # labels=["pre-fork"]) would be treated as one feature and serialised
-        # by the Design→Infrastructure phase rule, preventing second agents
-        # from receiving any foundation tasks.  (GH: v82 swim-lane bug)
-        _SYSTEM_LABELS: frozenset[str] = frozenset(
-            {"pre-fork", "foundation", "pre_fork_synthesis"}
-        )
-
-        # Get in-progress tasks to check phase constraints
-        in_progress_task_ids = {
-            t.id for t in scoped_tasks if t.status == TaskStatus.IN_PROGRESS
-        }
-
-        # Further filter available tasks based on phase constraints.
-        # Classification is memoized per task content across requests
-        # (issue #743): it is a pure function of task text that never
-        # changes after creation, and recomputing it for every task on
-        # every request dominated request latency on large boards.
-        # isinstance(dict) rather than ``is None`` so a test double whose
-        # attribute access auto-creates a Mock still yields a real dict.
-        classify_cache = getattr(state, "_task_type_cache", None)
-        if not isinstance(classify_cache, dict):
-            classify_cache = {}
-            try:
-                state._task_type_cache = classify_cache
-            except Exception:
-                pass
-        phase_eligible_tasks = []
-        for task in available_tasks:
-            task_type = _classify_task_cached(task, classifier, classify_cache)
-            task_phase = phase_enforcer._get_task_phase(task_type)
-
-            # Check if this phase is allowed given current in-progress tasks
-            phase_allowed = True
-
-            # First check against in-progress tasks
-            for ip_task_id in in_progress_task_ids:
-                ip_task = tasks_by_id.get(ip_task_id)
-                if ip_task:
-                    ip_type = _classify_task_cached(ip_task, classifier, classify_cache)
-                    ip_phase = phase_enforcer._get_task_phase(ip_type)
-
-                    # Check if tasks share the same FEATURE (by labels).
-                    # Exclude system labels so "pre-fork" and similar internal
-                    # tags do not create false feature groupings.
-                    if task.labels and ip_task.labels:
-                        task_feature_labels = set(task.labels) - _SYSTEM_LABELS
-                        ip_feature_labels = set(ip_task.labels) - _SYSTEM_LABELS
-                        shared_labels = task_feature_labels & ip_feature_labels
-                        if shared_labels:
-                            # Same feature - check phase order
-                            if phase_enforcer._should_depend_on_phase(
-                                task_phase, ip_phase
-                            ):
-                                # This task's phase should wait for
-                                # in-progress phase
-                                phase_allowed = False
-                                logger.debug(
-                                    f"Task '{task.name}' "
-                                    f"({task_phase.value}) blocked by "
-                                    f"in-progress task '{ip_task.name}' "
-                                    f"({ip_phase.value}) in same feature"
-                                )
-                                break
-
-            # Also check if all required earlier phases have been completed
-            if phase_allowed and task.labels:
-                # Only consider non-system labels as feature identifiers
-                task_feature_labels = set(task.labels) - _SYSTEM_LABELS
-                if task_feature_labels:
-                    # Get all settled tasks in the same feature. Issue #629
-                    # / Codex P1 on PR #718: for the terminal integration
-                    # task a BLOCKED earlier-phase task counts as settled,
-                    # matching the dependency gate. Counting only DONE here
-                    # reintroduced the hang through a second door — the
-                    # integration task stayed phase-ineligible forever while
-                    # the gridlock detector (sharing deps_allow_claim)
-                    # reported no gridlock, so the run hung with the alarm
-                    # switched off. Ordinary tasks keep the strict DONE rule.
-                    satisfying_statuses = phase_satisfied_by(task)
-                    feature_completed_tasks = [
-                        t
-                        for t in scoped_tasks
-                        if t.status in satisfying_statuses
-                        and t.labels
-                        and (set(t.labels) - _SYSTEM_LABELS) & task_feature_labels
-                    ]
-
-                    # Check which phases have been completed
-                    completed_phases = set()
-                    for comp_task in feature_completed_tasks:
-                        comp_type = _classify_task_cached(
-                            comp_task, classifier, classify_cache
-                        )
-                        comp_phase = phase_enforcer._get_task_phase(comp_type)
-                        completed_phases.add(comp_phase)
-
-                    # Check if all required earlier phases are complete
-                    required_phases = [
-                        p
-                        for p in phase_enforcer.PHASE_ORDER
-                        if p.value < task_phase.value
-                    ]
-                    for req_phase in required_phases:
-                        if req_phase not in completed_phases:
-                            # Check if there are any tasks of this phase
-                            phase_exists = any(
-                                phase_enforcer._get_task_phase(
-                                    _classify_task_cached(t, classifier, classify_cache)
-                                )
-                                == req_phase
-                                for t in scoped_tasks
-                                if t.labels
-                                and (set(t.labels) - _SYSTEM_LABELS)
-                                & task_feature_labels
-                            )
-
-                            if phase_exists:
-                                phase_allowed = False
-                                logger.info(
-                                    f"Task '{task.name}' "
-                                    f"({task_phase.value}) blocked - waiting "
-                                    f"for {req_phase.name} phase to complete "
-                                    f"in same feature. Task labels: "
-                                    f"{task.labels}, Required phase: "
-                                    f"{req_phase.name}"
-                                )
-                                break
-
-            if phase_allowed:
-                phase_eligible_tasks.append(task)
-
-        # Log filtering results
-        if len(available_tasks) != len(phase_eligible_tasks):
-            logger.info(
-                f"Phase enforcement filtered tasks: {len(available_tasks)} -> "
-                f"{len(phase_eligible_tasks)} eligible"
-            )
-
-        available_tasks = phase_eligible_tasks
 
         # Further filter to deprioritize deployment tasks
         # Separate deployment and non-deployment tasks

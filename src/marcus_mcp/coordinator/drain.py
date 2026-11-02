@@ -10,7 +10,11 @@ no work in flight**.
 
 Claimable is judged board-wide, not per agent: a task another worker
 could take keeps the board alive even if the caller is not eligible for
-it. Skills, eligibility and file locks are therefore not consulted here.
+it. Skills, eligibility and file locks are therefore not consulted here,
+but the gates that no choice of worker can satisfy are: the dependency
+gate (strict for ordinary tasks, hard-only for subtasks, exactly as the
+two selectors apply them) and the board-wide README and phase gates,
+through the very function the assignment filter uses.
 In flight is judged conservatively: a live lease, an ``IN_PROGRESS``
 card, a task being assigned right now, a persisted assignment, or a
 ``TODO`` card that still names an assignee (an orphan the reconciler
@@ -28,6 +32,9 @@ from src.core.task_claimability import (
     build_slug_to_id,
     deps_allow_claim,
     resolve_dependency_ids,
+)
+from src.marcus_mcp.coordinator.subtask_assignment import (
+    _are_dependencies_satisfied as hard_dependencies_satisfied,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +77,30 @@ class DrainVerdict:
 def _scope(tasks: List[Task], project_id: str) -> List[Task]:
     """Mirror the assignment filter's scoping: legacy tasks (no project) are shared."""
     return [t for t in tasks if t.project_id is None or t.project_id == project_id]
+
+
+def _subtasks_enabled(state: Any) -> bool:
+    """Whether the subtask selector is in play, mirroring the assignment path."""
+    if getattr(state, "subtask_manager", None) is None:
+        return False
+    try:
+        from src.config.settings import Settings
+
+        return bool(Settings().is_subtasks_enabled())
+    except Exception:  # noqa: BLE001 - unreadable settings: assume the default
+        return True
+
+
+def _board_wide_gates(
+    candidates: List[Task], scoped: List[Task], tasks_by_id: Dict[str, Task], state: Any
+) -> List[Task]:
+    """Apply the assignment filter's board-wide gates (README, phases)."""
+    if not candidates:
+        return []
+    # Imported here: tools.task imports this module.
+    from src.marcus_mcp.tools.task import apply_board_wide_gates
+
+    return apply_board_wide_gates(list(candidates), scoped, tasks_by_id, state)
 
 
 def _is_decomposed_parent(task: Task, state: Any, scoped: List[Task]) -> bool:
@@ -124,16 +155,29 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
 
     slug_to_id = build_slug_to_id(scoped)
     done_ids = {t.id for t in scoped if t.status == TaskStatus.DONE}
+    subtask_path = _subtasks_enabled(state)
 
-    def _deps_satisfied(task: Task) -> bool:
+    def _ordinary_deps_satisfied(task: Task) -> bool:
         resolved = resolve_dependency_ids(task, slug_to_id)
         claimable, _ = deps_allow_claim(task, resolved, tasks_by_id)
         return claimable
 
-    done = blocked = claimable = in_flight = unclaimable = 0
+    done = blocked = in_flight = unclaimable = 0
+    candidates: List[Task] = []  # ordinary tasks that still face the board gates
+    subtask_claimable = 0
     for task in scoped:
         if task.status == TaskStatus.DONE:
             done += 1
+            continue
+        if task.status == TaskStatus.BLOCKED:
+            blocked += 1
+            continue
+        # A decomposed parent is a container: the selector moves it to
+        # IN_PROGRESS when its first child is claimed and completes it when
+        # the last child is done, so its own status says nothing about live
+        # work. Its liveness is its children's (Codex P2 on PR #773).
+        if _is_decomposed_parent(task, state, scoped):
+            unclaimable += 1
             continue
         if (
             task.id in leased
@@ -144,15 +188,25 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
         ):
             in_flight += 1
             continue
-        if task.status == TaskStatus.BLOCKED:
-            blocked += 1
-            continue
         # Only TODO remains: TaskStatus is exactly TODO, IN_PROGRESS, DONE,
         # BLOCKED, and the first three are handled above.
-        if _is_decomposed_parent(task, state, scoped):
-            unclaimable += 1
+        if task.is_subtask and task.parent_task_id and subtask_path:
+            # The subtask selector's rules: parent not DONE, the parent's and
+            # the subtask's HARD dependencies done, soft ones skipped. No
+            # slug resolution and no phase gate there, so none here.
+            parent = tasks_by_id.get(task.parent_task_id)
+            if parent is None or parent.status == TaskStatus.DONE:
+                unclaimable += 1
+                continue
+            if not hard_dependencies_satisfied(parent, scoped):
+                unclaimable += 1
+                continue
+            if not hard_dependencies_satisfied(task, scoped):
+                unclaimable += 1
+                continue
+            subtask_claimable += 1
             continue
-        if not _deps_satisfied(task):
+        if not _ordinary_deps_satisfied(task):
             unclaimable += 1
             continue
         if task.is_subtask and task.parent_task_id:
@@ -162,7 +216,11 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
                 if not all(dep in done_ids for dep in parent_deps):
                     unclaimable += 1
                     continue
-        claimable += 1
+        candidates.append(task)
+
+    gated = _board_wide_gates(candidates, scoped, tasks_by_id, state)
+    claimable = subtask_claimable + len(gated)
+    unclaimable += len(candidates) - len(gated)
 
     total = len(scoped)
     if in_flight:

@@ -288,6 +288,119 @@ class TestVerdictWhenDrained:
         assert verdict.drained is False
         assert verdict.reason == "claimable"
 
+    @pytest.mark.asyncio
+    async def test_subtask_soft_dependency_is_skipped_like_the_selector(
+        self,
+    ) -> None:
+        """The subtask selector ignores soft dependencies; so must the verdict.
+
+        A runnable child behind a soft dependency on a BLOCKED task is
+        claimable by someone, so the board is not drained (Codex P2 on
+        PR #773).
+        """
+        parent = _task("p")
+        child = _task("p.1", is_subtask=True, parent_task_id="p", deps=["dead"])
+        child.dependency_types = ["soft"]
+        tasks = [_task("dead", TaskStatus.BLOCKED), parent, child]
+        state = _state(tasks, subtask_manager=True)
+
+        with patch(
+            "src.marcus_mcp.coordinator.drain._subtasks_enabled", return_value=True
+        ):
+            verdict = await compute_board_drain(state, PROJECT)
+
+        assert verdict.drained is False
+        assert verdict.reason == "claimable"
+
+    @pytest.mark.asyncio
+    async def test_subtask_hard_dependency_on_dead_lane_is_unclaimable(self) -> None:
+        """A hard dependency on a BLOCKED task keeps the child unclaimable."""
+        parent = _task("p")
+        child = _task("p.1", is_subtask=True, parent_task_id="p", deps=["dead"])
+        child.dependency_types = ["hard"]
+        tasks = [_task("dead", TaskStatus.BLOCKED), parent, child]
+        state = _state(tasks, subtask_manager=True)
+
+        with patch(
+            "src.marcus_mcp.coordinator.drain._subtasks_enabled", return_value=True
+        ):
+            verdict = await compute_board_drain(state, PROJECT)
+
+        assert verdict.drained is True
+        assert verdict.reason == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_in_progress_decomposed_parent_is_not_live_work(self) -> None:
+        """The selector parks a parent in IN_PROGRESS; its children decide liveness.
+
+        One child done, the other waiting on a dead lane, no leases: the
+        parent sits IN_PROGRESS forever, and the board is drained, blocked
+        (Codex P2 on PR #773).
+        """
+        parent = _task("p", TaskStatus.IN_PROGRESS)
+        tasks = [
+            _task("dead", TaskStatus.BLOCKED),
+            parent,
+            _task("p.1", TaskStatus.DONE, is_subtask=True, parent_task_id="p"),
+            _task("p.2", is_subtask=True, parent_task_id="p", deps=["dead"]),
+        ]
+        state = _state(tasks, subtask_manager=True)
+
+        with patch(
+            "src.marcus_mcp.coordinator.drain._subtasks_enabled", return_value=True
+        ):
+            verdict = await compute_board_drain(state, PROJECT)
+
+        assert verdict.drained is True
+        assert verdict.reason == "blocked"
+        assert verdict.tasks_in_flight == 0
+
+    @pytest.mark.asyncio
+    async def test_phase_gate_blocks_implementation_behind_a_dead_design(
+        self,
+    ) -> None:
+        """A BLOCKED design task and a dependency-free implementation task that share a feature.
+
+        The assignment filter never offers the implementation while the
+        design phase has no DONE task; the verdict must agree, or workers
+        retry forever instead of going home (Codex P2 on PR #773).
+        """
+        tasks = [
+            _task(
+                "d",
+                TaskStatus.BLOCKED,
+                name="Design payments API",
+                labels=["design", "payments"],
+            ),
+            _task(
+                "i",
+                name="Implement payments endpoint",
+                labels=["implementation", "payments"],
+            ),
+        ]
+        state = _state(tasks)
+
+        verdict = await compute_board_drain(state, PROJECT)
+
+        assert verdict.drained is True
+        assert verdict.reason == "blocked"
+        assert verdict.tasks_unclaimable == 1
+
+    @pytest.mark.asyncio
+    async def test_readme_alone_is_claimable_like_the_selector(self) -> None:
+        """README is held back until 90% done unless it is the only task left."""
+        tasks = [
+            _task("a", TaskStatus.BLOCKED),
+            _task("b", TaskStatus.BLOCKED),
+            _task("r", name="Write README documentation", labels=["documentation"]),
+        ]
+        state = _state(tasks)
+
+        verdict = await compute_board_drain(state, PROJECT)
+
+        assert verdict.drained is False
+        assert verdict.reason == "claimable"
+
     def test_verdict_serializes(self) -> None:
         """The verdict rides inside the MCP response as plain data."""
         verdict = DrainVerdict(
