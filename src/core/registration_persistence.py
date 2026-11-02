@@ -271,7 +271,9 @@ class RegistrationPersistence:
             self._last_written_seen.pop(agent_id, None)
             await self._write()
 
-    async def remove_if_stale(self, agent_id: str, cutoff: datetime) -> bool:
+    async def remove_if_stale(
+        self, agent_id: str, cutoff: datetime
+    ) -> Optional[Dict[str, Any]]:
         """Drop a record only if it is still stale once the lock is held.
 
         The eviction decision and the removal happen under one lock, so a
@@ -287,21 +289,23 @@ class RegistrationPersistence:
 
         Returns
         -------
-        bool
-            True when the record was removed.
+        Optional[Dict[str, Any]]
+            The removed record, so a caller that loses a race after the
+            removal can put it back with :meth:`save`; None when nothing
+            was removed.
         """
         async with self.lock:
             await self._ensure_loaded_locked()
             record = self._cache.get(agent_id)
             if record is None:
-                return False
+                return None
             seen = _parse_when(record.get("last_seen"))
             if seen is not None and seen >= cutoff:
-                return False
-            self._cache.pop(agent_id, None)
+                return None
+            removed = self._cache.pop(agent_id)
             self._last_written_seen.pop(agent_id, None)
             await self._write()
-            return True
+            return dict(removed)
 
     async def touch(self, agent_id: str, now: Optional[datetime] = None) -> bool:
         """Record that Marcus heard from a worker.

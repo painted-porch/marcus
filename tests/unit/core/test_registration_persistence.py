@@ -226,7 +226,8 @@ class TestRemoveIfStale:
 
         removed = await store.remove_if_stale("agent-a", cutoff=t0 + timedelta(hours=1))
 
-        assert removed is True
+        assert removed is not None
+        assert removed["agent_id"] == "agent-a"  # returned so a loser can restore it
         assert await RegistrationPersistence(tmp_path).load() == {}
 
     @pytest.mark.asyncio
@@ -247,7 +248,7 @@ class TestRemoveIfStale:
 
         removed = await store.remove_if_stale("agent-a", cutoff=t0 + timedelta(hours=1))
 
-        assert removed is False
+        assert removed is None
         assert "agent-a" in await RegistrationPersistence(tmp_path).load()
 
     @pytest.mark.asyncio
@@ -257,7 +258,7 @@ class TestRemoveIfStale:
 
         assert (
             await store.remove_if_stale("ghost", cutoff=datetime.now(timezone.utc))
-            is False
+            is None
         )
         assert not (tmp_path / "registrations.json").exists()
 

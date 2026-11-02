@@ -1036,12 +1036,29 @@ class MarcusServer:
             # record.
             judged_stale = self.agent_status.get(agent_id)
             removed = await store.remove_if_stale(agent_id, cutoff)
-            if not removed:
+            if removed is None:
                 continue
-            if self.agent_status.get(agent_id) is judged_stale:
-                self.agent_status.pop(agent_id, None)
-                self.agent_project_map.pop(agent_id, None)
-                evicted.append(agent_id)
+            # Re-validate after the await (Codex P2 on PR #772): the
+            # worker may have re-registered (a different in-memory
+            # object) or, through a concurrent request_next_task, taken a
+            # task and so now hold a live lease. Either way it is alive:
+            # keep it and put the record back.
+            live_leases = getattr(lease_manager, "active_leases", None) or {}
+            holds_now = any(
+                getattr(lease, "agent_id", None) == agent_id
+                for lease in live_leases.values()
+            )
+            if holds_now or self.agent_status.get(agent_id) is not judged_stale:
+                worker = self.agent_status.get(agent_id)
+                if worker is not None:
+                    restored = dict(removed)
+                    restored["last_seen"] = moment.isoformat()
+                    restored["completed_tasks_count"] = worker.completed_tasks_count
+                    await store.save(restored)
+                continue
+            self.agent_status.pop(agent_id, None)
+            self.agent_project_map.pop(agent_id, None)
+            evicted.append(agent_id)
         if evicted:
             logger.info(
                 f"Evicted {len(evicted)} silent worker registration(s) after "

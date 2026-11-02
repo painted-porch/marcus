@@ -2724,7 +2724,7 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
         # reconciliation (Codex P1 on PR #772).
         from src.marcus_mcp.heartbeat import rehydrate_on_tool_call
 
-        await rehydrate_on_tool_call(state)
+        await rehydrate_on_tool_call(state, {"agent_id": agent_id})
 
         # Log thinking about finding task
         agent = state.agent_status.get(agent_id)

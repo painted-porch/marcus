@@ -1260,7 +1260,7 @@ async def handle_tool_call(
 
     # ADR-0012 O1: the roster is rebuilt from disk on the first tool call
     # after a restart, before the tool looks the agent up.
-    await rehydrate_on_tool_call(state)
+    await rehydrate_on_tool_call(state, arguments)
 
     # Push a PlannerContext for the duration of this tool call so any
     # planner-side LLM calls Marcus makes while servicing it get tagged

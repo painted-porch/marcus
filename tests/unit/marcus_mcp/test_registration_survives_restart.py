@@ -420,7 +420,7 @@ class TestEviction:
         fresh = _worker("agent-a")
         real_remove = server.registration_persistence.remove_if_stale
 
-        async def _remove_with_race(agent_id: str, cutoff: datetime) -> bool:
+        async def _remove_with_race(agent_id: str, cutoff: datetime) -> Any:
             # register_agent runs while the removal awaits disk.
             server.agent_status["agent-a"] = fresh
             server.agent_project_map["agent-a"] = "proj-1"
@@ -433,6 +433,40 @@ class TestEviction:
         assert evicted == []
         assert server.agent_status["agent-a"] is fresh
         assert server.agent_project_map["agent-a"] == "proj-1"
+        # The record the sweep removed is put back.
+        assert "agent-a" in await RegistrationPersistence(tmp_path).load()
+
+    @pytest.mark.asyncio
+    async def test_a_worker_that_takes_a_task_during_the_sweep_is_kept(
+        self, tmp_path: Path
+    ) -> None:
+        """A stale idle worker's concurrent request_next_task wins.
+
+        The sweep snapshotted the lease holders before awaiting; the lease
+        created meanwhile must be seen afterwards, or the worker holds a
+        task with no registration (Codex P2 on PR #772).
+        """
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a", last_seen=NOW - timedelta(days=2))
+        server = _fake_server(tmp_path)
+        await server.ensure_registrations_loaded(now=NOW - timedelta(days=2))
+        real_remove = server.registration_persistence.remove_if_stale
+
+        async def _remove_with_claim(agent_id: str, cutoff: datetime) -> Any:
+            lease = Mock()
+            lease.agent_id = "agent-a"
+            server.lease_manager.active_leases["task-9"] = lease  # claimed meanwhile
+            return await real_remove(agent_id, cutoff)
+
+        server.registration_persistence.remove_if_stale = _remove_with_claim
+
+        evicted = await server.evict_stale_registrations(now=NOW)
+
+        assert evicted == []
+        assert "agent-a" in server.agent_status
+        assert "agent-a" in server.agent_project_map
+        on_disk = await RegistrationPersistence(tmp_path).load()
+        assert on_disk["agent-a"]["last_seen"] == NOW.isoformat()
 
     @pytest.mark.asyncio
     async def test_a_record_refreshed_before_removal_is_not_evicted(
@@ -533,8 +567,9 @@ class TestHooks:
 
         order: List[str] = []
 
-        async def _rehydrate(state: Any) -> None:
+        async def _rehydrate(state: Any, arguments: Any = None) -> None:
             order.append("rehydrate")
+            assert arguments == {"echo": "x"}
 
         async def _ping(echo: str, state: Any) -> Dict[str, Any]:
             order.append("tool")
@@ -574,6 +609,7 @@ class TestHooks:
         state.ensure_registrations_loaded = AsyncMock(
             side_effect=lambda: order.append("rehydrate")
         )
+        state.registration_persistence = None
 
         with patch.object(
             task_tools, "get_project_board_context", new=AsyncMock(return_value={})
@@ -585,17 +621,57 @@ class TestHooks:
         assert order == ["refresh", "rehydrate"]
 
     @pytest.mark.asyncio
-    async def test_touch_on_tool_call_also_touches_the_registration(self) -> None:
-        """Every tool call moves last_seen, so a live worker is never evicted."""
+    async def test_rehydrate_touches_the_registration_before_loading(self) -> None:
+        """The caller's last_seen moves before any sweep could judge it stale.
+
+        So a worker's own call can never evict it, however long it was
+        silent, and a concurrent sweep sees the fresh timestamp.
+        """
+        order: List[str] = []
+        state = Mock()
+        state.registration_persistence = Mock()
+
+        async def _touch(agent_id: str) -> bool:
+            order.append(f"touch:{agent_id}")
+            return True
+
+        async def _ensure() -> None:
+            order.append("ensure")
+
+        state.registration_persistence.touch = _touch
+        state.ensure_registrations_loaded = _ensure
+
+        await rehydrate_on_tool_call(state, {"agent_id": "agent-a"})
+
+        assert order == ["touch:agent-a", "ensure"]
+
+    @pytest.mark.asyncio
+    async def test_rehydrate_without_agent_id_only_loads(self) -> None:
+        """Calls without an agent_id (ping, project status) touch nothing."""
+        state = Mock()
+        state.registration_persistence = Mock()
+        state.registration_persistence.touch = AsyncMock()
+        state.ensure_registrations_loaded = AsyncMock()
+
+        await rehydrate_on_tool_call(state, {"echo": "x"})
+        await rehydrate_on_tool_call(state)
+
+        state.registration_persistence.touch.assert_not_awaited()
+        assert state.ensure_registrations_loaded.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_lease_heartbeat_stays_lease_only(self) -> None:
+        """touch_on_tool_call extends the lease and nothing else."""
         state = Mock()
         state.lease_manager = Mock()
         state.lease_manager.touch_lease = AsyncMock(return_value=True)
         state.registration_persistence = Mock()
-        state.registration_persistence.touch = AsyncMock(return_value=False)
+        state.registration_persistence.touch = AsyncMock()
 
         await touch_on_tool_call({"agent_id": "agent-a"}, state)
 
-        state.registration_persistence.touch.assert_awaited_once_with("agent-a")
+        state.lease_manager.touch_lease.assert_awaited_once_with("agent-a")
+        state.registration_persistence.touch.assert_not_awaited()
 
 
 class TestRegisterAgentPersists:

@@ -37,20 +37,44 @@ async def touch_on_tool_call(arguments: Optional[Dict[str, Any]], state: Any) ->
     tool result, and the lease monitor remains the authority on liveness.
     """
     agent_id = arguments.get("agent_id") if arguments else None
-    if not agent_id:
-        return
     lease_manager = getattr(state, "lease_manager", None)
-    if lease_manager:
-        try:
-            await lease_manager.touch_lease(agent_id)
-        except (
-            Exception
-        ) as error:  # noqa: BLE001 - a heartbeat must never fail the call
-            logger.warning(f"[heartbeat] touch_lease failed for {agent_id}: {error}")
-    # ADR-0012 O1: the same call moves the registration's last_seen, the
-    # eviction clock, so a live worker is never swept from the roster.
+    if not agent_id or not lease_manager:
+        return
+    try:
+        await lease_manager.touch_lease(agent_id)
+    except Exception as error:  # noqa: BLE001 - a heartbeat must never fail the call
+        logger.warning(f"[heartbeat] touch_lease failed for {agent_id}: {error}")
+
+
+async def rehydrate_on_tool_call(
+    state: Any, arguments: Optional[Dict[str, Any]] = None
+) -> None:
+    """Refresh the caller's registration and load the roster before a tool runs.
+
+    ADR-0012 O1, best-effort. Two steps, in this order:
+
+    1. The calling agent's ``last_seen`` (the eviction clock) is moved
+       **before** dispatch and before any sweep, so a worker's own call can
+       never evict it, however long it was silent, and a sweep running
+       concurrently sees the fresh timestamp under the store's lock.
+       (The lease heartbeat stays after dispatch: a failing tool is still a
+       live worker, but not progress.)
+    2. ``agent_status`` and ``agent_project_map`` are rebuilt from disk on
+       the first tool call after a restart (the lazy path; the startup path
+       never runs in HTTP mode). The server method is idempotent, so calling
+       it on every tool call costs one attribute check after the first.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state. Each step is skipped when its attribute is
+        missing.
+    arguments : Optional[Dict[str, Any]]
+        The tool call's arguments; only ``agent_id`` is read.
+    """
+    agent_id = arguments.get("agent_id") if arguments else None
     registrations = getattr(state, "registration_persistence", None)
-    if registrations is not None:
+    if agent_id and registrations is not None:
         try:
             touched = registrations.touch(agent_id)
             if inspect.isawaitable(touched):
@@ -59,22 +83,6 @@ async def touch_on_tool_call(arguments: Optional[Dict[str, Any]], state: Any) ->
             logger.warning(
                 f"[heartbeat] registration touch failed for {agent_id}: {error}"
             )
-
-
-async def rehydrate_on_tool_call(state: Any) -> None:
-    """Load the worker roster before a tool runs, best-effort (ADR-0012 O1).
-
-    ``agent_status`` and ``agent_project_map`` are rebuilt from disk on
-    the first tool call after a restart (the lazy path; the startup path
-    never runs in HTTP mode). The server method is idempotent, so calling
-    it on every tool call costs one attribute check after the first.
-
-    Parameters
-    ----------
-    state : Any
-        Marcus server state. Nothing happens without
-        ``ensure_registrations_loaded``.
-    """
     ensure = getattr(state, "ensure_registrations_loaded", None)
     if not callable(ensure):
         return
@@ -123,7 +131,7 @@ class HeartbeatFastMCP(FastMCP):  # type: ignore[misc,unused-ignore]
             The tool's own result, unchanged. A failing tool propagates
             its error and records no heartbeat.
         """
-        await rehydrate_on_tool_call(self.marcus_state)
+        await rehydrate_on_tool_call(self.marcus_state, arguments)
         result: Union[Sequence[ContentBlock], Dict[str, Any]] = await super().call_tool(
             name, arguments
         )

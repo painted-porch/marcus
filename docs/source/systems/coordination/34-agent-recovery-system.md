@@ -210,9 +210,10 @@ Three rules keep the roster honest:
 - **Ownership comes from the lease store, never the roster file.** On every call a worker's `current_tasks` is reconciled with the live leases in both directions: a rehydrated worker mid-chore gets its task back, and a task whose lease is gone (completed, recovered, or now held by someone else) is dropped.
   A task still being assigned is left alone, because its lease is created after `current_tasks` is set.
   `request_next_task` runs this after it has refreshed the board and before its one-task-per-agent check.
-- **Silent registrations are evicted.** Every tool call moves `last_seen` (the same hook as the heartbeat, with disk writes debounced).
+- **Silent registrations are evicted.** Every tool call that carries an `agent_id` moves that worker's `last_seen` **before** the tool runs (disk writes debounced to one a minute per worker), so a worker's own call can never evict it, however long it was silent.
   A registration not heard from for `registration.ttl_hours` (default 24) is removed from memory and disk, swept at load and then at most once per `registration.sweep_interval_seconds`.
   A worker holding a live lease is never evicted, whatever the clock says.
+  The sweep re-checks staleness under the store's lock and re-validates after its disk write, so a worker that re-registers or claims a task while the sweep is running is kept and its record restored.
 
 Re-registration is idempotent: a harness that registers again mid-chore keeps the task it holds and its `completed_tasks_count`, which is also written through to the roster on every completion.
 
