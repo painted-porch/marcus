@@ -33,6 +33,7 @@ from src.core.models import (
 # the availability filter here and the gridlock detector share one rule
 # and cannot drift. Aliased to the module-local names used throughout
 # this file.
+from src.core.task_claimability import build_slug_to_id
 from src.core.task_claimability import deps_allow_claim as _deps_allow_claim
 from src.core.task_claimability import is_integration_task as _is_integration_task
 from src.core.task_claimability import phase_satisfied_by
@@ -44,6 +45,7 @@ from src.integrations.behavior_evidence import (
 )
 from src.logging.agent_events import log_agent_event
 from src.logging.conversation_logger import conversation_logger, log_thinking
+from src.marcus_mcp.coordinator.drain import compute_board_drain
 from src.marcus_mcp.utils import serialize_for_mcp
 
 logger = logging.getLogger(__name__)
@@ -3378,6 +3380,66 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                 return {"success": False, "error": f"Failed to assign task: {str(e)}"}
 
         else:
+            # The drain signal (epic #706, launcher design piece 4): decided
+            # by the server from the board, not by a model calling a tool.
+            # A project with no claimable task and no work in flight tells
+            # the worker to go home; anything else falls through to the
+            # retry below. A failure here must neither strand nor eject a
+            # worker, so it degrades to the retry.
+            _drain_project_id = (
+                state.agent_project_map.get(agent_id, "")
+                if hasattr(state, "agent_project_map")
+                else ""
+            )
+            _drain_verdict = None
+            if _drain_project_id:
+                try:
+                    _drain_verdict = await compute_board_drain(state, _drain_project_id)
+                except Exception as _drain_error:  # noqa: BLE001 - degrade to retry
+                    logger.error(f"Drain verdict failed for {agent_id}: {_drain_error}")
+            if _drain_verdict is not None and _drain_verdict.drained:
+                sep = "=" * 70
+                if _drain_verdict.reason == "complete":
+                    headline = "BOARD DRAINED: all tasks are done."
+                    detail = (
+                        f"All {_drain_verdict.tasks_total} tasks in your project "
+                        "are complete and no work is in flight."
+                    )
+                else:
+                    remaining = _drain_verdict.tasks_total - _drain_verdict.tasks_done
+                    headline = "BOARD DRAINED: the remaining work cannot proceed."
+                    detail = (
+                        f"{_drain_verdict.tasks_done} of {_drain_verdict.tasks_total} "
+                        f"tasks are done; {remaining} remain but none can be "
+                        f"claimed ({_drain_verdict.tasks_blocked} blocked, "
+                        f"{_drain_verdict.tasks_unclaimable} waiting on blocked "
+                        "work) and nothing is in flight. An operator must "
+                        "intervene; there is nothing more for you to do."
+                    )
+                logger.info(
+                    f"BOARD DRAINED for {agent_id} (project {_drain_project_id}): "
+                    f"{_drain_verdict.to_dict()}"
+                )
+                conversation_logger.log_worker_message(
+                    agent_id,
+                    "from_pm",
+                    headline,
+                    {"drain": _drain_verdict.to_dict(), **project_context},
+                )
+                return {
+                    "success": False,
+                    "status": "BOARD_DRAINED",
+                    "should_exit": True,
+                    "drain": _drain_verdict.to_dict(),
+                    "message": (
+                        f"\n\n{sep}\n{headline}\n{sep}\n\n{detail}\n\n"
+                        "REQUIRED ACTION:\n"
+                        "1. Print a brief summary of your contributions\n"
+                        "2. Exit. Do NOT retry or request more tasks.\n\n"
+                        f"{sep}\n"
+                    ),
+                }
+
             # Record no-task response for gridlock detection
             if hasattr(state, "gridlock_detector") and state.gridlock_detector:
                 state.gridlock_detector.record_no_task_response(agent_id)
@@ -3539,6 +3601,9 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                 "retry_after_seconds": retry_seconds,
                 "retry_reason": retry_info["reason"],
             }
+            if _drain_verdict is not None:
+                # Why the board is not drained yet, for the harness and logs.
+                response["drain"] = _drain_verdict.to_dict()
 
             return response
 
@@ -6880,37 +6945,9 @@ async def _find_optimal_task_original_logic(
         # settled-but-not-done upstreams (best-effort integration claim).
         tasks_by_id = {t.id: t for t in scoped_tasks}
 
-        # Build slug-to-ID mapping for dependency resolution
-        # Bundled design tasks are created with slug IDs like
-        # "design_productivity_tools" but get replaced with numeric Planka IDs
-        # when synced to the board. Dependencies still reference the slug, so
-        # we need to map slug → numeric ID.
-        slug_to_id: dict[str, str] = {}
-        for t in scoped_tasks:
-            # Look for Design tasks - they have labels like:
-            # ['design', 'architecture', 'productivity tools']
-            if (
-                t.name
-                and "Design" in t.name
-                and hasattr(t, "labels")
-                and t.labels
-                and len(t.labels) >= 3
-            ):
-                # Extract domain from labels
-                # (last non-design/architecture label)
-                domain_labels = [
-                    label
-                    for label in t.labels
-                    if label.lower() not in ["design", "architecture"]
-                ]
-                if domain_labels:
-                    # Create slug from domain label:
-                    # "productivity tools" → "design_productivity_tools"
-                    domain = domain_labels[-1]
-                    slug = f"design_{domain.lower().replace(' ', '_')}"
-                    slug_to_id[slug] = str(t.id)
-                    logger.debug(f"Mapped slug '{slug}' → task ID {t.id} ('{t.name}')")
-
+        # Design slugs resolve to board ids before the dependency gate; the
+        # drain verdict uses the same helper so both see the same graph.
+        slug_to_id = build_slug_to_id(scoped_tasks)
         logger.info(
             f"Built slug-to-ID mapping with {len(slug_to_id)} entries: "
             f"{dict(list(slug_to_id.items())[:5])}"  # Show first 5

@@ -131,3 +131,31 @@ class TestLeaseEpochContract:
         text = prompt_path.read_text().lower()
         assert "stale_epoch" not in text
         assert "reconciliation card" not in text
+
+
+class TestDrainSignalContract:
+    """Epic #706: the server's BOARD_DRAINED verdict is the only exit rule.
+
+    The canonical loop prompt must teach the worker to stop on the drain
+    signal and never on its own reading of the board; the experiment
+    template is the one-task copy slated for deletion and is not held to
+    the loop contract.
+    """
+
+    def test_names_the_drain_signal(self) -> None:
+        """The prompt names BOARD_DRAINED and should_exit."""
+        text = CANONICAL_PROMPT.read_text()
+        assert "BOARD_DRAINED" in text
+        assert "should_exit" in text
+
+    def test_drain_means_exit_without_retry(self) -> None:
+        """On the signal the worker exits and does not request again."""
+        text = " ".join(CANONICAL_PROMPT.read_text().lower().split())
+        assert "do not retry" in text
+        assert "exit your work loop" in text
+
+    def test_worker_does_not_self_declare_completion(self) -> None:
+        """The old 'total == completed means done' rule is gone."""
+        text = " ".join(CANONICAL_PROMPT.read_text().lower().split())
+        assert "total_tasks == completed" not in text
+        assert "only the board_drained signal ends your loop" in text

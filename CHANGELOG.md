@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The drain signal (epic #706). When `request_next_task` has nothing to offer, Marcus now computes whether the agent's project has any claimable task or any work in flight; if neither, it returns `status: "BOARD_DRAINED"` with `should_exit: true` and a `drain` object (reason `complete` or `blocked`, with counts), so workers in a loop go home on their own instead of polling forever. The retry response carries the same `drain` object explaining why the board is not drained yet. `prompts/Agent_prompt.md` now stops on this signal and no longer lets a worker decide on its own that the project is finished.
 - Worker registrations survive a Marcus restart (ADR-0012 obligation O1). Every accepted `register_agent` is written to `registrations.json` beside the assignment store and rehydrated on the first tool call after a restart, on both transports; a rehydrated worker gets its live task back from the lease store. Registrations silent for `registration.ttl_hours` (default 24) are evicted, never while they hold a live lease. Re-registration is idempotent and keeps the held task and completion count.
 
 ### Fixed
