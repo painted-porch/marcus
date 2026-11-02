@@ -6462,13 +6462,6 @@ async def report_blocker(
                 if _dead_task is not None:
                     _dead_task.status = TaskStatus.BLOCKED
                     _dead_task.assigned_to = None
-                _subtasks = getattr(
-                    getattr(state, "subtask_manager", None), "subtasks", None
-                )
-                if isinstance(_subtasks, dict) and task_id in _subtasks:
-                    state.subtask_manager.update_subtask_status(
-                        task_id, TaskStatus.BLOCKED, state.project_tasks
-                    )
                 try:
                     await state.kanban_client.update_task(
                         task_id,
@@ -6484,6 +6477,17 @@ async def report_blocker(
                         _dead_task.status = TaskStatus.IN_PROGRESS
                         _dead_task.assigned_to = agent_id
                     raise
+                # The subtask store persists to disk on write, so it is
+                # updated only after the board write succeeded; otherwise a
+                # failed handoff would leave BLOCKED on disk for the next
+                # reload to resurrect (Codex P2 on PR #770).
+                _subtasks = getattr(
+                    getattr(state, "subtask_manager", None), "subtasks", None
+                )
+                if isinstance(_subtasks, dict) and task_id in _subtasks:
+                    state.subtask_manager.update_subtask_status(
+                        task_id, TaskStatus.BLOCKED, state.project_tasks
+                    )
                 if hasattr(state.kanban_client, "move_task_to_column"):
                     try:
                         await state.kanban_client.move_task_to_column(

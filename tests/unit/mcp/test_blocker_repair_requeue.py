@@ -503,6 +503,8 @@ class TestDistinctAgentsNotRawCalls:
                 _make_state("agent-1", "task-1"), "agent-1", "task-1"
             )
         state = _make_state("agent-1", "task-1")
+        state.subtask_manager = MagicMock()
+        state.subtask_manager.subtasks = {"task-1": MagicMock()}
         state.kanban_client.update_task = AsyncMock(
             side_effect=RuntimeError("provider down")
         )
@@ -512,6 +514,9 @@ class TestDistinctAgentsNotRawCalls:
         assert failed["success"] is False
         assert "task-1" not in _blocker_repair_consumed_epoch
         assert state.project_tasks[0].status == TaskStatus.IN_PROGRESS
+        # The subtask store persists on write, so nothing may reach it
+        # until the board write has succeeded.
+        state.subtask_manager.update_subtask_status.assert_not_called()
 
         state.kanban_client.update_task = AsyncMock()
         final = await _terminal_blocker(state, "agent-1", "task-1")
@@ -519,6 +524,7 @@ class TestDistinctAgentsNotRawCalls:
         assert final["requeued_for_repair"] is False
         payload = state.kanban_client.update_task.await_args.args[1]
         assert payload["status"] == TaskStatus.BLOCKED
+        state.subtask_manager.update_subtask_status.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_distinct_agents_each_consume_one(self) -> None:
