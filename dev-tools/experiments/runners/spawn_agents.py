@@ -882,7 +882,6 @@ CRITICAL INSTRUCTIONS:
         agent_name = agent["name"]
         agent_role = agent["role"]
         agent_skills = agent["skills"]
-        num_subagents = agent.get("subagents", 0)
 
         work_dir = workspace or self.config.implementation_dir
 
@@ -910,25 +909,16 @@ STARTUP SEQUENCE:
    - skills: {json.dumps(agent_skills)}
    - project_id: <project_id from project_info.json>
 
-3. Register {num_subagents} subagents:
-   For i in 1 to {num_subagents}:
-   - Use mcp__marcus__register_agent with:
-     - agent_id: "{agent_id}_sub{{i}}"
-     - name: "{agent_name} Subagent {{i}}"
-     - role: "{agent_role}"
-     - skills: {json.dumps(agent_skills)}
-     - project_id: <same project_id from project_info.json>
-
-4. Call mcp__marcus__request_next_task ONCE:
+3. Call mcp__marcus__request_next_task ONCE:
    - No parameters needed. This finds a task suitable for your skills.
-   - If you receive a task → go to step 5.
+   - If you receive a task → go to step 4.
    - If you receive "no suitable tasks" → there is no work for you.
      Print a one-line note and EXIT immediately. Do NOT sleep, do NOT
      retry, do NOT poll. You are an ephemeral, single-task agent; the
      runner spawns a fresh agent whenever a task genuinely becomes
      available, so an idle agent that waits only burns tokens.
 
-5. Do the task:
+4. Do the task:
    - FIRST: run `git merge main --no-edit` to get latest completed work
    - You already have everything you need to start. Your worktree is
      an already-scaffolded, building project (Marcus set it up); your
@@ -941,7 +931,7 @@ STARTUP SEQUENCE:
    - Report progress at 25%, 50%, 75%, 100% with report_task_progress
    - Commit to your branch: {branch} (git add, commit)
 
-6. When the task is complete (reported at 100%): print a one-line
+5. When the task is complete (reported at 100%): print a one-line
    summary of what you did and EXIT.
 
    You do EXACTLY ONE task, then stop. Do NOT call request_next_task
@@ -1461,7 +1451,6 @@ echo "=========================================="
         agent_id = agent["id"]
         agent_name = agent["name"]
         agent_role = agent["role"]
-        num_subagents = agent.get("subagents", 0)
 
         print(f"\nSpawning {agent_name} ({agent_id})")
         print("-" * 60)
@@ -1550,7 +1539,6 @@ echo "=========================================="
 
         print(f"  ✓ Spawned worker pane {pane_id}")
         print(f"  Prompt: {prompt_file}")
-        print(f"  Subagents: {num_subagents}")
         return pane_id
 
     @staticmethod

@@ -201,6 +201,22 @@ The pre-D3 keys `max_renewals`, `stuck_threshold_renewals`, `renewal_decay_facto
 }
 ```
 
+### Registration Settings
+
+Configure the worker roster (ADR-0012 O1).
+Registrations are persisted to `registrations.json` beside the assignment store and rehydrated on the first tool call after a restart.
+A registration Marcus has not heard from for `ttl_hours` is evicted; a worker holding a live lease never is.
+
+```json
+{
+  "registration": {
+    "ttl_hours": 24.0,
+    "sweep_interval_seconds": 3600.0,
+    "touch_write_interval_seconds": 60.0
+  }
+}
+```
+
 ### Board Health Settings
 
 Configure board health monitoring:

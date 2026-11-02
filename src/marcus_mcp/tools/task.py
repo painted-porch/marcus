@@ -8,6 +8,7 @@ This module contains tools for task operations in the Marcus system:
 - unassign_task: Manually unassign a task from an agent
 """
 
+import inspect
 import json
 import logging
 import os
@@ -2676,6 +2677,12 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
     # (In HTTP mode, setup runs on a temporary loop that's abandoned)
     if hasattr(state, "ensure_lease_monitor_running"):
         await state.ensure_lease_monitor_running()
+
+    # ADR-0012 O1: the first poll after a restart rebuilds the worker
+    # roster from disk before the agent is looked up below.
+    from src.marcus_mcp.heartbeat import rehydrate_on_tool_call
+
+    await rehydrate_on_tool_call(state)
 
     # Get project/board context
     project_context = await get_project_board_context(state)
@@ -5447,9 +5454,7 @@ async def report_task_progress(
             # after_merge_not_before``).  PR #653's earlier attempt
             # to gate this on merge success violated the existing
             # invariant; restored here.
-            if agent_id in state.agent_status:
-                agent = state.agent_status[agent_id]
-                agent.completed_tasks_count += 1
+            await _record_task_completion(state, agent_id)
 
             # Memory recording, however, DOES reflect merge outcome.
             # Pre-#651, this recorded ``success=True`` regardless of
@@ -6645,6 +6650,41 @@ async def report_blocker(
 
 
 # Helper functions for task assignment
+
+
+async def _record_task_completion(state: Any, agent_id: str) -> None:
+    """Count one completed task for ``agent_id`` and persist the counter.
+
+    ``completed_tasks_count`` tracks agent work output, not git outcomes,
+    so the caller invokes this after the merge attempt whatever its
+    result. The count is part of the worker's registration record
+    (ADR-0012 O1), so it is written through to the roster file; a write
+    failure is logged and never fails the completion.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+    agent_id : str
+        The agent that completed a task.
+    """
+    agent = state.agent_status.get(agent_id) if state.agent_status else None
+    if agent is None:
+        return
+    agent.completed_tasks_count += 1
+    store = getattr(state, "registration_persistence", None)
+    if store is None:
+        return
+    try:
+        pending = store.update_fields(
+            agent_id, completed_tasks_count=agent.completed_tasks_count
+        )
+        if inspect.isawaitable(pending):
+            await pending
+    except Exception as error:  # noqa: BLE001 - best effort by design
+        logger.warning(
+            f"Could not persist completed_tasks_count for {agent_id}: {error}"
+        )
 
 
 def _scope_tasks_to_project(tasks: List[Task], project_id: str) -> List[Task]:

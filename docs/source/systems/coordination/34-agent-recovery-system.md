@@ -192,7 +192,29 @@ D3 makes recovery trustworthy, so the apology is deleted.
 An `in_progress` report from an agent with no live lease is refused before anything reaches the board, with `status: "lease_recovered"` and a message telling the agent to request its next task.
 A holder whose lease lapsed but is still inside the grace period may still renew; grace is exactly the window in which Marcus has not yet given up on it.
 
-### 7. RecoveryInfo
+### 7. Registration survives a restart (ADR-0012 O1)
+
+**Files**: `src/core/registration_persistence.py`, `src/marcus_mcp/server.py` (`ensure_registrations_loaded`), `src/marcus_mcp/heartbeat.py` (`rehydrate_on_tool_call`)
+
+Leases were always rehydrated from disk; the worker roster was not.
+`agent_status` and `agent_project_map` started empty on every restart, so a worker that had registered once and was still pulling chores became an unknown agent whose every `request_next_task` failed.
+Since O1 every accepted registration is written to `registrations.json`, beside `assignments.json`, carrying what `register_agent` was told plus `registered_at` and `last_seen`.
+
+The roster comes back on the **lazy path**, because the startup path never runs in HTTP mode.
+The dispatcher on both transports (`handlers.py` for stdio, `HeartbeatFastMCP` for HTTP) calls `rehydrate_on_tool_call` before any tool runs, and `request_next_task` calls it explicitly as well.
+The server method is idempotent; after the first load it only re-runs the eviction sweep.
+
+Three rules keep the roster honest:
+
+- **Memory wins over disk.** A worker that re-registered after the restart is left alone.
+- **Ownership comes from the lease store, never the roster file.** A rehydrated worker's `current_tasks` is rebuilt from the live leases, so the one-task-per-agent rule still holds and there is one authority on who holds what.
+- **Silent registrations are evicted.** Every tool call moves `last_seen` (the same hook as the heartbeat, with disk writes debounced).
+  A registration not heard from for `registration.ttl_hours` (default 24) is removed from memory and disk, swept at load and then at most once per `registration.sweep_interval_seconds`.
+  A worker holding a live lease is never evicted, whatever the clock says.
+
+Re-registration is idempotent: a harness that registers again mid-chore keeps the task it holds and its `completed_tasks_count`, which is also written through to the roster on every completion.
+
+### 8. RecoveryInfo
 
 **File**: `src/core/models.py`
 
@@ -220,7 +242,7 @@ Because `recovery_info` is in-memory only, `server.refresh_project_state`
 explicitly **captures and re-applies** it across refreshes so that a refresh
 can't silently drop the handoff context.
 
-### 8. Worktree-Aware Recovery Instructions
+### 9. Worktree-Aware Recovery Instructions
 
 Every Marcus agent works on its own git branch: `marcus/<agent_id>`. When an
 agent dies, commits they made still live on that branch. The recovery
@@ -235,7 +257,7 @@ The next agent merges committed work, reviews what was done, then continues
 from where the previous agent left off. This is the difference between
 "recovered" and "redone."
 
-### 9. Recovery Handoff in Task Instructions
+### 10. Recovery Handoff in Task Instructions
 
 **File**: `src/marcus_mcp/tools/task.py` — `build_tiered_instructions`
 
@@ -248,7 +270,7 @@ and the git merge instructions.
 The next agent sees the handoff as soon as they receive the task — no
 separate notification, no risk of missing it.
 
-### 10. Assignment Filter Respects `assigned_to`
+### 11. Assignment Filter Respects `assigned_to`
 
 **File**: `src/marcus_mcp/tools/task.py` — `_find_optimal_task_original_logic`
 
@@ -263,7 +285,7 @@ important effects:
    Because the filter checks `assigned_to is None`, the task immediately
    re-enters the pool.
 
-### 11. Gridlock Detector
+### 12. Gridlock Detector
 
 **File**: `src/core/gridlock_detector.py`
 
@@ -290,6 +312,14 @@ All resilience tuning lives in `src/config/marcus_config.py` under `TaskLeaseSet
 | `enable_adaptive` | `true` | Scale the budget by estimate, priority and complexity. |
 
 `priority_multipliers` and `complexity_multipliers` scale the budget, not the heartbeat.
+
+The worker roster has its own section, `RegistrationSettings` (`registration` in the config file):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `ttl_hours` | `24.0` | Hours of silence after which a registration is evicted. |
+| `sweep_interval_seconds` | `3600.0` | How often, at most, the eviction sweep runs. |
+| `touch_write_interval_seconds` | `60.0` | Minimum spacing between disk writes of `last_seen` per worker. |
 The pre-D3 keys `max_renewals`, `stuck_threshold_renewals`, `renewal_decay_factor` and `silence_multiplier` are still accepted so older config files load, and are ignored.
 
 ## Full Recovery Flow (Agent Dies)

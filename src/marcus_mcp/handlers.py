@@ -16,7 +16,7 @@ import mcp.types as types
 
 from src.cost_tracking.cost_recorder import PlannerContext, get_recorder
 from src.logging.mcp_tool_logger import log_mcp_tool_response
-from src.marcus_mcp.heartbeat import touch_on_tool_call
+from src.marcus_mcp.heartbeat import rehydrate_on_tool_call, touch_on_tool_call
 
 from .audit import get_audit_logger
 from .tools import (  # Agent tools; Task tools; Project tools; System tools; NLP tools
@@ -1257,6 +1257,10 @@ async def handle_tool_call(
                 ),
             )
         ]
+
+    # ADR-0012 O1: the roster is rebuilt from disk on the first tool call
+    # after a restart, before the tool looks the agent up.
+    await rehydrate_on_tool_call(state)
 
     # Push a PlannerContext for the duration of this tool call so any
     # planner-side LLM calls Marcus makes while servicing it get tagged
