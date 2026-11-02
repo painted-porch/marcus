@@ -19,7 +19,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
-from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -56,17 +55,16 @@ def _make_state(
     agent_project_map: Optional[dict] = None,
     active_project_id: Optional[str] = None,
 ) -> Any:
-    """Build a fake Marcus server state with the attribution inputs."""
-    project_registry = None
-    if active_project_id is not None:
-        project_registry = Mock()
-        project_registry.get_active_project = AsyncMock(
-            return_value=SimpleNamespace(id=active_project_id, name="Proj")
-        )
+    """Build a fake Marcus server state with the attribution inputs.
+
+    ``active_project_id`` is exposed as ``selected_project_id``, the field
+    the shared cost resolver reads for the active-project fallback.
+    """
     return SimpleNamespace(
         cost_store=cost_store,
         agent_project_map=agent_project_map or {},
-        project_registry=project_registry,
+        selected_project_id=active_project_id,
+        current_project_id=None,
     )
 
 

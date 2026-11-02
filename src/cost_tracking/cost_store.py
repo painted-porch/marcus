@@ -1421,21 +1421,12 @@ class CostStore:
             The closed ``run_id``, or ``None`` if the project had no
             open runs.
         """
-        from src.cost_tracking.cost_recorder import canonical_project_id
-
-        normalized = canonical_project_id(project_id) or project_id
-        row = self.conn.execute(
-            """
-            SELECT run_id FROM runs
-             WHERE project_id = ? AND ended_at IS NULL
-             ORDER BY started_at DESC
-             LIMIT 1
-            """,
-            (normalized,),
-        ).fetchone()
-        if row is None:
+        # Select the run to close via the shared helper so the two methods
+        # cannot drift (#768 review): same MAX(started_at) among the
+        # project's open runs, with the same project-id normalization.
+        run_id = self.get_latest_open_run_for_project(project_id)
+        if run_id is None:
             return None
-        (run_id,) = row
         closed = self.close_run(
             run_id,
             ended_at=ended_at,

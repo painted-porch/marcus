@@ -1334,7 +1334,9 @@ class TestCallClaudeCostRecording:
         with recorder.planner_context(
             PlannerContext(run_id="run_abc", project_id="projhex")
         ):
-            await engine._call_claude("prompt", operation="generate_instructions")
+            await engine._call_claude(
+                "prompt", operation="generate_instructions", record_cost=True
+            )
 
         row = cost_store.conn.execute(
             "SELECT run_id, project_id, input_tokens, cache_creation_tokens, "
@@ -1354,14 +1356,47 @@ class TestCallClaudeCostRecording:
         )
 
     @pytest.mark.asyncio
-    async def test_call_claude_skips_recording_without_context(
+    async def test_call_claude_does_not_record_without_optin(
         self, recorder, cost_store
     ):
-        """No active PlannerContext means no row.
+        """An in-context caller that does not opt in records nothing.
 
-        ``_call_claude`` has callers unrelated to the run-time planner
-        operations (for example ``analyze_task``). They run with no active
-        context and must not manufacture an ``'unassigned'`` cost row (#768).
+        ``_call_claude`` has callers that run inside an existing
+        ``PlannerContext`` (dependency inference and completeness checks
+        during ``create_project``). They leave ``record_cost`` at its
+        default, so they must not write a new ``token_events`` row (#768).
+        """
+        from src.cost_tracking.cost_recorder import PlannerContext
+
+        engine = AIAnalysisEngine.__new__(AIAnalysisEngine)
+        engine.model = "claude-3-5-sonnet-20241022"
+        engine.current_project_id = None
+        engine.current_agent_id = None
+        engine.client = Mock()
+        engine.client.messages.create.return_value = self._mock_sdk_response(
+            input_tokens=7, output_tokens=3
+        )
+
+        # A context IS active, but the caller does not opt in.
+        with recorder.planner_context(
+            PlannerContext(run_id="run_abc", project_id="projhex")
+        ):
+            await engine._call_claude("prompt")
+
+        (count,) = cost_store.conn.execute(
+            "SELECT COUNT(*) FROM token_events"
+        ).fetchone()
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_call_claude_does_not_record_without_context(
+        self, recorder, cost_store
+    ):
+        """Opting in with no active context records nothing.
+
+        When ``_planner_cost_context`` cannot resolve a project it pushes no
+        context, so an opted-in call still skips rather than writing to the
+        ``'unassigned'`` bucket (#768).
         """
         engine = AIAnalysisEngine.__new__(AIAnalysisEngine)
         engine.model = "claude-3-5-sonnet-20241022"
@@ -1372,8 +1407,8 @@ class TestCallClaudeCostRecording:
             input_tokens=7, output_tokens=3
         )
 
-        # No ``recorder.planner_context(...)`` wrap: no attribution was set up.
-        await engine._call_claude("prompt")
+        # Opted in, but no ``planner_context`` wrap.
+        await engine._call_claude("prompt", record_cost=True)
 
         (count,) = cost_store.conn.execute(
             "SELECT COUNT(*) FROM token_events"
@@ -1406,5 +1441,7 @@ class TestCallClaudeCostRecording:
         with recorder.planner_context(
             PlannerContext(run_id="run_x", project_id="projx")
         ):
-            result = await engine._call_claude("prompt", operation="analyze_blocker")
+            result = await engine._call_claude(
+                "prompt", operation="analyze_blocker", record_cost=True
+            )
         assert result == "plain text"

@@ -543,7 +543,7 @@ Identify risks and provide JSON:
 
         try:
             instructions = await self._call_claude(
-                prompt, operation="generate_instructions"
+                prompt, operation="generate_instructions", record_cost=True
             )
             return instructions
         except Exception as e:
@@ -756,7 +756,9 @@ Task Details:
         # response are distinct problems; both fall back, but the cause
         # should be visible. Behavior is unchanged (always falls back).
         try:
-            response = await self._call_claude(prompt, operation="analyze_blocker")
+            response = await self._call_claude(
+                prompt, operation="analyze_blocker", record_cost=True
+            )
         except Exception as e:
             print(f"AI blocker analysis: LLM call failed: {e}", file=sys.stderr)
             return self._generate_fallback_blocker_analysis(
@@ -1581,7 +1583,9 @@ Return JSON with this format:
             "rationale": "Based on task label matching and project progress",
         }
 
-    async def _call_claude(self, prompt: str, *, operation: str = "analyze") -> str:
+    async def _call_claude(
+        self, prompt: str, *, operation: str = "analyze", record_cost: bool = False
+    ) -> str:
         """
         Call Claude API with error handling and cost recording.
 
@@ -1591,11 +1595,11 @@ Return JSON with this format:
         path, it talks to the Anthropic SDK client directly rather than
         through :class:`~src.ai.providers.llm_abstraction.LLMAbstraction`.
         To keep Cato's cost view complete, a successful call records a
-        ``token_events`` row via the shared cost recorder when a
-        :class:`~src.cost_tracking.cost_recorder.PlannerContext` is active at
-        the call site (the run-time planner operations wrap their call in
-        ``_planner_cost_context``). Calls made with no active context are not
-        recorded (#768).
+        ``token_events`` row via the shared cost recorder when the caller
+        opts in with ``record_cost=True`` (the run-time planner operations,
+        which also wrap their call in ``_planner_cost_context``). Every other
+        caller leaves ``record_cost`` at its default and records nothing, so
+        this path is unchanged for them (#768).
 
         Parameters
         ----------
@@ -1605,8 +1609,12 @@ Return JSON with this format:
             Cost-tracking operation label stamped onto the recorded
             ``token_events`` row (for example ``"generate_instructions"``
             or ``"analyze_blocker"``). Defaults to ``"analyze"``. Only used
-            when a ``PlannerContext`` is active; an ``operation_override`` on
-            that context still wins over this value.
+            when ``record_cost`` is set; an ``operation_override`` on the
+            active context still wins over this value.
+        record_cost : bool, optional
+            When ``True`` (the run-time planner operations), a successful call
+            records a ``token_events`` row. Defaults to ``False`` so every
+            other caller of this method records nothing.
 
         Returns
         -------
@@ -1639,13 +1647,19 @@ Return JSON with this format:
 
             # Record a cost-store ``token_events`` row for this call so the
             # Cato dashboard sees run-time planner spend, not just setup /
-            # decomposition spend (#768). Best-effort and fully guarded:
-            # the recorder never raises, and a provider response whose
-            # usage fields are not plain integers must not break the call
-            # path, so token extraction is coerced defensively.
-            self._record_cost_event(
-                response, operation=operation, latency_ms=_latency_ms
-            )
+            # decomposition spend (#768). Only when the caller opts in:
+            # the run-time planner operations pass ``record_cost=True``; the
+            # other callers of ``_call_claude`` (including ones that run
+            # inside create_project's PlannerContext, such as dependency
+            # inference and completeness validation) leave it False and are
+            # left exactly as before. Best-effort and fully guarded: the
+            # recorder never raises, and a provider response whose usage
+            # fields are not plain integers must not break the call path, so
+            # token extraction is coerced defensively.
+            if record_cost:
+                self._record_cost_event(
+                    response, operation=operation, latency_ms=_latency_ms
+                )
 
             # Extract token usage if available
             if hasattr(response, "usage"):

@@ -937,11 +937,13 @@ async def _planner_cost_context(
     resolves that context and returns it ready to use in a ``with``
     block; the three run-time call sites wrap their AI call in it.
 
-    Resolution order for the project id:
-
-    1. the task's own ``project_id`` (most precise),
-    2. the agent's registered project (``state.agent_project_map``),
-    3. the currently active project (``state.project_registry``).
+    The project id is resolved by
+    :func:`src.marcus_mcp.handlers._resolve_project_for_cost`, the same
+    resolver the MCP request path uses, so a run-time call can never
+    attribute to a different project than its handler does. It checks, in
+    order, the task's own ``project_id``, the agent's registered project
+    (``state.agent_project_map``), then the server's selected / active
+    project.
 
     The run id is the project's open setup run -- the row
     ``create_project`` opened in the ``runs`` table and left open for the
@@ -956,8 +958,9 @@ async def _planner_cost_context(
     Parameters
     ----------
     state : Any
-        Marcus server state. Supplies ``cost_store``,
-        ``agent_project_map``, and ``project_registry``.
+        Marcus server state. Supplies ``cost_store`` and the fields the
+        shared cost resolver reads (``agent_project_map`` and the
+        selected / active project).
     task : Optional[Task]
         The task the AI call is about, if any. Its ``project_id`` and
         ``id`` seed the attribution.
@@ -975,23 +978,22 @@ async def _planner_cost_context(
     """
     from src.cost_tracking.cost_recorder import PlannerContext, get_recorder
 
-    # 1. Resolve the project id.
-    project_id: Optional[str] = None
-    if task is not None:
-        project_id = getattr(task, "project_id", None)
-    if not project_id and agent_id:
-        agent_map = getattr(state, "agent_project_map", None)
-        if isinstance(agent_map, dict):
-            project_id = agent_map.get(agent_id)
-    if not project_id:
-        registry = getattr(state, "project_registry", None)
-        if registry is not None:
-            try:
-                active_project = await registry.get_active_project()
-            except Exception:  # pragma: no cover - defensive, never break caller
-                active_project = None
-            if active_project is not None:
-                project_id = getattr(active_project, "id", None)
+    # 1. Resolve the project id. Reuse the one cost-attribution resolver the
+    #    MCP handler uses (explicit project_id -> agent_project_map ->
+    #    selected/active project) so this run-time context cannot drift from
+    #    the handler's (#768 review). Imported here, not at module scope,
+    #    to avoid a circular import: handlers imports this module's tools.
+    from src.marcus_mcp.handlers import _resolve_project_for_cost
+
+    project_id: Optional[str] = _resolve_project_for_cost(
+        {
+            "project_id": (
+                getattr(task, "project_id", None) if task is not None else None
+            ),
+            "agent_id": agent_id,
+        },
+        state,
+    )
     if not project_id:
         # No project to attribute against -- fall through to 'unassigned'
         # so the attribution gap stays visible rather than being
