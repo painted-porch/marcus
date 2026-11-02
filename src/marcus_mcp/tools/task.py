@@ -2678,12 +2678,6 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
     if hasattr(state, "ensure_lease_monitor_running"):
         await state.ensure_lease_monitor_running()
 
-    # ADR-0012 O1: the first poll after a restart rebuilds the worker
-    # roster from disk before the agent is looked up below.
-    from src.marcus_mcp.heartbeat import rehydrate_on_tool_call
-
-    await rehydrate_on_tool_call(state)
-
     # Get project/board context
     project_context = await get_project_board_context(state)
 
@@ -2721,6 +2715,16 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
         # Get current project state
         await state.refresh_project_state()
         _mark("state_refresh")
+
+        # ADR-0012 O1: the first poll after a restart rebuilds the worker
+        # roster from disk, and every poll reconciles a rehydrated worker's
+        # current task with the live leases. This runs AFTER
+        # refresh_project_state on purpose: the reconciliation needs the
+        # board's tasks, and the one-task-per-agent check below needs the
+        # reconciliation (Codex P1 on PR #772).
+        from src.marcus_mcp.heartbeat import rehydrate_on_tool_call
+
+        await rehydrate_on_tool_call(state)
 
         # Log thinking about finding task
         agent = state.agent_status.get(agent_id)

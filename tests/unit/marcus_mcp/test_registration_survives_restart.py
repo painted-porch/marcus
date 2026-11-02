@@ -109,6 +109,7 @@ def _fake_server(
     fake.registration_sweep_interval_seconds = 3600.0
     fake._registrations_loaded = False
     fake._registrations_swept_at = None
+    fake.ensure_lease_monitor_running = AsyncMock()
     fake.lease_manager = Mock()
     fake.lease_manager.active_leases = {}
     for task_id, agent_id in (leases or {}).items():
@@ -193,6 +194,49 @@ class TestRehydration:
         assert server.agent_status["agent-a"].current_tasks == [task]
 
     @pytest.mark.asyncio
+    async def test_leases_are_loaded_before_ownership_is_attached(
+        self, tmp_path: Path
+    ) -> None:
+        """Over HTTP the persisted leases are read only when the monitor starts.
+
+        The hook must start it first, or it attaches against an empty lease
+        table and sweeps with no holders known (Codex P1/P2 on PR #772).
+        """
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a")
+        task = _task("task-1")
+        server = _fake_server(tmp_path, tasks=[task])
+
+        async def _start_monitor() -> None:
+            lease = Mock()
+            lease.agent_id = "agent-a"
+            server.lease_manager.active_leases["task-1"] = lease
+
+        server.ensure_lease_monitor_running = AsyncMock(side_effect=_start_monitor)
+
+        await server.ensure_registrations_loaded(now=NOW)
+
+        server.ensure_lease_monitor_running.assert_awaited_once()
+        assert server.agent_status["agent-a"].current_tasks == [task]
+
+    @pytest.mark.asyncio
+    async def test_ownership_is_reconciled_again_once_tasks_are_loaded(
+        self, tmp_path: Path
+    ) -> None:
+        """project_tasks arrives after the first hook; the next call attaches."""
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a")
+        server = _fake_server(tmp_path, leases={"task-1": "agent-a"})  # no tasks yet
+        await server.ensure_registrations_loaded(now=NOW)
+        assert server.agent_status["agent-a"].current_tasks == []
+
+        task = _task("task-1")
+        server.project_tasks = [task]  # refresh_project_state ran
+        await server.ensure_registrations_loaded(now=NOW + timedelta(seconds=1))
+
+        assert server.agent_status["agent-a"].current_tasks == [task]
+
+    @pytest.mark.asyncio
     async def test_lease_on_an_unknown_task_leaves_current_tasks_empty(
         self, tmp_path: Path
     ) -> None:
@@ -264,6 +308,26 @@ class TestEviction:
 
         assert still_there is True
         assert "agent-a" not in server.agent_status
+
+    @pytest.mark.asyncio
+    async def test_sweep_is_deferred_until_the_lease_store_exists(
+        self, tmp_path: Path
+    ) -> None:
+        """No lease manager yet means no way to spot a holder: do not evict."""
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-stale", last_seen=NOW - timedelta(days=2))
+        server = _fake_server(tmp_path)
+        server.lease_manager = None
+
+        await server.ensure_registrations_loaded(now=NOW)
+
+        assert "agent-stale" in server.agent_status
+        assert server._registrations_swept_at is None
+        # Once the lease store is there, the next call sweeps.
+        server.lease_manager = Mock()
+        server.lease_manager.active_leases = {}
+        await server.ensure_registrations_loaded(now=NOW + timedelta(seconds=1))
+        assert "agent-stale" not in server.agent_status
 
     @pytest.mark.asyncio
     async def test_evict_returns_the_evicted_ids(self, tmp_path: Path) -> None:
@@ -373,12 +437,22 @@ class TestHooks:
         state.log_event = Mock()
         state.lease_manager = None
 
+        order: List[str] = []
+        state.refresh_project_state = AsyncMock(
+            side_effect=lambda: order.append("refresh")
+        )
+        state.ensure_registrations_loaded = AsyncMock(
+            side_effect=lambda: order.append("rehydrate")
+        )
+
         with patch.object(
             task_tools, "get_project_board_context", new=AsyncMock(return_value={})
         ):
             await task_tools.request_next_task("agent-a", state)
 
         state.ensure_registrations_loaded.assert_awaited_once()
+        # After the board is loaded, so the reconciliation has tasks to attach.
+        assert order == ["refresh", "rehydrate"]
 
     @pytest.mark.asyncio
     async def test_touch_on_tool_call_also_touches_the_registration(self) -> None:

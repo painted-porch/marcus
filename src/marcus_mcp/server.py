@@ -874,13 +874,28 @@ class MarcusServer:
         Memory wins over disk: a worker that re-registered after the
         restart is left alone. A rehydrated worker's ``current_tasks`` is
         rebuilt from the live leases, never read from the roster file, so
-        the lease store stays the single authority on ownership.
+        the lease store stays the single authority on ownership; that
+        reconciliation is repeated on every call because the board's
+        tasks may not have been loaded yet when the first call ran.
         """
         store = getattr(self, "registration_persistence", None)
         if store is None:
             return
         moment = now or datetime.now(timezone.utc)
+        # The lease store must be loaded before ownership is attached or
+        # anything is evicted (Codex P1/P2 on PR #772): over HTTP the
+        # persisted leases are read only when the lease monitor starts,
+        # which until now happened on the first request_next_task, after
+        # this hook. Starting it here is safe: the hook runs on the live
+        # request loop, the same loop request_next_task uses.
+        ensure_monitor = getattr(self, "ensure_lease_monitor_running", None)
+        if callable(ensure_monitor):
+            await ensure_monitor()
         if self._registrations_loaded:
+            # Ownership is reconciled on every call, not once: project_tasks
+            # is filled by refresh_project_state after the first hook ran,
+            # and request_next_task calls this again once it has.
+            self._attach_live_leases_to_registrations()
             swept_at = self._registrations_swept_at
             if (
                 swept_at is not None
@@ -956,11 +971,17 @@ class MarcusServer:
         """
         store = getattr(self, "registration_persistence", None)
         moment = now or datetime.now(timezone.utc)
-        self._registrations_swept_at = moment
         if store is None:
             return []
-        ttl = timedelta(hours=self.registration_ttl_hours)
         lease_manager = getattr(self, "lease_manager", None)
+        if lease_manager is None:
+            # Without the lease store there is no way to tell a silent
+            # worker from one mid-task; defer the sweep (swept_at stays
+            # unset so the next call tries again) rather than evict a
+            # holder (Codex P2 on PR #772).
+            return []
+        self._registrations_swept_at = moment
+        ttl = timedelta(hours=self.registration_ttl_hours)
         active = getattr(lease_manager, "active_leases", None) or {}
         holders = {getattr(lease, "agent_id", None) for lease in active.values()}
         evicted: List[str] = []
