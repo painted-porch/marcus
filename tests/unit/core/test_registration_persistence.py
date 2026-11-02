@@ -263,6 +263,53 @@ class TestRemoveIfStale:
         assert not (tmp_path / "registrations.json").exists()
 
 
+class TestSaveIfAbsent:
+    """A restore after a lost race must never clobber a newer record."""
+
+    @pytest.mark.asyncio
+    async def test_inserts_when_absent(self, tmp_path: Path) -> None:
+        """No record: inserted, True."""
+        store = RegistrationPersistence(tmp_path)
+        when = datetime.now(timezone.utc)
+
+        inserted = await store.save_if_absent(
+            record_from_worker(
+                _worker(), project_id="p", registered_at=when, last_seen=when
+            )
+        )
+
+        assert inserted is True
+        assert "agent-a" in await RegistrationPersistence(tmp_path).load()
+
+    @pytest.mark.asyncio
+    async def test_keeps_the_existing_record(self, tmp_path: Path) -> None:
+        """A newer record is left untouched, False."""
+        store = RegistrationPersistence(tmp_path)
+        when = datetime.now(timezone.utc)
+        await store.save(
+            record_from_worker(
+                _worker(role="newer"),
+                project_id="p-new",
+                registered_at=when,
+                last_seen=when,
+            )
+        )
+
+        inserted = await store.save_if_absent(
+            record_from_worker(
+                _worker(role="older"),
+                project_id="p-old",
+                registered_at=when,
+                last_seen=when,
+            )
+        )
+
+        assert inserted is False
+        on_disk = await RegistrationPersistence(tmp_path).load()
+        assert on_disk["agent-a"]["role"] == "newer"
+        assert on_disk["agent-a"]["project_id"] == "p-new"
+
+
 class TestTouch:
     """last_seen is the eviction clock; writes are debounced."""
 

@@ -418,6 +418,7 @@ class TestEviction:
         server = _fake_server(tmp_path)
         await server.ensure_registrations_loaded(now=NOW - timedelta(days=2))
         fresh = _worker("agent-a")
+        fresh.role = "re-registered"
         real_remove = server.registration_persistence.remove_if_stale
 
         async def _remove_with_race(agent_id: str, cutoff: datetime) -> Any:
@@ -433,8 +434,45 @@ class TestEviction:
         assert evicted == []
         assert server.agent_status["agent-a"] is fresh
         assert server.agent_project_map["agent-a"] == "proj-1"
-        # The record the sweep removed is put back.
-        assert "agent-a" in await RegistrationPersistence(tmp_path).load()
+        # The record is put back from what is in memory now, not from the
+        # stale record the sweep removed.
+        on_disk = await RegistrationPersistence(tmp_path).load()
+        assert on_disk["agent-a"]["role"] == "re-registered"
+        assert on_disk["agent-a"]["project_id"] == "proj-1"
+
+    @pytest.mark.asyncio
+    async def test_restore_never_overwrites_a_newer_record(
+        self, tmp_path: Path
+    ) -> None:
+        """If the re-registration's save landed first, the restore steps aside."""
+        store = RegistrationPersistence(tmp_path)
+        await _seed(store, "agent-a", last_seen=NOW - timedelta(days=2))
+        server = _fake_server(tmp_path)
+        await server.ensure_registrations_loaded(now=NOW - timedelta(days=2))
+        real_remove = server.registration_persistence.remove_if_stale
+
+        async def _remove_then_newer_save(agent_id: str, cutoff: datetime) -> Any:
+            removed = await real_remove(agent_id, cutoff)
+            # The queued re-registration save runs right after the removal.
+            newer = _worker("agent-a")
+            newer.role = "newest"
+            server.agent_status["agent-a"] = newer
+            server.agent_project_map["agent-a"] = "proj-2"
+            await server.registration_persistence.save(
+                record_from_worker(
+                    newer, project_id="proj-2", registered_at=NOW, last_seen=NOW
+                )
+            )
+            return removed
+
+        server.registration_persistence.remove_if_stale = _remove_then_newer_save
+
+        evicted = await server.evict_stale_registrations(now=NOW)
+
+        assert evicted == []
+        on_disk = await RegistrationPersistence(tmp_path).load()
+        assert on_disk["agent-a"]["role"] == "newest"
+        assert on_disk["agent-a"]["project_id"] == "proj-2"
 
     @pytest.mark.asyncio
     async def test_a_worker_that_takes_a_task_during_the_sweep_is_kept(

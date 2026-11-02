@@ -58,6 +58,7 @@ from src.core.project_context_manager import ProjectContextManager  # noqa: E402
 from src.core.project_registry import ProjectRegistry  # noqa: E402
 from src.core.registration_persistence import (  # noqa: E402
     RegistrationPersistence,
+    record_from_worker,
     worker_from_record,
 )
 from src.core.service_registry import (  # noqa: E402
@@ -1051,10 +1052,24 @@ class MarcusServer:
             if holds_now or self.agent_status.get(agent_id) is not judged_stale:
                 worker = self.agent_status.get(agent_id)
                 if worker is not None:
-                    restored = dict(removed)
-                    restored["last_seen"] = moment.isoformat()
-                    restored["completed_tasks_count"] = worker.completed_tasks_count
-                    await store.save(restored)
+                    # Rebuild from what is in memory NOW, not from the
+                    # removed record, and never over a newer record: a
+                    # re-registration's own save may already have landed
+                    # with new project, skills, vendor or principal.
+                    registered_at = removed.get("registered_at")
+                    await store.save_if_absent(
+                        record_from_worker(
+                            worker,
+                            project_id=self.agent_project_map.get(agent_id)
+                            or str(removed.get("project_id") or ""),
+                            registered_at=(
+                                datetime.fromisoformat(registered_at)
+                                if registered_at
+                                else moment
+                            ),
+                            last_seen=moment,
+                        )
+                    )
                 continue
             self.agent_status.pop(agent_id, None)
             self.agent_project_map.pop(agent_id, None)

@@ -238,6 +238,35 @@ class RegistrationPersistence:
                 self._last_written_seen[agent_id] = seen
             await self._write()
 
+    async def save_if_absent(self, record: Dict[str, Any]) -> bool:
+        """Insert a record only if the agent has none; never overwrite.
+
+        Used by the eviction sweep to put back a record it removed and then
+        found it should not have. If a re-registration's own ``save`` has
+        landed in the meantime, that newer record wins (Codex P2 on PR #772).
+
+        Parameters
+        ----------
+        record : Dict[str, Any]
+            A record from :func:`record_from_worker`.
+
+        Returns
+        -------
+        bool
+            True when the record was inserted.
+        """
+        async with self.lock:
+            await self._ensure_loaded_locked()
+            agent_id = str(record["agent_id"])
+            if agent_id in self._cache:
+                return False
+            self._cache[agent_id] = dict(record)
+            seen = _parse_when(record.get("last_seen"))
+            if seen is not None:
+                self._last_written_seen[agent_id] = seen
+            await self._write()
+            return True
+
     async def update_fields(self, agent_id: str, **fields: Any) -> None:
         """Merge fields into an existing record; unknown agents are ignored.
 
