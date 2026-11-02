@@ -249,6 +249,18 @@ Adjust lease duration based on task complexity:
 
 ---
 
+## Registration
+
+**Keep the worker roster across restarts and bounded (ADR-0012 O1).**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `registration.ttl_hours` | float | 24.0 | Hours of silence after which a worker's registration is evicted (never while it holds a live lease) |
+| `registration.sweep_interval_seconds` | float | 3600.0 | How often, at most, the eviction sweep runs |
+| `registration.touch_write_interval_seconds` | float | 60.0 | Minimum spacing between disk writes of `last_seen` per worker; every tool call is a touch |
+
+---
+
 ## Board Health
 
 **Monitor and maintain board health.**

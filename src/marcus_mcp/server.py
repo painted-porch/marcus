@@ -12,7 +12,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -56,6 +56,11 @@ from src.core.models import (  # noqa: E402
 )
 from src.core.project_context_manager import ProjectContextManager  # noqa: E402
 from src.core.project_registry import ProjectRegistry  # noqa: E402
+from src.core.registration_persistence import (  # noqa: E402
+    RegistrationPersistence,
+    record_from_worker,
+    worker_from_record,
+)
 from src.core.service_registry import (  # noqa: E402
     register_marcus_service,
     unregister_marcus_service,
@@ -208,6 +213,25 @@ class MarcusServer:
 
         # Assignment persistence and locking
         self.assignment_persistence = AssignmentPersistence()
+        # ADR-0012 O1: the worker roster lives beside the assignment store
+        # and is rehydrated lazily (see ensure_registrations_loaded).
+        _registration_cfg = getattr(self.config, "registration", None)
+        self.registration_ttl_hours: float = float(
+            getattr(_registration_cfg, "ttl_hours", 24.0)
+        )
+        self.registration_sweep_interval_seconds: float = float(
+            getattr(_registration_cfg, "sweep_interval_seconds", 3600.0)
+        )
+        self.registration_persistence: Optional[RegistrationPersistence] = (
+            RegistrationPersistence(
+                self.assignment_persistence.storage_dir,
+                touch_write_interval_seconds=float(
+                    getattr(_registration_cfg, "touch_write_interval_seconds", 60.0)
+                ),
+            )
+        )
+        self._registrations_loaded: bool = False
+        self._registrations_swept_at: Optional[datetime] = None
         self._lock_manager = EventLoopLockManager()
         self.tasks_being_assigned: set[str] = set()
 
@@ -829,6 +853,233 @@ class MarcusServer:
                     "recovered task %s — no running event loop",
                     task_id,
                 )
+
+    async def ensure_registrations_loaded(self, now: Optional[datetime] = None) -> None:
+        """Rebuild the worker roster from disk once, then sweep it periodically.
+
+        ADR-0012 obligation O1. ``agent_status`` and ``agent_project_map``
+        used to live only in memory, so a restart under live workers turned
+        each into an unknown agent whose polls failed forever. This runs on
+        the lazy path (every tool call, via ``rehydrate_on_tool_call``, and
+        explicitly from ``request_next_task``) because the startup path
+        never runs in HTTP mode. After the first load it only re-runs the
+        eviction sweep, at most once per ``registration_sweep_interval_seconds``.
+
+        Parameters
+        ----------
+        now : Optional[datetime]
+            The current time (injectable for tests).
+
+        Notes
+        -----
+        Memory wins over disk: a worker that re-registered after the
+        restart is left alone. A rehydrated worker's ``current_tasks`` is
+        rebuilt from the live leases, never read from the roster file, so
+        the lease store stays the single authority on ownership; that
+        reconciliation is repeated on every call because the board's
+        tasks may not have been loaded yet when the first call ran.
+        """
+        store = getattr(self, "registration_persistence", None)
+        if store is None:
+            return
+        moment = now or datetime.now(timezone.utc)
+        # The lease store must be loaded before ownership is attached or
+        # anything is evicted (Codex P1/P2 on PR #772): over HTTP the
+        # persisted leases are read only when the lease monitor starts,
+        # which until now happened on the first request_next_task, after
+        # this hook. Starting it here is safe: the hook runs on the live
+        # request loop, the same loop request_next_task uses.
+        ensure_monitor = getattr(self, "ensure_lease_monitor_running", None)
+        if callable(ensure_monitor):
+            await ensure_monitor()
+        if self._registrations_loaded:
+            # Ownership is reconciled on every call, not once: project_tasks
+            # is filled by refresh_project_state after the first hook ran,
+            # and request_next_task calls this again once it has.
+            self._reconcile_registrations_with_leases()
+            swept_at = self._registrations_swept_at
+            if (
+                swept_at is not None
+                and (moment - swept_at).total_seconds()
+                < self.registration_sweep_interval_seconds
+            ):
+                return
+            await self.evict_stale_registrations(now=moment)
+            return
+
+        records = await store.load()
+        restored = 0
+        for agent_id, record in records.items():
+            if agent_id in self.agent_status:
+                continue  # re-registered after the restart; memory wins
+            try:
+                worker = worker_from_record(record)
+            except (KeyError, TypeError, ValueError) as error:
+                logger.warning(
+                    f"Skipping unreadable registration record for {agent_id}: {error}"
+                )
+                continue
+            self.agent_status[agent_id] = worker
+            project_id = record.get("project_id") or ""
+            if project_id and agent_id not in self.agent_project_map:
+                self.agent_project_map[agent_id] = project_id
+            restored += 1
+        self._registrations_loaded = True
+        self._reconcile_registrations_with_leases()
+        if restored:
+            logger.info(
+                f"Rehydrated {restored} worker registration(s) from "
+                f"{store.registrations_file} (ADR-0012 O1)"
+            )
+        await self.evict_stale_registrations(now=moment)
+
+    def _reconcile_registrations_with_leases(self) -> None:
+        """Make every worker's ``current_tasks`` agree with the live leases.
+
+        The roster file deliberately carries no task ownership; the lease
+        store does. Both directions are applied:
+
+        - A worker with no current task that holds a live lease gets that
+          task back (a rehydrated worker mid-chore must not look idle to
+          the one-task-per-agent rule).
+        - A worker whose current task has no live lease held by it drops
+          that task. This is what makes the attach safe under concurrent
+          HTTP calls (Codex P2 on PR #772): completion clears
+          ``current_tasks`` and only then releases the lease, so a hook
+          running in between re-attaches the task; the next call, which
+          ``request_next_task`` makes before its one-task check, removes
+          it again because the lease is gone.
+
+        A task still being assigned (``tasks_being_assigned``) is left
+        alone, because its lease is created after ``current_tasks`` is
+        set. Without a lease manager nothing is touched.
+        """
+        lease_manager = getattr(self, "lease_manager", None)
+        if lease_manager is None:
+            return
+        active = getattr(lease_manager, "active_leases", None) or {}
+        in_flight = getattr(self, "tasks_being_assigned", None) or set()
+        tasks_by_id = {
+            task.id: task for task in (getattr(self, "project_tasks", None) or [])
+        }
+        held_by: Dict[str, List[str]] = {}
+        for task_id, lease in list(active.items()):
+            held_by.setdefault(getattr(lease, "agent_id", ""), []).append(task_id)
+
+        for agent_id, worker in list(self.agent_status.items()):
+            holds = held_by.get(agent_id, [])
+            if worker.current_tasks:
+                kept = [
+                    task
+                    for task in worker.current_tasks
+                    if task.id in holds or task.id in in_flight
+                ]
+                if len(kept) != len(worker.current_tasks):
+                    dropped = [
+                        task.id for task in worker.current_tasks if task not in kept
+                    ]
+                    worker.current_tasks = kept
+                    logger.info(
+                        f"Reconciled {agent_id}: dropped {dropped} from "
+                        "current_tasks, no live lease held"
+                    )
+            if not worker.current_tasks and holds:
+                task = tasks_by_id.get(holds[0])
+                if task is not None:
+                    worker.current_tasks = [task]
+
+    async def evict_stale_registrations(
+        self, now: Optional[datetime] = None
+    ) -> List[str]:
+        """Forget workers Marcus has not heard from within the TTL.
+
+        Parameters
+        ----------
+        now : Optional[datetime]
+            The current time (injectable for tests).
+
+        Returns
+        -------
+        List[str]
+            The evicted agent ids. A worker holding a live lease is never
+            evicted, whatever its ``last_seen`` says: holding a task is
+            proof of life, and the lease monitor is the authority on it.
+        """
+        store = getattr(self, "registration_persistence", None)
+        moment = now or datetime.now(timezone.utc)
+        if store is None:
+            return []
+        lease_manager = getattr(self, "lease_manager", None)
+        if lease_manager is None:
+            # Without the lease store there is no way to tell a silent
+            # worker from one mid-task; defer the sweep (swept_at stays
+            # unset so the next call tries again) rather than evict a
+            # holder (Codex P2 on PR #772).
+            return []
+        self._registrations_swept_at = moment
+        ttl = timedelta(hours=self.registration_ttl_hours)
+        active = getattr(lease_manager, "active_leases", None) or {}
+        holders = {getattr(lease, "agent_id", None) for lease in active.values()}
+        cutoff = moment - ttl
+        evicted: List[str] = []
+        for agent_id in list(store.records()):
+            if agent_id in holders:
+                continue
+            seen = store.last_seen(agent_id)
+            if seen is not None and seen >= cutoff:
+                continue
+            # A re-registration can land while the removal awaits disk
+            # (Codex P2 on PR #772). The store re-checks staleness under
+            # its lock, so a re-registration that saved first wins; and
+            # the in-memory entry is dropped only if it is still the one
+            # that was judged stale, so a re-registration that published
+            # in memory first is kept and its pending save restores the
+            # record.
+            judged_stale = self.agent_status.get(agent_id)
+            removed = await store.remove_if_stale(agent_id, cutoff)
+            if removed is None:
+                continue
+            # Re-validate after the await (Codex P2 on PR #772): the
+            # worker may have re-registered (a different in-memory
+            # object) or, through a concurrent request_next_task, taken a
+            # task and so now hold a live lease. Either way it is alive:
+            # keep it and put the record back.
+            live_leases = getattr(lease_manager, "active_leases", None) or {}
+            holds_now = any(
+                getattr(lease, "agent_id", None) == agent_id
+                for lease in live_leases.values()
+            )
+            if holds_now or self.agent_status.get(agent_id) is not judged_stale:
+                worker = self.agent_status.get(agent_id)
+                if worker is not None:
+                    # Rebuild from what is in memory NOW, not from the
+                    # removed record, and never over a newer record: a
+                    # re-registration's own save may already have landed
+                    # with new project, skills, vendor or principal.
+                    registered_at = removed.get("registered_at")
+                    await store.save_if_absent(
+                        record_from_worker(
+                            worker,
+                            project_id=self.agent_project_map.get(agent_id)
+                            or str(removed.get("project_id") or ""),
+                            registered_at=(
+                                datetime.fromisoformat(registered_at)
+                                if registered_at
+                                else moment
+                            ),
+                            last_seen=moment,
+                        )
+                    )
+                continue
+            self.agent_status.pop(agent_id, None)
+            self.agent_project_map.pop(agent_id, None)
+            evicted.append(agent_id)
+        if evicted:
+            logger.info(
+                f"Evicted {len(evicted)} silent worker registration(s) after "
+                f"{self.registration_ttl_hours:g}h: {', '.join(evicted)}"
+            )
+        return evicted
 
     async def ensure_lease_monitor_running(self) -> None:
         """Start the lease monitor if it exists but isn't running.

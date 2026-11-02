@@ -284,6 +284,32 @@ class TaskLeaseSettings:
 
 
 @dataclass
+class RegistrationSettings:
+    """Worker registration roster settings (ADR-0012 obligation O1).
+
+    Registrations are persisted to ``registrations.json`` beside the
+    assignment store and rehydrated lazily on the first tool call after
+    a restart. A registration that Marcus has not heard from for
+    ``ttl_hours`` is evicted so the roster does not grow forever; a
+    worker holding a live lease is never evicted.
+
+    Parameters
+    ----------
+    ttl_hours : float
+        Hours of silence after which a registration is evicted (default 24).
+    sweep_interval_seconds : float
+        How often, at most, the eviction sweep runs (default 3600).
+    touch_write_interval_seconds : float
+        Minimum spacing between disk writes of ``last_seen`` per worker
+        (default 60); every tool call is a touch.
+    """
+
+    ttl_hours: float = 24.0
+    sweep_interval_seconds: float = 3600.0
+    touch_write_interval_seconds: float = 60.0
+
+
+@dataclass
 class BoardHealthSettings:
     """Board health monitoring configuration.
 
@@ -428,6 +454,8 @@ class MarcusConfig:
         MCP transport settings
     task_lease : TaskLeaseSettings
         Task lease management settings
+    registration : RegistrationSettings
+        Worker registration roster settings
     board_health : BoardHealthSettings
         Board health monitoring settings
     multi_endpoint : MultiEndpointSettings
@@ -455,6 +483,7 @@ class MarcusConfig:
     memory: MemorySettings = field(default_factory=MemorySettings)
     transport: TransportSettings = field(default_factory=TransportSettings)
     task_lease: TaskLeaseSettings = field(default_factory=TaskLeaseSettings)
+    registration: RegistrationSettings = field(default_factory=RegistrationSettings)
     board_health: BoardHealthSettings = field(default_factory=BoardHealthSettings)
     multi_endpoint: MultiEndpointSettings = field(default_factory=MultiEndpointSettings)
     hybrid_inference: HybridInferenceSettings = field(
@@ -618,6 +647,11 @@ class MarcusConfig:
 
         if "task_lease" in data:
             nested_configs["task_lease"] = TaskLeaseSettings(**data["task_lease"])
+
+        if "registration" in data:
+            nested_configs["registration"] = RegistrationSettings(
+                **data["registration"]
+            )
 
         if "board_health" in data:
             nested_configs["board_health"] = BoardHealthSettings(**data["board_health"])

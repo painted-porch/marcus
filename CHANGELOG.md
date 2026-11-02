@@ -5,6 +5,18 @@ All notable changes to Marcus will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Worker registrations survive a Marcus restart (ADR-0012 obligation O1). Every accepted `register_agent` is written to `registrations.json` beside the assignment store and rehydrated on the first tool call after a restart, on both transports; a rehydrated worker gets its live task back from the lease store. Registrations silent for `registration.ttl_hours` (default 24) are evicted, never while they hold a live lease. Re-registration is idempotent and keeps the held task and completion count.
+
+### Fixed
+- A given-up task is re-offered at most three times in total after give-ups (#769), whoever gave up, so a lone persistent agent is no longer handed the same impossible task forever; lane death now reaches memory, the subtask store, the card and the provider's blocked column, and duplicate or no-lease give-ups count nothing.
+- Moving a GitHub issue to the blocked or in-progress column no longer wipes its other labels.
+
+### Removed
+- The experiment runner no longer instructs workers to register `{agent_id}_sub{i}` phantom subagents.
+
 ## [0.3.10] - 2026-10-18
 
 ### Fixed

@@ -6,13 +6,57 @@ This module contains tools for managing AI agents in the Marcus system:
 - list_registered_agents: List all registered agents
 """
 
+import inspect
+import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from src.core.models import WorkerStatus
+from src.core.registration_persistence import record_from_worker
 from src.logging.agent_events import log_agent_event
 from src.logging.conversation_logger import conversation_logger, log_thinking
 
 VALID_PRINCIPALS = ("agent", "human")
+
+logger = logging.getLogger(__name__)
+
+
+async def _persist_registration(
+    state: Any, worker: WorkerStatus, project_id: str
+) -> None:
+    """Write a registration to the roster file, best-effort (ADR-0012 O1).
+
+    A disk hiccup must not stop a worker from starting: the in-memory
+    registration already succeeded, so a failure here is logged and the
+    worker simply will not survive the next restart.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state; nothing happens without
+        ``registration_persistence``.
+    worker : WorkerStatus
+        The registration as stored in ``agent_status``.
+    project_id : str
+        The project the worker registered for.
+    """
+    store = getattr(state, "registration_persistence", None)
+    if store is None:
+        return
+    now = datetime.now(timezone.utc)
+    try:
+        pending = store.save(
+            record_from_worker(
+                worker, project_id=project_id, registered_at=now, last_seen=now
+            )
+        )
+        if inspect.isawaitable(pending):
+            await pending
+    except Exception as error:  # noqa: BLE001 - best effort by design
+        logger.warning(
+            f"Could not persist registration for {worker.worker_id}: {error}. "
+            "The worker is registered for this process only."
+        )
 
 
 def _record_identity_change(
@@ -169,6 +213,11 @@ async def register_agent(
         # land on the record so the audit bundle can show it.
         _record_identity_change(state, agent_id, vendor, principal)
 
+        # Idempotent re-registration (ADR-0012 O1): a harness that
+        # registers again mid-chore, or after a Marcus restart rehydrated
+        # it, keeps the task it holds and its completion count.
+        previous_registration = state.agent_status.get(agent_id)
+
         status = WorkerStatus(
             worker_id=agent_id,
             name=name,
@@ -192,12 +241,22 @@ async def register_agent(
             principal=principal,
         )
 
+        if previous_registration is not None:
+            status.current_tasks = list(
+                getattr(previous_registration, "current_tasks", []) or []
+            )
+            status.completed_tasks_count = int(
+                getattr(previous_registration, "completed_tasks_count", 0) or 0
+            )
+
         state.agent_status[agent_id] = status
 
         # Store project scope (GH-388: prevents cross-project task theft).
         if not hasattr(state, "agent_project_map"):
             state.agent_project_map = {}
         state.agent_project_map[agent_id] = project_id
+
+        await _persist_registration(state, status, project_id)
 
         # Log registration event immediately
         state.log_event(

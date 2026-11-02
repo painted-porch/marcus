@@ -11,6 +11,7 @@ recovered as dead. :class:`HeartbeatFastMCP` puts the same hook on the
 HTTP path, once, covering every registered tool.
 """
 
+import inspect
 import logging
 from typing import Any, Dict, Optional, Sequence, Union
 
@@ -45,6 +46,54 @@ async def touch_on_tool_call(arguments: Optional[Dict[str, Any]], state: Any) ->
         logger.warning(f"[heartbeat] touch_lease failed for {agent_id}: {error}")
 
 
+async def rehydrate_on_tool_call(
+    state: Any, arguments: Optional[Dict[str, Any]] = None
+) -> None:
+    """Refresh the caller's registration and load the roster before a tool runs.
+
+    ADR-0012 O1, best-effort. Two steps, in this order:
+
+    1. The calling agent's ``last_seen`` (the eviction clock) is moved
+       **before** dispatch and before any sweep, so a worker's own call can
+       never evict it, however long it was silent, and a sweep running
+       concurrently sees the fresh timestamp under the store's lock.
+       (The lease heartbeat stays after dispatch: a failing tool is still a
+       live worker, but not progress.)
+    2. ``agent_status`` and ``agent_project_map`` are rebuilt from disk on
+       the first tool call after a restart (the lazy path; the startup path
+       never runs in HTTP mode). The server method is idempotent, so calling
+       it on every tool call costs one attribute check after the first.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state. Each step is skipped when its attribute is
+        missing.
+    arguments : Optional[Dict[str, Any]]
+        The tool call's arguments; only ``agent_id`` is read.
+    """
+    agent_id = arguments.get("agent_id") if arguments else None
+    registrations = getattr(state, "registration_persistence", None)
+    if agent_id and registrations is not None:
+        try:
+            touched = registrations.touch(agent_id)
+            if inspect.isawaitable(touched):
+                await touched
+        except Exception as error:  # noqa: BLE001 - never fail the call
+            logger.warning(
+                f"[heartbeat] registration touch failed for {agent_id}: {error}"
+            )
+    ensure = getattr(state, "ensure_registrations_loaded", None)
+    if not callable(ensure):
+        return
+    try:
+        pending = ensure()
+        if inspect.isawaitable(pending):
+            await pending
+    except Exception as error:  # noqa: BLE001 - never fail the call
+        logger.warning(f"[heartbeat] registration rehydration failed: {error}")
+
+
 # FastMCP is typed in the project's environment and untyped in the pre-commit
 # hook's; the ignore covers the second and is marked unused for the first.
 class HeartbeatFastMCP(FastMCP):  # type: ignore[misc,unused-ignore]
@@ -67,7 +116,7 @@ class HeartbeatFastMCP(FastMCP):  # type: ignore[misc,unused-ignore]
     async def call_tool(
         self, name: str, arguments: Dict[str, Any]
     ) -> Union[Sequence[ContentBlock], Dict[str, Any]]:
-        """Run the tool, then record the heartbeat for the calling agent.
+        """Load the roster, run the tool, then record the heartbeat.
 
         Parameters
         ----------
@@ -82,6 +131,7 @@ class HeartbeatFastMCP(FastMCP):  # type: ignore[misc,unused-ignore]
             The tool's own result, unchanged. A failing tool propagates
             its error and records no heartbeat.
         """
+        await rehydrate_on_tool_call(self.marcus_state, arguments)
         result: Union[Sequence[ContentBlock], Dict[str, Any]] = await super().call_tool(
             name, arguments
         )
