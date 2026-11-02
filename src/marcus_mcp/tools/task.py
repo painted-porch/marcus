@@ -6293,6 +6293,7 @@ async def report_blocker(
             # D3 "no lease, no report" is the rule everywhere; here it also
             # keeps the budget honest. Deployments without a lease manager
             # skip the check, as they do everywhere else.
+            _epoch = 0
             if hasattr(state, "lease_manager") and state.lease_manager:
                 _live = state.lease_manager.active_leases.get(task_id)
                 if _live is None:
@@ -6333,6 +6334,28 @@ async def report_blocker(
                             ),
                         }
                     _blocker_repair_consumed_epoch[task_id] = _epoch
+
+            # Snapshot the counters so a handoff that never reaches the board
+            # can be undone. If update_task raises, the outer handler returns
+            # an error and the lease stays held; without a rollback the mark
+            # above would refuse the agent's retry as a duplicate and the
+            # counters would show a requeue that never happened (Codex P2 on
+            # PR #770). Only a failed BOARD write rolls back; once the card
+            # says TODO or BLOCKED the give-up has happened.
+            _prior_agents = set(_blocker_repair_agents.get(task_id, set()))
+            _prior_requeues = _blocker_repair_requeues.get(task_id, 0)
+
+            def _rollback_acceptance() -> None:
+                if _epoch and _blocker_repair_consumed_epoch.get(task_id) == _epoch:
+                    _blocker_repair_consumed_epoch.pop(task_id, None)
+                if _prior_agents:
+                    _blocker_repair_agents[task_id] = set(_prior_agents)
+                else:
+                    _blocker_repair_agents.pop(task_id, None)
+                if _prior_requeues:
+                    _blocker_repair_requeues[task_id] = _prior_requeues
+                else:
+                    _blocker_repair_requeues.pop(task_id, None)
 
             repair_attempt = _record_repair_attempt(task_id, agent_id)
             total_requeues = _blocker_repair_requeues.get(task_id, 0)
@@ -6375,18 +6398,30 @@ async def report_blocker(
                     ),
                     None,
                 )
+                _prior_status = task_obj.status if task_obj is not None else None
+                _prior_recovery = (
+                    task_obj.recovery_info if task_obj is not None else None
+                )
                 if task_obj is not None:
                     task_obj.recovery_info = recovery_info
                     task_obj.status = TaskStatus.TODO
                     task_obj.assigned_to = None
-                await state.kanban_client.update_task(
-                    task_id,
-                    {
-                        "status": TaskStatus.TODO,
-                        "assigned_to": None,
-                        "blocker": blocker_description,
-                    },
-                )
+                try:
+                    await state.kanban_client.update_task(
+                        task_id,
+                        {
+                            "status": TaskStatus.TODO,
+                            "assigned_to": None,
+                            "blocker": blocker_description,
+                        },
+                    )
+                except Exception:
+                    _rollback_acceptance()
+                    if task_obj is not None:
+                        task_obj.status = _prior_status
+                        task_obj.assigned_to = agent_id
+                        task_obj.recovery_info = _prior_recovery
+                    raise
                 await _release_task_file_locks(state, task_id, "repair requeue")
                 logger.warning(
                     "REPAIR REQUEUE: task %s returned to the board after "
@@ -6434,14 +6469,21 @@ async def report_blocker(
                     state.subtask_manager.update_subtask_status(
                         task_id, TaskStatus.BLOCKED, state.project_tasks
                     )
-                await state.kanban_client.update_task(
-                    task_id,
-                    {
-                        "status": TaskStatus.BLOCKED,
-                        "assigned_to": None,
-                        "blocker": blocker_description,
-                    },
-                )
+                try:
+                    await state.kanban_client.update_task(
+                        task_id,
+                        {
+                            "status": TaskStatus.BLOCKED,
+                            "assigned_to": None,
+                            "blocker": blocker_description,
+                        },
+                    )
+                except Exception:
+                    _rollback_acceptance()
+                    if _dead_task is not None:
+                        _dead_task.status = TaskStatus.IN_PROGRESS
+                        _dead_task.assigned_to = agent_id
+                    raise
                 if hasattr(state.kanban_client, "move_task_to_column"):
                     try:
                         await state.kanban_client.move_task_to_column(

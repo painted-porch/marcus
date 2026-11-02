@@ -450,6 +450,77 @@ class TestDistinctAgentsNotRawCalls:
         assert _blocker_repair_requeues["task-1"] == 1
 
     @pytest.mark.asyncio
+    async def test_failed_board_write_rolls_back_acceptance(self) -> None:
+        """A handoff that never reached the board is not a give-up.
+
+        When update_task raises, the lease is still held, so the agent's
+        retry must be accepted (not refused as a duplicate) and the counters
+        must show nothing for the failed attempt (Codex P2 on PR #770).
+        """
+        from src.marcus_mcp.tools.task import (
+            _blocker_repair_agents,
+            _blocker_repair_consumed_epoch,
+            _blocker_repair_requeues,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+        task_obj = state.project_tasks[0]
+        state.kanban_client.update_task = AsyncMock(
+            side_effect=RuntimeError("provider down")
+        )
+
+        failed = await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert failed["success"] is False
+        assert "requeued_for_repair" not in failed
+        assert "task-1" not in _blocker_repair_consumed_epoch
+        assert "task-1" not in _blocker_repair_agents
+        assert "task-1" not in _blocker_repair_requeues
+        assert task_obj.status == TaskStatus.IN_PROGRESS
+        assert task_obj.assigned_to == "agent-1"
+        assert "task-1" in state.lease_manager.active_leases
+
+        state.kanban_client.update_task = AsyncMock()
+        retried = await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert retried["requeued_for_repair"] is True
+        assert _blocker_repair_requeues["task-1"] == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_lane_death_write_rolls_back_acceptance(self) -> None:
+        """Same rollback on the lane-death branch: the retry still ends the lane."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_REQUEUES,
+            _blocker_repair_consumed_epoch,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        for _ in range(MAX_BLOCKER_REPAIR_REQUEUES):
+            await _terminal_blocker(
+                _make_state("agent-1", "task-1"), "agent-1", "task-1"
+            )
+        state = _make_state("agent-1", "task-1")
+        state.kanban_client.update_task = AsyncMock(
+            side_effect=RuntimeError("provider down")
+        )
+
+        failed = await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert failed["success"] is False
+        assert "task-1" not in _blocker_repair_consumed_epoch
+        assert state.project_tasks[0].status == TaskStatus.IN_PROGRESS
+
+        state.kanban_client.update_task = AsyncMock()
+        final = await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert final["requeued_for_repair"] is False
+        payload = state.kanban_client.update_task.await_args.args[1]
+        assert payload["status"] == TaskStatus.BLOCKED
+
+    @pytest.mark.asyncio
     async def test_distinct_agents_each_consume_one(self) -> None:
         """Independent give-ups are what exhaust the ceiling."""
         from src.marcus_mcp.tools.task import (
