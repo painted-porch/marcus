@@ -18,6 +18,8 @@ The repair counter deliberately does NOT reset on recovery (unlike the
 advisory-help budget), because it is the loop guard.
 """
 
+import asyncio
+import itertools
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
@@ -59,6 +61,9 @@ def _make_task(task_id: str, status: TaskStatus, assigned_to: str = "") -> Task:
     return task
 
 
+_EPOCHS = itertools.count(1)
+
+
 def _make_state(
     agent_id: str,
     task_id: str,
@@ -74,11 +79,10 @@ def _make_state(
         The task under test.
     all_agents : Optional[List[str]]
         The full pool of agents registered with Marcus (``state.agent_status``).
-        Defaults to ``[agent_id]`` — a lone-agent board. Pass additional ids to
-        model a multi-agent board where a FRESH agent (one that has not given
-        up on the task) is still available to retry it. The repair-requeue
-        floor (issue #769) only re-offers a given-up task while such a fresh
-        agent exists.
+        Defaults to ``[agent_id]``, a lone-agent board. The repair decision
+        no longer reads this pool (issue #769 is bounded by a total requeue
+        budget instead), but the board shape is kept so the tests still
+        describe the scenario they model.
     """
     state = MagicMock()
     state.initialize_kanban = AsyncMock()
@@ -108,6 +112,9 @@ def _make_state(
 
     lease = MagicMock()
     lease.agent_id = agent_id
+    # Every _make_state is a fresh claim, and create_lease issues a new
+    # fencing epoch per claim; the terminal give-up is accepted once per epoch.
+    lease.lease_epoch = next(_EPOCHS)
     state.lease_manager = MagicMock()
     state.lease_manager.active_leases = {task_id: lease}
     _wire_release_lease(state.lease_manager)
@@ -150,9 +157,8 @@ class TestFirstTerminalBlockerRequeues:
     """A first give-up returns the work to the board, it does not kill it.
 
     These model a multi-agent board (``all_agents`` names a second, idle
-    agent) so a genuinely FRESH agent is available to receive the requeued
-    task. The lone-agent board — where the requeue has nobody fresh to go to
-    and must instead die (issue #769) — is covered by ``TestLoneAgentFloor``.
+    agent). A lone-agent board behaves the same on the first give-up; how
+    its loop is bounded (issue #769) is covered by ``TestBoundedRepairBudget``.
     """
 
     @pytest.mark.asyncio
@@ -400,6 +406,48 @@ class TestDistinctAgentsNotRawCalls:
         assert _blocker_repair_agents["task-1"] == {"agent-1"}
         assert _blocker_repair_requeues["task-1"] == 1
         stale.kanban_client.update_task.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_duplicates_on_one_lease_spend_the_budget_once(
+        self,
+    ) -> None:
+        """Overlapping copies of the same give-up count as one.
+
+        All of them pass the live-lease check (the lease is released only
+        after the board write), so acceptance is keyed on the lease epoch:
+        the first copy takes the mark before its first await, the rest are
+        refused and consume neither bound (Codex P2 on PR #770).
+        """
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_REQUEUES,
+            _blocker_repair_requeues,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+
+        async def _board_write_yields(*args: Any, **kwargs: Any) -> None:
+            # A real board write suspends; a bare AsyncMock does not, and
+            # without a suspension the first report would run to completion
+            # (lease released) before any duplicate started, hiding the race.
+            await asyncio.sleep(0)
+
+        state.kanban_client.update_task = AsyncMock(side_effect=_board_write_yields)
+
+        results = await asyncio.gather(
+            *[
+                _terminal_blocker(state, "agent-1", "task-1")
+                for _ in range(MAX_BLOCKER_REPAIR_REQUEUES + 1)
+            ]
+        )
+
+        accepted = [r for r in results if r.get("requeued_for_repair") is True]
+        refused = [r for r in results if r.get("duplicate") is True]
+        assert len(accepted) == 1
+        assert len(refused) == MAX_BLOCKER_REPAIR_REQUEUES
+        assert all(r["status"] == "lease_recovered" for r in refused)
+        assert _blocker_repair_requeues["task-1"] == 1
 
     @pytest.mark.asyncio
     async def test_distinct_agents_each_consume_one(self) -> None:

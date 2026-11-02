@@ -145,6 +145,13 @@ _blocker_repair_agents: Dict[str, Set[str]] = {}
 # the next spawned agent would have repaired (#722).
 MAX_BLOCKER_REPAIR_REQUEUES = 3
 _blocker_repair_requeues: Dict[str, int] = {}
+# The lease epoch (ADR-0012 D11 fencing token) whose terminal give-up has
+# already been accepted, per task. A terminal report is accepted once per
+# assignment: concurrent duplicates of the same give-up all pass the live-
+# lease check (the lease is released only after the board write), so
+# without this four overlapping reports could spend the whole budget on one
+# real give-up (Codex P2 on PR #770).
+_blocker_repair_consumed_epoch: Dict[str, int] = {}
 
 
 def _record_repair_attempt(task_id: str, agent_id: str) -> int:
@@ -188,6 +195,7 @@ def clear_repair_attempts(task_id: str) -> None:
     """
     _blocker_repair_agents.pop(task_id, None)
     _blocker_repair_requeues.pop(task_id, None)
+    _blocker_repair_consumed_epoch.pop(task_id, None)
 
 
 def _record_repair_requeue(task_id: str) -> int:
@@ -6302,6 +6310,29 @@ async def report_blocker(
                             "your next task with request_next_task."
                         ),
                     }
+                # Accept one terminal give-up per assignment. The mark is
+                # taken here, before the first await, so overlapping
+                # duplicates on the same lease see it and are refused
+                # without touching either bound (Codex P2 on PR #770).
+                _epoch = getattr(_live, "lease_epoch", 0) or 0
+                if _epoch:
+                    if _blocker_repair_consumed_epoch.get(task_id) == _epoch:
+                        logger.warning(
+                            f"report_blocker ignored: duplicate terminal give-up "
+                            f"from {agent_id} on {task_id} (lease epoch {_epoch}) "
+                            f"is already being processed."
+                        )
+                        return {
+                            "success": False,
+                            "status": "lease_recovered",
+                            "duplicate": True,
+                            "message": (
+                                f"Your give-up on task {task_id} was already "
+                                "received and is being handled. Request your "
+                                "next task with request_next_task."
+                            ),
+                        }
+                    _blocker_repair_consumed_epoch[task_id] = _epoch
 
             repair_attempt = _record_repair_attempt(task_id, agent_id)
             total_requeues = _blocker_repair_requeues.get(task_id, 0)
