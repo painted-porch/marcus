@@ -360,46 +360,50 @@ class TestRequeueReleasesFileLocks:
 
 
 class TestDistinctAgentsNotRawCalls:
-    """Codex P1: the budget counts independent agents, not tool calls.
-
-    After the first requeue removes the lease, the ownership guard only
-    rejects a lease held by *someone else* — so a stale agent retrying
-    after a lost response could burn the remaining attempts and mark a
-    lane dead that no fresh agent ever tried.
-    """
+    """The distinct-agent ceiling counts independent agents, not tool calls."""
 
     @pytest.mark.asyncio
-    async def test_same_agent_repeating_does_not_consume_attempts(self) -> None:
-        """Five calls from one agent = one agent having given up.
+    async def test_stale_duplicate_without_a_lease_is_refused_and_counts_nothing(
+        self,
+    ) -> None:
+        """A retry after a lost response arrives with no live lease.
 
-        A second, idle agent is registered so a fresh agent always remains
-        (otherwise the lone-agent floor of #769 would end the lane on the
-        first call). This isolates the #722 concern: repeated calls from the
-        SAME agent must not burn the distinct-agent budget or mark a lane
-        dead that the fresh agent has never tried.
+        The requeue released the lease, so the duplicate is refused and
+        consumes neither the ceiling nor the budget; a lane is never killed
+        by a give-up nobody made.
         """
-        from src.marcus_mcp.tools.task import clear_repair_attempts, report_blocker
+        from src.marcus_mcp.tools.task import (
+            _blocker_repair_agents,
+            _blocker_repair_requeues,
+            clear_repair_attempts,
+            report_blocker,
+        )
 
         clear_repair_attempts("task-1")
+        state = _make_state("agent-1", "task-1")
+        first = await _terminal_blocker(state, "agent-1", "task-1")
+        assert first["requeued_for_repair"] is True
 
-        for _ in range(5):
-            state = _make_state("agent-1", "task-1", all_agents=["agent-1", "agent-2"])
-            result = await report_blocker(
-                agent_id="agent-1",
-                task_id="task-1",
-                blocker_description="same agent retrying",
-                severity="high",
-                state=state,
-                skip_ai_analysis=True,
-            )
-            assert result["requeued_for_repair"] is True, (
-                "a stale duplicate from one agent must not burn the budget "
-                "while a fresh agent remains"
-            )
+        stale = _make_state("agent-1", "task-1")
+        stale.lease_manager.active_leases = {}  # the requeue released it
+        result = await report_blocker(
+            agent_id="agent-1",
+            task_id="task-1",
+            blocker_description="same report, retried",
+            severity="high",
+            state=stale,
+            skip_ai_analysis=True,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "lease_recovered"
+        assert _blocker_repair_agents["task-1"] == {"agent-1"}
+        assert _blocker_repair_requeues["task-1"] == 1
+        stale.kanban_client.update_task.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_distinct_agents_each_consume_one(self) -> None:
-        """Independent give-ups are what exhaust the budget."""
+        """Independent give-ups are what exhaust the ceiling."""
         from src.marcus_mcp.tools.task import (
             MAX_BLOCKER_REPAIR_ATTEMPTS,
             _record_repair_attempt,
@@ -413,100 +417,132 @@ class TestDistinctAgentsNotRawCalls:
         assert MAX_BLOCKER_REPAIR_ATTEMPTS >= 2
 
 
-class TestLoneAgentFloor:
-    """Issue #769: a lone agent must not be re-offered a task it gave up.
+class TestBoundedRepairBudget:
+    """Issue #769: a lone persistent agent must not be re-offered a task forever.
 
-    The repair-requeue ceiling counts DISTINCT agents who have given up and
-    only declares a lane dead once that count passes
-    ``MAX_BLOCKER_REPAIR_ATTEMPTS``. On a board with a single agent (or any
-    board where every currently-available agent has already given up) that
-    count can never reach the ceiling: the one agent is handed the exact same
-    task it just failed, forever, burning an instruction-generation and a
-    blocker-analysis AI call every loop (a "write a README" task cycled 7
-    times in 140 seconds with one incapable bot).
-
-    The fix adds a floor: a requeue only happens while some currently-
-    available agent has NOT yet given up on the task. When none remains, the
-    lane is marked dead (BLOCKED, the terminal unassignable state) on the
-    spot instead of looping.
+    The distinct-agent ceiling cannot be reached when the pool is smaller
+    than it. A second, agent-blind bound ends the loop: a task is re-offered
+    at most ``MAX_BLOCKER_REPAIR_REQUEUES`` times after give-ups, whoever
+    gave up. The bound deliberately reads no snapshot of who is registered:
+    the spawn-per-task runner also shows one agent at give-up time, and a
+    snapshot rule killed lanes the next spawned agent would have repaired
+    (ultrareview on PR #770).
     """
 
     @pytest.mark.asyncio
-    async def test_lone_agent_first_give_up_kills_the_lane(self) -> None:
-        """One agent, one give-up: the lane dies — it is not re-offered."""
-        from src.marcus_mcp.tools.task import clear_repair_attempts
+    async def test_lone_agent_first_give_up_still_requeues(self) -> None:
+        """One agent on the board: the first give-up is NOT lane death.
 
-        clear_repair_attempts("task-1")
-        state = _make_state("agent-1", "task-1")  # lone-agent board
-
-        result = await _terminal_blocker(state, "agent-1", "task-1")
-
-        assert result["success"] is True
-        assert result["requeued_for_repair"] is False
-        payload = state.kanban_client.update_task.await_args.args[1]
-        assert payload["status"] == TaskStatus.BLOCKED
-
-    @pytest.mark.asyncio
-    async def test_lone_agent_does_not_loop(self) -> None:
-        """Repeated give-ups from the lone agent never requeue."""
-        from src.marcus_mcp.tools.task import clear_repair_attempts
-
-        clear_repair_attempts("task-1")
-
-        for _ in range(5):
-            state = _make_state("agent-1", "task-1")
-            result = await _terminal_blocker(state, "agent-1", "task-1")
-            assert result["requeued_for_repair"] is False
-
-    @pytest.mark.asyncio
-    async def test_lone_agent_lane_death_releases_coordination_state(self) -> None:
-        """The agent is freed and its lease dropped when the lane dies."""
+        This is the spawn-per-task runner's shape too; killing here would
+        remove the #722 repair rung.
+        """
         from src.marcus_mcp.tools.task import clear_repair_attempts
 
         clear_repair_attempts("task-1")
         state = _make_state("agent-1", "task-1")
 
-        await _terminal_blocker(state, "agent-1", "task-1")
-
-        assert "agent-1" not in state.agent_tasks
-        assert "task-1" not in state.lease_manager.active_leases
-
-    @pytest.mark.asyncio
-    async def test_all_available_agents_gave_up_kills_the_lane(self) -> None:
-        """Two agents, both give up: lane dies even under the ceiling.
-
-        With ``MAX_BLOCKER_REPAIR_ATTEMPTS == 2`` a two-agent pool could never
-        trip the ceiling (distinct count maxes at 2), so before the floor the
-        pair ping-ponged the task forever. Once both have given up, no fresh
-        agent remains and the lane must die.
-        """
-        from src.marcus_mcp.tools.task import clear_repair_attempts
-
-        clear_repair_attempts("task-1")
-        pool = ["agent-1", "agent-2"]
-
-        first = await _terminal_blocker(
-            _make_state("agent-1", "task-1", all_agents=pool), "agent-1", "task-1"
-        )
-        assert first["requeued_for_repair"] is True  # agent-2 is still fresh
-
-        state = _make_state("agent-2", "task-1", all_agents=pool)
-        second = await _terminal_blocker(state, "agent-2", "task-1")
-
-        assert second["requeued_for_repair"] is False
-        payload = state.kanban_client.update_task.await_args.args[1]
-        assert payload["status"] == TaskStatus.BLOCKED
-
-    @pytest.mark.asyncio
-    async def test_fresh_agent_still_retries_up_to_ceiling(self) -> None:
-        """Multi-agent behavior is preserved: a fresh agent still gets a turn."""
-        from src.marcus_mcp.tools.task import clear_repair_attempts
-
-        clear_repair_attempts("task-1")
-        pool = ["agent-1", "agent-2", "agent-3"]
-
-        result = await _terminal_blocker(
-            _make_state("agent-1", "task-1", all_agents=pool), "agent-1", "task-1"
-        )
+        result = await _terminal_blocker(state, "agent-1", "task-1")
 
         assert result["requeued_for_repair"] is True
+        payload = state.kanban_client.update_task.await_args.args[1]
+        assert payload["status"] == TaskStatus.TODO
+
+    @pytest.mark.asyncio
+    async def test_lone_agent_loop_ends_at_the_budget(self) -> None:
+        """A lone agent that keeps claiming and giving up is stopped after the budget."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_REQUEUES,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        for _ in range(MAX_BLOCKER_REPAIR_REQUEUES):
+            state = _make_state("agent-1", "task-1")  # re-claimed: a live lease again
+            result = await _terminal_blocker(state, "agent-1", "task-1")
+            assert result["requeued_for_repair"] is True
+
+        state = _make_state("agent-1", "task-1")
+        final = await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert final["requeued_for_repair"] is False
+        payload = state.kanban_client.update_task.await_args.args[1]
+        assert payload["status"] == TaskStatus.BLOCKED
+        assert "handed back" in final["message"]
+
+    @pytest.mark.asyncio
+    async def test_two_agents_ping_pong_ends_at_the_budget(self) -> None:
+        """Two agents under the ceiling can no longer ping-pong a task forever."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_REQUEUES,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        agents = ["agent-a", "agent-b"]
+        outcomes = []
+        for i in range(MAX_BLOCKER_REPAIR_REQUEUES + 1):
+            who = agents[i % 2]
+            state = _make_state(who, "task-1")
+            result = await _terminal_blocker(state, who, "task-1")
+            outcomes.append(result["requeued_for_repair"])
+
+        assert outcomes == [True] * MAX_BLOCKER_REPAIR_REQUEUES + [False]
+
+    @pytest.mark.asyncio
+    async def test_lane_death_write_is_complete(self) -> None:
+        """Dead means dead everywhere: memory, subtask store, card, provider column."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_REQUEUES,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        for _ in range(MAX_BLOCKER_REPAIR_REQUEUES):
+            await _terminal_blocker(
+                _make_state("agent-1", "task-1"), "agent-1", "task-1"
+            )
+        state = _make_state("agent-1", "task-1")
+        task_obj = state.project_tasks[0]
+        state.subtask_manager = MagicMock()
+        state.subtask_manager.subtasks = {"task-1": MagicMock()}
+        state.kanban_client.move_task_to_column = AsyncMock()
+
+        await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert task_obj.status == TaskStatus.BLOCKED
+        assert task_obj.assigned_to is None
+        state.subtask_manager.update_subtask_status.assert_called_once()
+        assert (
+            state.subtask_manager.update_subtask_status.call_args.args[1]
+            == TaskStatus.BLOCKED
+        )
+        payload = state.kanban_client.update_task.await_args.args[1]
+        assert payload["status"] == TaskStatus.BLOCKED
+        assert payload["assigned_to"] is None
+        state.kanban_client.move_task_to_column.assert_awaited_once_with(
+            "task-1", "blocked"
+        )
+
+    @pytest.mark.asyncio
+    async def test_lane_death_tolerates_a_provider_without_blocked_column(
+        self,
+    ) -> None:
+        """A provider lacking move_task_to_column still gets the card write."""
+        from src.marcus_mcp.tools.task import (
+            MAX_BLOCKER_REPAIR_REQUEUES,
+            clear_repair_attempts,
+        )
+
+        clear_repair_attempts("task-1")
+        for _ in range(MAX_BLOCKER_REPAIR_REQUEUES):
+            await _terminal_blocker(
+                _make_state("agent-1", "task-1"), "agent-1", "task-1"
+            )
+        state = _make_state("agent-1", "task-1")
+        del state.kanban_client.move_task_to_column
+
+        final = await _terminal_blocker(state, "agent-1", "task-1")
+
+        assert final["requeued_for_repair"] is False
+        payload = state.kanban_client.update_task.await_args.args[1]
+        assert payload["status"] == TaskStatus.BLOCKED

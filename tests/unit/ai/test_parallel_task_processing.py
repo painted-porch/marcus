@@ -109,6 +109,13 @@ class TestParallelTaskDescriptionGeneration:
             sample_analysis, sample_constraints
         )
 
+        # Only the detailed-task calls are under test. Hierarchy generation
+        # also goes through the mock (domain discovery retries four times,
+        # sequentially, on the non-JSON reply), and those ~40 ms of serial
+        # calls used to sit inside the "parallel" window, so the assertion
+        # below held only on a fast machine.
+        call_times.clear()
+
         # Create detailed tasks (this should execute in parallel)
         start_time = asyncio.get_event_loop().time()
         tasks = await parser._create_detailed_tasks(

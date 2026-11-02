@@ -134,6 +134,17 @@ ADVISORY_SEVERITIES = frozenset({"low", "medium"})
 # would let a task ping-pong between TODO and blocked forever.
 MAX_BLOCKER_REPAIR_ATTEMPTS = 2
 _blocker_repair_agents: Dict[str, Set[str]] = {}
+# Issue #769: the distinct-agent ceiling above can never be reached when
+# the pool is smaller than it (one persistent agent is handed the same
+# task back forever, at an instruction-generation call and a blocker-
+# analysis call per loop). This is the second, agent-blind bound: the
+# total number of times a task may be re-offered after a give-up,
+# whoever gives up. It is deliberately NOT a snapshot of who is
+# registered right now, because the spawn-per-task runner also shows a
+# single agent at give-up time and a snapshot rule would kill lanes that
+# the next spawned agent would have repaired (#722).
+MAX_BLOCKER_REPAIR_REQUEUES = 3
+_blocker_repair_requeues: Dict[str, int] = {}
 
 
 def _record_repair_attempt(task_id: str, agent_id: str) -> int:
@@ -176,6 +187,25 @@ def clear_repair_attempts(task_id: str) -> None:
         The task whose repair record should be reset.
     """
     _blocker_repair_agents.pop(task_id, None)
+    _blocker_repair_requeues.pop(task_id, None)
+
+
+def _record_repair_requeue(task_id: str) -> int:
+    """Count one more re-offer of ``task_id`` after a give-up; return the total.
+
+    Parameters
+    ----------
+    task_id : str
+        The task being requeued for repair.
+
+    Returns
+    -------
+    int
+        Total requeues so far for this task, across all agents.
+    """
+    total = _blocker_repair_requeues.get(task_id, 0) + 1
+    _blocker_repair_requeues[task_id] = total
+    return total
 
 
 async def _release_task_file_locks(state: Any, task_id: str, context: str) -> None:
@@ -6247,31 +6277,49 @@ async def report_blocker(
             # attempt it, rather than killing the lane on one agent's word.
             # Only after MAX_BLOCKER_REPAIR_ATTEMPTS independent agents have
             # given up is the lane recorded as genuinely dead.
+            # Issue #769, guard 3: a terminal give-up must come from the
+            # agent that currently holds the task. After a requeue the lease
+            # is gone, so a stale duplicate of the same report (a retry after
+            # a lost response) arrives with no live lease; counting it would
+            # burn the repair budget on a give-up nobody made. Under ADR-0012
+            # D3 "no lease, no report" is the rule everywhere; here it also
+            # keeps the budget honest. Deployments without a lease manager
+            # skip the check, as they do everywhere else.
+            if hasattr(state, "lease_manager") and state.lease_manager:
+                _live = state.lease_manager.active_leases.get(task_id)
+                if _live is None:
+                    logger.warning(
+                        f"report_blocker ignored: agent {agent_id} holds no live "
+                        f"lease on {task_id}; the task was already requeued or "
+                        f"recovered, so this give-up is not counted."
+                    )
+                    return {
+                        "success": False,
+                        "status": "lease_recovered",
+                        "message": (
+                            f"Task {task_id} is no longer yours: it was already "
+                            "handed back after a give-up or recovered. Request "
+                            "your next task with request_next_task."
+                        ),
+                    }
+
             repair_attempt = _record_repair_attempt(task_id, agent_id)
+            total_requeues = _blocker_repair_requeues.get(task_id, 0)
 
-            # Issue #769 floor: a requeue only helps if some currently-
-            # available agent has NOT already given up on this task. The
-            # ceiling alone counts DISTINCT give-ups, so when the agent pool
-            # is smaller than the ceiling it can never be reached — a lone
-            # agent is handed back the exact task it just failed, forever,
-            # burning an instruction-generation and a blocker-analysis AI
-            # call every loop (a "write a README" task cycled 7 times in 140
-            # seconds with one incapable bot). When no fresh agent remains,
-            # re-offering is pointless: mark the lane dead now instead of
-            # looping. All registered agents count as the pool (a busy agent
-            # has not given up and may free up to retry), so this never ends
-            # a lane a genuinely different agent could still attempt.
-            gave_up_agents = _blocker_repair_agents.get(task_id, set())
-            available_agents = set(getattr(state, "agent_status", None) or {}) | {
-                agent_id
-            }
-            has_fresh_agent = bool(available_agents - gave_up_agents)
-
-            requeued_for_repair = (
-                repair_attempt <= MAX_BLOCKER_REPAIR_ATTEMPTS and has_fresh_agent
-            )
+            # Two bounds, either ends the lane: enough DISTINCT agents gave
+            # up (the ceiling), or the task has been re-offered enough times
+            # in total, whoever gave up (the budget, issue #769). The budget
+            # is what terminates a single persistent agent's loop; the
+            # ceiling is what a multi-agent board normally hits first; the
+            # spawn-per-task runner, which also looks like one agent at
+            # give-up time, keeps its repair rung (#722) because neither
+            # bound reads who is registered right now.
+            under_ceiling = repair_attempt <= MAX_BLOCKER_REPAIR_ATTEMPTS
+            under_budget = total_requeues < MAX_BLOCKER_REPAIR_REQUEUES
+            requeued_for_repair = under_ceiling and under_budget
 
             if requeued_for_repair:
+                total_requeues = _record_repair_requeue(task_id)
                 now = datetime.now(timezone.utc)
                 recovery_info = RecoveryInfo(
                     recovered_at=now,
@@ -6319,31 +6367,68 @@ async def report_blocker(
                     MAX_BLOCKER_REPAIR_ATTEMPTS,
                 )
             else:
-                # Lane death: either the ceiling was reached (enough distinct
-                # agents gave up) or no fresh agent remains to re-offer it to
-                # (issue #769 floor). Record which so the log and the agent
-                # reply are accurate for both.
+                # Lane death. Record which bound ended it so the log and the
+                # agent reply are accurate for both.
                 lane_death_reason = (
-                    "every available agent has already given up on it (#769)"
-                    if not has_fresh_agent
+                    f"{MAX_BLOCKER_REPAIR_ATTEMPTS} independent agents gave up on it"
+                    if not under_ceiling
                     else (
-                        f"{MAX_BLOCKER_REPAIR_ATTEMPTS} independent agents "
-                        "gave up on it"
+                        f"it has been re-offered {MAX_BLOCKER_REPAIR_REQUEUES} "
+                        "times after give-ups (#769 repair budget)"
                     )
                 )
-                # Update task status
+                # The terminal write has to reach every place the task
+                # lives, or the lane is dead on the board and alive in
+                # memory (ultrareview on PR #770): the in-memory task, the
+                # subtask store (a subtask has no card of its own, so
+                # without this it stays IN_PROGRESS and its dependents
+                # starve, #595), the card, and the provider's blocked
+                # column (GitHub and Linear do not persist BLOCKED through
+                # update_task; the circuit breaker learned this on PR #707).
+                _dead_task = next(
+                    (
+                        t
+                        for t in (getattr(state, "project_tasks", None) or [])
+                        if t.id == task_id
+                    ),
+                    None,
+                )
+                if _dead_task is not None:
+                    _dead_task.status = TaskStatus.BLOCKED
+                    _dead_task.assigned_to = None
+                _subtasks = getattr(
+                    getattr(state, "subtask_manager", None), "subtasks", None
+                )
+                if isinstance(_subtasks, dict) and task_id in _subtasks:
+                    state.subtask_manager.update_subtask_status(
+                        task_id, TaskStatus.BLOCKED, state.project_tasks
+                    )
                 await state.kanban_client.update_task(
                     task_id,
-                    {"status": TaskStatus.BLOCKED, "blocker": blocker_description},
+                    {
+                        "status": TaskStatus.BLOCKED,
+                        "assigned_to": None,
+                        "blocker": blocker_description,
+                    },
                 )
+                if hasattr(state.kanban_client, "move_task_to_column"):
+                    try:
+                        await state.kanban_client.move_task_to_column(
+                            task_id, "blocked"
+                        )
+                    except Exception as _move_err:  # noqa: BLE001 - best effort
+                        logger.warning(
+                            f"move_task_to_column('blocked') failed for "
+                            f"{task_id}: {_move_err}"
+                        )
                 await _release_task_file_locks(state, task_id, "lane death")
                 logger.warning(
                     "LANE DEAD: task %s blocked because %s (distinct give-ups: "
-                    "%d, available agents: %d).",
+                    "%d, requeues so far: %d).",
                     task_id,
                     lane_death_reason,
                     repair_attempt,
-                    len(available_agents),
+                    total_requeues,
                 )
 
             # Release coordination state — a blocked task is terminal for the
@@ -6445,11 +6530,12 @@ async def report_blocker(
                     ),
                 }
             lane_death_detail = (
-                "no other available agent can attempt it"
-                if not has_fresh_agent
+                f"{MAX_BLOCKER_REPAIR_ATTEMPTS + 1} independent agents have now "
+                "given up"
+                if not under_ceiling
                 else (
-                    f"{MAX_BLOCKER_REPAIR_ATTEMPTS + 1} independent agents "
-                    "have now given up"
+                    f"it has already been handed back {MAX_BLOCKER_REPAIR_REQUEUES} "
+                    "times after give-ups"
                 )
             )
             return {
