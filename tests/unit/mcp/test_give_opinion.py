@@ -254,6 +254,67 @@ class TestGiveOpinion:
         state.kanban_client.add_comment.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_board_outage_costs_the_comment_not_the_opinion(self) -> None:
+        """A project whose board cannot connect still gets its opinion recorded.
+
+        The history registry is what the opinions read serves from, so it
+        is written before any board is touched, and a failure resolving
+        the board is handled like a failure posting the comment
+        (Codex P2 on PR #800).
+        """
+        state = _make_state()
+        state.current_project_id = "p-active"
+        state.project_manager = Mock()
+        state.project_manager.get_project_board = AsyncMock(
+            side_effect=RuntimeError("kanban down")
+        )
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new_callable=AsyncMock,
+        ) as persist:
+            result = await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+            )
+
+        assert result["success"] is True
+        persist.assert_awaited_once()
+        state.kanban_client.add_comment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_opinion_is_persisted_before_the_board_is_touched(self) -> None:
+        """Order: history registry first, board second."""
+        order: list[str] = []
+        state = _make_state()
+        state.current_project_id = "p-active"
+        state.project_manager = Mock()
+
+        async def board(_project_id: str) -> None:
+            order.append("board")
+            return None
+
+        state.project_manager.get_project_board = AsyncMock(side_effect=board)
+
+        async def persist(*_args: Any, **_kwargs: Any) -> None:
+            order.append("persist")
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new=persist,
+        ):
+            await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+            )
+
+        assert order == ["persist", "board"]
+
+    @pytest.mark.asyncio
     async def test_unknown_project_board_skips_the_comment(self) -> None:
         """If the registry cannot produce B's board, record without a comment."""
         state = _make_state()

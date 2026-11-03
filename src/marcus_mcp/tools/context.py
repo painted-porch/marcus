@@ -323,12 +323,31 @@ async def give_opinion(
             project_id=project_id,
         )
 
+        # Record first: the history registry is what the opinions read
+        # serves from, so it must be written before any board is touched.
+        # A board outage (or a project whose client cannot connect) may
+        # cost the comment, never the opinion (Codex P2 on PR #800).
+        if hasattr(state, "events") and state.events:
+            await state.events.publish_nowait(
+                "opinion_logged", agent_id, logged_decision.to_dict()
+            )
+        await _persist_decision_to_history(
+            logged_decision, state, project_id=project_id
+        )
+
         # Keep the opinion visible to a human watching the board: on the
         # task when there is one, else on the project's About card, and
         # always on the board of the project the opinion belongs to.
-        board_client, board_name, board_tasks = await _board_for_opinion(
-            state, project_id
-        )
+        try:
+            board_client, board_name, board_tasks = await _board_for_opinion(
+                state, project_id
+            )
+        except Exception as e:  # noqa: BLE001 - a board outage only costs the comment
+            logger.warning(
+                f"Could not resolve the board for project {project_id}; "
+                f"opinion recorded without a comment: {e}"
+            )
+            board_client, board_name, board_tasks = None, None, []
         target_id = task_id or _about_card_id(board_tasks, board_name)
         if board_client and target_id:
             try:
@@ -348,15 +367,6 @@ async def give_opinion(
                 canonical,
                 agent_id,
             )
-
-        if hasattr(state, "events") and state.events:
-            await state.events.publish_nowait(
-                "opinion_logged", agent_id, logged_decision.to_dict()
-            )
-
-        await _persist_decision_to_history(
-            logged_decision, state, project_id=project_id
-        )
 
         return {
             "success": True,
