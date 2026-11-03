@@ -1164,3 +1164,38 @@ if [ "$n" = "1" ]; then echo 2 > {RETRY_MARKER}; else touch .marcus_session_done
             register_snippet="true",
             chore_command="true",
         )
+
+    def test_a_kill_during_the_retry_wait_is_handled_at_once(
+        self, tmp_path: Path
+    ) -> None:
+        """SIGTERM mid-wait ends the session promptly (Codex P2 on PR #784).
+
+        The stub leaves a 60-second retry marker; the session is killed while
+        it waits. A foreground sleep would defer the trap for the full minute.
+        """
+        import os
+        import signal
+        import subprocess as sp
+        import time
+
+        repo = _repo_with_main(tmp_path)
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"#!/bin/bash\necho 60 > {RETRY_MARKER}\n")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        proc = sp.Popen(
+            ["bash", str(script)], stdout=sp.PIPE, stderr=sp.PIPE, text=True
+        )
+        # read until the waiting line appears (bounded)
+        deadline = time.monotonic() + 15
+        seen = ""
+        assert proc.stdout is not None
+        while time.monotonic() < deadline and "waiting 60s" not in seen:
+            seen += proc.stdout.readline()
+        assert "waiting 60s" in seen
+        started = time.monotonic()
+        os.kill(proc.pid, signal.SIGTERM)
+        proc.communicate(timeout=20)
+        assert time.monotonic() - started < 10
+        assert not workspace.exists()

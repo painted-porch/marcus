@@ -270,6 +270,16 @@ BRANCH="{branch}"
 # dev servers) before the workspace is removed from under them.
 set -m
 CHORE_PID=""
+WAIT_PID=""
+# A sleep the signal handler can interrupt: bash defers traps while a
+# foreground command runs, so a bare ``sleep`` would hold a killed session
+# (and its worktree) for the whole wait (Codex P2 on PR #784).
+pause() {{
+    sleep "$1" &
+    WAIT_PID=$!
+    wait "$WAIT_PID" 2>/dev/null
+    WAIT_PID=""
+}}
 # Stop everything left in the chore's process group: the harness itself on
 # a kill, or children it started and did not stop (a dev server, a test
 # watcher) after it exited normally. Waiting on the harness PID never waits
@@ -285,6 +295,7 @@ reap_chore() {{
 }}
 cleanup() {{
     trap - EXIT HUP TERM INT
+    [ -n "$WAIT_PID" ] && kill "$WAIT_PID" >/dev/null 2>&1
     reap_chore
     cd "$REPO" 2>/dev/null || exit 0
     git worktree remove --force "$WORKSPACE" >/dev/null 2>&1 || true
@@ -361,10 +372,10 @@ while true; do
         [ -z "$wait_s" ] && wait_s=30
         [ "$wait_s" -gt {MAX_RETRY_WAIT_SECONDS} ] && wait_s={MAX_RETRY_WAIT_SECONDS}
         echo "[session {sid}] no task; waiting ${{wait_s}}s before the next chore"
-        sleep "$wait_s"
+        pause "$wait_s"
         continue
     fi
-    sleep 2
+    pause 2
 done
 echo "=========================================="
 echo "{agent["name"]} - session over"
