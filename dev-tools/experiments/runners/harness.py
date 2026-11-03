@@ -9,7 +9,7 @@ the worker-keepalive wrapper, the trust-dialog handling, the
 workflow-file convention, and the install hint shown on a missing
 binary — differs.
 
-Before this module landed, ``AgentSpawner`` had six ``if/elif`` sites
+Before this module landed, the old spawner had six ``if/elif`` sites
 spread across one ~2000-line file, one per harness-specific quirk.
 Adding a third harness (e.g. ``gemini``) meant editing every site.
 This module collects every harness-specific behavior into a single
@@ -51,80 +51,6 @@ from pathlib import Path
 from typing import Dict, List, Protocol, Tuple, runtime_checkable
 
 
-def _bounded_relaunch_loop(
-    inner_cmd: str,
-    cli_name: str,
-    *,
-    break_on_clean_exit: bool,
-    max_relaunches: int = 50,
-) -> str:
-    """Render a bash relaunch loop for fire-and-exit harnesses.
-
-    Both :class:`CodexHarness` and :class:`GeminiHarness` wrap their
-    per-prompt invocations in this loop so a worker whose CLI exits
-    is brought back to keep polling Marcus.  The loop semantics
-    differ between the two harnesses by exactly one switch:
-
-    * **Codex** with ``--enable goals`` stays engaged across many
-      model turns inside one invocation — when ``codex exec`` exits
-      ``rc=0`` it genuinely means "the goal completed."  Breaking on
-      ``rc=0`` is correct; relaunching would burn tokens (especially
-      under ``--epictetus``).
-    * **Gemini** has no goals-equivalent.  Every ``gemini -p`` cycle
-      ends in ``rc=0`` after one prompt iteration.  Breaking on
-      ``rc=0`` would kill the worker after a single cycle before it
-      can finish a task or pick up another one — the worker MUST
-      relaunch unconditionally and rely on ``MAX_RELAUNCHES`` plus
-      the monitor's ``end_experiment`` tmux-kill to terminate.
-
-    Discovered live during PR #587 validation: a gemini worker
-    started a task, wrote a placeholder file, exited ``rc=0``, the
-    wrapper broke, and the task sat ``in_progress`` forever.
-
-    Parameters
-    ----------
-    inner_cmd : str
-        The single-shot per-pane invocation produced by
-        :meth:`Harness.build_agent_command`.
-    cli_name : str
-        Identifier surfaced in the ``[worker]`` pane-history echoes
-        (``codex``, ``gemini``) so scrollback is harness-explicit.
-    break_on_clean_exit : bool
-        See above.  ``True`` for codex; ``False`` for gemini.
-    max_relaunches : int, optional
-        Loop cap.  Default 50.
-
-    Returns
-    -------
-    str
-        A multi-line bash block ready to be embedded in the worker
-        shell script.
-    """
-    if break_on_clean_exit:
-        clean_exit_branch = (
-            "  if [ $rc -eq 0 ]; then\n"
-            f'    echo "[worker] {cli_name} finished cleanly (rc=0);'
-            ' not relaunching"\n'
-            "    break\n"
-            "  fi\n"
-        )
-    else:
-        clean_exit_branch = ""
-    return (
-        f"MAX_RELAUNCHES={max_relaunches}\n"
-        "for relaunch in $(seq 1 $MAX_RELAUNCHES); do\n"
-        f'  echo "[worker] {cli_name} launch $relaunch/$MAX_RELAUNCHES"\n'
-        f"  {inner_cmd}\n"
-        "  rc=$?\n"
-        f"{clean_exit_branch}"
-        f'  echo "[worker] {cli_name} exited rc=$rc;'
-        ' relaunching in 3s..."\n'
-        "  sleep 3\n"
-        "done\n"
-        'echo "[worker] hit MAX_RELAUNCHES=$MAX_RELAUNCHES — giving up"'
-    )
-
-
 @runtime_checkable
 class Harness(Protocol):
     """Structural protocol every per-CLI harness implementation satisfies.
@@ -135,7 +61,7 @@ class Harness(Protocol):
         Stable identifier the runner stores on ``config.harness`` and
         the user picks on the command line (``--harness <name>``).
     binary : str
-        Executable name looked up on PATH during the spawner
+        Executable name looked up on PATH during the launcher
         pre-flight.
     provider : str
         Cost-tracking provider label (``"anthropic"`` / ``"openai"``).
@@ -146,15 +72,15 @@ class Harness(Protocol):
         provider string per code path.
     needs_trust_dialog_poll : bool
         ``True`` when the harness raises an interactive trust dialog
-        on first launch in a directory; the spawner then polls each
+        on first launch in a directory; the host then polls each
         pane for the prompt and confirms it.  Claude only.
     needs_pretrust_directory : bool
         ``True`` when the harness reads a per-directory trust file
-        (e.g. ``~/.claude.json``) that the spawner must seed before
+        (e.g. ``~/.claude.json``) that the host must seed before
         launch.  Claude only.
     workflow_files : Tuple[str, ...]
-        Workflow filenames the spawner copies into the implementation
-        directory so the agent picks up Marcus-specific guidance.
+        Workflow filenames the launcher writes into the implementation
+        directory so the agent picks up the session contract.
         For codex, both ``CLAUDE.md`` and ``AGENTS.md`` are written —
         the latter is the codex-specific convention
         (https://developers.openai.com/codex/guides/agents-md).
@@ -176,23 +102,6 @@ class Harness(Protocol):
         print_mode: bool = False,
     ) -> str:
         """Return the per-pane shell command line that launches the agent."""
-        ...
-
-    def wrap_worker_invocation(self, inner_cmd: str) -> str:
-        """Return the worker shell block: bare invocation or wrapped loop.
-
-        ``inner_cmd`` is the pre-rendered single-shot command produced
-        by :meth:`build_agent_command`.  Implementations decide whether
-        to return it unchanged (claude TUI stays alive) or wrap it
-        (codex relaunch loop).
-
-        .. note::
-            Resist adding knobs through ``inner_cmd`` — if a future
-            harness needs different wrapping behavior, expose the
-            distinction as a *structured* parameter or a new method.
-            Threading semantics through the inner command string
-            re-couples the strategy classes to each other.
-        """
         ...
 
     def build_mcp_register_snippet(self) -> str:
@@ -279,10 +188,6 @@ class ClaudeHarness:
             f"  {model_flag}--dangerously-skip-permissions "
             f"{print_flag}< {prompt_file}"
         )
-
-    def wrap_worker_invocation(self, inner_cmd: str) -> str:
-        """Claude TUI stays alive across model turns — no wrapper needed."""
-        return inner_cmd
 
     def build_mcp_register_snippet(self) -> str:
         """No-op: the agent command pins Marcus via ``--strict-mcp-config``.
@@ -383,17 +288,6 @@ class CodexHarness:
             f"-C {workdir} --add-dir {workdir} \\\n"
             f"  {model_flag}< {prompt_file}"
         )
-
-    def wrap_worker_invocation(self, inner_cmd: str) -> str:
-        """Wrap ``codex exec`` in the shared bounded relaunch loop.
-
-        Codex ``exec`` is fire-and-exit: each invocation runs until
-        the model judges its goal complete or the token budget is
-        reached.  The relaunch loop brings it back to keep polling
-        Marcus.  See :func:`_bounded_relaunch_loop` for the loop
-        semantics (``rc=0`` break, ``MAX_RELAUNCHES`` cap).
-        """
-        return _bounded_relaunch_loop(inner_cmd, "codex", break_on_clean_exit=True)
 
     def build_mcp_register_snippet(self) -> str:
         """``codex mcp add`` writes to ``~/.codex/config.toml``.
@@ -514,20 +408,6 @@ class GeminiHarness:
             f"--include-directories {workdir} \\\n"
             f"  {model_flag}< {prompt_file}"
         )
-
-    def wrap_worker_invocation(self, inner_cmd: str) -> str:
-        """Wrap ``gemini`` in the shared bounded relaunch loop.
-
-        Critically passes ``break_on_clean_exit=False``: ``gemini
-        -p`` exits ``rc=0`` after every prompt cycle (gemini has no
-        codex ``--enable goals`` equivalent that keeps it engaged
-        across cycles), so the worker MUST relaunch unconditionally
-        to keep polling Marcus.  Breaking on ``rc=0`` was the live-
-        validation failure mode discovered on PR #587: the worker
-        started a task, wrote a placeholder file, exited 0, the
-        wrapper broke, and the task sat ``in_progress`` forever.
-        """
-        return _bounded_relaunch_loop(inner_cmd, "gemini", break_on_clean_exit=False)
 
     def build_mcp_register_snippet(self) -> str:
         """``gemini mcp add`` writes to ``~/.gemini/settings.json`` at user scope.

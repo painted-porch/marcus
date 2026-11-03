@@ -4076,7 +4076,7 @@ async def _attempt_merge_recovery(
     1. Read ``source_context.merge_conflict`` from the BLOCKED task.
     2. Resolve the worktree path
        (``<project_root>/../worktrees/<agent_id>``, the Marcus
-       convention set by ``spawn_agents.py``).
+       convention set by the session launcher).
     3. Run ``git rebase main`` in the worktree.
     4. On clean rebase: ``git checkout main`` in the main repo,
        ``git merge --ff-only <branch>``, transition task to DONE
@@ -6156,7 +6156,7 @@ async def request_task_redo(
     )
     previous_branch = f"marcus/{previous_agent}" if previous_agent else None
 
-    # Best-effort worktree resolution via the spawn_agents.py convention
+    # Best-effort worktree resolution via the session launcher's convention
     # ``<project_root>/../worktrees/<agent_id>``. The worktree may already
     # be cleaned up — the branch (merged work) is the durable handle.
     previous_worktree_path: Optional[str] = None

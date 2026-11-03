@@ -153,16 +153,20 @@ These are non-negotiable. Violating them breaks the coordination model:
 
 A runner is any system that:
 
-1. Starts one agent as **project creator** — it calls `create_project` via Marcus
-   and writes `project_info.json` when complete.
-2. Starts N agents as **workers** — they wait for `project_info.json`, then
-   enter the work loop above.
-3. Optionally starts a **monitor** — polls `get_experiment_status` and calls
-   `end_experiment` when `is_running` flips to false.
+1. Creates the project — it calls `create_project` via Marcus (with
+   `project_root` set) and makes sure `project_info.json` exists for the
+   workers.
+2. Starts N **worker sessions** — each registers once, then enters the work
+   loop above, one task at a time.
+3. Lets the board end the run — a session exits when `request_next_task`
+   returns `status: "BOARD_DRAINED"`; the runner waits for every session to
+   exit and tears down. No monitor agent is needed, and the runner must not
+   restart a session Marcus has already recovered from.
 
 The reference runner is
-[`dev-tools/experiments/runners/spawn_agents.py`](dev-tools/experiments/runners/spawn_agents.py),
-which implements this pattern using Claude CLI agents in tmux panes.
+[`dev-tools/experiments/runners/session_launcher.py`](dev-tools/experiments/runners/session_launcher.py)
+(run through `run_experiment.py`), which implements this pattern with agent
+CLI sessions in tmux windows, one chore per harness invocation.
 
 ---
 
@@ -173,8 +177,8 @@ To add support for a different agent runtime (LangGraph, AutoGen, Codex, etc.):
 1. Connect your agent to the Marcus MCP server at `http://localhost:4298/mcp`.
 2. Copy [`prompts/Agent_prompt.md`](prompts/Agent_prompt.md) into your agent's
    system prompt (or translate it to your runtime's prompt format).
-3. Ensure your runner implements the project creator / worker / monitor split
-   described above.
+3. Ensure your runner implements the create-project / worker-sessions /
+   board-ends-the-run pattern described above.
 4. Validate against the synthetic agent test harness (see issue
    [#383](https://github.com/lwgray/marcus/issues/383)) — if a synthetic agent
    can complete an experiment end-to-end with your runner, your integration is
@@ -189,7 +193,7 @@ Creator:   create_project(description, project_name) → board populated, tasks 
 Startup:   register_agent
 Work loop: request_next_task → [get_task_context] → work → log_decision/log_artifact → report_task_progress(100%) → repeat
 No task:   sleep retry_after_seconds → retry (do not exit)
-Exit:      runner-controlled
+Exit:      request_next_task returns BOARD_DRAINED (should_exit: true)
 ```
 
 See [`prompts/Agent_prompt.md`](prompts/Agent_prompt.md) for the complete

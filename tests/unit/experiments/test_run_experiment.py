@@ -78,3 +78,142 @@ class TestCreateExperimentStructureShutilShadowing:
         assert (
             experiment_dir / "config.yaml"
         ).exists(), "config.yaml should have been copied from the template"
+
+
+def _experiment(tmp_path: Path) -> Path:
+    """Lay out a valid experiment directory."""
+    experiment = tmp_path / "exp"
+    experiment.mkdir()
+    (experiment / "config.yaml").write_text(
+        "project_name: 'tiny'\nproject_spec_file: project_spec.md\n"
+        "agents:\n  - id: a1\n    name: A1\n  - id: a2\n    name: A2\n"
+        "  - id: a3\n    name: A3\n"
+    )
+    (experiment / "project_spec.md").write_text("Build a tiny app.")
+    return experiment
+
+
+class TestMainIsSessionOnly:
+    """A plain run is the session launcher; there is no other mode."""
+
+    def test_sessions_default_from_config(self, tmp_path: Path) -> None:
+        """No --sessions: the count comes from config.yaml (here, three agents)."""
+        experiment = _experiment(tmp_path)
+        launcher = type("L", (), {"run": lambda self: True})
+        with (
+            patch.object(
+                run_experiment.sys, "argv", ["run_experiment.py", str(experiment)]
+            ),
+            patch.object(run_experiment, "SessionLauncher") as launcher_cls,
+            pytest.raises(SystemExit) as exit_info,
+        ):
+            launcher_cls.return_value = launcher()
+            run_experiment.main()
+        assert exit_info.value.code == 0
+        assert launcher_cls.call_args.kwargs["sessions"] == 3
+
+    def test_sessions_flag_overrides_config(self, tmp_path: Path) -> None:
+        """--sessions N wins over the config count."""
+        experiment = _experiment(tmp_path)
+        with (
+            patch.object(
+                run_experiment.sys,
+                "argv",
+                ["run_experiment.py", str(experiment), "--sessions", "1"],
+            ),
+            patch.object(run_experiment, "SessionLauncher") as launcher_cls,
+            pytest.raises(SystemExit),
+        ):
+            launcher_cls.return_value.run.return_value = True
+            run_experiment.main()
+        assert launcher_cls.call_args.kwargs["sessions"] == 1
+
+    def test_failed_run_exits_nonzero(self, tmp_path: Path) -> None:
+        """The launcher's False becomes exit code 1."""
+        experiment = _experiment(tmp_path)
+        with (
+            patch.object(
+                run_experiment.sys, "argv", ["run_experiment.py", str(experiment)]
+            ),
+            patch.object(run_experiment, "SessionLauncher") as launcher_cls,
+            pytest.raises(SystemExit) as exit_info,
+        ):
+            launcher_cls.return_value.run.return_value = False
+            run_experiment.main()
+        assert exit_info.value.code == 1
+
+    def test_no_spawn_loop_remains(self) -> None:
+        """The runner module no longer knows about a spawner."""
+        assert not hasattr(run_experiment, "AgentSpawner")
+
+
+class TestMainSetupModes:
+    """``--init``, ``--validate``, and the failure exits around them."""
+
+    def _templates(self, tmp_path: Path) -> Path:
+        """Create a templates dir next to a fake ``runners/`` and return it."""
+        templates = tmp_path / "experiments" / "templates"
+        templates.mkdir(parents=True)
+        (templates / "config.yaml.template").write_text(
+            "project_name: 'x'\nproject_spec_file: project_spec.md\nagents: []\n"
+        )
+        (tmp_path / "experiments" / "runners").mkdir()
+        return templates
+
+    def _run_main(self, argv: list[str], templates: Path) -> int:
+        """Run ``main()`` with the module believing it lives beside ``templates``."""
+        fake_module = templates.parent / "runners" / "run_experiment.py"
+        with (
+            patch.object(run_experiment.sys, "argv", ["run_experiment.py", *argv]),
+            patch.object(run_experiment, "__file__", str(fake_module)),
+            pytest.raises(SystemExit) as exit_info,
+        ):
+            run_experiment.main()
+        return int(exit_info.value.code or 0)
+
+    def test_init_lays_out_the_directory_and_exits_zero(self, tmp_path: Path) -> None:
+        """--init copies the templates, creates the subdirectories, and stops."""
+        templates = self._templates(tmp_path)
+        experiment = tmp_path / "new-exp"
+        with patch(
+            "subprocess.run",
+            return_value=type("R", (), {"returncode": 0, "stdout": "marcus"})(),
+        ):
+            code = self._run_main(["--init", str(experiment)], templates)
+        assert code == 0
+        assert (experiment / "config.yaml").exists()
+        assert (experiment / "project_spec.md").exists()
+        for sub in ("prompts", "logs", "implementation", "worktrees"):
+            assert (experiment / sub).is_dir()
+
+    def test_missing_directory_exits_one(self, tmp_path: Path) -> None:
+        """A run against a directory that does not exist is refused."""
+        templates = self._templates(tmp_path)
+        code = self._run_main([str(tmp_path / "nope")], templates)
+        assert code == 1
+
+    def test_validate_passes_on_a_complete_experiment(self, tmp_path: Path) -> None:
+        """--validate exits zero when config.yaml and the spec are present."""
+        templates = self._templates(tmp_path)
+        experiment = _experiment(tmp_path)
+        assert self._run_main(["--validate", str(experiment)], templates) == 0
+
+    def test_validate_fails_when_spec_is_missing(self, tmp_path: Path) -> None:
+        """--validate exits one and names the missing spec."""
+        templates = self._templates(tmp_path)
+        experiment = _experiment(tmp_path)
+        (experiment / "project_spec.md").unlink()
+        assert self._run_main(["--validate", str(experiment)], templates) == 1
+
+    def test_validate_fails_on_unreadable_config(self, tmp_path: Path) -> None:
+        """A config.yaml that does not parse is a validation error."""
+        experiment = tmp_path / "exp"
+        experiment.mkdir()
+        (experiment / "config.yaml").write_text("project_name: [unclosed\n")
+        assert run_experiment.validate_experiment(experiment) is False
+
+    def test_validate_fails_without_config(self, tmp_path: Path) -> None:
+        """No config.yaml at all is a validation error."""
+        experiment = tmp_path / "exp"
+        experiment.mkdir()
+        assert run_experiment.validate_experiment(experiment) is False

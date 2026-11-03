@@ -397,7 +397,7 @@ class TestPathDiscriminator:
     async def test_explicit_marcus_path_flows_through(
         self, cost_store: Any, recorder: Any
     ) -> None:
-        """spawn_agents.py's path='marcus' lands in the runs row."""
+        """The session launcher's path='marcus' lands in the runs row."""
         from src.marcus_mcp.tools.nlp import create_project
 
         state = _build_state(cost_store)

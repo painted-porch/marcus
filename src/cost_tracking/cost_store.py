@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS runs (
   project_id       TEXT NOT NULL,
   -- Entry point that produced this run. One of:
   --   'direct'     - human MCP user (e.g., Claude Code calling create_project)
-  --   'marcus'     - /marcus meta-runner via experiments/spawn_agents.py
-  --   'posidonius' - Posidonius automated research runner via spawn_agents.py
+  --   'marcus'     - the session launcher (run_experiment.py / the /marcus skill)
+  --   'posidonius' - Posidonius automated research runner (sets options.path)
   --   'unknown'    - legacy rows from before the discriminator existed
   path             TEXT NOT NULL DEFAULT 'unknown',
   board_id         TEXT,
@@ -557,7 +557,7 @@ DEFAULT_SEED.extend(
         ),
         # ── Legacy Claude 3.x family ──
         # Marcus's default config (anthropic_provider.py:71) still uses
-        # claude-3-haiku-20240307; spawn_agents docs reference
+        # claude-3-haiku-20240307; older experiment docs reference
         # claude-3-5-sonnet-20241022. Sonnet 3.7 + Opus 3 are formally
         # deprecated but still appear on the pricing page.
         ModelPrice(

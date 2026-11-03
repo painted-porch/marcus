@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moving a GitHub issue to the blocked or in-progress column no longer wipes its other labels.
 
 ### Removed
+- The spawn-per-task runner (epic #706 Milestone A, ADR-0012 D10). `run_experiment.py` now has one mode: the session launcher. Deleted: the spawn loop, the project-creator agent, the stall watchdog and spawn-thrash detector (`spawn_controller.py`), the codex/gemini relaunch wrapper in `harness.py`, the "EXACTLY ONE task then exit" worker prompt (`templates/agent_prompt.md`), the dead `config.yaml.simple` template, and the stale top-level `experiments/spawn_agents.py` copy. What the launcher still needs (config, tmux, worktrees, harness command, Claude trust seeding) lives in `runners/worker_host.py`. `config.yaml` gains an optional `sessions:` key (default: one session per listed agent); `stall_timeout_minutes`, `spawn_thrash_polls`, `cpm_override`, `max_agents`, and per-agent `subagents` are no longer read. `--sessions N` overrides the config. The launcher now mirrors its progress to `logs/runner.log` and labels its runs `path: "marcus"` in the cost store. The `/marcus` skill is rewritten for sessions.
 - The experiment runner no longer instructs workers to register `{agent_id}_sub{i}` phantom subagents.
 
 ## [0.3.10] - 2026-10-18

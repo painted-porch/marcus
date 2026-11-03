@@ -40,8 +40,8 @@ When a task passes validation and is marked DONE, Marcus merges the agent's bran
 
 | Actor | Responsibility |
 |-------|---------------|
-| `run_experiment.py` | `git init`, create `implementation/` on `main` |
-| `spawn_agents.py` | Creates worktrees per worker via `_create_agent_worktree()`. Sets git identity. Sets working directory in agent prompt. |
+| `session_launcher.py` | `git init`, create `implementation/` on `main`, commit the scaffold |
+| `worker_host.py` | Creates one worktree per session via `WorkerHost.create_worktree()` at `worktrees/<agent_id>`. Git identity is set in the session script. |
 | Marcus MCP (`task.py`) | `_merge_agent_branch_to_main()` in `report_task_progress()` after validation passes. Sends agent back on conflicts. |
 | Worker agent | Works in its worktree, commits to its branch, resolves conflicts if sent back |
 | Integration agent | Works on `main` (everything already merged), verifies and fixes |
@@ -153,8 +153,8 @@ Marcus has three interfaces. Each handles worktree creation differently:
 
 | Interface | Who creates worktrees? | Where? |
 |-----------|----------------------|--------|
-| `/marcus` skill | `spawn_agents.py` (automatic) | In experiment runner |
-| Posidonius | `spawn_agents.py` via `run_experiment.py` (automatic) | Same code path |
+| `/marcus` skill | `session_launcher.py` via `run_experiment.py` (automatic) | In experiment runner |
+| Posidonius | `session_launcher.py` via `run_experiment.py` (automatic) | Same code path |
 | MCP direct | User (manual `git worktree add`) | User's responsibility |
 
 For the `/marcus` skill and Posidonius interfaces, worktree creation is fully automated. When using the MCP server directly (without the experiment runner), the user is responsible for setting up git worktrees manually.
@@ -167,7 +167,8 @@ For the `/marcus` skill and Posidonius interfaces, worktree creation is fully au
 
 ## Implementation Files
 
-- `dev-tools/experiments/runners/spawn_agents.py` — `_create_agent_worktree()`, `spawn_worker()`, `create_worker_prompt()`
+- `dev-tools/experiments/runners/worker_host.py` — `WorkerHost.create_worktree()`
+- `dev-tools/experiments/runners/session_launcher.py` — `SessionLauncher.launch_session()`
 - `src/marcus_mcp/tools/task.py` — `_merge_agent_branch_to_main()` in `report_task_progress()`
 
 ## Prerequisite: Project Scaffolding

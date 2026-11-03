@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Marcus Experiment Launcher.
+Marcus experiment runner: set up an experiment directory and start sessions.
 
-Convenience script to run Marcus multi-agent experiments.
-Creates experiment directory structure if needed and launches agents.
+``--init`` lays out the directory from the templates, ``--validate`` checks
+it, and a plain run hands the experiment to the session launcher
+(:mod:`runners.session_launcher`), which creates the project over MCP and
+starts N persistent worker sessions. Marcus itself starts nothing (epic
+#706, ADR-0012 D10).
 """
 
 import argparse
@@ -14,7 +17,8 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from runners.spawn_agents import AgentSpawner, ExperimentConfig  # noqa: E402
+from runners.session_launcher import SessionLauncher  # noqa: E402
+from runners.worker_host import ExperimentConfig  # noqa: E402
 
 
 def create_experiment_structure(experiment_dir: Path, templates_dir: Path) -> bool:
@@ -213,8 +217,11 @@ Examples:
   # Create a new experiment
   python run_experiment.py --init ~/experiments/my-project
 
-  # Run an existing experiment
+  # Run an existing experiment (sessions from config.yaml)
   python run_experiment.py ~/experiments/my-project
+
+  # Run with three worker sessions
+  python run_experiment.py ~/experiments/my-project --sessions 3
 
   # Validate experiment config without running
   python run_experiment.py --validate ~/experiments/my-project
@@ -244,10 +251,10 @@ Examples:
         action="store_true",
         default=False,
         help=(
-            "Keep the tmux session alive after the experiment ends. "
+            "Keep the tmux session alive after the run ends. "
             "Use when running Epictetus post-experiment interrogation so "
             "the tool can query agents after the project is complete. "
-            "Default: session is killed once all agents exit."
+            "Default: session is killed once all sessions have gone home."
         ),
     )
 
@@ -256,9 +263,9 @@ Examples:
         type=str,
         default=None,
         help=(
-            "Override the model used for spawned agent CLI processes "
-            "(project creator, workers, monitor).  The same model "
-            "string is applied to every agent and is passed through "
+            "Override the model used by the worker sessions' agent CLI. "
+            "The same model string is applied to every session and is "
+            "passed through "
             "verbatim to whichever harness is active "
             "(``claude --model`` or ``codex --model``).  No "
             "per-harness validation — invalid model names surface as "
@@ -266,8 +273,8 @@ Examples:
             "flag overrides ``agent_model`` in ``config.yaml``, which "
             "overrides ``ai.model`` in ``config_marcus.json``.  When "
             "unset, falls back to whatever the harness CLI is "
-            "globally configured for.  Affects ONLY the spawned "
-            "Agent processes; Marcus's Planner model continues to "
+            "globally configured for.  Affects ONLY the worker "
+            "sessions; Marcus's Planner model continues to "
             "read from ``config_marcus.json`` unchanged."
         ),
     )
@@ -278,19 +285,19 @@ Examples:
         default=None,
         choices=["claude", "codex", "gemini"],
         help=(
-            "Agent harness used to spawn each pane.  ``claude`` "
-            "(default) spawns Anthropic's claude CLI with "
-            "``--dangerously-skip-permissions``; ``codex`` spawns "
+            "Agent CLI each session runs.  ``claude`` "
+            "(default) runs Anthropic's claude CLI with "
+            "``--dangerously-skip-permissions``; ``codex`` runs "
             "OpenAI's codex CLI with ``exec "
             "--dangerously-bypass-approvals-and-sandbox`` (the "
             "documented flag for approval=never, "
             "sandbox=danger-full-access; equivalent to the "
-            "colloquial ``--yolo`` mode); ``gemini`` spawns Google's "
+            "colloquial ``--yolo`` mode); ``gemini`` runs Google's "
             "gemini CLI with ``--skip-trust --yolo`` (bypass the "
             "trusted-directory dialog and auto-approve all tool "
             "calls).  When unset, falls back to ``harness`` in "
             "``config.yaml`` which itself defaults to ``claude``.  "
-            "All agents in a single experiment use the same harness; "
+            "All sessions in a single run use the same harness; "
             "mixed-harness teams are intentionally out of scope for "
             "v1.  Pre-flight verifies the harness CLI is on PATH and "
             "that the Marcus MCP server is registered in the "
@@ -305,24 +312,25 @@ Examples:
         default=None,
         metavar="N",
         help=(
-            "Run the session launcher instead of the legacy spawn loop: "
-            "create the project over MCP, start N persistent worker "
-            "sessions (one chore per harness invocation, fresh context "
-            "each chore), wait for them to go home on BOARD_DRAINED, then "
-            "tear down. No restarts, no watchdog (epic #706 Milestone A)."
+            "How many persistent worker sessions to start (one chore per "
+            "harness invocation, fresh context each chore). Defaults to "
+            "``sessions`` in config.yaml, or the number of listed agents. "
+            "The launcher creates the project over MCP, waits for every "
+            "session to go home on BOARD_DRAINED, then tears down; no "
+            "restarts, no watchdog (epic #706 Milestone A)."
         ),
     )
     parser.add_argument(
         "--max-chores",
         type=int,
         default=200,
-        help="Per-session chore cap for --sessions runs (default 200).",
+        help="Per-session chore cap (default 200).",
     )
     parser.add_argument(
         "--no-wait",
         action="store_true",
         default=False,
-        help="With --sessions: return as soon as the sessions are started.",
+        help="Return as soon as the sessions are started.",
     )
     args = parser.parse_args()
 
@@ -373,34 +381,18 @@ Examples:
 
     config_file = experiment_dir / "config.yaml"
     config = ExperimentConfig(config_file)
-    if args.sessions is not None:
-        from runners.session_launcher import SessionLauncher
-
-        launcher = SessionLauncher(
-            config,
-            templates_dir,
-            sessions=args.sessions,
-            epictetus=args.epictetus,
-            agent_model=args.model,
-            harness=args.harness,
-            max_chores=args.max_chores,
-            wait=not args.no_wait,
-        )
-        sys.exit(0 if launcher.run() else 1)
-    print(
-        "Note: the legacy spawn loop is on its way out; the session launcher "
-        "is `--sessions N` (epic #706)."
-    )
-    spawner = AgentSpawner(
+    sessions = args.sessions if args.sessions is not None else config.sessions
+    launcher = SessionLauncher(
         config,
         templates_dir,
+        sessions=sessions,
         epictetus=args.epictetus,
         agent_model=args.model,
         harness=args.harness,
+        max_chores=args.max_chores,
+        wait=not args.no_wait,
     )
-
-    success = spawner.run()
-    sys.exit(0 if success else 1)
+    sys.exit(0 if launcher.run() else 1)
 
 
 if __name__ == "__main__":

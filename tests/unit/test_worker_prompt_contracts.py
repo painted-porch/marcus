@@ -1,19 +1,16 @@
 """
-Contract tests for the worker prompt files (Codex P1 on PR #720).
+Contract tests for the worker prompt (Codex P1 on PR #720).
 
-Marcus ships more than one worker prompt:
-
-* ``prompts/Agent_prompt.md`` — the CANONICAL, user-facing spec. The
-  README tells operators to copy this into every project directory, so
-  this is the prompt real users' agents run with.
-* ``dev-tools/experiments/templates/agent_prompt.md`` — the prompt the
-  experiment runner embeds for spawned agents.
-
-They drift silently: #719's severity contract was added to the
-experiment template only, so agents launched via the documented setup
-would still send the default ``medium`` for an impossible blocker and
-unexpectedly keep the task. These tests pin the behaviour-defining
-contracts in BOTH files so a future change to one surfaces the other.
+``prompts/Agent_prompt.md`` is the canonical, user-facing worker spec: the
+README tells operators to copy it into every project directory, so it is
+the prompt real users' agents run with. The experiment runner's one-task
+copy (``dev-tools/experiments/templates/agent_prompt.md``) drifted from it
+silently (#719's severity contract was added to one file only) and was
+deleted with the spawn-per-task runner (epic #706); the session launcher's
+sheet is ``dev-tools/experiments/templates/session_prompt.md``, pinned by
+``tests/unit/experiments/test_session_launcher.py``. These tests pin the
+behaviour-defining contracts of the canonical prompt, and the list below
+is where a second sheet goes if one is ever held to the same contract.
 """
 
 from pathlib import Path
@@ -24,11 +21,22 @@ pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_PROMPT = REPO_ROOT / "prompts" / "Agent_prompt.md"
-EXPERIMENT_PROMPT = (
+DELETED_ONE_TASK_PROMPT = (
     REPO_ROOT / "dev-tools" / "experiments" / "templates" / "agent_prompt.md"
 )
 
-ALL_PROMPTS = [CANONICAL_PROMPT, EXPERIMENT_PROMPT]
+ALL_PROMPTS = [CANONICAL_PROMPT]
+
+
+class TestOneTaskCopyStaysDeleted:
+    """The "EXACTLY ONE task then exit" sheet must not come back."""
+
+    def test_experiment_one_task_prompt_is_gone(self) -> None:
+        """Nothing reads it, and a second sheet is how contracts drift."""
+        assert not DELETED_ONE_TASK_PROMPT.exists(), (
+            "the one-task worker prompt was deleted with the spawn loop; "
+            "extend ALL_PROMPTS instead of reviving it"
+        )
 
 
 @pytest.mark.parametrize("prompt_path", ALL_PROMPTS, ids=lambda p: p.name)
@@ -137,9 +145,7 @@ class TestDrainSignalContract:
     """Epic #706: the server's BOARD_DRAINED verdict is the only exit rule.
 
     The canonical loop prompt must teach the worker to stop on the drain
-    signal and never on its own reading of the board; the experiment
-    template is the one-task copy slated for deletion and is not held to
-    the loop contract.
+    signal and never on its own reading of the board.
     """
 
     def test_names_the_drain_signal(self) -> None:
