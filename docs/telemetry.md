@@ -94,26 +94,6 @@ when it decomposes your project. We do **not** make a separate LLM call to
 produce these labels, and we do **not** ship your project description text.
 Only the bucket labels above leave your machine.
 
-**`experiment_started`** — fired when a multi-agent experiment begins.
-
-```json
-{ "agent_count": 3, "runner": "meta_runner" }
-```
-
-**`experiment_completed`** — fired when a run finishes.
-
-```json
-{
-  "total_tasks": 14,
-  "completion_pct": 100,
-  "duration_minutes": 47,
-  "agent_count": 3,
-  "blocker_rate": 0.07,
-  "decomposer_strategy": "contract_first",
-  "complexity_mode": "standard"
-}
-```
-
 **`project_cost_summary`** — fired when a run finishes, summarizing
 aggregate token cost.
 

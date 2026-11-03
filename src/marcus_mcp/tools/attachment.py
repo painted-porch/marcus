@@ -340,18 +340,6 @@ async def log_artifact(
         )
         logger.info(log_msg)
 
-        # Record in active experiment if one is running
-        from src.experiments.live_experiment_monitor import get_active_monitor
-
-        monitor = get_active_monitor()
-        if monitor and monitor.is_running:
-            monitor.record_artifact(
-                task_id=task_id,
-                artifact_type=artifact_type,
-                filename=filename,
-                description=description or "",
-            )
-
         # Persist to project history for post-project analysis
         await _persist_artifact_to_history(
             task_id=task_id,

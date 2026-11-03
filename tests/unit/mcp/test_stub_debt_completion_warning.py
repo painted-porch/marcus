@@ -18,7 +18,6 @@ pytestmark = pytest.mark.unit
 
 # Pre-stub modules that would trigger side effects on import.
 for _mod in [
-    "src.experiments.live_experiment_monitor",
     "src.integrations.planka.client",
 ]:
     if _mod not in sys.modules:

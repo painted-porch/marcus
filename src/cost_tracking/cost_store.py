@@ -24,8 +24,8 @@ identifying which run produced it.
 This concept used to be named ``experiment`` / ``experiment_id``.
 The rename happened because the name clashed with MLflow's
 *operational* experiment concept (the ``start_experiment`` MCP tool
-in ``src/marcus_mcp/tools/experiments.py``), which is unrelated:
-MLflow tracks task assignments, completions, and blockers for
+of the since-deleted experiment monitor), which was unrelated:
+MLflow tracked task assignments, completions, and blockers for
 ``/marcus`` and Posidonius runs; the cost-tracking layer tracks
 LLM token spend grouped by run. They share nothing besides a
 historical name collision.
@@ -696,7 +696,7 @@ class CostStore:
         Before this rename, the cost-tracking layer used
         ``experiments`` and ``experiment_id`` as its terminology. That
         clashed with MLflow's *operational* experiment concept (the
-        ``start_experiment`` MCP tool), causing real architectural
+        since-deleted ``start_experiment`` MCP tool), causing real architectural
         confusion — see Simon decision ``7ed3074d``. The rename
         clarifies that these are two unrelated systems with a
         historical name collision.
@@ -1213,8 +1213,8 @@ class CostStore:
         When ``ended_at`` is ``None``, falls back to the timestamp of
         the most recent ``token_events`` row attributed to this run —
         the best on-disk approximation for unattended close
-        (``path=direct`` usage where the user never calls
-        ``end_experiment``). When no events exist for the run, the
+        (a run whose board never drained, so nothing closed it). When
+        no events exist for the run, the
         method returns False without updating, since "closed with no
         activity" is ambiguous and likely indicates the run died
         before any LLM call.
@@ -1341,8 +1341,8 @@ class CostStore:
         their ``token_events`` rows to the same ``run`` that
         ``create_project`` opened for the project at setup time. That run
         is the latest row in ``runs`` for the project whose ``ended_at``
-        is still NULL -- it stays open until ``end_experiment`` closes
-        it (#768).
+        is still NULL -- it stays open until the board drains and
+        ``request_next_task`` closes it (#768).
 
         This is the read-only sibling of
         :meth:`close_latest_open_run_for_project`: identical row
@@ -1395,7 +1395,8 @@ class CostStore:
     ) -> Optional[str]:
         """Close the most recently started open run for a project (#537).
 
-        Live-close hook for ``end_experiment``. The schema allows
+        Live-close hook for the drain signal (``BOARD_DRAINED`` in
+        ``request_next_task``). The schema allows
         multiple ``runs`` rows per ``project_id`` (retries, repeated
         traversals), so a bulk close would stamp every historical
         open row with the just-finished experiment's
@@ -1413,7 +1414,7 @@ class CostStore:
         or dashless hex form (SQLiteKanban auto-discovery) — both
         resolve to the dashless form actually stored in ``runs``.
         Without this, the live close silently no-ops whenever the
-        monitor was handed a dashed project_id.
+        caller was handed a dashed project_id.
 
         Returns
         -------

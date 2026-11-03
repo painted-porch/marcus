@@ -94,10 +94,6 @@ ROLE_TOOLS = {
         "create_project",  # NLP project creation
         # Scheduling and resource planning
         "get_optimal_agent_count",  # Calculate optimal agent count using CPM
-        # Experiment tracking
-        "start_experiment",  # Start live experiments
-        "end_experiment",  # Stop and finalize experiments
-        "get_experiment_status",  # Check experiment status
     ],
     "admin": [
         # Admins get all tools

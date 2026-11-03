@@ -87,7 +87,7 @@ System-level services:
 - `Events`, `Event`
 
 ### Layer 6: Monitoring & Analytics
-**Location:** `src/monitoring/`, `src/experiments/`, `src/visualization/`
+**Location:** `src/monitoring/`, `src/visualization/`
 
 Real-time system health and learning:
 - **Monitoring:** Project health, task assignments, error prediction
@@ -96,7 +96,6 @@ Real-time system health and learning:
 
 **Key Classes:**
 - `ProjectMonitor`, `AssignmentMonitor`
-- `MarcusExperiment`, `LiveExperimentMonitor`
 - `PipelineFlowManager`, visualizers
 
 ## Data Flow
@@ -288,7 +287,6 @@ Real-time system health and learning:
 
 ### Monitoring
 - `src/monitoring/project_monitor.py` - Project health
-- `src/experiments/mlflow_tracker.py` - Experiment tracking
 
 ## Architectural Principles
 

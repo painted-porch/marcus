@@ -254,23 +254,6 @@ src/visualization/
 └── conversation_adapter.py ....... Agent conversation bridge
 ```
 
-### 2.9 **Experiment Tracking** (`src/experiments/`)
-
-MLflow-based experiment management for optimization.
-
-```
-src/experiments/
-├── mlflow_tracker.py ............. MLflow experiment tracker
-└── live_experiment_monitor.py .... Real-time experiment monitoring
-```
-
-**Tracked Metrics:**
-- Task completion velocity
-- Agent performance profiles
-- Estimation accuracy
-- Blocker frequency and types
-- Artifact production rates
-
 ### 2.10 **Modes System** (`src/modes/`)
 
 Different operational modes for Marcus.

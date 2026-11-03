@@ -486,13 +486,7 @@ class TestVerifyTaskContext:
         state.project_tasks = [verify]
         state.context = None
 
-        with (
-            patch("src.marcus_mcp.tools.context.log_agent_event"),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
-        ):
+        with (patch("src.marcus_mcp.tools.context.log_agent_event"),):
             result = await get_task_context("verify-1", state)
 
         assert result["success"] is True

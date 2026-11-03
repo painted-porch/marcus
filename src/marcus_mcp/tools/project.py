@@ -1,17 +1,121 @@
 """Project Monitoring Tools for Marcus MCP.
 
 This module contains tools for monitoring project progress and metrics:
-- get_project_status: Get comprehensive project metrics and status
+- get_project_status: Get comprehensive project metrics and status, including
+  the list of tasks that have not reached DONE and why
 """
 
 import logging
-from typing import Any
+from typing import Any, Dict, List, Optional
 
-from src.core.models import TaskStatus
+from src.core.models import Task, TaskStatus
 from src.logging.conversation_logger import conversation_logger
 from src.marcus_mcp.utils import serialize_for_mcp
 
 logger = logging.getLogger(__name__)
+
+
+async def unfinished_reason(task: Task, kanban_client: Any = None) -> str:
+    """Explain, in one line, why a task never reached DONE.
+
+    The blocker text is not on the task row for every provider: Marcus's
+    ``report_blocker`` sends ``update_task(task_id, {"blocker": text})`` and
+    the SQLite provider inserts that into a separate ``blockers`` table,
+    while task hydration reads only the tasks row. So the provider's blocker
+    store is consulted when the row carries no text (Codex P1 on PR #723).
+
+    Parameters
+    ----------
+    task : Task
+        A task that is not DONE.
+    kanban_client : Any, optional
+        Provider, consulted for its blocker record when the task row carries
+        no blocker text. Duck-typed: providers without ``get_task_blockers``
+        fall through to the plain description.
+
+    Returns
+    -------
+    str
+        The recorded blocker text when one can be found, otherwise a plain
+        description of the state the task was left in. Never empty.
+    """
+    blocker = (task.source_context or {}).get("blocker")
+    if blocker:
+        return str(blocker)
+    if task.status == TaskStatus.BLOCKED and kanban_client is not None:
+        getter = getattr(kanban_client, "get_task_blockers", None)
+        if getter is not None:
+            try:
+                records = await getter(task.id)
+                if records:
+                    # The most recent blocker is the operative one.
+                    latest = records[-1]
+                    text = (
+                        latest.get("description")
+                        if isinstance(latest, dict)
+                        else getattr(latest, "description", None)
+                    )
+                    if text:
+                        return str(text)
+            except Exception as e:  # noqa: BLE001 - never drop the entry
+                logger.warning(
+                    "unfinished_reason: blocker lookup failed for %s: %s", task.id, e
+                )
+    if task.status == TaskStatus.BLOCKED:
+        return "blocked (no blocker text recorded)"
+    if task.status == TaskStatus.IN_PROGRESS:
+        return "still in progress when the run ended"
+    return "never claimed by an agent"
+
+
+async def list_unfinished_tasks(
+    kanban_client: Any, expected_total: int
+) -> Optional[List[Dict[str, Any]]]:
+    """Return the tasks that are not DONE, or None when the read is untrustworthy.
+
+    Providers swallow fetch errors and return ``[]`` rather than raising, so
+    an unreachable board would otherwise publish "nothing unfinished". The
+    list is published only when the fetch agrees with the metrics total.
+
+    Parameters
+    ----------
+    kanban_client : Any
+        The project's provider; needs ``get_all_tasks``.
+    expected_total : int
+        The task count the provider's metrics reported.
+
+    Returns
+    -------
+    Optional[List[Dict[str, Any]]]
+        ``{"id", "name", "status", "reason"}`` per unfinished task, or None
+        when the provider cannot list tasks or the read is not corroborated.
+    """
+    getter = getattr(kanban_client, "get_all_tasks", None)
+    if getter is None:
+        return None
+    try:
+        all_tasks = await getter()
+    except Exception as e:  # noqa: BLE001 - status must never fail on this
+        logger.warning("get_project_status: unfinished-task fetch failed: %s", e)
+        return None
+    if not all_tasks or len(all_tasks) != expected_total:
+        logger.warning(
+            "get_project_status: task fetch returned %d task(s) but metrics "
+            "report %d; omitting unfinished_tasks",
+            len(all_tasks or []),
+            expected_total,
+        )
+        return None
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "status": t.status.value,
+            "reason": await unfinished_reason(t, kanban_client),
+        }
+        for t in all_tasks
+        if t.status != TaskStatus.DONE
+    ]
 
 
 async def get_project_status(state: Any) -> Any:
@@ -138,7 +242,13 @@ async def get_project_status(state: Any) -> Any:
                 ]
             )
 
-            response = {
+            unfinished = None
+            if hasattr(state, "kanban_client") and state.kanban_client:
+                unfinished = await list_unfinished_tasks(
+                    state.kanban_client, int(total_tasks or 0)
+                )
+
+            response: Dict[str, Any] = {
                 "success": True,
                 "project": {
                     "id": active_project.id if active_project else None,
@@ -164,6 +274,8 @@ async def get_project_status(state: Any) -> Any:
                     "available": len(state.agent_status) - active_workers,
                 },
             }
+            if unfinished is not None:
+                response["project"]["unfinished_tasks"] = unfinished
             return serialize_for_mcp(response)
         else:
             return {

@@ -131,17 +131,13 @@ class TestReportBlockerReleasesCoordination:
         task = _make_task()
         state = _make_state(task)
 
-        with patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ):
-            await report_blocker(
-                agent_id="agent-1",
-                task_id=task.id,
-                blocker_description="Stuck on dep",
-                severity="high",
-                state=state,
-            )
+        await report_blocker(
+            agent_id="agent-1",
+            task_id=task.id,
+            blocker_description="Stuck on dep",
+            severity="high",
+            state=state,
+        )
 
         assert "agent-1" not in state.agent_tasks, (
             "report_blocker must clear the agent's assignment slot — a "
@@ -157,17 +153,13 @@ class TestReportBlockerReleasesCoordination:
         task = _make_task()
         state = _make_state(task)
 
-        with patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ):
-            await report_blocker(
-                agent_id="agent-1",
-                task_id=task.id,
-                blocker_description="Stuck on dep",
-                severity="high",
-                state=state,
-            )
+        await report_blocker(
+            agent_id="agent-1",
+            task_id=task.id,
+            blocker_description="Stuck on dep",
+            severity="high",
+            state=state,
+        )
 
         assert task.id not in state.lease_manager.active_leases, (
             "report_blocker must remove the active lease — otherwise the "
@@ -183,17 +175,13 @@ class TestReportBlockerReleasesCoordination:
         task = _make_task()
         state = _make_state(task)
 
-        with patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ):
-            await report_blocker(
-                agent_id="agent-1",
-                task_id=task.id,
-                blocker_description="Stuck on dep",
-                severity="high",
-                state=state,
-            )
+        await report_blocker(
+            agent_id="agent-1",
+            task_id=task.id,
+            blocker_description="Stuck on dep",
+            severity="high",
+            state=state,
+        )
 
         state.assignment_persistence.remove_assignment.assert_awaited_once_with(
             "agent-1"
@@ -218,17 +206,13 @@ class TestReportBlockerReleasesCoordination:
         clear_repair_attempts(task.id)
         state = _make_state(task)
 
-        with patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ):
-            await report_blocker(
-                agent_id="agent-1",
-                task_id=task.id,
-                blocker_description="Stuck",
-                severity="high",
-                state=state,
-            )
+        await report_blocker(
+            agent_id="agent-1",
+            task_id=task.id,
+            blocker_description="Stuck",
+            severity="high",
+            state=state,
+        )
 
         update_call = state.kanban_client.update_task.call_args
         assert update_call is not None

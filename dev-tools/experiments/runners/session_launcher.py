@@ -269,6 +269,62 @@ echo "=========================================="
 """
 
 
+def format_unfinished_report(
+    unfinished: Optional[List[Dict[str, Any]]], total: int
+) -> List[str]:
+    """Render the end-of-run statement of what did and did not get built.
+
+    Counts alone let a run end looking successful while a deliverable is
+    silently missing. Missing data must never read as success either:
+    ``unfinished`` is None when Marcus could not produce a trustworthy task
+    list, and a zero total says nothing about whether work was done.
+
+    Parameters
+    ----------
+    unfinished : Optional[List[Dict[str, Any]]]
+        ``{"id", "name", "status", "reason"}`` per task that did not reach
+        DONE, as ``get_project_status`` reports under ``unfinished_tasks``.
+    total : int
+        Total task count for the project.
+
+    Returns
+    -------
+    List[str]
+        Lines to emit: one confirmation line for a clean run; otherwise every
+        unfinished task, why it stopped, and the consequence.
+    """
+    if unfinished is None:
+        return [
+            "RESULT: could not verify completion; Marcus returned no "
+            "trustworthy task list (board unreachable?). Check the board "
+            "before treating this run as successful."
+        ]
+    if total <= 0:
+        return [
+            "RESULT: could not verify completion; no tasks reported for "
+            "this project. Check the board before treating this run as "
+            "successful."
+        ]
+    done = total - len(unfinished)
+    if not unfinished:
+        return [f"RESULT: all {done}/{total} tasks complete"]
+    lines = [
+        f"RESULT: {done}/{total} tasks complete; "
+        f"{len(unfinished)} task(s) did NOT complete:"
+    ]
+    for task in unfinished:
+        lines.append(
+            f"  - [{task.get('status', '?')}] {task.get('name', '?')} "
+            f"({str(task.get('id', ''))[:8]}): {task.get('reason', 'unknown')}"
+        )
+    lines.append(
+        "  Whatever these tasks were meant to produce may be missing from "
+        "the deliverable; check the board and the product before treating "
+        "this run as successful."
+    )
+    return lines
+
+
 class SessionLauncher:
     """Start N sessions for one experiment and wait for them to go home.
 
@@ -610,6 +666,24 @@ class SessionLauncher:
         except Exception:  # noqa: BLE001 - a summary must never fail the run
             return {}
 
+    def final_report(self) -> None:
+        """Read the board once and say what did and did not get built."""
+        summary = self.board_summary()
+        project = summary.get("project") if isinstance(summary, dict) else None
+        if not isinstance(project, dict):
+            for line in format_unfinished_report(None, total=0):
+                self.say(line)
+            return
+        counts = {
+            k: project.get(k)
+            for k in ("total_tasks", "completed", "in_progress", "blocked")
+        }
+        self.say(f"[Board] {json.dumps(counts, default=str)}")
+        for line in format_unfinished_report(
+            project.get("unfinished_tasks"), total=int(project.get("total_tasks") or 0)
+        ):
+            self.say(line)
+
     def wait_for_sessions(self, pane_ids: List[str]) -> None:
         """Block until every session pane has exited, reporting now and then."""
         while True:
@@ -671,10 +745,7 @@ class SessionLauncher:
         if not self.wait:
             return True
         self.wait_for_sessions(pane_ids)
-        summary = self.board_summary()
-        if summary:
-            board = json.dumps(summary.get("project", summary), default=str)[:400]
-            self.say(f"[Board] {board}")
+        self.final_report()
         self.say("[Sessions] all sessions have gone home")
         self.teardown()
         return True

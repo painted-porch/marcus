@@ -98,13 +98,7 @@ class TestValidationEscalationOnSameIssues:
         mock_retry_tracker.get_attempt_count.return_value = 1
         mock_retry_tracker.is_retry_with_same_issues.return_value = True
 
-        with (
-            patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
-        ):
+        with (patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),):
             response = await _handle_validation_failure(
                 task, "agent-1", validation_result, state
             )
@@ -139,10 +133,6 @@ class TestValidationEscalationOnSameIssues:
                 "src.marcus_mcp.tools.task.report_blocker",
                 new=AsyncMock(),
             ) as mock_blocker,
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
         ):
             await _handle_validation_failure(task, "agent-1", validation_result, state)
 
@@ -166,13 +156,7 @@ class TestValidationEscalationOnSameIssues:
         mock_retry_tracker.get_attempt_count.return_value = 0
         mock_retry_tracker.is_retry_with_same_issues.return_value = False
 
-        with (
-            patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
-        ):
+        with (patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),):
             response = await _handle_validation_failure(
                 task, "agent-1", validation_result, state
             )
@@ -193,13 +177,7 @@ class TestValidationEscalationOnSameIssues:
         mock_retry_tracker.get_attempt_count.return_value = 1
         mock_retry_tracker.is_retry_with_same_issues.return_value = True
 
-        with (
-            patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
-        ):
+        with (patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),):
             await _handle_validation_failure(task, "agent-1", validation_result, state)
 
         mock_retry_tracker.record_attempt.assert_called_once_with(
@@ -233,13 +211,7 @@ class TestEscalationPayloadStrip:
         mock_retry_tracker.get_attempt_count.return_value = 1
         mock_retry_tracker.is_retry_with_same_issues.return_value = True
 
-        with (
-            patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
-        ):
+        with (patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),):
             response = await _handle_validation_failure(
                 task, "agent-1", validation_result, state
             )
@@ -272,13 +244,7 @@ class TestEscalationPayloadStrip:
         mock_retry_tracker.get_attempt_count.return_value = 1
         mock_retry_tracker.is_retry_with_same_issues.return_value = True
 
-        with (
-            patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
-        ):
+        with (patch("src.marcus_mcp.tools.task._retry_tracker", mock_retry_tracker),):
             response = await _handle_validation_failure(
                 task, "agent-1", validation_result, state
             )

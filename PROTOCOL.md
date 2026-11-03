@@ -108,11 +108,12 @@ c. If task received:
 
 ### 3. Exit
 
-Exit when your runner signals completion. The board itself does not push
-an exit signal to agents — that is the runner's responsibility. A common
-pattern is to poll `get_experiment_status` in a separate monitor process
-and shut agents down when the board is fully complete, but this is
-runner-specific logic, not part of the agent protocol.
+Exit when `request_next_task` returns `status: "BOARD_DRAINED"` with
+`should_exit: true`. The board computes this itself: no task in your project
+can be claimed and no work is in flight, either because every task is done or
+because the remaining tasks can never become claimable. Do not retry after it.
+Do not exit on your own reading of the board; a retry response with
+`retry_after_seconds` means wait and ask again.
 
 ---
 

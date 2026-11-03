@@ -19,14 +19,6 @@ import pytest
 
 from src.marcus_mcp.tools.attachment import log_artifact
 
-# Pre-stub live_experiment_monitor so the artifact write path has no
-# external dependency (mirrors test_log_artifact_size_guard.py).
-_MONITOR_MODULE_PATH = "src.experiments.live_experiment_monitor"
-if _MONITOR_MODULE_PATH not in sys.modules:
-    _mock_monitor_mod = Mock()
-    _mock_monitor_mod.get_active_monitor = Mock(return_value=None)
-    sys.modules[_MONITOR_MODULE_PATH] = _mock_monitor_mod
-
 pytestmark = pytest.mark.unit
 
 
