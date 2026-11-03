@@ -2268,6 +2268,11 @@ class MarcusServer:
                 keyword: Optional[str] = None,
                 start_time: Optional[str] = None,
                 end_time: Optional[str] = None,
+                subject: Optional[str] = None,
+                kind: Optional[str] = None,
+                since: Optional[str] = None,
+                limit: Optional[int] = None,
+                offset: Optional[int] = None,
             ) -> Dict[str, Any]:
                 """
                 Query project history with flexible filtering.
@@ -2282,6 +2287,9 @@ class MarcusServer:
                 - task_dependencies: Get dependency chain (requires task_id)
                 - decisions: Find decisions (filter by task_id, agent_id, or
                   affecting_task_id)
+                - opinions: Opinions grouped by subject with the count of
+                  distinct agents who posted on it (filter by subject, kind,
+                  or since); pagination is over subjects
                 - artifacts: Find artifacts (filter by task_id, artifact_type,
                   or agent_id)
                 - agent_history: Get agent history (requires agent_id)
@@ -2340,7 +2348,7 @@ class MarcusServer:
                 from .tools.history import query_project_history as impl
 
                 # Build filters dict from optional parameters
-                filters = {}
+                filters: Dict[str, Any] = {}
                 if status is not None:
                     filters["status"] = status
                 if agent_id is not None:
@@ -2359,6 +2367,19 @@ class MarcusServer:
                     filters["start_time"] = start_time
                 if end_time is not None:
                     filters["end_time"] = end_time
+                # Opinions read (deliberation layer B2). The live check
+                # caught that a filter not named here is silently dropped.
+                if subject is not None:
+                    filters["subject"] = subject
+                if kind is not None:
+                    filters["kind"] = kind
+                if since is not None:
+                    filters["since"] = since
+                # Pagination was documented but never forwarded.
+                if limit is not None:
+                    filters["limit"] = limit
+                if offset is not None:
+                    filters["offset"] = offset
 
                 return await impl(
                     project_id=project_id,
@@ -2459,6 +2480,58 @@ class MarcusServer:
                         "agent_id": agent_id,
                         "task_id": task_id,
                         "decision": decision,
+                    },
+                    response=result,
+                )
+
+                return result
+
+        if "give_opinion" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def give_opinion(
+                agent_id: str,
+                subject: str,
+                what: str,
+                why: str = "",
+                impact: str = "",
+                task_id: Optional[str] = None,
+            ) -> Dict[str, Any]:
+                """Post an opinion about the project to the board.
+
+                Use it for something you observed that other agents should
+                weigh, whether or not it is about the task you hold: a
+                hazard, a bottleneck, an assumption that turned out wrong.
+                ``subject`` is a short slug naming what it is about
+                (``farm.flooded``, ``schema.users``); Marcus normalises it,
+                and opinions on the same subject from different agents are
+                counted together in ``query_project_history(...,
+                "opinions")``. Leave ``task_id`` empty for an opinion about
+                the project as a whole.
+                """
+                from src.logging.mcp_tool_logger import log_mcp_tool_response
+
+                from .tools.context import give_opinion as impl
+
+                result = await impl(
+                    agent_id=agent_id,
+                    subject=subject,
+                    what=what,
+                    state=server,
+                    why=why,
+                    impact=impact,
+                    task_id=task_id,
+                )
+
+                log_mcp_tool_response(
+                    tool_name="give_opinion",
+                    arguments={
+                        "agent_id": agent_id,
+                        "subject": subject,
+                        "what": what,
+                        "why": why,
+                        "impact": impact,
+                        "task_id": task_id,
                     },
                     response=result,
                 )

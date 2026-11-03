@@ -2,11 +2,13 @@
 
 This module contains tools for context management:
 - log_decision: Log architectural decisions
+- give_opinion: Post an opinion about the project to the board
 - get_task_context: Get context for a specific task
 """
 
 import copy
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -124,6 +126,256 @@ async def log_decision(
             "success": True,
             "decision_id": logged_decision.decision_id,
             "message": "Decision logged and cross-referenced to dependent tasks",
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+#: Anything that is not a lowercase letter or digit separates slug parts.
+_SUBJECT_SEPARATOR = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_subject(subject: str) -> str:
+    """Return the canonical slug for an opinion subject.
+
+    Several agents flagging the same thing is the signal the deliberation
+    layer counts, and a count by subject is only as good as the agents'
+    agreement on the string. So Marcus owns the spelling: lowercase, any
+    run of characters that is not a letter or digit becomes one dot, and
+    leading or trailing dots are dropped. ``Farm Flooded``,
+    ``farm_flooded`` and ``farm.flooded`` are one subject.
+
+    Parameters
+    ----------
+    subject : str
+        The subject as the agent wrote it.
+
+    Returns
+    -------
+    str
+        The canonical slug, or an empty string when nothing is left.
+    """
+    return _SUBJECT_SEPARATOR.sub(".", subject.lower()).strip(".")
+
+
+def _about_card_id(tasks: List[Any], project_name: Optional[str]) -> Optional[str]:
+    """Return the id of a board's About card, if the board has one.
+
+    ``create_project`` writes one card per project named
+    ``About: <project_name>`` with ``source_type="project_about"``. It is
+    the natural home for a comment that is about the project rather
+    than about any one task. The exact name is tried first (two projects'
+    cards could share a board); ``source_type`` round-trips on sqlite but
+    not on every provider, so the name prefix is the last resort.
+    """
+    if isinstance(project_name, str) and project_name:
+        exact = f"About: {project_name}"
+        for task in tasks:
+            if getattr(task, "name", None) == exact:
+                return str(task.id)
+    for task in tasks:
+        if getattr(task, "source_type", None) == "project_about" or str(
+            getattr(task, "name", "")
+        ).startswith("About: "):
+            return str(task.id)
+    return None
+
+
+async def _board_for_opinion(
+    state: Any, project_id: Optional[str]
+) -> tuple[Any, Optional[str], List[Any]]:
+    """Return the kanban client, project name and tasks an opinion's comment goes to.
+
+    The active project's board serves when the opinion belongs to it (or
+    to no project at all). When the agent is registered to another
+    project on a multi-project server, that project's own board is
+    resolved through the project manager, so the marker lands where the
+    opinion's readers look rather than on whichever project happens to
+    be active (Codex P2 on PR #800).
+    """
+    active_project_id = getattr(state, "current_project_id", None)
+    manager = getattr(state, "project_manager", None)
+    if project_id is None or project_id == active_project_id or manager is None:
+        return (
+            getattr(state, "kanban_client", None),
+            getattr(state, "current_project_name", None),
+            list(getattr(state, "project_tasks", None) or []),
+        )
+    board = await manager.get_project_board(project_id)
+    if board is None:
+        return None, None, []
+    client, project_name = board
+    try:
+        tasks = list(await client.get_all_tasks() or [])
+    except Exception as e:  # noqa: BLE001 - a missing card list only costs the comment
+        logger.warning(f"Could not list tasks for project {project_id}: {e}")
+        tasks = []
+    return client, project_name, tasks
+
+
+def _project_for_agent(agent_id: str, state: Any) -> Optional[str]:
+    """Return the project an opinion by ``agent_id`` belongs to, if registered.
+
+    The agent's registration (``state.agent_project_map``) is the only
+    source used. ``register_agent`` refuses a registration without a
+    ``project_id`` and the map is rehydrated from persisted registrations
+    after a restart, so a registered agent is always found. The server's
+    ACTIVE project (``Context.project_id``, ``state.current_project_id``)
+    is deliberately not a fallback: it is ``None`` before any project is
+    selected and need not be the agent's on a multi-project server, and
+    an unregistered caller has no business posting an opinion
+    (marcus-44 review of PR #800).
+    """
+    mapping = getattr(state, "agent_project_map", None)
+    if isinstance(mapping, dict):
+        mapped = mapping.get(agent_id)
+        if mapped:
+            return str(mapped)
+    return None
+
+
+async def give_opinion(
+    agent_id: str,
+    subject: str,
+    what: str,
+    state: Any,
+    why: str = "",
+    impact: str = "",
+    task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Post an opinion about the project to the board.
+
+    An opinion is a marker other agents can read and corroborate: "the
+    farm is flooded", "this schema is wrong", "mobs at the north edge and
+    no walls". It need not be about the task the agent holds, which is
+    what ``log_decision`` cannot express. It is stored as a ``Decision``
+    with ``kind="assessment"`` and a normalised ``subject`` so that
+    ``query_project_history(..., "opinions")`` can count how many
+    distinct agents said the same thing.
+
+    Parameters
+    ----------
+    agent_id : str
+        The agent giving the opinion.
+    subject : str
+        What the opinion is about, as a short slug (``farm.flooded``,
+        ``schema.users``). Normalised by ``normalize_subject``.
+    what : str
+        The assessment itself.
+    state : Any
+        Marcus server state instance.
+    why : str, optional
+        What the agent saw that led to it.
+    impact : str, optional
+        What it affects.
+    task_id : Optional[str], optional
+        The task the opinion relates to, if any. Without it the opinion
+        is project-level and its board comment lands on the About card.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``success``, ``decision_id``, the canonical ``subject``, ``kind``
+        and ``task_id``; or ``success=False`` with ``error``.
+    """
+    try:
+        if not getattr(state, "context", None):
+            return {"success": False, "error": "Context system not enabled"}
+
+        canonical = normalize_subject(subject or "")
+        if not canonical:
+            return {
+                "success": False,
+                "error": (
+                    "subject is required: a short slug naming what the "
+                    "opinion is about, for example farm.flooded or "
+                    "schema.users"
+                ),
+            }
+        why = why.strip() if why and why.strip() else "Not specified"
+        impact = impact.strip() if impact and impact.strip() else "Not specified"
+
+        # A task-less opinion is readable only through its project stamp,
+        # so it is refused when the agent is not registered rather than
+        # written where no reader will ever find it.
+        project_id = _project_for_agent(agent_id, state)
+        if project_id is None and task_id is None:
+            return {
+                "success": False,
+                "error": (
+                    "no project to record a project-level opinion against: "
+                    f"agent {agent_id} is not registered. Call register_agent "
+                    "with a project_id first, or pass task_id for an opinion "
+                    "about a task."
+                ),
+            }
+
+        logged_decision = await state.context.log_decision(
+            agent_id=agent_id,
+            task_id=task_id,
+            what=what,
+            why=why,
+            impact=impact,
+            subject=canonical,
+            kind="assessment",
+            project_id=project_id,
+        )
+
+        # Record first: the history registry is what the opinions read
+        # serves from, so it must be written before any board is touched.
+        # A board outage (or a project whose client cannot connect) may
+        # cost the comment, never the opinion (Codex P2 on PR #800).
+        if hasattr(state, "events") and state.events:
+            await state.events.publish_nowait(
+                "opinion_logged", agent_id, logged_decision.to_dict()
+            )
+        await _persist_decision_to_history(
+            logged_decision, state, project_id=project_id
+        )
+
+        # Keep the opinion visible to a human watching the board: on the
+        # task when there is one, else on the project's About card, and
+        # always on the board of the project the opinion belongs to.
+        try:
+            board_client, board_name, board_tasks = await _board_for_opinion(
+                state, project_id
+            )
+        except Exception as e:  # noqa: BLE001 - a board outage only costs the comment
+            logger.warning(
+                f"Could not resolve the board for project {project_id}; "
+                f"opinion recorded without a comment: {e}"
+            )
+            board_client, board_name, board_tasks = None, None, []
+        target_id = task_id or _about_card_id(board_tasks, board_name)
+        if board_client and target_id:
+            try:
+                comment = (
+                    f"💬 OPINION by {agent_id} on {canonical}\n"
+                    f"Assessment: {what}\n"
+                    f"Why: {why}\n"
+                    f"Impact: {impact}"
+                )
+                await board_client.add_comment(target_id, comment)
+            except Exception as e:
+                # The opinion is recorded either way
+                logger.warning(f"Failed to add kanban comment for opinion: {e}")
+        elif not target_id:
+            logger.debug(
+                "No task and no About card for opinion %s by %s; no board comment",
+                canonical,
+                agent_id,
+            )
+
+        return {
+            "success": True,
+            "decision_id": logged_decision.decision_id,
+            "subject": canonical,
+            "kind": "assessment",
+            "task_id": task_id,
+            "project_id": project_id,
+            "message": "Opinion recorded on the board",
         }
 
     except Exception as e:
@@ -1171,7 +1423,9 @@ async def _collect_sibling_subtask_context(
     return {"artifacts": sibling_artifacts, "decisions": sibling_decisions}
 
 
-async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None:
+async def _persist_decision_to_history(
+    logged_decision: Any, state: Any, project_id: Optional[str] = None
+) -> None:
     """
     Persist decision to project history for post-project analysis.
 
@@ -1184,6 +1438,10 @@ async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None
         The decision from the Context system
     state : Any
         Marcus server state
+    project_id : Optional[str]
+        The project to record under. Defaults to the server's active
+        project; ``give_opinion`` passes the agent's own project so a
+        task-less opinion is filed where its readers will look.
 
     Notes
     -----
@@ -1191,11 +1449,11 @@ async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None
     """
     try:
         # Get project info from state
-        if not hasattr(state, "current_project_id") or not state.current_project_id:
+        project_id = project_id or getattr(state, "current_project_id", None)
+        if not project_id:
             logger.debug("No active project - skipping project history persistence")
             return
 
-        project_id = state.current_project_id
         project_name = getattr(state, "current_project_name", project_id)
 
         # Initialize project history persistence if not already done
@@ -1231,6 +1489,8 @@ async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None
             confidence=0.8,  # Default confidence
             kanban_comment_url=kanban_comment_url,
             project_id=project_id,
+            subject=getattr(logged_decision, "subject", None),
+            kind=getattr(logged_decision, "kind", "decision"),
         )
 
         # Persist to project history

@@ -685,7 +685,12 @@ class ProjectHistoryAggregator:
 
         # Add decisions made by each task
         for decision in decisions:
-            task_id = decision.task_id
+            decision_task_id = decision.task_id
+            if decision_task_id is None:
+                # A project-level opinion (deliberation layer) was made
+                # by no task; it is read through the opinions query.
+                continue
+            task_id = decision_task_id
             if task_id not in task_histories:
                 # Create minimal task history if not found
                 task_histories[task_id] = TaskHistory(

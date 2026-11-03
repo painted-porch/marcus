@@ -40,6 +40,12 @@ class TestAllToolGroup:
         assert is_tool_allowed("all", "create_tasks") is True
         assert is_tool_allowed("all", "not_a_tool") is False
 
+    def test_give_opinion_is_an_agent_and_analytics_tool(self) -> None:
+        """Agents post opinions; analytics reads them (deliberation B1)."""
+        assert "give_opinion" in TOOL_GROUPS["agent"]
+        assert "give_opinion" in TOOL_GROUPS["analytics"]
+        assert "give_opinion" not in TOOL_GROUPS["human"]
+
     def test_unknown_group_is_still_empty(self) -> None:
         """A name that is not a group resolves to no tools, as before."""
         assert get_tools_for_endpoint("nope") == set()

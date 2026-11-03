@@ -406,11 +406,11 @@ class TestProjectHistoryPersistence:
         )
         await persistence.append_decision("proj_test", "Test Project", decision2)
 
-        # Verify both decisions are present
+        # Verify both decisions are present (rows stored in the same second
+        # are ordered newest first by key, so compare as a set)
         decisions = await persistence.load_decisions("proj_test")
         assert len(decisions) == 2
-        assert decisions[0].decision_id == "dec_test"
-        assert decisions[1].decision_id == "dec_test_2"
+        assert {d.decision_id for d in decisions} == {"dec_test", "dec_test_2"}
 
     @pytest.mark.asyncio
     async def test_append_artifact_creates_new_file(

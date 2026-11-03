@@ -48,6 +48,10 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "get_task_context",
         "log_decision",
         "log_artifact",
+        # Deliberation layer: an opinion about the project, posted as a
+        # board marker so other agents' opinions on the same subject can
+        # be counted together.
+        "give_opinion",
         # Read-only board status: named in the worker contract (redo
         # guidance polls it) and read by the session launcher's report.
         "get_project_status",
@@ -94,6 +98,7 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         # Context and artifacts
         "log_decision",
         "log_artifact",
+        "give_opinion",
         # NLP tools
         "create_project",
         "create_tasks",

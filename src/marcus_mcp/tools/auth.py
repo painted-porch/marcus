@@ -89,6 +89,7 @@ ROLE_TOOLS = {
         # Context and collaboration
         "get_task_context",  # Full task context
         "log_decision",  # Document choices
+        "give_opinion",  # Post an assessment to the board (deliberation layer)
         "log_artifact",  # Store outputs
         "get_project_status",  # Read-only board status (worker contract)
         "get_agent_status",  # Read-only own status (worker contract)

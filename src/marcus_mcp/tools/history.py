@@ -44,6 +44,8 @@ async def query_project_history(
         - "blocked_tasks": Find tasks with blockers
         - "task_dependencies": Get dependency chain (requires: task_id)
         - "decisions": Find decisions (filters: task_id, agent_id, affecting_task_id)  # noqa: E501
+        - "opinions": Opinions grouped by subject with the distinct-agent count
+          (filters: subject, kind, since); pagination is over subjects
         - "artifacts": Find artifacts (filters: task_id, artifact_type, agent_id)
         - "agent_history": Get agent history (requires: agent_id)
         - "agent_metrics": Get agent performance metrics (requires: agent_id)
@@ -204,6 +206,25 @@ async def query_project_history(
                 "success": True,
                 "data": [d.to_dict() for d in decisions],
                 "count": len(decisions),
+                "pagination": {"limit": limit, "offset": offset},
+            }
+
+        elif query_type == "opinions":
+            # Deliberation layer B2: one entry per subject, counted by
+            # distinct agents, most corroborated first. Pagination pages
+            # over subjects, the unit a caller acts on.
+            entries = await query_api.summarize_subjects(
+                project_id,
+                subject=filters.get("subject"),
+                kind=filters.get("kind", "assessment"),
+                since=filters.get("since"),
+            )
+            page = entries[offset : offset + limit]
+            return {
+                "success": True,
+                "data": page,
+                "count": len(page),
+                "total_subjects": len(entries),
                 "pagination": {"limit": limit, "offset": offset},
             }
 

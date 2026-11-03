@@ -8,7 +8,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from src.config.marcus_config import get_config
 from src.core.assignment_persistence import AssignmentPersistence
@@ -288,6 +288,40 @@ class ProjectContextManager:
 
         context = self.contexts.get(self.active_project_id)
         return context.assignment_persistence if context else None
+
+    async def get_project_board(
+        self, project_id: str
+    ) -> Optional[Tuple[KanbanInterface, str]]:
+        """Return a project's kanban client and name without switching to it.
+
+        A write that belongs to a project other than the active one (an
+        agent registered to project B posting an opinion while A is
+        active) must land on B's board, not A's. This reuses B's cached
+        context, or creates and connects one through the same path
+        ``switch_project`` uses, and leaves the active project alone.
+
+        Parameters
+        ----------
+        project_id : str
+            The project whose board is wanted.
+
+        Returns
+        -------
+        Optional[Tuple[KanbanInterface, str]]
+            The connected kanban client and the project's name, or None
+            when the registry does not know the project or no client
+            could be connected.
+        """
+        async with self.lock:
+            project = await self.registry.get_project(project_id)
+            if not project:
+                logger.warning(f"Project {project_id} not in registry; no board")
+                return None
+            context = await self._get_or_create_context(project)
+            if context.kanban_client is None:
+                return None
+            context.last_accessed = datetime.now(timezone.utc)
+            return context.kanban_client, project.name
 
     async def _get_or_create_context(self, project: ProjectConfig) -> ProjectContext:
         """Get existing context or create new one."""

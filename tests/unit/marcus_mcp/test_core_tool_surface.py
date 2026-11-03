@@ -67,3 +67,18 @@ class TestCoreToolSurface:
         # A human-only tool proves the surface is the union, not just
         # the agent group under another name.
         assert "create_tasks" in tools
+
+    @pytest.mark.asyncio
+    async def test_agent_endpoint_serves_give_opinion(self) -> None:
+        """The agent endpoint registers the opinion marker (deliberation B1)."""
+        from mcp.server.fastmcp import FastMCP
+
+        server: Any = MarcusServer.__new__(MarcusServer)
+        app = FastMCP("test-marcus-agent")
+
+        server._register_endpoint_tools(app, "agent")
+        tools = {t.name: t for t in await app.list_tools()}
+
+        assert "give_opinion" in tools
+        required = set(tools["give_opinion"].inputSchema.get("required", []))
+        assert required == {"agent_id", "subject", "what"}

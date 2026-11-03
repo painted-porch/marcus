@@ -22,6 +22,87 @@ from src.analysis.aggregator import (
 )
 from src.core.project_history import ArtifactMetadata, Decision
 
+#: Rows per ``load_decisions`` page when a read must see every decision.
+DECISION_PAGE_SIZE = 10000
+
+
+def group_opinions_by_subject(
+    decisions: list[Decision],
+    subject: Optional[str] = None,
+    kind: str = "assessment",
+    since: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Group opinions into one entry per subject (deliberation layer, B2).
+
+    The count that matters for corroboration is the number of DISTINCT
+    agents who posted on a subject, so one agent repeating itself does
+    not raise a subject's weight; ``opinion_count`` keeps the raw total.
+
+    Parameters
+    ----------
+    decisions : list[Decision]
+        The project's decisions, opinions included.
+    subject : Optional[str]
+        Keep only this subject (already normalised).
+    kind : str
+        Which kind to group: ``"assessment"`` (opinions, the default) or
+        ``"decision"``. Rows with no subject are never grouped.
+    since : Optional[str]
+        ISO-8601 timestamp; rows before it are ignored.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One entry per subject, most corroborated first, then most recent:
+        ``subject``, ``kind``, ``count`` (distinct agents), ``opinion_count``,
+        ``agents`` (sorted), ``first_seen``, ``last_seen``, ``task_ids``
+        (sorted, project-level rows contribute none) and ``opinions``
+        (the rows themselves, newest first).
+    """
+    since_ts: Optional[datetime] = None
+    if since:
+        since_ts = datetime.fromisoformat(since)
+        if since_ts.tzinfo is None:
+            since_ts = since_ts.replace(tzinfo=timezone.utc)
+
+    groups: dict[str, list[Decision]] = {}
+    for decision in decisions:
+        if decision.kind != kind or not decision.subject:
+            continue
+        if subject and decision.subject != subject:
+            continue
+        timestamp = decision.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        if since_ts and timestamp < since_ts:
+            continue
+        groups.setdefault(decision.subject, []).append(decision)
+
+    entries: list[dict[str, Any]] = []
+    for group_subject, items in groups.items():
+        items.sort(key=lambda d: d.timestamp, reverse=True)
+        agents = sorted({d.agent_id for d in items})
+        task_ids = sorted({d.task_id for d in items if d.task_id})
+        entries.append(
+            {
+                "subject": group_subject,
+                "kind": kind,
+                "count": len(agents),
+                "opinion_count": len(items),
+                "agents": agents,
+                "first_seen": items[-1].timestamp.isoformat(),
+                "last_seen": items[0].timestamp.isoformat(),
+                "task_ids": task_ids,
+                "opinions": [d.to_dict() for d in items],
+            }
+        )
+
+    # Most recent first, then (stable) most corroborated first.
+    entries.sort(key=lambda e: e["last_seen"], reverse=True)
+    entries.sort(key=lambda e: e["count"], reverse=True)
+    return entries
+
 
 class ProjectHistoryQuery:
     """
@@ -298,6 +379,57 @@ class ProjectHistoryQuery:
         """
         history = await self.get_project_history(project_id)
         return [d for d in history.decisions if task_id in d.affected_tasks]
+
+    async def summarize_subjects(
+        self,
+        project_id: str,
+        subject: Optional[str] = None,
+        kind: str = "assessment",
+        since: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Group the project's opinions by subject (deliberation layer, B2).
+
+        Reads the decision registry directly rather than the aggregated
+        history: opinions are read on an agent's pull cadence, and the
+        aggregate (conversations, timeline, cache) is far heavier than
+        the list this needs.
+
+        Parameters
+        ----------
+        project_id : str
+            Project to query
+        subject : Optional[str]
+            Keep only this subject (already normalised)
+        kind : str
+            ``"assessment"`` (default) or ``"decision"``
+        since : Optional[str]
+            ISO-8601 timestamp; earlier rows are ignored
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One entry per subject; see ``group_opinions_by_subject``.
+        """
+        # Walk every page: ``load_decisions`` caps a page at
+        # DECISION_PAGE_SIZE, and grouping a single page would undercount
+        # corroboration on a large project and could drop subjects
+        # outright (Codex P2 on PR #800). The loop stops on the first
+        # empty page rather than the first short one, because a page
+        # can come back short when malformed rows were skipped.
+        decisions: list[Decision] = []
+        offset = 0
+        while True:
+            page = await self.aggregator.history_persistence.load_decisions(
+                project_id, limit=DECISION_PAGE_SIZE, offset=offset
+            )
+            if not page:
+                break
+            decisions.extend(page)
+            offset += DECISION_PAGE_SIZE
+        return group_opinions_by_subject(
+            decisions, subject=subject, kind=kind, since=since
+        )
 
     # Artifact Queries
 

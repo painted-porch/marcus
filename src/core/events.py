@@ -348,6 +348,8 @@ class EventTypes:
 
     # Decision events
     DECISION_LOGGED = "decision_logged"
+    # An opinion posted to the board with give_opinion (deliberation layer)
+    OPINION_LOGGED = "opinion_logged"
     PATTERN_DETECTED = "pattern_detected"
 
     # Planning events (issue #449)

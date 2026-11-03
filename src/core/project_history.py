@@ -47,13 +47,22 @@ class Decision:
     kanban_comment_url : Optional[str]
         URL to the Kanban comment where this was also logged
     project_id : Optional[str]
-        Project identifier for validation/debugging. Note: Conversation logs
-        are the authoritative source for project-task mapping. This field is
-        stored for data integrity verification but is not used for filtering.
+        Project identifier. Conversation logs remain the primary source for
+        the project-task mapping of task-scoped decisions; ``project_id`` is
+        load-bearing for project-level opinions (``task_id`` is None), which
+        no task-id filter can reach.
+    subject : Optional[str]
+        Normalised slug naming what the entry is about (``farm.flooded``,
+        ``schema.users``). Opinions on the same subject are counted
+        together; architectural decisions may leave it empty.
+    kind : str
+        ``"decision"`` for an architectural decision made while doing a
+        task, ``"assessment"`` for an opinion an agent posts to the board
+        (deliberation layer).
     """
 
     decision_id: str
-    task_id: str
+    task_id: Optional[str]
     agent_id: str
     timestamp: datetime
     what: str
@@ -63,6 +72,8 @@ class Decision:
     confidence: float = 0.8
     kanban_comment_url: Optional[str] = None
     project_id: Optional[str] = None
+    subject: Optional[str] = None
+    kind: str = "decision"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -78,11 +89,17 @@ class Decision:
             "confidence": self.confidence,
             "kanban_comment_url": self.kanban_comment_url,
             "project_id": self.project_id,
+            "subject": self.subject,
+            "kind": self.kind,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Decision":
-        """Create from dictionary loaded from JSON."""
+        """Create from dictionary loaded from JSON.
+
+        Rows written before the opinion fields existed load as task-scoped
+        architectural decisions (``subject=None``, ``kind="decision"``).
+        """
         # Parse timestamp and ensure it's timezone-aware
         ts = datetime.fromisoformat(data["timestamp"])
         if ts.tzinfo is None:
@@ -91,7 +108,7 @@ class Decision:
 
         return cls(
             decision_id=data["decision_id"],
-            task_id=data["task_id"],
+            task_id=data.get("task_id"),
             agent_id=data["agent_id"],
             timestamp=ts,
             what=data["what"],
@@ -101,6 +118,8 @@ class Decision:
             confidence=data.get("confidence", 0.8),
             kanban_comment_url=data.get("kanban_comment_url"),
             project_id=data.get("project_id"),
+            subject=data.get("subject"),
+            kind=data.get("kind", "decision"),
         )
 
 
@@ -559,20 +578,96 @@ class ProjectHistoryPersistence:
 
         logger.info(f"Saved snapshot for project {snapshot.project_id}")
 
+    #: Task ids per storage query; stays under SQLite's historical 999
+    #: bound-variable limit with room for the other parameters.
+    _TASK_ID_CHUNK = 500
+
+    async def _load_project_rows(
+        self, collection: str, project_id: str, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
+        """
+        Load the rows of ``collection`` that belong to ``project_id``, paged.
+
+        A row belongs to the project when its stamped ``project_id``
+        matches, or when its ``task_id`` is one of the project's tasks
+        according to the conversation logs. The second clause is the
+        pre-stamp safety net: it loads rows written before ``project_id``
+        was stamped and rows stamped with another project while a task of
+        this one was being worked. The first clause is the only route for
+        a project-level opinion (``task_id`` None).
+
+        Both clauses run as storage prefilters, so a shared database full
+        of other projects' rows is never scanned in Python (Codex P2 on PR
+        #800: the backend used to apply its limit before the project
+        filter, and a project's rows behind enough newer foreign rows came
+        back as an empty page). Each clause fetches ``limit + offset``
+        rows, which is enough for the union's newest ``limit + offset`` to
+        be exact; the union is ordered newest first and then paged.
+
+        Parameters
+        ----------
+        collection : str
+            ``"decisions"`` or ``"artifacts"``
+        project_id : str
+            Project identifier
+        limit : int
+            Maximum rows to return (capped at 10000)
+        offset : int
+            Rows to skip, newest first
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Raw rows, newest first, deduplicated by storage key
+        """
+        page_limit = min(limit, 10000)
+        fetch = page_limit + offset
+        rows = await self._backend.query(
+            collection, where={"project_id": project_id}, limit=fetch
+        )
+        project_task_ids = sorted(
+            await self._get_task_ids_from_conversations(project_id)
+        )
+        for start in range(0, len(project_task_ids), self._TASK_ID_CHUNK):
+            chunk = project_task_ids[start : start + self._TASK_ID_CHUNK]
+            rows.extend(
+                await self._backend.query(
+                    collection, where={"task_id": chunk}, limit=fetch
+                )
+            )
+
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for row in rows:
+            key = str(row.get("_key", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+        # Newest first, with the key breaking same-second ties: the same
+        # total order the backends page by, so the union of each clause's
+        # newest ``fetch`` rows contains the union's newest ``fetch`` rows
+        # and paging never overlaps.
+        unique.sort(
+            key=lambda r: (str(r.get("_stored_at", "")), str(r.get("_key", ""))),
+            reverse=True,
+        )
+        return unique[offset : offset + page_limit]
+
     async def load_decisions(
         self, project_id: str, limit: int = 10000, offset: int = 0
     ) -> list[Decision]:
         """
         Load decisions for a project from SQLite with pagination.
 
-        Filters decisions by task_id, using conversation logs to identify
-        project-specific tasks.
-
-        Design Decision: Conversation logs are the authoritative source of truth
-        for project-task mapping. While decisions contain a project_id field,
-        we filter by task_id (derived from conversations) to maintain a single
-        source of truth and avoid data inconsistencies. The project_id field
-        in Decision is used for validation and debugging only.
+        A row belongs to the project when its ``task_id`` is one of the
+        project's tasks (derived from conversation logs) OR its
+        ``project_id`` matches. The second clause is what makes a
+        project-level opinion (``task_id`` None, deliberation layer B2)
+        reachable: no task-id filter can match it, so ``project_id`` is
+        load-bearing for it. Conversation logs remain the source for the
+        task-scoped mapping, so rows written before ``project_id`` was
+        stamped still load.
 
         Parameters
         ----------
@@ -592,33 +687,9 @@ class ProjectHistoryPersistence:
 
         with error_context("load_decisions", custom_context={"project_id": project_id}):
             try:
-                # Use pooled backend instance
-                backend = self._backend
-
-                # Get task IDs for this project from conversation logs
-                project_task_ids = await self._get_task_ids_from_conversations(
-                    project_id
+                paginated_decisions = await self._load_project_rows(
+                    "decisions", project_id, limit, offset
                 )
-
-                if not project_task_ids:
-                    logger.debug(
-                        f"No task IDs found for project {project_id} in conversations"
-                    )
-                    return []
-
-                # Create filter function for task IDs
-                def task_filter(item: dict[str, Any]) -> bool:
-                    return item.get("task_id") in project_task_ids
-
-                # Query decisions with filter and pagination
-                # Use reasonable limit to avoid memory issues
-                query_limit = min(limit, 10000)
-                all_decisions = await backend.query(
-                    "decisions", filter_func=task_filter, limit=query_limit + offset
-                )
-
-                # Apply offset and limit
-                paginated_decisions = all_decisions[offset : offset + limit]
 
                 # Parse decisions
                 decisions = []
@@ -634,8 +705,7 @@ class ProjectHistoryPersistence:
 
                 logger.debug(
                     f"Loaded {len(decisions)} decisions for project {project_id} "
-                    f"(from {len(project_task_ids)} tasks, "
-                    f"limit={limit}, offset={offset})"
+                    f"(limit={limit}, offset={offset})"
                 )
                 return decisions
 
@@ -650,14 +720,10 @@ class ProjectHistoryPersistence:
         """
         Load artifact metadata for a project from SQLite with pagination.
 
-        Filters artifacts by task_id, using conversation logs to identify
-        project-specific tasks.
-
-        Design Decision: Conversation logs are the authoritative source of truth
-        for project-task mapping. While artifacts contain a project_id field,
-        we filter by task_id (derived from conversations) to maintain a single
-        source of truth and avoid data inconsistencies. The project_id field
-        in ArtifactMetadata is used for validation and debugging only.
+        Same membership rule and storage prefilters as ``load_decisions``:
+        a row is the project's by its stamped ``project_id`` or by a
+        ``task_id`` found in the project's conversation logs; see
+        ``_load_project_rows``.
 
         Parameters
         ----------
@@ -677,33 +743,9 @@ class ProjectHistoryPersistence:
 
         with error_context("load_artifacts", custom_context={"project_id": project_id}):
             try:
-                # Use pooled backend instance
-                backend = self._backend
-
-                # Get task IDs for this project from conversation logs
-                project_task_ids = await self._get_task_ids_from_conversations(
-                    project_id
+                paginated_artifacts = await self._load_project_rows(
+                    "artifacts", project_id, limit, offset
                 )
-
-                if not project_task_ids:
-                    logger.debug(
-                        f"No task IDs found for project {project_id} in conversations"
-                    )
-                    return []
-
-                # Create filter function for task IDs
-                def task_filter(item: dict[str, Any]) -> bool:
-                    return item.get("task_id") in project_task_ids
-
-                # Query artifacts with filter and pagination
-                # Use reasonable limit to avoid memory issues
-                query_limit = min(limit, 10000)
-                all_artifacts = await backend.query(
-                    "artifacts", filter_func=task_filter, limit=query_limit + offset
-                )
-
-                # Apply offset and limit
-                paginated_artifacts = all_artifacts[offset : offset + limit]
 
                 # Parse artifacts
                 artifacts = []
@@ -719,8 +761,7 @@ class ProjectHistoryPersistence:
 
                 logger.debug(
                     f"Loaded {len(artifacts)} artifacts for project {project_id} "
-                    f"(from {len(project_task_ids)} tasks, "
-                    f"limit={limit}, offset={offset})"
+                    f"(limit={limit}, offset={offset})"
                 )
                 return artifacts
 
