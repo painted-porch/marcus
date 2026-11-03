@@ -2751,16 +2751,19 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
 
 
 def _close_run_on_drain(project_id: Optional[str], verdict: Any) -> Optional[str]:
-    """Close the project's open cost-store run when the board drains.
+    """Close the project's current cost-store run when the board drains.
 
     The ``runs`` table (``src/cost_tracking/cost_store.py``) opens a row per
     ``create_project`` and used to close it only when a model called the
     ``end_experiment`` tool. That tool is gone (ADR-0012 D10: a run is not a
     core concept), so the board's own verdict closes the row: the first
     drained ``request_next_task`` for a project stamps ``ended_at`` and the
-    final counts. Idempotent, because the close targets the latest *open*
-    run and returns None when there is none. Best effort: a cost-store
-    failure never blocks the drain response.
+    final counts, and emits the ``project_cost_summary`` telemetry event
+    that used to ride on ``end_experiment``. Every later drain for the same
+    project is a no-op, because the close targets the *current* run and
+    refuses an already-closed one (so older unclosed rows are never
+    touched). Best effort: a cost-store failure never blocks the drain
+    response.
 
     Parameters
     ----------
@@ -2780,7 +2783,8 @@ def _close_run_on_drain(project_id: Optional[str], verdict: Any) -> Optional[str
     try:
         from src.cost_tracking.cost_recorder import get_recorder
 
-        closed = get_recorder().store.close_latest_open_run_for_project(
+        store = get_recorder().store
+        closed = store.close_current_run_for_project(
             project_id=project_id,
             ended_at=datetime.now(timezone.utc),
             total_tasks=verdict.tasks_total,
@@ -2790,14 +2794,54 @@ def _close_run_on_drain(project_id: Optional[str], verdict: Any) -> Optional[str
     except Exception as exc:  # noqa: BLE001 - never fail the drain on bookkeeping
         logger.warning("Could not close the run for project %s: %s", project_id, exc)
         return None
-    if closed:
-        logger.info(
-            "Closed run %s for project %s on BOARD_DRAINED (%s)",
-            closed,
-            project_id,
-            verdict.reason,
+    if not closed:
+        return None
+    logger.info(
+        "Closed run %s for project %s on BOARD_DRAINED (%s)",
+        closed,
+        project_id,
+        verdict.reason,
+    )
+    _fire_cost_summary_for_project(project_id, store)
+    return str(closed)
+
+
+def _fire_cost_summary_for_project(project_id: str, store: Any) -> None:
+    """Emit ``project_cost_summary`` once for a run that just closed.
+
+    ``CostAggregator.project_summary`` returns a nested object (totals under
+    ``summary``, cost in dollars); the telemetry helper wants a flat dict
+    with ``cost_usd_cents`` and ``task_count``, so it is flattened here.
+    Best effort; telemetry never affects the drain.
+
+    Parameters
+    ----------
+    project_id : str
+        The project whose run closed.
+    store : Any
+        The cost store the aggregator reads.
+    """
+    try:
+        from src.cost_tracking.cost_aggregator import CostAggregator
+        from src.telemetry.events import fire_project_cost_summary
+
+        summary = CostAggregator(store).project_summary(project_id)
+        if not summary:
+            return
+        totals = summary.get("summary") or {}
+        cost_usd = totals.get("total_cost_usd") or 0
+        fire_project_cost_summary(
+            {
+                "input_tokens": totals.get("input_tokens") or 0,
+                "output_tokens": totals.get("output_tokens") or 0,
+                "cache_read_tokens": totals.get("cache_read_tokens") or 0,
+                "cache_creation_tokens": totals.get("cache_creation_tokens") or 0,
+                "cost_usd_cents": round(cost_usd * 100),
+                "task_count": len(summary.get("by_task") or []),
+            }
         )
-    return str(closed) if closed else None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("project_cost_summary not emitted for %s: %s", project_id, exc)
 
 
 async def request_next_task(agent_id: str, state: Any) -> Any:

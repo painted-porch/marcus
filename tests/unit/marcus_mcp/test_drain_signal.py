@@ -570,7 +570,7 @@ class TestDrainClosesTheRun:
         tasks = [_task("a", TaskStatus.DONE), _task("b", TaskStatus.DONE)]
         state = _request_state(tasks)
         store = Mock()
-        store.close_latest_open_run_for_project = Mock(return_value="run-1")
+        store.close_current_run_for_project = Mock(return_value="run-1")
         recorder = Mock(store=store)
 
         with (
@@ -582,7 +582,7 @@ class TestDrainClosesTheRun:
             result = await request_next_task("agent-1", state)
 
         assert result["status"] == "BOARD_DRAINED"
-        kwargs = store.close_latest_open_run_for_project.call_args.kwargs
+        kwargs = store.close_current_run_for_project.call_args.kwargs
         assert kwargs["project_id"] == PROJECT
         assert kwargs["total_tasks"] == 2
         assert kwargs["completed_tasks"] == 2
@@ -608,3 +608,74 @@ class TestDrainClosesTheRun:
 
         assert result["status"] == "BOARD_DRAINED"
         assert result["should_exit"] is True
+
+    @pytest.mark.asyncio
+    async def test_cost_summary_fires_once_when_a_run_closes(self) -> None:
+        """The project_cost_summary event rides on the real close, flattened."""
+        from src.marcus_mcp.tools.task import request_next_task
+
+        tasks = [_task("a", TaskStatus.DONE)]
+        state = _request_state(tasks)
+        store = Mock()
+        store.close_current_run_for_project = Mock(return_value="run-1")
+        recorder = Mock(store=store)
+        aggregator = Mock()
+        aggregator.project_summary = Mock(
+            return_value={
+                "summary": {
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_read_tokens": 50,
+                    "cache_creation_tokens": 5,
+                    "total_cost_usd": 0.1234,
+                },
+                "by_task": [{"task_id": "a"}],
+            }
+        )
+
+        with (
+            _no_task_patches(),
+            patch(
+                "src.cost_tracking.cost_recorder.get_recorder", return_value=recorder
+            ),
+            patch(
+                "src.cost_tracking.cost_aggregator.CostAggregator",
+                return_value=aggregator,
+            ),
+            patch("src.telemetry.events.fire_project_cost_summary") as fire,
+        ):
+            await request_next_task("agent-1", state)
+
+        fire.assert_called_once_with(
+            {
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "cache_read_tokens": 50,
+                "cache_creation_tokens": 5,
+                "cost_usd_cents": 12,
+                "task_count": 1,
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_repeated_drain_does_not_close_or_fire_again(self) -> None:
+        """A second worker's drain finds the run already closed: no close, no event."""
+        from src.marcus_mcp.tools.task import request_next_task
+
+        tasks = [_task("a", TaskStatus.DONE)]
+        state = _request_state(tasks)
+        store = Mock()
+        store.close_current_run_for_project = Mock(return_value=None)
+        recorder = Mock(store=store)
+
+        with (
+            _no_task_patches(),
+            patch(
+                "src.cost_tracking.cost_recorder.get_recorder", return_value=recorder
+            ),
+            patch("src.telemetry.events.fire_project_cost_summary") as fire,
+        ):
+            result = await request_next_task("agent-1", state)
+
+        assert result["status"] == "BOARD_DRAINED"
+        fire.assert_not_called()

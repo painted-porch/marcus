@@ -1395,8 +1395,9 @@ class CostStore:
     ) -> Optional[str]:
         """Close the most recently started open run for a project (#537).
 
-        Live-close hook for the drain signal (``BOARD_DRAINED`` in
-        ``request_next_task``). The schema allows
+        Closes the newest *open* row. The drain signal uses
+        :meth:`close_current_run_for_project` instead, which refuses to
+        walk back past an already-closed current run. The schema allows
         multiple ``runs`` rows per ``project_id`` (retries, repeated
         traversals), so a bulk close would stamp every historical
         open row with the just-finished experiment's
@@ -1437,6 +1438,71 @@ class CostStore:
             num_agents=num_agents,
         )
         return run_id if closed else None
+
+    def close_current_run_for_project(
+        self,
+        project_id: str,
+        ended_at: Optional[datetime] = None,
+        total_tasks: Optional[int] = None,
+        completed_tasks: Optional[int] = None,
+        blocked_tasks: Optional[int] = None,
+        num_agents: Optional[int] = None,
+    ) -> Optional[str]:
+        """Close the project's current run if it is still open; never an older one.
+
+        Live-close hook for the drain signal (``BOARD_DRAINED`` in
+        ``request_next_task``), which may fire once per worker. The
+        *current* run is the project's most recently started row whatever
+        its state. If that row is already closed the call is a no-op, so
+        repeated drains cannot walk backward through older open rows and
+        stamp historical runs with today's counts (Codex P2 on PR #782).
+        Older open rows stay with the periodic ``backfill_run_close_state``
+        script.
+
+        ``project_id`` is normalized exactly as in
+        :meth:`get_latest_open_run_for_project`.
+
+        Parameters
+        ----------
+        project_id : str
+            Project identifier in dashed or dashless form.
+        ended_at : datetime, optional
+            Close timestamp; see :meth:`close_run` for the fallback.
+        total_tasks, completed_tasks, blocked_tasks, num_agents : int, optional
+            Final counts to stamp on the run.
+
+        Returns
+        -------
+        Optional[str]
+            The closed ``run_id``, or None when the project has no run or
+            its current run is already closed.
+        """
+        from src.cost_tracking.cost_recorder import canonical_project_id
+
+        normalized = canonical_project_id(project_id) or project_id
+        row = self.conn.execute(
+            """
+            SELECT run_id, ended_at FROM runs
+             WHERE project_id = ?
+             ORDER BY started_at DESC
+             LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+        if row is None:
+            return None
+        run_id, already_ended = row
+        if already_ended is not None:
+            return None
+        closed = self.close_run(
+            str(run_id),
+            ended_at=ended_at,
+            total_tasks=total_tasks,
+            completed_tasks=completed_tasks,
+            blocked_tasks=blocked_tasks,
+            num_agents=num_agents,
+        )
+        return str(run_id) if closed else None
 
     def record_price(self, price: ModelPrice) -> None:
         """Insert one ``model_prices`` row.
