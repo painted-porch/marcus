@@ -8,10 +8,15 @@ cannot raise a subject's weight.
 """
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.analysis.query_api import group_opinions_by_subject
+from src.analysis.query_api import (
+    DECISION_PAGE_SIZE,
+    ProjectHistoryQuery,
+    group_opinions_by_subject,
+)
 from src.core.project_history import Decision
 
 pytestmark = pytest.mark.unit
@@ -154,3 +159,60 @@ class TestGroupOpinionsBySubject:
     def test_empty_input_is_an_empty_list(self) -> None:
         """No opinions means no entries, not an error."""
         assert group_opinions_by_subject([]) == []
+
+
+class TestSummarizeSubjectsReadsEveryPage:
+    """Test suite for the read behind ``query_project_history("opinions")``.
+
+    ``load_decisions`` pages at ``DECISION_PAGE_SIZE`` rows.  Grouping only
+    the first page would undercount corroboration on a large project and
+    could drop subjects entirely (Codex P2 on PR #800), so the read must
+    walk every page before it groups.
+    """
+
+    @pytest.mark.asyncio
+    async def test_counts_opinions_beyond_the_first_page(self) -> None:
+        """One more opinion than a page holds is still counted."""
+        total = DECISION_PAGE_SIZE + 1
+        rows = [
+            _opinion(f"d{i}", f"agent-{i}", "farm.flooded", i) for i in range(total)
+        ]
+
+        async def load_decisions(
+            project_id: str, limit: int = DECISION_PAGE_SIZE, offset: int = 0
+        ) -> list[Decision]:
+            return rows[offset : offset + limit]
+
+        aggregator = Mock()
+        aggregator.history_persistence.load_decisions = AsyncMock(
+            side_effect=load_decisions
+        )
+
+        [entry] = await ProjectHistoryQuery(aggregator).summarize_subjects("p1")
+
+        assert entry["count"] == total
+        assert entry["opinion_count"] == total
+        offsets = [
+            call.kwargs["offset"]
+            for call in aggregator.history_persistence.load_decisions.await_args_list
+        ]
+        assert offsets == [0, DECISION_PAGE_SIZE, 2 * DECISION_PAGE_SIZE]
+
+    @pytest.mark.asyncio
+    async def test_small_project_reads_one_page_and_stops(self) -> None:
+        """A project under one page costs one data page plus the empty check.
+
+        The loop stops on the first EMPTY page, not the first short one,
+        because ``load_decisions`` skips malformed rows and can return a
+        short page with more rows still behind it.
+        """
+        rows = [_opinion("d1", "agent-1", "farm.flooded", 0)]
+        aggregator = Mock()
+        aggregator.history_persistence.load_decisions = AsyncMock(
+            side_effect=lambda project_id, limit, offset: rows[offset : offset + limit]
+        )
+
+        entries = await ProjectHistoryQuery(aggregator).summarize_subjects("p1")
+
+        assert [e["count"] for e in entries] == [1]
+        assert aggregator.history_persistence.load_decisions.await_count == 2

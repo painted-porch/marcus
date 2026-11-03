@@ -22,6 +22,9 @@ from src.analysis.aggregator import (
 )
 from src.core.project_history import ArtifactMetadata, Decision
 
+#: Rows per ``load_decisions`` page when a read must see every decision.
+DECISION_PAGE_SIZE = 10000
+
 
 def group_opinions_by_subject(
     decisions: list[Decision],
@@ -408,7 +411,22 @@ class ProjectHistoryQuery:
         list[dict[str, Any]]
             One entry per subject; see ``group_opinions_by_subject``.
         """
-        decisions = await self.aggregator.history_persistence.load_decisions(project_id)
+        # Walk every page: ``load_decisions`` caps a page at
+        # DECISION_PAGE_SIZE, and grouping a single page would undercount
+        # corroboration on a large project and could drop subjects
+        # outright (Codex P2 on PR #800). The loop stops on the first
+        # empty page rather than the first short one, because a page
+        # can come back short when malformed rows were skipped.
+        decisions: list[Decision] = []
+        offset = 0
+        while True:
+            page = await self.aggregator.history_persistence.load_decisions(
+                project_id, limit=DECISION_PAGE_SIZE, offset=offset
+            )
+            if not page:
+                break
+            decisions.extend(page)
+            offset += DECISION_PAGE_SIZE
         return group_opinions_by_subject(
             decisions, subject=subject, kind=kind, since=since
         )

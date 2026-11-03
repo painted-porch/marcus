@@ -405,6 +405,7 @@ class Context:
         impact: str,
         subject: Optional[str] = None,
         kind: str = "decision",
+        project_id: Optional[str] = None,
     ) -> Decision:
         """Log an architectural decision, or an opinion, made by an agent.
 
@@ -426,6 +427,11 @@ class Context:
             the same subject are counted together.
         kind : str
             ``"decision"`` (default) or ``"assessment"`` for an opinion.
+        project_id : Optional[str]
+            The project to stamp. Defaults to this Context's project,
+            which is the server's ACTIVE project at call time; a caller
+            that knows the agent's own project should pass it, because a
+            task-less opinion is only readable through this stamp.
 
         Returns
         -------
@@ -442,7 +448,7 @@ class Context:
             what=what,
             why=why,
             impact=impact,
-            project_id=self.project_id,
+            project_id=project_id or self.project_id,
             subject=subject,
             kind=kind,
         )

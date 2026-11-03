@@ -165,13 +165,45 @@ def _about_card_id(state: Any) -> Optional[str]:
     ``create_project`` writes one card per project named
     ``About: <project_name>`` with ``source_type="project_about"``. It is
     the natural home for a comment that is about the project rather
-    than about any one task.
+    than about any one task. The exact name is tried first (two projects'
+    cards could share a board); ``source_type`` round-trips on sqlite but
+    not on every provider, so the name prefix is the last resort.
     """
-    for task in getattr(state, "project_tasks", None) or []:
+    tasks = getattr(state, "project_tasks", None) or []
+    project_name = getattr(state, "current_project_name", None)
+    if isinstance(project_name, str) and project_name:
+        exact = f"About: {project_name}"
+        for task in tasks:
+            if getattr(task, "name", None) == exact:
+                return str(task.id)
+    for task in tasks:
         if getattr(task, "source_type", None) == "project_about" or str(
             getattr(task, "name", "")
         ).startswith("About: "):
             return str(task.id)
+    return None
+
+
+def _project_for_agent(agent_id: str, state: Any) -> Optional[str]:
+    """Return the project an opinion by ``agent_id`` belongs to.
+
+    The agent's registration (``state.agent_project_map``) is the truth;
+    ``Context.project_id`` and ``state.current_project_id`` are the
+    server's ACTIVE project at call time, which on a multi-project server
+    need not be the agent's, and which is ``None`` before any project has
+    been selected (marcus-44 review of PR #800).
+    """
+    mapping = getattr(state, "agent_project_map", None)
+    if isinstance(mapping, dict):
+        mapped = mapping.get(agent_id)
+        if mapped:
+            return str(mapped)
+    for candidate in (
+        getattr(getattr(state, "context", None), "project_id", None),
+        getattr(state, "current_project_id", None),
+    ):
+        if isinstance(candidate, str) and candidate:
+            return candidate
     return None
 
 
@@ -237,6 +269,21 @@ async def give_opinion(
         why = why.strip() if why and why.strip() else "Not specified"
         impact = impact.strip() if impact and impact.strip() else "Not specified"
 
+        # A task-less opinion is readable only through its project stamp,
+        # so it is refused when no project can be resolved rather than
+        # written where no reader will ever find it.
+        project_id = _project_for_agent(agent_id, state)
+        if project_id is None and task_id is None:
+            return {
+                "success": False,
+                "error": (
+                    "no project to record a project-level opinion against: "
+                    f"agent {agent_id} is not registered to a project and "
+                    "no project is active. Register with a project_id, or "
+                    "pass task_id for an opinion about a task."
+                ),
+            }
+
         logged_decision = await state.context.log_decision(
             agent_id=agent_id,
             task_id=task_id,
@@ -245,6 +292,7 @@ async def give_opinion(
             impact=impact,
             subject=canonical,
             kind="assessment",
+            project_id=project_id,
         )
 
         # Keep the opinion visible to a human watching the board: on the
@@ -274,7 +322,9 @@ async def give_opinion(
                 "opinion_logged", agent_id, logged_decision.to_dict()
             )
 
-        await _persist_decision_to_history(logged_decision, state)
+        await _persist_decision_to_history(
+            logged_decision, state, project_id=project_id
+        )
 
         return {
             "success": True,
@@ -282,6 +332,7 @@ async def give_opinion(
             "subject": canonical,
             "kind": "assessment",
             "task_id": task_id,
+            "project_id": project_id,
             "message": "Opinion recorded on the board",
         }
 
@@ -1330,7 +1381,9 @@ async def _collect_sibling_subtask_context(
     return {"artifacts": sibling_artifacts, "decisions": sibling_decisions}
 
 
-async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None:
+async def _persist_decision_to_history(
+    logged_decision: Any, state: Any, project_id: Optional[str] = None
+) -> None:
     """
     Persist decision to project history for post-project analysis.
 
@@ -1343,6 +1396,10 @@ async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None
         The decision from the Context system
     state : Any
         Marcus server state
+    project_id : Optional[str]
+        The project to record under. Defaults to the server's active
+        project; ``give_opinion`` passes the agent's own project so a
+        task-less opinion is filed where its readers will look.
 
     Notes
     -----
@@ -1350,11 +1407,11 @@ async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None
     """
     try:
         # Get project info from state
-        if not hasattr(state, "current_project_id") or not state.current_project_id:
+        project_id = project_id or getattr(state, "current_project_id", None)
+        if not project_id:
             logger.debug("No active project - skipping project history persistence")
             return
 
-        project_id = state.current_project_id
         project_name = getattr(state, "current_project_name", project_id)
 
         # Initialize project history persistence if not already done

@@ -117,6 +117,24 @@ class TestContextDecisionOpinionFields:
         assert data["task_id"] is None
 
     @pytest.mark.asyncio
+    async def test_log_decision_project_id_override_wins(self) -> None:
+        """A caller that knows the agent's project can stamp it explicitly."""
+        context = Context(project_id="p-active")
+
+        decision = await context.log_decision(
+            agent_id="agent-2",
+            task_id=None,
+            what="w",
+            why="y",
+            impact="i",
+            subject="farm.flooded",
+            kind="assessment",
+            project_id="p-agent",
+        )
+
+        assert decision.project_id == "p-agent"
+
+    @pytest.mark.asyncio
     async def test_log_decision_keeps_the_old_call_shape(self) -> None:
         """Existing task-scoped callers are unchanged."""
         context = Context()

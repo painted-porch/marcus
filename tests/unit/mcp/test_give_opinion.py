@@ -60,13 +60,21 @@ def _logged_decision(**overrides: Any) -> Mock:
 
 
 def _make_state(with_about_card: bool = True) -> Mock:
-    """Build a Mock state with a Context, a kanban client and a board."""
+    """Build a Mock state with a Context, a kanban client and a board.
+
+    The agent is registered to project ``p-agent`` while the server's
+    active project (``context.project_id``) is ``p-active``, so a test
+    can tell which one an opinion was stamped with.
+    """
     state = Mock()
     state.context = Mock()
+    state.context.project_id = "p-active"
     state.context.log_decision = AsyncMock(return_value=_logged_decision())
     state.kanban_client = Mock()
     state.kanban_client.add_comment = AsyncMock(return_value={"success": True})
     state.project_tasks = [_about_card()] if with_about_card else []
+    state.current_project_name = "Wheat Farm"
+    state.agent_project_map = {"agent-2": "p-agent"}
     state.events = None
     return state
 
@@ -127,7 +135,120 @@ class TestGiveOpinion:
             impact="food supply",
             subject="farm.flooded",
             kind="assessment",
+            project_id="p-agent",
         )
+
+    @pytest.mark.asyncio
+    async def test_opinion_is_stamped_with_the_agents_project(self) -> None:
+        """The stamp comes from the agent's registration, not the active project.
+
+        ``Context.project_id`` is the server's active project at call time;
+        on a multi-project server an agent on project B logging while A is
+        active would otherwise be stamped A and be invisible to B
+        (marcus-44 review of PR #800).
+        """
+        state = _make_state()
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new_callable=AsyncMock,
+        ) as persist:
+            await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+            )
+
+        assert state.context.log_decision.await_args.kwargs["project_id"] == "p-agent"
+        assert persist.await_args.kwargs["project_id"] == "p-agent"
+
+    @pytest.mark.asyncio
+    async def test_unregistered_agent_falls_back_to_the_active_project(self) -> None:
+        """Without a registration, the active project is the best stamp."""
+        state = _make_state()
+        state.agent_project_map = {}
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new_callable=AsyncMock,
+        ):
+            result = await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert state.context.log_decision.await_args.kwargs["project_id"] == "p-active"
+
+    @pytest.mark.asyncio
+    async def test_task_less_opinion_with_no_project_is_refused(self) -> None:
+        """A row no project can read back is refused rather than stranded."""
+        state = _make_state()
+        state.agent_project_map = {}
+        state.context.project_id = None
+        state.current_project_id = None
+
+        result = await give_opinion(
+            agent_id="agent-2",
+            subject="farm.flooded",
+            what="the farm is flooded",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert "project" in result["error"]
+        state.context.log_decision.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_task_scoped_opinion_needs_no_project_stamp(self) -> None:
+        """With a task, the task-id clause makes the row readable."""
+        state = _make_state()
+        state.agent_project_map = {}
+        state.context.project_id = None
+        state.current_project_id = None
+        state.context.log_decision = AsyncMock(
+            return_value=_logged_decision(task_id="task-9")
+        )
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new_callable=AsyncMock,
+        ):
+            result = await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+                task_id="task-9",
+            )
+
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_about_card_is_matched_by_exact_name_first(self) -> None:
+        """Two About cards on the board: the project's own wins."""
+        state = _make_state()
+        other = _about_card()
+        other.id = "about_other"
+        other.name = "About: Other Project"
+        state.project_tasks = [other, _about_card()]
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new_callable=AsyncMock,
+        ):
+            await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+            )
+
+        target, _ = state.kanban_client.add_comment.await_args.args
+        assert target == "about_project"
 
     @pytest.mark.asyncio
     async def test_project_level_opinion_comments_on_the_about_card(self) -> None:
