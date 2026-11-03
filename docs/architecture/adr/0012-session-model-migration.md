@@ -95,6 +95,13 @@ Marcus still never resolves.
   ancestor and rejects a resolution the agent had already made — found in
   review of PR #790); quarantining rejected commits (Marcus rewriting an
   agent's history is exactly the intelligence this path forbids).
+- **Conflict policy decided 2026-11-03: BLOCKED and re-report, not an integrator card.**
+This decision's own wording said "any conflict spawns a board-visible integrator card", and that is **not** what ships.
+A conflicted completion keeps marking the task BLOCKED with the conflict recorded, and the same agent resolves it and reports again (bug #651, PR #653).
+The reason is what the board claims: accepting the completion and deferring the merge to a card means the board says DONE while `main` lacks the work, and a downstream task can be claimed against a `main` that is missing its dependency.
+Marcus's value is that the board does not lie about `main`, so the gap is not reopened for convenience.
+The real weakness of BLOCKED is that the task depends on its original agent still being alive, and that is addressed by making the automatic rescue task-scoped (issue #796) rather than by loosening the board.
+- **Merge home, in practice:** one landing mechanism with two callers, the completion path and the recovery sweep, rather than merge code relocated into a separate home. That is what the epic's "remove merge execution from `report_task_progress`" item amounts to once #796 routes recovery through the same landing: the mechanical path exists once, is called twice, and never resolves in either.
 - **Rejected:** launcher-executes-all (a dumb ops layer inherits conflict
   resolution → rebuilds #700 elsewhere); integrator-card-always (every trivial
   merge waits for a session and burns tokens).

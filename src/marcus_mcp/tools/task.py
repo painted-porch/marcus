@@ -4531,34 +4531,58 @@ async def _attempt_merge_recovery(
     task: Task,
     state: Any,
 ) -> Optional[Dict[str, Any]]:
-    """Recover a BLOCKED-by-merge-conflict task via worktree rebase.
+    """Retry the per-task landing of a BLOCKED-by-merge-conflict task.
 
-    Bug #651 follow-up.  PR #653 marked tasks BLOCKED on merge fail
-    (closed the kanban/filesystem divergence) but left them
-    unrecoverable.  verify-snake-8 (test71, 2026-05-25) hit one
-    such conflict and the runner spawned 49 ephemeral agents
-    chasing the unclaimed downstream task before the 20-minute
-    stall watchdog gave up — roughly $25-50 of wasted spawn cost.
+    Bug #651 follow-up. PR #653 marked tasks BLOCKED on merge failure,
+    which closed the kanban/filesystem divergence but left them
+    unrecoverable: verify-snake-8 (test71, 2026-05-25) hit one such
+    conflict and the old runner spawned 49 ephemeral agents chasing the
+    unclaimed downstream task before its stall watchdog gave up.
 
-    Most "conflicts" in DAG-based parallel work are stale-base
-    false conflicts: another agent merged main while this agent's
-    worktree was on the old base; the actual code changes don't
-    overlap.  Rebase resolves these mechanically.  Real content
-    conflicts (overlapping line edits) abort the rebase and leave
-    the task BLOCKED for human intervention.
+    **What this does, since issue #796.** It asks the landing again, and
+    nothing else. If the branch has moved on since the failure, the
+    task's work lands and the task goes DONE. If the conflict is still
+    unresolved, the landing fails again and the task stays BLOCKED,
+    which is the honest answer.
+
+    The branch moving on is the expected case rather than a lucky one:
+    the blocker message tells the agent to resolve the conflict in its
+    own worktree and report again, and this sweep rescues the task when
+    the agent did the first part and went home without the second.
+
+    **What it no longer does.** It used to rebase the branch onto
+    ``main`` and fast-forward the whole branch in. That merged every
+    commit on the branch, so a task whose completion Marcus had refused
+    reached ``main`` through the rescue, which is issue #730's defect on
+    a path #730 did not touch. It also broke ADR-0012 D2's rule that the
+    mechanical path never resolves, rebases or recovers. The rebase
+    existed to clear stale-base false conflicts, and the footprint
+    landing (#790) already merges three-way against the common ancestor,
+    which is what those conflicts needed.
+
+    A consequence worth stating: **nothing in the agent's worktree is
+    touched any more**. There is no stash, no reset and no rebase, so
+    this sweep cannot destroy an agent's uncommitted work however it
+    runs. The one guard that remains is to skip a worktree with a merge
+    in progress, because its branch tip is still the commit that failed
+    and retrying would only churn.
 
     Recovery flow:
 
     1. Read ``source_context.merge_conflict`` from the BLOCKED task.
     2. Resolve the worktree path
        (``<project_root>/../worktrees/<agent_id>``, the Marcus
-       convention set by the session launcher).
-    3. Run ``git rebase main`` in the worktree.
-    4. On clean rebase: ``git checkout main`` in the main repo,
-       ``git merge --ff-only <branch>``, transition task to DONE
-       on the kanban, clear ``merge_conflict`` from source_context.
-    5. On rebase conflict: ``git rebase --abort`` to clean state;
-       leave task BLOCKED; return None.
+       convention set by the session launcher), and skip it if a merge
+       is in progress there.
+    3. Recover the task's claim-time baseline and call
+       :func:`_merge_agent_branch_to_main` with it, exactly as the
+       completion path does. Without a baseline, stop: the landing would
+       fall back to merging the whole branch, which is right when an
+       agent is waiting for its work and wrong here, where nobody is.
+    4. On success: transition the task to DONE on the kanban, clear
+       ``merge_conflict`` from ``source_context``, and open any pending
+       reconciliation card (ADR-0012 D11).
+    5. On failure: leave the task BLOCKED; return None.
 
     Parameters
     ----------
@@ -4574,16 +4598,15 @@ async def _attempt_merge_recovery(
     Returns
     -------
     Optional[Dict[str, Any]]
-        Success dict ``{"success": True, "task_id": ...,
-        "method": "rebase"}`` when the task recovered.  ``None`` for
-        any failure path.  Callers treat ``None`` as "task stays
-        BLOCKED."
+        ``{"success": True, "task_id": ..., "branch": ...,
+        "method": "task_scoped_landing"}`` when the task recovered.
+        ``None`` on every failure path, which callers treat as "the task
+        stays BLOCKED".
 
     Notes
     -----
-    Bright-line: Marcus rebasing the agent's branch onto main is
-    environment shaping, not HOW dictation.  Same primitive as
-    ``git pull --rebase`` that any developer runs daily.
+    Best effort and never raises: a task that cannot be landed stays
+    BLOCKED, which is where it already was.
     """
     import subprocess as _sp
     from pathlib import Path as _Path
@@ -4626,40 +4649,22 @@ async def _attempt_merge_recovery(
         )
         return None
 
-    # Bug #700: a failed integration merge or gate-test side effects can
-    # leave the worktree index/working tree dirty, and ``git rebase``
-    # refuses to start on a non-clean state ("Your index contains
-    # uncommitted changes" / "You have unstaged changes"), permanently
-    # wedging a task whose work is safely committed on ``branch``.
-    #
-    # Two hazards must be respected before cleaning it (Codex review, #711):
-    #   P1 — the merge-conflict blocker message asks the agent to resolve
-    #        the conflict *in this same worktree* (``git merge main``;
-    #        edit; ``git add``; ``git commit``).  This recovery sweep runs
-    #        concurrently on any other agent's no-task poll, so it must
-    #        never destroy an in-progress manual resolution.  If a merge is
-    #        underway (``MERGE_HEAD`` present), fence: leave the task
-    #        BLOCKED and let the agent finish.
-    #   P2 — the dirty state may include *untracked* paths that also exist
-    #        on newer ``main`` (e.g. a generated lockfile); those abort the
-    #        rebase too, so untracked files must be set aside as well.
-    #
-    # For the remaining case (dirty, no merge underway) the changes are
-    # gate side-effects / stale artifacts.  Rather than delete them with
-    # ``reset --hard`` (which also cannot identify them as disposable),
-    # stash them — tracked AND untracked — so nothing is ever destroyed:
-    # the committed work still replays via rebase, and the stash remains
-    # recoverable if the set-aside changes turn out to matter.
+    # The blocker message asks the agent to resolve the conflict in this
+    # same worktree (``git merge main``, edit, ``git add``, ``git
+    # commit``). This sweep runs on any other agent's no-task poll, so a
+    # resolution in progress must be left alone: its branch tip is still
+    # the commit that failed, so retrying now would fail again and churn.
     try:
         merge_in_progress = _sp.run(
-            ["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            ["git", "rev-parse", "--verify", "--quiet", "MERGE_HEAD"],
             cwd=worktree,
             capture_output=True,
-            timeout=30,
+            text=True,
+            timeout=15,
         )
     except (_sp.SubprocessError, OSError) as exc:
         logger.warning(
-            "[recovery] %s: could not probe worktree merge state: %s; "
+            "[recovery] %s: could not check for a merge in progress: %s; "
             "skipping auto-recovery to be safe",
             task.id,
             exc,
@@ -4674,93 +4679,67 @@ async def _attempt_merge_recovery(
         )
         return None
 
-    try:
-        _sp.run(
-            [
-                "git",
-                "stash",
-                "push",
-                "--include-untracked",
-                "-m",
-                f"marcus-recovery-{task.id}",
-            ],
-            cwd=worktree,
-            capture_output=True,
-            timeout=30,
-        )
-    except (_sp.SubprocessError, OSError) as exc:
+    # Issue #796: retry the same per-task landing the completion path
+    # uses, and nothing else.
+    #
+    # This used to rebase the branch onto ``main`` and fast-forward the
+    # whole branch in. That merged every commit on the branch, so a task
+    # whose completion Marcus had refused reached ``main`` through the
+    # rescue — issue #730's defect on a path #730 did not touch. It also
+    # broke ADR-0012 D2's rule that the mechanical path never resolves,
+    # rebases or recovers, which a rebase is the clearest case of.
+    #
+    # The rebase existed to clear stale-base false conflicts, and the
+    # footprint landing (#790) already merges three-way against the
+    # common ancestor, which is what those conflicts needed. So the
+    # rescue is now: ask the landing again. It succeeds when the branch
+    # has moved on since the failure, which is exactly what the blocker
+    # message told the agent to do and what it may have done before
+    # going home without re-reporting. A genuine unresolved conflict
+    # fails again and the task stays BLOCKED, which is the honest answer.
+    #
+    # Nothing in the agent's worktree is touched, so there is no stash,
+    # no reset and no state for this sweep to destroy.
+    baseline = await _baseline_commit_for_task(state, agent_id, task.id)
+    if not baseline:
+        # The landing falls back to merging the whole branch when it has
+        # no baseline, which is right on the completion path (an agent is
+        # waiting and its work should not be dropped) and wrong here:
+        # nobody is waiting, and widening is the defect this path exists
+        # to stop. Leave it BLOCKED for an operator instead.
         logger.warning(
-            "[recovery] %s: pre-rebase worktree stash failed: %s; "
-            "continuing to rebase attempt",
+            "[recovery] %s: no baseline recorded for %s, so the landing "
+            "could only be widened to the whole branch; leaving BLOCKED "
+            "(issue #796)",
             task.id,
-            exc,
+            agent_id,
         )
+        return None
 
     logger.info(
-        "[recovery] %s: attempting rebase of %s onto main in %s",
+        "[recovery] %s: retrying the per-task landing of %s from baseline %s",
         task.id,
         branch,
-        worktree,
+        baseline[:8],
     )
-    try:
-        rebase = _sp.run(
-            ["git", "rebase", "main"],
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (_sp.SubprocessError, OSError) as exc:
-        logger.warning("[recovery] %s: rebase subprocess error: %s", task.id, exc)
-        return None
-
-    if rebase.returncode != 0:
-        logger.warning(
-            "[recovery] %s: rebase failed (real content conflict?): %s",
+    landed = await _merge_agent_branch_to_main(
+        agent_id, task.id, state, baseline_commit=baseline
+    )
+    if landed is None:
+        logger.info(
+            "[recovery] %s: nothing to land for %s (no branch or no repo); "
+            "leaving BLOCKED",
             task.id,
-            rebase.stderr.strip() if rebase.stderr else "(no stderr)",
+            branch,
         )
-        try:
-            _sp.run(
-                ["git", "rebase", "--abort"],
-                cwd=worktree,
-                capture_output=True,
-                timeout=30,
-            )
-        except (_sp.SubprocessError, OSError):
-            pass
         return None
-
-    try:
-        _sp.run(
-            ["git", "checkout", "main"],
-            cwd=repo,
-            check=True,
-            capture_output=True,
-            timeout=30,
+    if not landed.get("success"):
+        logger.info(
+            "[recovery] %s: %s still does not land (%s); leaving BLOCKED",
+            task.id,
+            branch,
+            landed.get("error"),
         )
-        _sp.run(
-            ["git", "reset", "--hard", "HEAD"],
-            cwd=repo,
-            capture_output=True,
-            timeout=30,
-        )
-        merge = _sp.run(
-            ["git", "merge", "--ff-only", branch],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if merge.returncode != 0:
-            logger.warning(
-                "[recovery] %s: post-rebase fast-forward failed: %s",
-                task.id,
-                merge.stderr.strip() if merge.stderr else "(no stderr)",
-            )
-            return None
-    except (_sp.SubprocessError, OSError) as exc:
-        logger.warning("[recovery] %s: post-rebase merge error: %s", task.id, exc)
         return None
 
     new_ctx = dict(ctx)
@@ -4774,14 +4753,14 @@ async def _attempt_merge_recovery(
         await state.kanban_client.update_task(task.id, update_data)
     except Exception as exc:
         logger.warning(
-            "[recovery] %s: kanban update failed after rebase+merge: %s",
+            "[recovery] %s: kanban update failed after landing: %s",
             task.id,
             exc,
         )
         return None
 
     logger.info(
-        "[recovery] %s: recovered via rebase; branch %s merged to main",
+        "[recovery] %s: recovered; this task's work from %s landed on main",
         task.id,
         branch,
     )
@@ -4794,7 +4773,7 @@ async def _attempt_merge_recovery(
         "success": True,
         "task_id": task.id,
         "branch": branch,
-        "method": "rebase",
+        "method": "task_scoped_landing",
     }
 
 

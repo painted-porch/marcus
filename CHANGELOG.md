@@ -45,6 +45,13 @@ Gating on self-reported virtue invites the compliance theatre that forced Invari
 - Moving a GitHub issue to the blocked or in-progress column no longer wipes its other labels.
 
 ### Changed
+- The rescue sweep lands one task's work, not a whole session branch (#796, ADR-0012 D2).
+A completion whose merge conflicts is marked BLOCKED, and a sweep on another agent's no-task poll used to rebase that agent's branch onto `main` and fast-forward the whole branch in.
+That merged every commit on the branch, so a task whose completion Marcus had refused reached `main` through the rescue: issue #730's defect on a path #730 did not touch.
+The sweep now retries the same per-task landing the completion path uses, and nothing else. It succeeds when the branch has moved on since the failure, which is what the blocker message asks the agent to do and what it may have done before going home without reporting again; an unresolved conflict fails again and the task stays BLOCKED.
+Without a recorded baseline the sweep stops rather than landing anything: the landing would otherwise fall back to merging the whole branch, which is right on the completion path where an agent is waiting for its work and wrong here where nobody is.
+Nothing in the agent's worktree is touched any more. There is no stash, no reset and no rebase, so a sweep running on someone else's poll cannot disturb an agent's uncommitted work; the one remaining guard skips a worktree with a merge in progress.
+Measured both ways on a real server: in the case the blocker message sets up, the old sweep rescued nothing and the new one rescues; in the case where the old rebase succeeded, it landed the refused work and the new one does not.
 - One worktree per session, for the session's whole life (ADR-0012 D1, epic #706 Milestone B).
 The session script no longer rotates the workspace between chores: it keeps one worktree and branch at `worktrees/<agent_id>`, which is also the path cost attribution reads, so the worktree count equals the session count with no churn.
 Before each new card the script discards anything left uncommitted and pulls `main`, so the session builds on what other sessions have landed and starts from a tree holding only committed work; a chore that ended **still holding** its task resumes on the tree as it stands, because both decisions belong to the agent while a card is in flight.
