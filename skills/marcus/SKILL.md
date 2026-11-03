@@ -289,6 +289,9 @@ cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <c
 
 # With codex harness:
 cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <cwd> --harness codex --model gpt-5-codex
+
+# Seeded board (explicit task list, no decomposition; for live checks):
+cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <cwd> --seed <path to tasks.yaml>
 ```
 
 This will:

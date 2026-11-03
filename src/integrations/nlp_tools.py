@@ -390,6 +390,23 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
         self._project_coverage_before_fill: Optional[float] = None
         self._project_coverage_after_fill: Optional[float] = None
 
+        # Seeded board: the caller handed over the exact task list, so no
+        # decomposer runs and no LLM is called. The tasks go on the board
+        # as given (the creator skips the safety-check additions and the
+        # subtask decomposer for ``source_type == "seeded"``), so a live
+        # check can run on a one-, two- or three-task board.
+        seed_specs = options.get("tasks") if isinstance(options, dict) else None
+        if seed_specs is not None:
+            from src.integrations.seeded_tasks import build_seeded_tasks
+
+            seeded = build_seeded_tasks(seed_specs, project_name)
+            self._actual_decomposer = "explicit"
+            logger.info(
+                f"[decomposer] explicit task list: {len(seeded)} seeded task(s), "
+                "no decomposition"
+            )
+            return seeded
+
         # Detect context (Phase 1)
         await self.board_analyzer.analyze_board("default", [])
         context = await self.context_detector.detect_optimal_mode(
@@ -1448,6 +1465,87 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
 
         return foundation_tasks
 
+    async def _augment_tasks(
+        self, tasks: List[Task], description: str, project_name: str
+    ) -> List[Task]:
+        """Apply the post-decomposition additions, or none for a seeded board.
+
+        The normal path adds phase dependencies and the implementation,
+        testing and deployment constraints (``apply_safety_checks``), then
+        the integration verification task and the README task. A seeded
+        board (``_actual_decomposer == "explicit"``) is exactly the tasks
+        the caller gave, so it gets none of that.
+
+        Parameters
+        ----------
+        tasks : List[Task]
+            The decomposed or seeded tasks.
+        description : str
+            The project description, for the integration and README tasks.
+        project_name : str
+            The project name, for the same.
+
+        Returns
+        -------
+        List[Task]
+            The tasks to put on the board.
+        """
+        if getattr(self, "_actual_decomposer", None) == "explicit":
+            logger.info(
+                f"Seeded board: {len(tasks)} task(s) kept as given, "
+                "no safety-check additions"
+            )
+            return list(tasks)
+
+        safe_tasks = await self.apply_safety_checks(tasks)
+        logger.info(f"Safety checks passed, {len(safe_tasks)} tasks ready")
+        # Spec coverage moved to the augmenter chain inside the decomposer
+        # (issue #456 Stage 4): gap tasks are already in the pool here.
+        #
+        # Add the integration verification task before documentation so
+        # the doc task depends on it. For contract-first decomposition
+        # (GH-320 PR 2) pass the shared contract file path so the
+        # verification agent treats it as authoritative.
+        from src.integrations.integration_verification import (
+            enhance_project_with_integration,
+        )
+
+        contract_file_for_integration: Optional[str] = None
+        for task in safe_tasks:
+            ctx = getattr(task, "source_context", None) or {}
+            candidate = ctx.get("contract_file")
+            if candidate:
+                contract_file_for_integration = candidate
+                break
+        # Intent preservation (GH-320 task #64) and user outcomes (#523
+        # Slice B): stashed by the contract-first path, absent otherwise.
+        stashed_requirements = getattr(self, "_contract_first_requirements", None)
+        stashed_outcomes = getattr(self, "_contract_first_user_outcomes", None)
+        safe_tasks = enhance_project_with_integration(
+            safe_tasks,
+            description,
+            project_name,
+            contract_file=contract_file_for_integration,
+            functional_requirements=stashed_requirements,
+            outcomes=stashed_outcomes,
+            structural_category=getattr(
+                self, "_project_structural_category", "unknown"
+            ),
+        )
+        logger.info("After integration enhancement: " f"{len(safe_tasks)} tasks")
+        from src.integrations.documentation_tasks import (
+            enhance_project_with_documentation,
+        )
+
+        safe_tasks = enhance_project_with_documentation(
+            safe_tasks, description, project_name
+        )
+        logger.info("After documentation enhancement: " f"{len(safe_tasks)} tasks")
+        added_tasks = len(safe_tasks) - len(tasks)
+        if added_tasks > 0:
+            logger.info(f"Safety checks added {added_tasks} dependency tasks")
+        return safe_tasks
+
     async def create_project_from_description(
         self,
         description: str,
@@ -1636,8 +1734,6 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                 )
 
             _timer.mark("natural_language_processing")
-
-            # Apply safety checks using base class
             with error_context(
                 "safety_checks",
                 custom_context={
@@ -1645,115 +1741,7 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                     "original_task_count": len(tasks),
                 },
             ):
-                safe_tasks = await self.apply_safety_checks(tasks)
-                logger.info(f"Safety checks passed, {len(safe_tasks)} tasks ready")
-
-                # Spec coverage moved to the augmenter chain inside the
-                # decomposer (issue #456 Stage 4).  Gap tasks
-                # synthesized by spec_coverage now flow through
-                # ``_infer_smart_dependencies`` and foundation wiring
-                # like first-class graph members instead of being
-                # appended here as orphans (``dependencies=[]``).  This
-                # is the v37 orphan-failure-mode fix.
-                #
-                # Order property preserved: the augmenter chain runs
-                # before the decomposer returns, so by the time
-                # enhance_project_with_integration / documentation see
-                # "all existing tasks", the spec_gap tasks are in the
-                # pool and become dependencies of the integration /
-                # documentation tasks naturally.
-
-                # Add integration verification task if appropriate
-                # Must be added BEFORE documentation so doc task
-                # depends on integration task.
-                #
-                # For contract-first decomposition (GH-320 PR 2),
-                # pass the shared contract file path so the
-                # integration task description instructs the
-                # verification agent to treat it as authoritative
-                # (fix implementations, not the contract).
-                from src.integrations.integration_verification import (
-                    enhance_project_with_integration,
-                )
-
-                contract_file_for_integration: Optional[str] = None
-                for task in safe_tasks:
-                    ctx = getattr(task, "source_context", None) or {}
-                    candidate = ctx.get("contract_file")
-                    if candidate:
-                        contract_file_for_integration = candidate
-                        break
-
-                # Intent preservation (GH-320 task #64): pass
-                # functional requirements to the integration task
-                # so it verifies the user's original ask. The
-                # requirements were stashed by
-                # _try_contract_first_decomposition; for the
-                # feature-based path the attribute is absent and
-                # defaults to None (no enrichment).
-                stashed_requirements = getattr(
-                    self, "_contract_first_requirements", None
-                )
-                # Issue #523 Slice B: same stash pattern for the
-                # extracted user outcomes.  The contract-first path
-                # populates them at decomposition time; the
-                # feature-based path leaves the attribute absent
-                # (defaults to None, no outcomes section).  Feature-
-                # based wiring is a follow-up — the snake-game class
-                # of failure ships via contract_first, the default.
-                stashed_outcomes = getattr(self, "_contract_first_user_outcomes", None)
-                safe_tasks = enhance_project_with_integration(
-                    safe_tasks,
-                    description,
-                    project_name,
-                    contract_file=contract_file_for_integration,
-                    functional_requirements=stashed_requirements,
-                    outcomes=stashed_outcomes,
-                    structural_category=getattr(
-                        self, "_project_structural_category", "unknown"
-                    ),
-                )
-                logger.info(
-                    "After integration enhancement: " f"{len(safe_tasks)} tasks"
-                )
-
-                # Add documentation task if appropriate
-                from src.integrations.documentation_tasks import (
-                    enhance_project_with_documentation,
-                )
-
-                safe_tasks = enhance_project_with_documentation(
-                    safe_tasks, description, project_name
-                )
-                logger.info(
-                    "After documentation enhancement: " f"{len(safe_tasks)} tasks"
-                )
-
-                # Log safety check impact
-                added_tasks = len(safe_tasks) - len(tasks)
-                if added_tasks > 0:
-                    logger.info(f"Safety checks added {added_tasks} dependency tasks")
-
-            # Design tasks go on the board as TODO but assigned to
-            # Marcus so workers can't grab them. Phase A (design
-            # artifact generation) runs in the background AFTER the
-            # response is returned. Workers can't grab implementation
-            # tasks because _are_dependencies_satisfied() checks that
-            # design (hard) dependencies are DONE. Once the background
-            # task completes, it marks design tasks DONE on the board
-            # and workers' next request_next_task call will succeed.
-            # GH-588: default to ``~/.marcus/projects/<project_id>`` when
-            # the caller omits ``project_root`` so the design
-            # auto-completion phase always runs. Skipping it leaves
-            # design tasks in TODO and deadlocks every dependent
-            # feature task.
-            #
-            # TODO(GH-589): decouple board-state design completion from
-            # on-disk scaffold generation. ``_run_design_phase`` is
-            # currently gated as a single unit on ``project_root``, but
-            # marking design tasks DONE is pure board-state mutation and
-            # does not need a filesystem root. Splitting these would
-            # eliminate the need to default ``project_root`` here at all.
+                safe_tasks = await self._augment_tasks(tasks, description, project_name)
             project_root = _resolve_project_root(options, self.active_project_id)
             for task in safe_tasks:
                 if _is_design_task(task):

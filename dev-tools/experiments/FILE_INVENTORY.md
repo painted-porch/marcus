@@ -745,6 +745,16 @@ experiments/
 
 ---
 
+### `seed_tasks.example.yaml`
+- **Type**: YAML seed
+- **Status**: ✅ Functional
+- **Purpose**: **Example explicit task list for `run_experiment.py --seed`**
+- **Contents**: two tasks (an implement task and a CLI task depending on it) with labels, completion criteria, hours
+- **Used By**: `run_experiment.py --seed` (loaded into `project_options.tasks`, which `create_project` turns into exactly those board tasks)
+- **Last Modified**: 2026-11-03
+
+---
+
 ### `session_prompt.md`
 - **Type**: Markdown template
 - **Status**: ✅ Functional

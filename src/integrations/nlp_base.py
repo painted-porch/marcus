@@ -546,6 +546,10 @@ class NaturalLanguageTaskCreator(ABC):
             if not original_task:
                 continue
 
+            # A seeded task is exactly what the caller asked for: never split it.
+            if getattr(original_task, "source_type", None) == "seeded":
+                logger.info(f"Seeded task '{original_task.name}' is not decomposed")
+                continue
             # Check if task should be decomposed
             # Pass complexity for prototype mode check
             if not should_decompose(original_task, project_complexity=self.complexity):

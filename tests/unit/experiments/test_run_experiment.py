@@ -217,3 +217,65 @@ class TestMainSetupModes:
         experiment = tmp_path / "exp"
         experiment.mkdir()
         assert run_experiment.validate_experiment(experiment) is False
+
+
+class TestSeedOption:
+    """``--seed tasks.yaml`` puts the explicit task list into project_options."""
+
+    def test_load_seed_tasks_accepts_a_list_or_a_tasks_mapping(
+        self, tmp_path: Path
+    ) -> None:
+        """Both top-level shapes are accepted."""
+        f = tmp_path / "s.yaml"
+        f.write_text("- name: A\n- name: B\n  depends_on: [A]\n")
+        assert [t["name"] for t in run_experiment.load_seed_tasks(f)] == ["A", "B"]
+        f.write_text("tasks:\n  - name: Only\n")
+        assert run_experiment.load_seed_tasks(f) == [{"name": "Only"}]
+
+    def test_load_seed_tasks_refuses_bad_files(self, tmp_path: Path) -> None:
+        """Missing, malformed YAML, or not-a-list all raise ValueError."""
+        with pytest.raises(ValueError, match="not found"):
+            run_experiment.load_seed_tasks(tmp_path / "missing.yaml")
+        f = tmp_path / "s.yaml"
+        f.write_text("tasks: 3\n")
+        with pytest.raises(ValueError, match="non-empty list"):
+            run_experiment.load_seed_tasks(f)
+        f.write_text("- [unclosed\n")
+        with pytest.raises(ValueError, match="not valid YAML"):
+            run_experiment.load_seed_tasks(f)
+
+    def test_seed_flag_lands_in_project_options(self, tmp_path: Path) -> None:
+        """main() passes the seed list to the launcher through project_options.tasks."""
+        experiment = _experiment(tmp_path)
+        seed = tmp_path / "seed.yaml"
+        seed.write_text("- name: Implement add_one_plus_one\n  labels: [implement]\n")
+        with (
+            patch.object(
+                run_experiment.sys,
+                "argv",
+                ["run_experiment.py", str(experiment), "--seed", str(seed)],
+            ),
+            patch.object(run_experiment, "SessionLauncher") as launcher_cls,
+            pytest.raises(SystemExit),
+        ):
+            launcher_cls.return_value.run.return_value = True
+            run_experiment.main()
+        config = launcher_cls.call_args.args[0]
+        assert config.project_options["tasks"] == [
+            {"name": "Implement add_one_plus_one", "labels": ["implement"]}
+        ]
+
+    def test_example_seed_file_is_valid(self) -> None:
+        """The shipped example passes the same validation Marcus applies."""
+        from src.integrations.seeded_tasks import validate_seed_specs
+
+        example = (
+            Path(__file__).resolve().parents[3]
+            / "dev-tools"
+            / "experiments"
+            / "templates"
+            / "seed_tasks.example.yaml"
+        )
+        specs = run_experiment.load_seed_tasks(example)
+        assert validate_seed_specs(specs) == []
+        assert len(specs) == 2
