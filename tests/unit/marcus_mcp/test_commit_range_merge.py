@@ -610,6 +610,220 @@ class TestLandingTheFootprint:
         assert (session.repo / "poem.txt").read_text() == "ONE\ntwo\nTHREE\n"
 
 
+class TestFoundInReviewOfPR790:
+    """Four defects the second Codex pass on PR #790 reproduced."""
+
+    @pytest.mark.asyncio
+    async def test_a_conflict_does_not_delete_unrelated_untracked_files(
+        self, session: _Session
+    ) -> None:
+        """Rollback must not reach past the task's own files.
+
+        The rollback ran a repository-wide ``git clean -fd``, so a
+        conflicting landing deleted untracked files that had nothing to do
+        with the task, while the refusal said main was left unchanged.
+        """
+        # Arrange — an untracked file someone keeps in the repo, and a
+        # task whose change conflicts with main.
+        keepsake = session.repo / "notes.txt"
+        keepsake.write_text("an operator's untracked notes\n")
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.worktree, "README.md", "session edit\n", "card C")
+        _commit(session.repo, "README.md", "main edit\n", "main moved on")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["error"] == "merge_conflict"
+        assert keepsake.exists(), "rollback deleted an unrelated untracked file"
+        assert keepsake.read_text() == "an operator's untracked notes\n"
+
+    @pytest.mark.asyncio
+    async def test_a_rename_lands_as_a_rename(self, session: _Session) -> None:
+        """Both ends of a rename are in the footprint.
+
+        Git's rename detection names only the destination, so the source
+        stayed on main and the task landed as two files.
+        """
+        # Arrange
+        _commit(session.worktree, "old.py", "print('x')\n", "seed the module")
+        landed = await _merge_agent_branch_to_main(
+            session.agent_id,
+            "card-a",
+            session.state,
+            baseline_commit=_git(session.worktree, "rev-parse", "HEAD~1"),
+        )
+        assert landed is not None and landed["success"] is True
+        assert (session.repo / "old.py").exists()
+
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _git(session.worktree, "mv", "old.py", "new.py")
+        _git(session.worktree, "commit", "-m", "rename the module")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-b", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert (session.repo / "new.py").exists()
+        assert not (session.repo / "old.py").exists(), "the rename source survived"
+
+    @pytest.mark.asyncio
+    async def test_a_deliberate_revert_to_baseline_content_lands(
+        self, session: _Session
+    ) -> None:
+        """A task can decide a file should go back to how it was.
+
+        The agent integrates main, then reverts a file main had changed.
+        ``baseline..tip`` is empty for that file, so an endpoint diff saw
+        nothing to do and main kept the content the task had rejected.
+        """
+        # Arrange — main changes a file after the task's baseline.
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.repo, "README.md", "main's new wording\n", "main rewords")
+        subprocess.run(
+            ["git", "merge", "main", "--no-edit"],
+            cwd=session.worktree,
+            check=True,
+            capture_output=True,
+        )
+        # The agent decides the old wording was right.
+        _commit(session.worktree, "README.md", "base\n", "revert to the old wording")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert (session.repo / "README.md").read_text() == "base\n"
+
+    def test_merging_main_alone_does_not_satisfy_the_commit_gate(
+        self, session: _Session
+    ) -> None:
+        """An agent must write something of its own.
+
+        The gate counted every commit between the baseline and the branch
+        tip, so an agent that merged main as its contract asks and then
+        committed nothing passed it on another session's work.
+        """
+        # Arrange — main moves, the agent merges it and does nothing else.
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.repo, "elsewhere.txt", "x\n", "another session landed work")
+        subprocess.run(
+            ["git", "merge", "main", "--no-edit"],
+            cwd=session.worktree,
+            check=True,
+            capture_output=True,
+        )
+
+        # Act / Assert
+        assert (
+            _verify_agent_has_commits(
+                session.agent_id, str(session.repo), baseline_commit=baseline
+            )
+            is False
+        )
+
+    def test_the_gate_still_passes_on_the_agents_own_commit(
+        self, session: _Session
+    ) -> None:
+        """The exclusion must not swallow genuine work done after a merge."""
+        # Arrange
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.repo, "elsewhere.txt", "x\n", "another session landed work")
+        subprocess.run(
+            ["git", "merge", "main", "--no-edit"],
+            cwd=session.worktree,
+            check=True,
+            capture_output=True,
+        )
+        _commit(session.worktree, "mine.txt", "mine\n", "the task's own work")
+
+        # Act / Assert
+        assert (
+            _verify_agent_has_commits(
+                session.agent_id, str(session.repo), baseline_commit=baseline
+            )
+            is True
+        )
+
+
+class TestTheDeletionSweepIsNarrow:
+    """Absence from the tip is not by itself a deletion (Codex P1, #790)."""
+
+    @pytest.mark.asyncio
+    async def test_a_concurrent_addition_is_not_deleted(
+        self, session: _Session
+    ) -> None:
+        """A path the task created and removed is not the task deleting it.
+
+        The agent adds a scratch file and removes it inside its own
+        range, so the path is in the footprint and absent from the tip.
+        Another session independently adds that same path to main. The
+        sweep must leave their file alone.
+        """
+        # Arrange
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.worktree, "scratch.txt", "mine\n", "add a scratch file")
+        _git(session.worktree, "rm", "-q", "scratch.txt")
+        _git(session.worktree, "commit", "-m", "and remove it again")
+        _commit(session.worktree, "real.txt", "work\n", "the actual work")
+        # Another session's file at the same path, on main.
+        _commit(session.repo, "scratch.txt", "theirs\n", "another session added it")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert (session.repo / "real.txt").exists()
+        assert (session.repo / "scratch.txt").exists(), "deleted a concurrent add"
+        assert (session.repo / "scratch.txt").read_text() == "theirs\n"
+
+    @pytest.mark.asyncio
+    async def test_a_deletion_the_target_has_since_changed_is_left_alone(
+        self, session: _Session
+    ) -> None:
+        """A delete-versus-edit is a judgement call, not a sweep.
+
+        The task deletes a file it started with, and main edits that same
+        file meanwhile. Removing it would discard the edit silently.
+        """
+        # Arrange — a file both sides start from.
+        _commit(session.worktree, "doc.md", "original\n", "seed the doc")
+        landed = await _merge_agent_branch_to_main(
+            session.agent_id,
+            "card-a",
+            session.state,
+            baseline_commit=_git(session.worktree, "rev-parse", "HEAD~1"),
+        )
+        assert landed is not None and landed["success"] is True
+
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _git(session.worktree, "rm", "-q", "doc.md")
+        _git(session.worktree, "commit", "-m", "the task removes the doc")
+        _commit(session.repo, "doc.md", "main's edit\n", "main edits the doc")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-b", session.state, baseline_commit=baseline
+        )
+
+        # Assert — main's edit survives.
+        assert result is not None and result["success"] is True
+        assert (session.repo / "doc.md").exists()
+        assert (session.repo / "doc.md").read_text() == "main's edit\n"
+
+
 class TestRangeMergeFailureModes:
     """The replay has to fail safely, not loudly or silently."""
 

@@ -4224,8 +4224,11 @@ def _verify_agent_has_commits(
     reported two tasks done with zero commits; UD2 had to rescue both).
 
     With a ``baseline_commit`` the question is per card: did the branch
-    gain commits since this card was claimed? Without one it falls back
-    to the branch-level question, "is the branch ahead of main".
+    gain commits **of its own** since this card was claimed? Commits the
+    agent merged in from ``main`` are excluded, or an agent could satisfy
+    the gate by integrating another session's work and writing nothing.
+    Without a baseline it falls back to the branch-level question, "is
+    the branch ahead of main".
 
     That fallback goes vacuous under ADR-0012 D1 (issue #730): one
     session branch spans many cards, so once any earlier commit is left
@@ -4281,9 +4284,14 @@ def _verify_agent_has_commits(
 
         # Count commits for this card when the baseline is known,
         # otherwise fall back to the branch-level comparison.
-        range_spec = f"main..{branch}"
+        scoped_args = ["main.." + branch]
         if baseline_commit and _commit_exists(repo, baseline_commit):
-            range_spec = f"{baseline_commit}..{branch}"
+            # Reachable from the branch but from neither the baseline nor
+            # main. Excluding main matters: an agent that merges main as
+            # its contract asks and then commits nothing of its own would
+            # otherwise pass this gate on main's commits (Codex P2 on PR
+            # #790). It is the same exclusion the footprint's range uses.
+            scoped_args = [branch, "--not", baseline_commit, "main"]
         elif baseline_commit:
             logger.warning(
                 "[commit_gate] baseline %s for %s is not a commit in %s; "
@@ -4294,7 +4302,7 @@ def _verify_agent_has_commits(
             )
 
         log_result = _sp.run(
-            ["git", "log", range_spec, "--oneline"],
+            ["git", "rev-list", *scoped_args],
             cwd=repo,
             capture_output=True,
             text=True,
@@ -4776,12 +4784,29 @@ def _is_ancestor(repo: Any, candidate: str, descendant: str) -> bool:
 
 
 def _card_footprint(repo: Any, baseline_commit: str, tip: str) -> Optional[List[str]]:
-    """List the files this task changed, from its baseline to its tip.
+    """List the files this task touched, from its baseline to its tip.
 
     The footprint, not the commit list, is what gets landed. Working from
     the files rather than replaying commits is what makes a resolution the
     agent already made survive: the content of the agent's tree is taken
     as it stands, and no intermediate state is reapplied.
+
+    Two details that an endpoint-to-endpoint diff gets wrong, both found
+    in review of PR #790:
+
+    * **Renames.** Git's rename detection reports only the destination,
+      so ``old.py -> new.py`` would land as two files with the source
+      still present. ``--no-renames`` makes both endpoints appear.
+    * **A deliberate revert.** An agent that integrates ``main``, then
+      decides a file should go back to the content it had at claim time,
+      leaves ``baseline..tip`` empty for that file while ``main`` still
+      holds the content it is reverting. Collecting the paths each commit
+      in the range touched catches it; the endpoint diff cannot.
+
+    Paths that only ``main``'s own merged-in commits touched can come
+    along, which is harmless: taking the tip's version of such a path
+    copies the content the agent already integrated, and in the
+    three-way case the patch for it is empty.
 
     Parameters
     ----------
@@ -4799,24 +4824,53 @@ def _card_footprint(repo: Any, baseline_commit: str, tip: str) -> Optional[List[
         answer, which the caller treats as a refusal rather than widening
         the merge.
     """
-    try:
-        listing = subprocess.run(
-            ["git", "diff", "--name-only", "-z", f"{baseline_commit}..{tip}"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except Exception as exc:  # noqa: BLE001 - caller refuses
-        logger.warning("[worktree] Could not read the task's footprint: %s", exc)
-        return None
-    if listing.returncode != 0:
-        logger.warning(
-            "[worktree] Could not read the task's footprint: %s",
-            listing.stderr.strip(),
-        )
-        return None
-    return [path for path in listing.stdout.split("\0") if path]
+    paths: List[str] = []
+    seen: Set[str] = set()
+    for command in (
+        # Every path any commit in the range touched, which includes a
+        # path reverted to its baseline content.
+        [
+            "git",
+            "log",
+            "--name-only",
+            "--no-renames",
+            "--format=",
+            "-z",
+            f"{baseline_commit}..{tip}",
+        ],
+        # And the endpoint difference, which covers a path changed with
+        # no commit of its own in the range (an amended or squashed tip).
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            f"{baseline_commit}..{tip}",
+        ],
+    ):
+        try:
+            listing = subprocess.run(
+                command,
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001 - caller refuses
+            logger.warning("[worktree] Could not read the task's footprint: %s", exc)
+            return None
+        if listing.returncode != 0:
+            logger.warning(
+                "[worktree] Could not read the task's footprint: %s",
+                listing.stderr.strip(),
+            )
+            return None
+        for path in listing.stdout.split("\0"):
+            if path and path not in seen:
+                seen.add(path)
+                paths.append(path)
+    return paths
 
 
 def _take_tip_paths(repo: Any, tip: str, paths: List[str]) -> Optional[str]:
@@ -4867,6 +4921,95 @@ def _take_tip_paths(repo: Any, tip: str, paths: List[str]) -> Optional[str]:
     return None
 
 
+def _blob_at(repo: Any, rev: str, path: str) -> Optional[str]:
+    """Return the blob sha of ``path`` at ``rev``, or None when absent.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path) to run git in.
+    rev : str
+        Revision to read.
+    path : str
+        Path inside that tree.
+
+    Returns
+    -------
+    Optional[str]
+        The blob sha, or None when the path does not exist there.
+    """
+    probe = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{rev}:{path}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    return probe.stdout.strip() or None
+
+
+def _remove_paths_the_task_deleted(
+    repo: Any,
+    baseline_commit: str,
+    tip: str,
+    paths: List[str],
+) -> None:
+    """Delete footprint paths the task removed, and only those.
+
+    A three-way patch cannot always express a deletion: when the common
+    ancestor predates the file, the diff has no hunk for it and the file
+    survives on the merge target. A rename is the ordinary case, where
+    the task removed ``old.py`` and added ``new.py``.
+
+    The deletion has to be established against the **task's baseline**,
+    not merely "absent from the tip". A path the task added and then
+    removed inside its own range is absent from the tip too, and if
+    another session independently added that same path to the merge
+    target meanwhile, treating absence as a deletion wipes their file
+    and commits it as a success (Codex P1 on PR #790).
+
+    A path the task deleted that the target has since **changed** is left
+    in place: removing it would discard a concurrent edit silently, and
+    deciding between a deletion and an edit is a judgement call, not
+    something the mechanical path settles.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path), checked out on the merge target.
+    baseline_commit : str
+        The branch tip captured when the task was claimed.
+    tip : str
+        The agent's branch tip.
+    paths : List[str]
+        The task's footprint.
+    """
+    for path in paths:
+        if _blob_at(repo, tip, path) is not None:
+            continue
+        at_baseline = _blob_at(repo, baseline_commit, path)
+        if at_baseline is None:
+            # The task never started with this path, so its absence from
+            # the tip is not a deletion the task made.
+            continue
+        on_target = _blob_at(repo, "HEAD", path)
+        if on_target is None:
+            continue
+        if on_target != at_baseline:
+            logger.warning(
+                "[worktree] Task deleted %s but the merge target has changed "
+                "it since; leaving it in place rather than discarding that "
+                "change",
+                path,
+            )
+            continue
+        subprocess.run(
+            ["git", "rm", "-q", "--ignore-unmatch", "--", path],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+
 def _apply_footprint_three_way(
     repo: Any, base: str, tip: str, paths: List[str]
 ) -> Optional[str]:
@@ -4896,7 +5039,7 @@ def _apply_footprint_three_way(
         None on success, or the conflict/error detail.
     """
     patch = subprocess.run(
-        ["git", "diff", "--binary", f"{base}..{tip}", "--", *paths],
+        ["git", "diff", "--binary", "--no-renames", f"{base}..{tip}", "--", *paths],
         cwd=repo,
         capture_output=True,
     )
@@ -4991,22 +5134,35 @@ def _merge_card_range(
     )
     tip = tip_read.stdout.strip() if tip_read.returncode == 0 else ""
 
-    def _rollback() -> None:
-        """Restore the merge target to where it stood before this call."""
+    def _rollback(paths: Optional[List[str]] = None) -> None:
+        """Restore the merge target to where it stood before this call.
+
+        Cleanup is restricted to the paths this landing touched. A
+        repository-wide ``git clean -fd`` would delete untracked files
+        that were already there and have nothing to do with the task,
+        while the refusal says main was left unchanged (Codex P1 on PR
+        #790).
+        """
         subprocess.run(
             ["git", "reset", "--hard", pre_merge_sha],
             cwd=repo,
             capture_output=True,
         )
-        subprocess.run(
-            ["git", "clean", "-qfd"],
-            cwd=repo,
-            capture_output=True,
-        )
+        if paths:
+            subprocess.run(
+                ["git", "clean", "-qfd", "--", *paths],
+                cwd=repo,
+                capture_output=True,
+            )
 
-    def _refuse(error: str, detail: str, message: str) -> Dict[str, Any]:
+    def _refuse(
+        error: str,
+        detail: str,
+        message: str,
+        paths: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Roll back and build the refusal."""
-        _rollback()
+        _rollback(paths)
         return {
             "success": False,
             "error": error,
@@ -5058,6 +5214,7 @@ def _merge_card_range(
                 failure,
                 f"Your task passed validation but Marcus could not copy its "
                 f"files onto main: {failure}. Main was left unchanged.",
+                paths=footprint,
             )
     else:
         mode = "three-way"
@@ -5074,10 +5231,15 @@ def _merge_card_range(
                 "Your task passed validation but Marcus could not find a "
                 "common ancestor between your branch and main, so it merged "
                 "nothing. Main was left unchanged.",
+                paths=footprint,
             )
         conflict = _apply_footprint_three_way(
             repo, base_read.stdout.strip(), tip, footprint
         )
+        if conflict is None:
+            # A deletion the patch could not carry, because the common
+            # ancestor predates the file. A rename is the ordinary case.
+            _remove_paths_the_task_deleted(repo, baseline_commit, tip, footprint)
         if conflict is not None:
             logger.warning(
                 "[worktree] Conflict landing task %s from %s: %s",
@@ -5095,6 +5257,7 @@ def _merge_card_range(
                 f"  (resolve conflicts in your editor)\n"
                 f"  git add . && git commit\n"
                 f"Then report completion again.",
+                paths=footprint,
             )
 
     logger.info(
@@ -5146,7 +5309,7 @@ def _merge_card_range(
                 "[worktree] Task %s brought no net change to main",
                 task_id,
             )
-            _rollback()
+            _rollback(footprint)
             return {
                 "success": True,
                 "commits_merged": len(card_commits),
@@ -5163,6 +5326,7 @@ def _merge_card_range(
             combined.strip(),
             f"Your task passed validation but Marcus could not commit it "
             f"onto main: {combined.strip()}. Main was left unchanged.",
+            paths=footprint,
         )
 
     logger.info(
