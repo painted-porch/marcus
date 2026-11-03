@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moving a GitHub issue to the blocked or in-progress column no longer wipes its other labels.
 
 ### Changed
+- One worktree per session, for the session's whole life (ADR-0012 D1, epic #706 Milestone B).
+The session script no longer rotates the workspace between chores: it keeps one worktree and branch at `worktrees/<agent_id>`, which is also the path cost attribution reads, so the worktree count equals the session count with no churn.
+Before each new card the script discards anything left uncommitted and pulls `main`, so the session builds on what other sessions have landed and starts from a tree holding only committed work; a chore that ended **still holding** its task resumes on the tree as it stands, because both decisions belong to the agent while a card is in flight.
+The discard matters because the workspace now outlives the chore: a worker that hands a task back with a blocker is not asked to commit or clean up, and leftovers would otherwise be committed into the next card's range and land on `main` with it.
+A pull that conflicts is aborted and left for the agent, which merges `main` itself as its contract says and resolves deliberately: Marcus's mechanical path never resolves, and neither does the harness.
+The worker contract now states that the worktree and branch belong to the session across every task it takes, and that a conflicting merge of `main` must be resolved and committed rather than abandoned.
+This is only safe because a completion merges one task's commit range rather than the whole branch (#730): commits for a task whose completion was refused stay on the branch and never ride into `main` with the next card.
 - Marcus merges one task's commits into `main`, not a whole agent branch (#730, ADR-0012 D2 and D8).
 The claim records the agent's branch tip as that task's **baseline**, persists it with the assignment so it survives a restart, and reads it in the agent's own worktree rather than in the main repo, whose `main` moves whenever another session lands work.
 On completion Marcus lands the task's **footprint** — the files it changed between the baseline and its branch tip — as a single commit whose message names the range, the file count and the commits behind it; a conflict restores `main` to exactly where it stood and hands the task back.

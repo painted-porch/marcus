@@ -202,28 +202,80 @@ class TestSessionScript:
         assert "-ge 7" in script
         assert "relaunch" not in script.lower()
 
-    def test_script_gives_a_finished_or_handed_back_chore_a_fresh_worktree(
+    def test_the_workspace_belongs_to_the_session_not_the_chore(
         self, tmp_path: Path
     ) -> None:
-        """The #730 hazard: a handed-back task's commits must not ride into main.
+        """ADR-0012 D1: one worktree and branch for the session's whole life.
 
-        When the worker left the chore-done marker, the next chore gets a new
-        worktree and branch cut from main at the same path; when it did not
-        (the chore ended mid-task), the workspace is kept so the worker
-        resumes.
+        Nothing in the loop removes or re-creates the workspace, so the
+        worktree count equals the session count. This is only safe because
+        Marcus merges one card's commit range rather than the whole branch
+        (#730).
+        """
+        script = self._script(tmp_path)
+        loop = script[script.index("chore=0") :]
+        assert "fresh_workspace" not in script
+        assert "git worktree add" not in loop
+        assert 'git branch -D "$BRANCH"' not in script
+
+    def test_script_pulls_main_before_a_new_card_only(self, tmp_path: Path) -> None:
+        """A new card starts from landed work; a held task resumes untouched.
+
+        Pulling main under a half-finished card is the agent's decision, so
+        the script does it only when the previous chore ended holding no
+        task (the chore-done marker) or on the session's first chore.
         """
         script = self._script(tmp_path)
         wt = tmp_path / "worktrees" / "agent_unicorn_1"
-        assert f"if [ -f {wt / CHORE_DONE_MARKER} ]; then" in script
-        assert "fresh_workspace()" in script
-        assert 'git worktree add "$WORKSPACE" -b "$BRANCH" main' in script
-        assert 'git branch -D "$BRANCH"' in script
-        assert "git checkout -q -B" not in script
-        check_at = script.index(f"if [ -f {wt / CHORE_DONE_MARKER} ]; then")
-        fresh_at = script.index("        fresh_workspace\n")
+        gate = f"if [ -f {wt / CHORE_DONE_MARKER} ] || [ $chore -eq 1 ]; then"
+        assert gate in script
+        assert "pull_main() {" in script
+        # The marker is consumed, or every later chore would read as new.
+        gate_at = script.index(gate)
         chore_at = script.index("claude --add-dir /x")
-        assert check_at < fresh_at < chore_at
+        body = script[gate_at:chore_at]
+        assert f"rm -f {wt / CHORE_DONE_MARKER}" in body
+        assert "pull_main" in body
+        assert "resuming the held task" in body
         assert f"rm -f {wt / SESSION_DONE_MARKER} {wt / CHORE_DONE_MARKER}" in script
+
+    def test_a_new_card_starts_from_a_clean_tree(self, tmp_path: Path) -> None:
+        """Leftovers from a previous chore must not enter the next card.
+
+        The workspace outlives the chore now, and a worker that hands a
+        task back with a blocker is not asked to commit or clean up. Those
+        leftovers would be committed into the next card's range and land
+        on main with it (Codex P1 on PR #791).
+        """
+        script = self._script(tmp_path)
+        wt = tmp_path / "worktrees" / "agent_unicorn_1"
+        gate = f"if [ -f {wt / CHORE_DONE_MARKER} ] || [ $chore -eq 1 ]; then"
+        assert "clean_tree() {" in script
+        clean = script[script.index("clean_tree() {") : script.index("pull_main() {")]
+        assert "git reset -q --hard" in clean
+        assert "git clean -qfd" in clean
+        assert "project_info.json" in clean, "the scaffold copy is restored"
+        body = script[script.index(gate) : script.index("claude --add-dir /x")]
+        assert body.index("clean_tree") < body.index("pull_main")
+
+    def test_a_conflicting_pull_of_main_is_aborted_for_the_agent(
+        self, tmp_path: Path
+    ) -> None:
+        """The mechanical path never resolves (ADR-0012 D2).
+
+        A session branch now spans many cards, so pulling main can conflict.
+        The script aborts and says so; the agent merges main itself and
+        resolves deliberately, as its contract says.
+        """
+        script = self._script(tmp_path)
+        pull = script[
+            script.index("pull_main() {") : script.index(
+                'cd "$WORKSPACE" || exit 1\nrm -f'
+            )
+        ]
+        assert "git merge main --no-edit" in pull
+        assert "git merge --abort" in pull
+        assert "left for the agent" in pull
 
     def test_script_tears_its_worktree_down_on_exit_and_signals(
         self, tmp_path: Path
@@ -985,13 +1037,15 @@ def _process_is_gone(pid: int) -> bool:
 class TestSessionScriptRunsForReal:
     """The generated bash, run against a real repo with a stub harness."""
 
-    def test_each_chore_gets_a_fresh_branch_and_the_worktree_is_removed_at_the_end(
+    def test_the_session_keeps_its_branch_across_chores_and_pulls_main(
         self, tmp_path: Path
     ) -> None:
-        """Chore 1 commits and hands off; chore 2 starts from main; teardown follows.
+        """ADR-0012 D1 end to end, with a real repo and a stub harness.
 
-        The stub harness commits a file and writes the chore-done marker on its
-        first run, then writes the session-done marker on its second run.
+        Chore 1 commits on the session branch and hands off, and meanwhile
+        another session lands work on main. Chore 2 must run on the same
+        branch, still holding chore 1's commit, with main's new work pulled
+        in. Teardown then removes the worktree and keeps the branch.
         """
         import subprocess as sp
 
@@ -1005,10 +1059,18 @@ if [ "$n" = "1" ]; then
   echo work > chore1.txt && git add -A && git commit -q -m "chore 1"
   git rev-parse --abbrev-ref HEAD > {tmp_path}/branch1
   git log --oneline | wc -l | tr -d ' ' > {tmp_path}/depth1
+  # another session lands work on main while this chore runs
+  cd {repo} && echo landed > landed.txt && git add -A \
+      && git commit -q -m "another session landed"
+  cd - >/dev/null
   touch .marcus_chore_done
 else
+  git rev-parse --abbrev-ref HEAD > {tmp_path}/branch2
   git log --oneline | wc -l | tr -d ' ' > {tmp_path}/depth2
-  ls chore1.txt >/dev/null 2>&1 && echo present > {tmp_path}/leak || echo clean > {tmp_path}/leak
+  ls chore1.txt >/dev/null 2>&1 \
+      && echo present > {tmp_path}/own || echo gone > {tmp_path}/own
+  ls landed.txt >/dev/null 2>&1 \
+      && echo pulled > {tmp_path}/landed || echo missing > {tmp_path}/landed
   touch .marcus_session_done
 fi
 """)
@@ -1020,16 +1082,112 @@ fi
         )
 
         assert result.returncode == 0, result.stderr
-        assert (tmp_path / "branch1").read_text().strip() == "marcus/agent_unicorn_1"
-        # chore 1 was on top of the scaffold (2 commits); chore 2 started fresh
-        # from main (1 commit): the un-merged chore-1 commit did not ride along.
-        assert (tmp_path / "depth1").read_text().strip() == "2"
-        assert (tmp_path / "depth2").read_text().strip() == "1"
-        assert (tmp_path / "leak").read_text().strip() == "clean"
+        branch = "marcus/agent_unicorn_1"
+        assert (tmp_path / "branch1").read_text().strip() == branch
+        assert (tmp_path / "branch2").read_text().strip() == branch
+        # The session's own earlier commit is still there: one branch, one
+        # session, many chores.
+        assert (tmp_path / "own").read_text().strip() == "present"
+        # And the new card starts from what other sessions landed.
+        assert (tmp_path / "landed").read_text().strip() == "pulled"
+        depth1 = int((tmp_path / "depth1").read_text().strip())
+        depth2 = int((tmp_path / "depth2").read_text().strip())
+        assert depth1 == 2
+        assert depth2 > depth1
         # teardown: the worktree is gone, the branch remains for recovery
         assert not workspace.exists()
         assert "worktrees/agent_unicorn_1" not in _git(repo, "worktree", "list")
-        assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
+        assert branch in _git(repo, "branch", "--list")
+
+    def test_a_conflicting_main_leaves_the_tree_clean_for_the_next_chore(
+        self, tmp_path: Path
+    ) -> None:
+        """A pull of main that conflicts is aborted, not left half-merged.
+
+        Under ADR-0012 D1 a session branch outlives a card, so main can move
+        under it in a way that conflicts. Marcus's mechanical path never
+        resolves (D2), and neither does the harness: chore 2 must start on a
+        clean tree, with no conflict markers, and the agent resolves the
+        merge itself as its contract says.
+        """
+        import subprocess as sp
+
+        repo = _repo_with_main(tmp_path)
+        counter = tmp_path / "count"
+        counter.write_text("0")
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+n=$(cat {counter}); n=$((n+1)); echo $n > {counter}
+if [ "$n" = "1" ]; then
+  echo "session version" > shared.txt && git add -A \
+      && git commit -q -m "chore 1 writes shared"
+  cd {repo} && echo "main version" > shared.txt && git add -A \
+      && git commit -q -m "another session wrote shared"
+  cd - >/dev/null
+  touch .marcus_chore_done
+else
+  git status --porcelain > {tmp_path}/status2
+  cat shared.txt > {tmp_path}/shared2
+  touch .marcus_session_done
+fi
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "left for the agent" in result.stdout
+        # No conflict markers, no unmerged paths: the agent decides.
+        assert (tmp_path / "status2").read_text().strip() == ""
+        assert (tmp_path / "shared2").read_text().strip() == "session version"
+
+    def test_leftovers_do_not_enter_the_next_cards_commit_range(
+        self, tmp_path: Path
+    ) -> None:
+        """Run the generated bash: junk left by chore 1 is gone in chore 2.
+
+        Codex reproduced the opposite with a stub that leaves an untracked
+        file before writing the chore-done marker, so this test drives the
+        same shape.
+        """
+        import subprocess as sp
+
+        repo = _repo_with_main(tmp_path)
+        counter = tmp_path / "count"
+        counter.write_text("0")
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+n=$(cat {counter}); n=$((n+1)); echo $n > {counter}
+if [ "$n" = "1" ]; then
+  echo work > committed.txt && git add -A && git commit -q -m "chore 1 commits"
+  echo junk > leftover.txt          # untracked
+  echo dirty >> committed.txt       # uncommitted edit
+  touch .marcus_chore_done
+else
+  ls leftover.txt >/dev/null 2>&1 \
+      && echo present > {tmp_path}/leftover || echo gone > {tmp_path}/leftover
+  git status --porcelain > {tmp_path}/dirty2
+  ls project_info.json >/dev/null 2>&1 \
+      && echo present > {tmp_path}/scaffold || echo gone > {tmp_path}/scaffold
+  touch .marcus_session_done
+fi
+""")
+        stub.chmod(0o755)
+        script, _ = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "leftover").read_text().strip() == "gone"
+        assert (tmp_path / "dirty2").read_text().strip() == ""
+        # The committed work is still there; only the uncommitted part went.
+        assert (tmp_path / "scaffold").read_text().strip() == "present"
+        assert "discarding uncommitted leftovers" in result.stdout
 
     def test_a_killed_session_leaves_no_worktree_behind(self, tmp_path: Path) -> None:
         """Kill the session mid-chore: the trap stops the chore's whole process
