@@ -54,6 +54,9 @@ from src.logging.agent_events import log_agent_event
 from src.logging.conversation_logger import conversation_logger, log_thinking
 from src.marcus_mcp.coordinator.drain import compute_board_drain
 from src.marcus_mcp.tools.context import give_opinion
+from src.marcus_mcp.tools.verification_retry import (
+    apply_verification_outcome,
+)
 from src.marcus_mcp.utils import serialize_for_mcp
 
 logger = logging.getLogger(__name__)
@@ -7744,6 +7747,22 @@ async def _record_progress(
                 update_data["source_context"] = {"evidence": evidence}
                 _clear_smoke_attempts(task_id)
                 await _handoff_evidence_to_dependents(task, evidence, state)
+
+                # A verify task that found a wrong figure re-opens the
+                # claim's author with the failures named, bounded, and
+                # declines the case when the rounds run out. Without
+                # this a failing verdict is recorded and the chain
+                # proceeds, which turns "verified" into "we checked".
+                verification_outcome = await apply_verification_outcome(
+                    task, evidence, state
+                )
+                if verification_outcome is not None:
+                    logger.info(
+                        "[verification] %s on case task %s: %s",
+                        verification_outcome["action"],
+                        task_id,
+                        verification_outcome.get("failed_claims"),
+                    )
 
             # Handle subtask completion
             if hasattr(state, "subtask_manager") and state.subtask_manager:

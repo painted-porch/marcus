@@ -38,14 +38,23 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-CROPS = {
+# FAOSTAT names its items in full; USDA Quick Stats is read through
+# its own adapter and already carries the short labels.
+FAOSTAT_CROPS = {
     "Maize (corn)": "maize",
     "Soya beans": "soybeans",
     "Wheat": "wheat",
     "Seed cotton, unginned": "cotton",
 }
 
-MIN_YIELD_KG_HA = 100.0
+#: Canonical columns every source adapter produces.
+CANONICAL_COLUMNS = ["area", "crop", "year", "yield_value", "area_value", "unit"]
+
+# Total crop failures put a near-zero denominator under a percentage
+# error. The floor is a small positive yield in whatever unit the
+# source reports, which is enough to exclude them without trimming
+# genuinely poor harvests.
+MIN_YIELD_VALUE = 1.0
 
 # The colleague's report covered 14,258 fields split 8,171 maize /
 # 5,305 soybeans / 413 wheat / 369 cotton, so one crop carries 57
@@ -92,8 +101,8 @@ class StagedCase:
     traps: List[Dict[str, Any]] = field(default_factory=list)
 
 
-def load_source(parquet_path: Path) -> pd.DataFrame:
-    """Load the FAOSTAT extract and pivot it to one row per unit.
+def load_faostat(parquet_path: Path) -> pd.DataFrame:
+    """Load a FAOSTAT extract and pivot it to one row per unit.
 
     A unit is one country-crop-year, which stands in for one field in
     the colleague's report.
@@ -107,12 +116,12 @@ def load_source(parquet_path: Path) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        Columns ``area``, ``crop``, ``year``, ``yield_kg_ha``,
-        ``area_ha``.
+        Columns ``area``, ``crop``, ``year``, ``yield_value``,
+        ``area_value``.
     """
     raw = pd.read_parquet(parquet_path)
-    raw = raw[raw["Item"].isin(CROPS)].copy()
-    raw["crop"] = raw["Item"].map(CROPS)
+    raw = raw[raw["Item"].isin(FAOSTAT_CROPS)].copy()
+    raw["crop"] = raw["Item"].map(FAOSTAT_CROPS)
     wide = raw.pivot_table(
         index=["Area", "crop", "Year"],
         columns="Element",
@@ -123,20 +132,90 @@ def load_source(parquet_path: Path) -> pd.DataFrame:
         columns={
             "Area": "area",
             "Year": "year",
-            "Yield": "yield_kg_ha",
-            "Area harvested": "area_ha",
+            "Yield": "yield_value",
+            "Area harvested": "area_value",
         }
     )
-    wide = wide.dropna(subset=["yield_kg_ha", "area_ha"])
-    wide = wide[(wide["yield_kg_ha"] > 0) & (wide["area_ha"] > 0)]
+    wide = wide.dropna(subset=["yield_value", "area_value"])
+    wide = wide[(wide["yield_value"] > 0) & (wide["area_value"] > 0)]
     # Total crop failures (yields near zero, e.g. 0.1 kg/ha after a
     # drought) put a near-zero denominator under every percentage
     # error and let a single row dominate the mean. They are excluded
     # as undefined-error records. The exclusion is the reason a tier
     # table built from scored records can total less than the record
     # count, which is the relation the dropped_tier_rows trap plants.
-    wide = wide[wide["yield_kg_ha"] >= MIN_YIELD_KG_HA]
-    return wide.reset_index(drop=True)
+    wide = wide[wide["yield_value"] >= MIN_YIELD_VALUE]
+    wide["unit"] = "kg/ha"
+    return wide[CANONICAL_COLUMNS].reset_index(drop=True)
+
+
+def load_nass(parquet_path: Path) -> pd.DataFrame:
+    """Load a USDA Quick Stats extract into the canonical shape.
+
+    A unit is one county-crop-year, which stands in for one field in
+    the colleague's report. Grains are reported in bushels per acre
+    and cotton in pounds per acre, so the unit travels with the row
+    and the per-crop table states it, exactly as his report does.
+
+    Parameters
+    ----------
+    parquet_path : Path
+        Extract written by ``numeric_fetch_nass.py``.
+
+    Returns
+    -------
+    pd.DataFrame
+        The canonical columns.
+    """
+    raw = pd.read_parquet(parquet_path)
+    out = raw.rename(
+        columns={
+            "yield_per_acre": "yield_value",
+            "acres_harvested": "area_value",
+        }
+    ).copy()
+    out = out.dropna(subset=["yield_value", "area_value"])
+    out = out[(out["yield_value"] > 0) & (out["area_value"] > 0)]
+    # A near-zero yield puts a near-zero denominator under every
+    # percentage error and lets one row dominate the mean. Such rows
+    # are excluded as undefined-error records. That exclusion is the
+    # reason a tier table built from scored records can total less
+    # than the record count, which is the relation the
+    # dropped_tier_rows trap plants.
+    out = out[out["yield_value"] >= MIN_YIELD_VALUE]
+    return out[CANONICAL_COLUMNS].reset_index(drop=True)
+
+
+SOURCES = {"nass": load_nass, "faostat": load_faostat}
+
+
+def load_source(parquet_path: Path, source: str = "nass") -> pd.DataFrame:
+    """Load an evaluation source into the canonical shape.
+
+    Every adapter returns the same columns, so swapping the source
+    changes nothing downstream. USDA county yields are the default
+    because a county is the closest public analogue to a field.
+
+    Parameters
+    ----------
+    parquet_path : Path
+        Extract to read.
+    source : str
+        Adapter name: ``nass`` or ``faostat``.
+
+    Returns
+    -------
+    pd.DataFrame
+        The canonical columns.
+
+    Raises
+    ------
+    KeyError
+        When the adapter name is unknown.
+    """
+    if source not in SOURCES:
+        raise KeyError(f"unknown source: {source}; expected one of {sorted(SOURCES)}")
+    return SOURCES[source](parquet_path)
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -155,8 +234,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.sort_values(["area", "crop", "year"]).copy()
     grp = df.groupby(["area", "crop"], sort=False)
-    df["prev_yield"] = grp["yield_kg_ha"].shift(1)
-    df["prev_area"] = grp["area_ha"].shift(1)
+    df["prev_yield"] = grp["yield_value"].shift(1)
+    df["prev_area"] = grp["area_value"].shift(1)
     return df.dropna(subset=["prev_yield", "prev_area"]).reset_index(drop=True)
 
 
@@ -165,9 +244,16 @@ def fit_and_predict(
 ) -> pd.DataFrame:
     """Train on years before the window and predict inside it.
 
+    One model is fitted per crop. The crops are reported in different
+    units -- bushels per acre for the grains, pounds per acre for
+    cotton -- so a single model across all of them would predict
+    bushel-scale values for cotton and score catastrophically for a
+    reason that has nothing to do with the experiment.
+
     Model quality is not the subject of the experiment. What matters
-    is that the errors are real and long-tailed, like the colleague's
-    report where median error was 4.4 percent and mean error 23.1.
+    is that the errors are real and long-tailed, like the report this
+    is modelled on where median error was 4.4 percent and mean error
+    23.1.
 
     Parameters
     ----------
@@ -181,28 +267,42 @@ def fit_and_predict(
     Returns
     -------
     pd.DataFrame
-        The held-out rows with ``predicted`` and ``ape`` columns.
+        The held-out rows with ``predicted`` and ``ape`` columns, for
+        every crop that had both training and test rows.
     """
     from sklearn.ensemble import HistGradientBoostingRegressor
 
     lo, hi = test_years
-    train = df[df["year"] < lo].copy()
-    test = df[(df["year"] >= lo) & (df["year"] <= hi)].copy()
+    feats = ["prev_yield", "prev_area", "year"]
+    predicted = []
 
-    crop_codes = {c: i for i, c in enumerate(sorted(df["crop"].unique()))}
-    train["crop_code"] = train["crop"].map(crop_codes)
-    test["crop_code"] = test["crop"].map(crop_codes)
-    feats = ["prev_yield", "prev_area", "year", "crop_code"]
+    for crop, group in df.groupby("crop"):
+        train = group[group["year"] < lo]
+        test = group[(group["year"] >= lo) & (group["year"] <= hi)].copy()
+        if len(train) < 50 or test.empty:
+            print(
+                f"  skipping {crop}: {len(train)} train / {len(test)} test "
+                "rows in the window"
+            )
+            continue
+        model = HistGradientBoostingRegressor(
+            max_iter=200, learning_rate=0.08, random_state=seed
+        )
+        model.fit(train[feats], train["yield_value"])
+        test["predicted"] = model.predict(test[feats])
+        predicted.append(test)
 
-    model = HistGradientBoostingRegressor(
-        max_iter=200, learning_rate=0.08, random_state=seed
+    if not predicted:
+        raise SystemExit(
+            "no crop had both training and test rows in the window; "
+            "widen --test-year-lo/--test-year-hi"
+        )
+
+    out = pd.concat(predicted, ignore_index=True)
+    out["ape"] = (
+        (out["predicted"] - out["yield_value"]).abs() / out["yield_value"] * 100.0
     )
-    model.fit(train[feats], train["yield_kg_ha"])
-    test["predicted"] = model.predict(test[feats])
-    test["ape"] = (
-        (test["predicted"] - test["yield_kg_ha"]).abs() / test["yield_kg_ha"] * 100.0
-    )
-    return test.reset_index(drop=True)
+    return out
 
 
 def _r2(actual: pd.Series, predicted: pd.Series) -> float:
@@ -313,13 +413,13 @@ def stage_case(
             "crop",
             "area",
             "year",
-            "yield_kg_ha",
+            "yield_value",
             "predicted",
-            "area_ha",
+            "area_value",
             "ape",
             "tier",
         ]
-    ].rename(columns={"yield_kg_ha": "actual"})
+    ].rename(columns={"yield_value": "actual"})
     per_record.to_csv(eval_dir / "per_record.csv", index=False)
 
     # --- per-crop table ---------------------------------------------------
@@ -329,10 +429,10 @@ def stage_case(
             {
                 "crop": crop,
                 "n_records": int(len(g)),
-                "r2": round(_r2(g["yield_kg_ha"], g["predicted"]), 3),
+                "r2": round(_r2(g["yield_value"], g["predicted"]), 3),
                 "median_ape": round(float(g["ape"].median()), 1),
                 "mean_ape": round(float(g["ape"].mean()), 1),
-                "unit": "kg/ha",
+                "unit": str(g["unit"].iloc[0]),
             }
         )
     per_crop = (
@@ -366,7 +466,7 @@ def stage_case(
     # raise rather than produce fewer bins. Dropping duplicate edges
     # keeps staging working on data with repeated values; the labels
     # are assigned after the fact so they always match the bin count.
-    binned = pd.qcut(df["area_ha"], 4, duplicates="drop")
+    binned = pd.qcut(df["area_value"], 4, duplicates="drop")
     n_bins = len(binned.cat.categories)
     df["quartile"] = binned.cat.rename_categories([f"Q{i + 1}" for i in range(n_bins)])
     qrows = []
@@ -375,7 +475,7 @@ def stage_case(
             {
                 "quartile": str(q),
                 "n_records": int(len(g)),
-                "median_area_ha": int(g["area_ha"].median()),
+                "median_area_value": int(g["area_value"].median()),
                 "median_ape": round(float(g["ape"].median()), 1),
             }
         )
@@ -384,7 +484,7 @@ def stage_case(
     # --- overall metrics --------------------------------------------------
     metrics: Dict[str, Any] = {
         "n_records": int(len(df)),
-        "r2_overall": round(_r2(df["yield_kg_ha"], df["predicted"]), 3),
+        "r2_overall": round(_r2(df["yield_value"], df["predicted"]), 3),
         "median_ape": round(float(df["ape"].median()), 1),
         "mean_ape": round(float(df["ape"].mean()), 1),
         "eval_timestamp": stamp,
@@ -540,6 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
     """
     p = argparse.ArgumentParser(prog="numeric_stage")
     p.add_argument("--source-parquet", required=True)
+    p.add_argument("--source", default="nass", choices=sorted(SOURCES))
     p.add_argument("--out-root", required=True)
     p.add_argument("--cases", type=int, default=30)
     p.add_argument("--seed", type=int, default=737)
@@ -568,7 +669,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_root = Path(args.out_root).expanduser()
     out_root.mkdir(parents=True, exist_ok=True)
 
-    src = load_source(Path(args.source_parquet).expanduser())
+    src = load_source(Path(args.source_parquet).expanduser(), args.source)
     feats = build_features(src)
     evaluated = fit_and_predict(
         feats, (args.test_year_lo, args.test_year_hi), args.seed

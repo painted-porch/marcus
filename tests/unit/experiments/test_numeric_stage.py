@@ -41,9 +41,10 @@ def evaluated():
                     "crop": crop,
                     "area": f"{crop}-land-{i}",
                     "year": 2020,
-                    "yield_kg_ha": actual,
+                    "yield_value": actual,
                     "predicted": actual * (1 + ape / 100.0),
-                    "area_ha": float(rng.uniform(1000, 500000)),
+                    "area_value": float(rng.uniform(1000, 500000)),
+                    "unit": "BU / ACRE",
                     "ape": ape,
                 }
             )
@@ -201,53 +202,49 @@ class TestStagedArtifacts:
 
 
 @pytest.fixture
-def raw_faostat(tmp_path):
-    """Write a small FAOSTAT-shaped extract to parquet.
+def raw_nass(tmp_path):
+    """Write a small USDA-shaped extract to parquet.
 
     Returns
     -------
     pathlib.Path
         Path to the parquet file.
     """
+    rng = np.random.default_rng(11)
     rows = []
-    for area in ("Alpha", "Beta", "Gamma"):
-        for item in ("Maize (corn)", "Wheat"):
-            for year in range(2010, 2021):
+    counties = [
+        f"{state}-C{n}"
+        for state in ("IA", "IL", "KS", "TX", "NE", "MN")
+        for n in range(3)
+    ]
+    for county in counties:
+        for crop, unit, base in (
+            ("maize", "BU / ACRE", 180.0),
+            ("soybeans", "BU / ACRE", 55.0),
+            ("cotton", "LB / ACRE", 900.0),
+        ):
+            for year in range(2010, 2024):
                 rows.append(
                     {
-                        "Area": area,
-                        "Item": item,
-                        "Element": "Yield",
-                        "Year": year,
-                        "Value": 3000.0 + year + len(area),
-                    }
-                )
-                rows.append(
-                    {
-                        "Area": area,
-                        "Item": item,
-                        "Element": "Area harvested",
-                        "Year": year,
-                        "Value": 10000.0 + year,
+                        "area": county,
+                        "crop": crop,
+                        "year": year,
+                        "yield_per_acre": (
+                            base + year % 7 + float(rng.normal(0, base * 0.05))
+                        ),
+                        "acres_harvested": 5000.0 + year * 10,
+                        "unit": unit,
                     }
                 )
     # One total crop failure, which the yield floor must exclude.
     rows.append(
         {
-            "Area": "Delta",
-            "Item": "Wheat",
-            "Element": "Yield",
-            "Year": 2015,
-            "Value": 0.5,
-        }
-    )
-    rows.append(
-        {
-            "Area": "Delta",
-            "Item": "Wheat",
-            "Element": "Area harvested",
-            "Year": 2015,
-            "Value": 900.0,
+            "area": "ND-CASS",
+            "crop": "maize",
+            "year": 2015,
+            "yield_per_acre": 0.4,
+            "acres_harvested": 900.0,
+            "unit": "BU / ACRE",
         }
     )
     path = tmp_path / "src.parquet"
@@ -259,20 +256,20 @@ class TestSourceLoading:
     """Loading pivots the long export and drops undefined-error rows."""
 
     @pytest.mark.unit
-    def test_pivot_gives_one_row_per_unit(self, raw_faostat):
+    def test_pivot_gives_one_row_per_unit(self, raw_nass):
         """Each area, crop and year becomes a single row."""
         from runners.numeric_stage import load_source
 
-        got = load_source(raw_faostat)
-        assert set(got.columns) >= {"area", "crop", "year", "yield_kg_ha", "area_ha"}
+        got = load_source(raw_nass)
+        assert set(got.columns) >= {"area", "crop", "year", "yield_value", "area_value"}
         assert len(got) == len(got[["area", "crop", "year"]].drop_duplicates())
 
     @pytest.mark.unit
-    def test_crop_names_are_mapped_to_short_labels(self, raw_faostat):
+    def test_crop_names_are_mapped_to_short_labels(self, raw_nass):
         """Export item names become the labels a report uses."""
         from runners.numeric_stage import load_source
 
-        assert set(load_source(raw_faostat)["crop"]) <= {
+        assert set(load_source(raw_nass)["crop"]) <= {
             "maize",
             "soybeans",
             "wheat",
@@ -280,34 +277,34 @@ class TestSourceLoading:
         }
 
     @pytest.mark.unit
-    def test_crop_failure_row_is_excluded(self, raw_faostat):
+    def test_crop_failure_row_is_excluded(self, raw_nass):
         """A near-zero yield would put a near-zero denominator under
         every percentage error, so it is dropped."""
-        from runners.numeric_stage import MIN_YIELD_KG_HA, load_source
+        from runners.numeric_stage import MIN_YIELD_VALUE, load_source
 
-        got = load_source(raw_faostat)
-        assert (got["yield_kg_ha"] >= MIN_YIELD_KG_HA).all()
-        assert "Delta" not in set(got["area"])
+        got = load_source(raw_nass)
+        assert (got["yield_value"] >= MIN_YIELD_VALUE).all()
+        assert "ND-CASS" not in set(got["area"])
 
 
 class TestFeatureBuilding:
     """The model trains on the previous year's observation."""
 
     @pytest.mark.unit
-    def test_previous_year_is_attached(self, raw_faostat):
+    def test_previous_year_is_attached(self, raw_nass):
         """Each row carries the prior year's yield for its series."""
         from runners.numeric_stage import build_features, load_source
 
-        got = build_features(load_source(raw_faostat))
+        got = build_features(load_source(raw_nass))
         assert {"prev_yield", "prev_area"} <= set(got.columns)
         assert got["prev_yield"].notna().all()
 
     @pytest.mark.unit
-    def test_first_year_of_each_series_is_dropped(self, raw_faostat):
+    def test_first_year_of_each_series_is_dropped(self, raw_nass):
         """The earliest year has no predecessor to learn from."""
         from runners.numeric_stage import build_features, load_source
 
-        src = load_source(raw_faostat)
+        src = load_source(raw_nass)
         got = build_features(src)
         for (_, _), group in got.groupby(["area", "crop"]):
             assert group["year"].min() > src["year"].min()
@@ -317,7 +314,7 @@ class TestEvaluation:
     """Prediction is held out by year, never by random split."""
 
     @pytest.mark.unit
-    def test_only_held_out_years_are_returned(self, raw_faostat):
+    def test_only_held_out_years_are_returned(self, raw_nass):
         """Rows outside the test window do not appear in the result."""
         from runners.numeric_stage import (
             build_features,
@@ -325,11 +322,11 @@ class TestEvaluation:
             load_source,
         )
 
-        got = fit_and_predict(build_features(load_source(raw_faostat)), (2018, 2020), 1)
+        got = fit_and_predict(build_features(load_source(raw_nass)), (2018, 2020), 1)
         assert got["year"].between(2018, 2020).all()
 
     @pytest.mark.unit
-    def test_errors_are_computed_as_percentages(self, raw_faostat):
+    def test_errors_are_computed_as_percentages(self, raw_nass):
         """Every held-out row carries a non-negative percentage error."""
         from runners.numeric_stage import (
             build_features,
@@ -337,7 +334,7 @@ class TestEvaluation:
             load_source,
         )
 
-        got = fit_and_predict(build_features(load_source(raw_faostat)), (2018, 2020), 1)
+        got = fit_and_predict(build_features(load_source(raw_nass)), (2018, 2020), 1)
         assert (got["ape"] >= 0).all()
         assert "predicted" in got.columns
 
@@ -346,7 +343,7 @@ class TestStagingEntryPoint:
     """The command stages cases and writes ground truth outside them."""
 
     @pytest.mark.unit
-    def test_main_stages_cases_and_manifest(self, raw_faostat, tmp_path):
+    def test_main_stages_cases_and_manifest(self, raw_nass, tmp_path):
         """A run produces one directory per case plus a manifest."""
         from runners.numeric_stage import main
 
@@ -355,7 +352,7 @@ class TestStagingEntryPoint:
         code = main(
             [
                 "--source-parquet",
-                str(raw_faostat),
+                str(raw_nass),
                 "--out-root",
                 str(out_root),
                 "--cases",
