@@ -24,6 +24,7 @@ from src.intelligence.dependency_inferer import (
     DependencyInferer,
     InferredDependency,
 )
+from src.utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -512,7 +513,15 @@ Focus on logical dependencies based on:
             if self.ai_engine is None:
                 raise ValueError("AI engine is not available")
             response = await self.ai_engine._call_claude(prompt)
-            results = json.loads(response)
+            # Model replies arrive fenced, prefaced, or followed by prose;
+            # a bare json.loads threw the whole batch away on "Extra data"
+            # (Simon 65e11785). The shared parser trims to the structure.
+            results = parse_json_response(response)
+            if not isinstance(results, list):
+                raise ValueError(
+                    f"expected a JSON list of pair verdicts, got "
+                    f"{type(results).__name__}"
+                )
 
             # Convert to hybrid dependencies
             ai_dependencies = {}

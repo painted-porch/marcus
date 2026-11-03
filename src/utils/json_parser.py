@@ -14,6 +14,50 @@ from typing import Any, Dict, Optional, Union
 logger = logging.getLogger(__name__)
 
 
+def _balanced_structure_end(text: str, start: int) -> Optional[int]:
+    """Return the index just past the JSON structure opening at ``start``.
+
+    Walks the text tracking nesting of both bracket kinds while ignoring
+    anything inside string literals (and escaped quotes within them), so
+    a ``]`` or ``}`` in a ``reasoning`` field does not end the structure
+    early.
+
+    Parameters
+    ----------
+    text : str
+        The full response.
+    start : int
+        Index of the opening ``{`` or ``[``.
+
+    Returns
+    -------
+    Optional[int]
+        End index (exclusive), or None when the structure never closes.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
 def extract_json_from_response(response: str) -> str:
     """
     Extract JSON content from a response with markdown or other formatting.
@@ -65,44 +109,23 @@ def extract_json_from_response(response: str) -> str:
                 return extracted
 
     # Check if the response has JSON structure (starts with { or [)
-    if response.startswith("{") or response.startswith("["):
-        return response
-
-    # Try to find JSON structure within the text
-    # Look for the first { or [ and extract until the matching closing bracket
+    # A reply that begins with the structure may still keep talking after it
+    # (``[...]\n\nNote: ...``), which ``json.loads`` rejects as "Extra data".
+    # Trim to the balanced structure in that case too (Simon 65e11785).
     json_start = response.find("{")
     array_start = response.find("[")
-
     if json_start == -1 and array_start == -1:
         raise ValueError("No JSON structure found in response")
 
-    # Determine which comes first
     if json_start == -1:
         start = array_start
-        is_object = False
     elif array_start == -1:
         start = json_start
-        is_object = True
     else:
         start = min(json_start, array_start)
-        is_object = start == json_start
 
-    # Extract from start to end, handling nested structures
-    bracket_count = 0
-    end = start
-    open_bracket = "{" if is_object else "["
-    close_bracket = "}" if is_object else "]"
-
-    for i in range(start, len(response)):
-        if response[i] == open_bracket:
-            bracket_count += 1
-        elif response[i] == close_bracket:
-            bracket_count -= 1
-            if bracket_count == 0:
-                end = i + 1
-                break
-
-    if bracket_count != 0:
+    end = _balanced_structure_end(response, start)
+    if end is None:
         raise ValueError("Unmatched brackets in JSON structure")
 
     extracted = response[start:end]
