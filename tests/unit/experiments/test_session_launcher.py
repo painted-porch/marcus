@@ -1199,3 +1199,76 @@ if [ "$n" = "1" ]; then echo 2 > {RETRY_MARKER}; else touch .marcus_session_done
         proc.communicate(timeout=20)
         assert time.monotonic() - started < 10
         assert not workspace.exists()
+
+
+class TestCollisionLine:
+    """The run's end-of-run report names collisions, and only when they happened."""
+
+    def _log(self, tmp_path: Path, project: Dict[str, Any]) -> str:
+        config = _config(tmp_path)
+        host = _host(tmp_path)
+        host.count_live_panes = Mock(return_value=0)
+        mcp = _mcp({"success": True, "project_id": "p1", "tasks_created": 1})
+
+        def _call(name: str, arguments: Any = None) -> Any:
+            if name == "create_project":
+                return {"success": True, "project_id": "p1", "tasks_created": 1}
+            if name == "get_project_status":
+                return {"success": True, "project": project}
+            return {}
+
+        mcp.call_tool = Mock(side_effect=_call)
+        launcher = SessionLauncher(
+            config,
+            TEMPLATE.parent,
+            sessions=1,
+            host=host,
+            mcp_factory=lambda t: mcp,
+            sleep=lambda s: None,
+        )
+        with (
+            patch("runners.session_launcher.shutil.which", return_value="/x"),
+            patch("runners.session_launcher.check_mcp_health", return_value=True),
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ),
+        ):
+            assert launcher.run() is True
+        return (Path(config.experiment_dir) / "logs" / "runner.log").read_text()
+
+    def test_collisions_are_named_when_they_happened(self, tmp_path: Path) -> None:
+        """A run with collisions says so, with the count and the D11 reference."""
+        log = self._log(
+            tmp_path,
+            {
+                "total_tasks": 1,
+                "completed": 1,
+                "unfinished_tasks": [],
+                "epoch_collisions": 2,
+            },
+        )
+        assert "[Collisions] 2 completion(s)" in log
+        assert "superseded lease epoch" in log
+
+    def test_a_clean_run_stays_quiet(self, tmp_path: Path) -> None:
+        """Zero collisions prints nothing, so the line means something."""
+        log = self._log(
+            tmp_path,
+            {
+                "total_tasks": 1,
+                "completed": 1,
+                "unfinished_tasks": [],
+                "epoch_collisions": 0,
+            },
+        )
+        assert "[Collisions]" not in log
+
+    def test_an_older_server_without_the_field_stays_quiet(
+        self, tmp_path: Path
+    ) -> None:
+        """A status payload without the field must not print a false zero."""
+        log = self._log(
+            tmp_path, {"total_tasks": 1, "completed": 1, "unfinished_tasks": []}
+        )
+        assert "[Collisions]" not in log

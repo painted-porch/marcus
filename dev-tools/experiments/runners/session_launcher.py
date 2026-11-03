@@ -806,6 +806,15 @@ class SessionLauncher:
             for k in ("total_tasks", "completed", "in_progress", "blocked")
         }
         self.say(f"[Board] {json.dumps(counts, default=str)}")
+        # Record-only collision counting (ADR-0012 D11): two workers held
+        # the same chore at once this often. Printed only when it happened,
+        # so a clean run stays quiet and a dirty one cannot be missed.
+        collisions = project.get("epoch_collisions") or 0
+        if collisions:
+            self.say(
+                f"[Collisions] {collisions} completion(s) arrived under a "
+                "superseded lease epoch (observed, not fenced; ADR-0012 D11)"
+            )
         for line in format_unfinished_report(
             project.get("unfinished_tasks"), total=int(project.get("total_tasks") or 0)
         ):
