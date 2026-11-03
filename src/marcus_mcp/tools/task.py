@@ -4720,6 +4720,21 @@ async def _record_epoch_collision(
     persistence = getattr(state, "persistence", None)
     if persistence is None:
         return False
+    # Provenance only: the count is taken by task membership, because
+    # ``state.active_project_id`` is not always set when a completion
+    # arrives (it was None in the live check for PR #789) and a project id
+    # also comes in two spellings. The task row is the authority.
+    task = next(
+        (
+            t
+            for t in getattr(state, "project_tasks", None) or []
+            if getattr(t, "id", None) == task_id
+        ),
+        None,
+    )
+    project_id = getattr(task, "project_id", None) or getattr(
+        state, "active_project_id", None
+    )
     try:
         await persistence.store(
             EPOCH_COLLISION_COLLECTION,
@@ -4729,7 +4744,7 @@ async def _record_epoch_collision(
                 "agent_id": agent_id,
                 "lease_epoch": lease_epoch,
                 "highest_epoch": highest,
-                "project_id": getattr(state, "active_project_id", None),
+                "project_id": project_id,
                 "observed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
@@ -4739,16 +4754,25 @@ async def _record_epoch_collision(
     return True
 
 
-async def count_epoch_collisions(state: Any, project_id: Optional[str]) -> int:
-    """Return how many epoch collisions were observed for a project.
+async def count_epoch_collisions(
+    state: Any, task_ids: Optional[Set[str]] = None
+) -> int:
+    """Return how many epoch collisions were observed, by task.
+
+    Counted by task membership rather than by the project id stamped on
+    the record: that stamp is provenance (it can be ``None`` when a
+    completion arrives before the active project is resolved, and project
+    ids come in a dashed and a dashless spelling), while the set of tasks
+    on a board is unambiguous.
 
     Parameters
     ----------
     state : Any
         Server state, providing ``persistence``.
-    project_id : Optional[str]
-        The project to count. ``None`` counts every record, which is what
-        a single-project deployment wants.
+    task_ids : Optional[Set[str]]
+        The tasks to count collisions for, normally the project's board.
+        ``None`` counts every record, which is what a single-project
+        deployment or an operator inspecting the store wants.
 
     Returns
     -------
@@ -4764,9 +4788,9 @@ async def count_epoch_collisions(state: Any, project_id: Optional[str]) -> int:
     except Exception as exc:  # noqa: BLE001 - a count must never fail a read path
         logger.warning(f"Could not read epoch collisions: {exc}")
         return 0
-    if project_id is None:
+    if task_ids is None:
         return len(records)
-    return sum(1 for r in records if (r or {}).get("project_id") == project_id)
+    return sum(1 for r in records if (r or {}).get("task_id") in task_ids)
 
 
 async def _observe_epoch_collision(

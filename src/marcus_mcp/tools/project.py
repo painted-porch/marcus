@@ -251,7 +251,7 @@ async def get_project_status(state: Any) -> Any:
             from src.marcus_mcp.tools.task import count_epoch_collisions
 
             epoch_collisions = await count_epoch_collisions(
-                state, active_project.id if active_project else None
+                state, {t.id for t in (state.project_tasks or [])}
             )
 
             unfinished = None

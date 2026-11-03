@@ -295,11 +295,11 @@ class TestEpochCollisionsReported:
 
     @pytest.mark.asyncio
     async def test_this_projects_observations_are_counted(self) -> None:
-        """Only records stamped with this project's id are counted."""
+        """Only records for tasks on this board are counted, stamp or no stamp."""
         state = _state([_task("t1", "A", TaskStatus.DONE)])
         state.persistence.query = AsyncMock(
             return_value=[
-                {"project_id": "p1", "task_id": "t1"},
+                {"project_id": None, "task_id": "t1"},
                 {"project_id": "elsewhere", "task_id": "t9"},
             ]
         )
