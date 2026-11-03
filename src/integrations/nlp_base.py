@@ -91,6 +91,14 @@ class NaturalLanguageTaskCreator(ABC):
         RuntimeError
             If kanban client doesn't support task creation
         """
+        # A seeded board is exactly the graph the caller gave; the auto-fixer
+        # would rewrite it (for example make a lone README task depend on
+        # itself as the "final" task). Its dependencies were validated when
+        # the seed was built (names, self-reference, cycles).
+        if tasks and all(getattr(t, "source_type", None) == "seeded" for t in tasks):
+            if not skip_validation:
+                logger.info("Seeded board: task graph taken as given, no auto-fix")
+            skip_validation = True
         # CRITICAL: Auto-fix task graph issues BEFORE committing to Kanban
         # This fixes problems automatically rather than raising exceptions
         if not skip_validation:

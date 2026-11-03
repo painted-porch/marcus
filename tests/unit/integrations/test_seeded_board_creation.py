@@ -167,3 +167,49 @@ class TestSeededTasksAreNotSplit:
             ),
         ):
             await creator._decompose_and_add_subtasks([created], [seeded])
+
+
+class TestSeededGraphIsNotRewritten:
+    """create_tasks_on_board must not auto-fix a seeded graph (Codex P2 on PR #787).
+
+    The auto-fixer would, for example, make a lone README task depend on
+    itself as the "final" task and leave it unclaimable forever.
+    """
+
+    @pytest.mark.asyncio
+    async def test_validate_and_fix_is_skipped_for_seeded_tasks(self) -> None:
+        """A seeded list reaches the kanban client with its graph untouched."""
+        from src.integrations.seeded_tasks import build_seeded_tasks
+
+        creator = _creator()
+        seeded = build_seeded_tasks([{"name": "Write the README"}], "demo")
+        created = Task(
+            id="k1",
+            name="Write the README",
+            description="Write the README",
+            status=TaskStatus.TODO,
+            priority=seeded[0].priority,
+            assigned_to=None,
+            created_at=seeded[0].created_at,
+            updated_at=seeded[0].updated_at,
+            due_date=None,
+            estimated_hours=1.0,
+        )
+        creator.kanban_client.create_task = AsyncMock(return_value=created)
+        with (
+            patch(
+                "src.integrations.nlp_base.TaskGraphValidator.validate_and_fix",
+                side_effect=AssertionError("the seeded graph must not be auto-fixed"),
+            ),
+            patch.object(creator, "_remap_dependencies", new=AsyncMock()),
+            patch.object(
+                creator, "_update_task_metadata_dependencies", new=AsyncMock()
+            ),
+            patch.object(creator, "_decompose_and_add_subtasks", new=AsyncMock()),
+            patch.object(creator, "_wire_cross_parent_dependencies", new=AsyncMock()),
+        ):
+            out = await creator.create_tasks_on_board(seeded)
+
+        assert [t.name for t in out] == ["Write the README"]
+        sent = creator.kanban_client.create_task.call_args.args[0]
+        assert sent.get("dependencies", []) == []

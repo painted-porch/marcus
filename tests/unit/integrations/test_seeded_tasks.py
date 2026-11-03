@@ -120,3 +120,35 @@ class TestValidateSeedSpecs:
         """build_seeded_tasks surfaces validation as SeedTaskError."""
         with pytest.raises(SeedTaskError, match="needs a non-empty name"):
             build_seeded_tasks([{"name": "  "}], "demo")
+
+
+class TestValidatorEdges:
+    """Codex P2s on PR #787: malformed types and cycles are reported, never raised."""
+
+    def test_non_list_depends_on_is_one_error_not_a_type_error(self) -> None:
+        """``depends_on: 7`` yields the list-type problem and nothing crashes."""
+        errors = validate_seed_specs([{"name": "A", "depends_on": 7}])
+        assert errors == ["tasks[0].depends_on must be a list of non-empty strings"]
+
+    def test_dependency_cycle_is_rejected(self) -> None:
+        """A -> B -> A is named as a cycle (the board's auto-fixer no longer runs)."""
+        errors = validate_seed_specs(
+            [
+                {"name": "A", "depends_on": ["B"]},
+                {"name": "B", "depends_on": ["A"]},
+            ]
+        )
+        assert any(e.startswith("tasks form a dependency cycle") for e in errors)
+
+    def test_a_chain_is_not_a_cycle(self) -> None:
+        """A -> B -> C validates."""
+        assert (
+            validate_seed_specs(
+                [
+                    {"name": "A"},
+                    {"name": "B", "depends_on": ["A"]},
+                    {"name": "C", "depends_on": ["B", "A"]},
+                ]
+            )
+            == []
+        )

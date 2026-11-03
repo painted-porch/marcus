@@ -103,20 +103,61 @@ def validate_seed_specs(specs: Any) -> List[str]:
                 f"{where}.priority must be one of "
                 f"{', '.join(p.value for p in Priority)}"
             )
+    edges: Dict[str, List[str]] = {}
     for index, spec in enumerate(specs):
         if not isinstance(spec, dict):
             continue
-        for dep in spec.get("depends_on", []) or []:
-            if isinstance(dep, str) and dep.strip() not in names:
+        deps = spec.get("depends_on", []) or []
+        if not isinstance(deps, list):
+            continue  # already reported by the list-type check above
+        own = str(spec.get("name", "")).strip()
+        for dep in deps:
+            if not isinstance(dep, str):
+                continue  # already reported
+            if dep.strip() not in names:
                 errors.append(
                     f"tasks[{index}].depends_on names an unknown task {dep!r}"
                 )
-            elif (
-                isinstance(dep, str)
-                and dep.strip() == str(spec.get("name", "")).strip()
-            ):
+            elif dep.strip() == own:
                 errors.append(f"tasks[{index}] depends on itself")
+            else:
+                edges.setdefault(own, []).append(dep.strip())
+    cycle = _find_cycle(edges)
+    if cycle:
+        errors.append("tasks form a dependency cycle: " + " -> ".join(cycle))
     return errors
+
+
+def _find_cycle(edges: Dict[str, List[str]]) -> List[str]:
+    """Return one dependency cycle as a list of names, or an empty list.
+
+    The board's graph auto-fixer does not run for seeded tasks, so a cycle
+    must be caught here; on the board it would leave every task in the
+    cycle unclaimable forever.
+    """
+    state: Dict[str, int] = {}
+    stack: List[str] = []
+
+    def visit(node: str) -> List[str]:
+        state[node] = 1
+        stack.append(node)
+        for nxt in edges.get(node, []):
+            if state.get(nxt, 0) == 1:
+                return stack[stack.index(nxt) :] + [nxt]
+            if state.get(nxt, 0) == 0:
+                found = visit(nxt)
+                if found:
+                    return found
+        stack.pop()
+        state[node] = 2
+        return []
+
+    for start in list(edges):
+        if state.get(start, 0) == 0:
+            found = visit(start)
+            if found:
+                return found
+    return []
 
 
 def build_seeded_tasks(specs: List[Dict[str, Any]], project_name: str) -> List[Task]:
