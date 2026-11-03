@@ -21,12 +21,23 @@ card, a task being assigned right now, a persisted assignment, or a
 will clear) all mean "wait, then ask again". This leans on ADR-0012 D3:
 a dead worker's lease is recovered within the silence timeout, so its
 task returns to claimable and the drain never fires over abandoned work.
+
+One ``BLOCKED`` card is not a dead lane: a completion whose branch failed
+to merge into ``main`` is marked ``BLOCKED`` with a ``merge_conflict``
+record (#651) while its own agent is told to resolve the conflict and
+re-report. That agent holds no lease any more (the lease was released on
+completion), so the card looks abandoned to the rules above. It is in
+flight for as long as the record is younger than the silence timeout, the
+same dial D3 uses to decide a quiet worker is dead; a live run drained
+early on exactly this card the first time it happened.
 """
 
 import logging
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Set
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set
 
+from src.core.lease_invariants import DEFAULT_SILENCE_TIMEOUT_MINUTES
 from src.core.models import Task, TaskStatus
 from src.core.task_claimability import (
     build_slug_to_id,
@@ -113,6 +124,54 @@ def _is_decomposed_parent(task: Task, state: Any, scoped: List[Task]) -> bool:
         return any(t.is_subtask and t.parent_task_id == task.id for t in scoped)
 
 
+def _conflict_resolution_in_flight(task: Task, lease_manager: Any) -> bool:
+    """Return True when a BLOCKED card is a merge conflict its agent is still fixing.
+
+    The merge-failure path stamps ``source_context["merge_conflict"]`` with
+    ``blocked_at`` and tells the completing agent to resolve and re-report.
+    Until the silence timeout has passed since that stamp, the card counts
+    as work in flight; after it, the agent is presumed gone and the card
+    is a dead lane like any other BLOCKED task.
+
+    Parameters
+    ----------
+    task : Task
+        A task whose status is BLOCKED.
+    lease_manager : Any
+        The server's lease manager, read for ``silence_timeout_minutes``;
+        the D3 default applies when it is absent.
+
+    Returns
+    -------
+    bool
+        True when the conflict record is present, well-formed, and fresh.
+    """
+    record = (task.source_context or {}).get("merge_conflict")
+    if not isinstance(record, dict):
+        return False
+    stamped = _parse_timestamp(record.get("blocked_at"))
+    if stamped is None:
+        return False
+    minutes = getattr(lease_manager, "silence_timeout_minutes", None)
+    window = timedelta(minutes=DEFAULT_SILENCE_TIMEOUT_MINUTES)
+    if isinstance(minutes, (int, float)) and minutes > 0:
+        window = timedelta(minutes=float(minutes))
+    return datetime.now(timezone.utc) - stamped < window
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 stamp into an aware UTC datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
     """Decide whether ``project_id`` has run out of work.
 
@@ -170,7 +229,10 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
             done += 1
             continue
         if task.status == TaskStatus.BLOCKED:
-            blocked += 1
+            if _conflict_resolution_in_flight(task, lease_manager):
+                in_flight += 1
+            else:
+                blocked += 1
             continue
         # A decomposed parent is a container: the selector moves it to
         # IN_PROGRESS when its first child is claimed and completes it when

@@ -679,3 +679,75 @@ class TestDrainClosesTheRun:
 
         assert result["status"] == "BOARD_DRAINED"
         fire.assert_not_called()
+
+
+def _conflicted(task_id: str, minutes_ago: float, stamp: Any = None) -> Task:
+    """A BLOCKED task carrying a merge_conflict record stamped ``minutes_ago``."""
+    from datetime import timedelta
+
+    task = _task(task_id, TaskStatus.BLOCKED)
+    when = (
+        stamp
+        if stamp is not None
+        else (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+    )
+    task.source_context = {
+        "merge_conflict": {
+            "agent_id": "agent-1",
+            "branch": "marcus/agent-1",
+            "blocked_at": when,
+        }
+    }
+    return task
+
+
+class TestMergeConflictIsInFlight:
+    """A merge conflict being resolved by its agent is not a dead lane.
+
+    The completion path marks the card BLOCKED (#651) and tells the agent
+    to resolve and re-report; the lease is already released, so nothing
+    else says the card is alive. A live run drained on this card while the
+    agent was mid-resolution, sending the other session home early.
+    """
+
+    @pytest.mark.asyncio
+    async def test_fresh_conflict_counts_as_in_flight(self) -> None:
+        """Stamped a minute ago: wait, do not drain."""
+        tasks = [_task("a", TaskStatus.DONE), _conflicted("b", minutes_ago=1)]
+        verdict = await compute_board_drain(_state(tasks), PROJECT)
+        assert verdict.drained is False
+        assert verdict.reason == "in_flight"
+        assert verdict.tasks_in_flight == 1
+        assert verdict.tasks_blocked == 0
+
+    @pytest.mark.asyncio
+    async def test_conflict_older_than_the_silence_timeout_is_blocked(self) -> None:
+        """Past the D3 dial the agent is presumed gone: a dead lane."""
+        tasks = [_task("a", TaskStatus.DONE), _conflicted("b", minutes_ago=46)]
+        verdict = await compute_board_drain(_state(tasks), PROJECT)
+        assert verdict.drained is True
+        assert verdict.reason == "blocked"
+        assert verdict.tasks_blocked == 1
+
+    @pytest.mark.asyncio
+    async def test_window_follows_the_lease_managers_silence_timeout(self) -> None:
+        """A shorter configured timeout shortens the grace window."""
+        tasks = [_task("a", TaskStatus.DONE), _conflicted("b", minutes_ago=10)]
+        state = _state(tasks)
+        state.lease_manager.silence_timeout_minutes = 5.0
+        verdict = await compute_board_drain(state, PROJECT)
+        assert verdict.drained is True and verdict.reason == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_blocked_without_a_conflict_record_is_still_blocked(self) -> None:
+        """An ordinary BLOCKED card (terminal blocker) is unchanged."""
+        tasks = [_task("a", TaskStatus.DONE), _task("b", TaskStatus.BLOCKED)]
+        verdict = await compute_board_drain(_state(tasks), PROJECT)
+        assert verdict.drained is True and verdict.reason == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_malformed_stamp_is_treated_as_blocked(self) -> None:
+        """A record without a readable time cannot keep the board alive forever."""
+        tasks = [_task("a", TaskStatus.DONE), _conflicted("b", 0, stamp="not-a-time")]
+        verdict = await compute_board_drain(_state(tasks), PROJECT)
+        assert verdict.drained is True and verdict.reason == "blocked"
