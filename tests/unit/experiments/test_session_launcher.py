@@ -17,6 +17,7 @@ import pytest
 from runners.session_launcher import (
     CHORE_DONE_MARKER,
     DEFAULT_SESSION_ROLE,
+    RETRY_MARKER,
     SESSION_DONE_MARKER,
     SessionLauncher,
     build_create_project_options,
@@ -1087,3 +1088,66 @@ exit 0
         with pytest.raises(ProcessLookupError):
             os.kill(orphan, 0)
         assert not workspace.exists()
+
+
+class TestRetryWaitLivesInTheScript:
+    """The retry wait is the harness's job: a model's shell may refuse ``sleep``."""
+
+    def test_header_tells_the_worker_to_write_the_retry_marker(self) -> None:
+        """The worker writes retry_after_seconds to the marker and exits."""
+        text = TEMPLATE.read_text()
+        assert RETRY_MARKER in text
+        assert "Do NOT sleep or poll inside this" in text
+        assert "run `sleep" not in text
+
+    def test_script_waits_the_marker_seconds_between_chores(
+        self, tmp_path: Path
+    ) -> None:
+        """Run the real script: chore 1 leaves a 2-second marker, chore 2 ends the session.
+
+        The gap between the two chores must be at least the marker's value,
+        and the marker must be consumed.
+        """
+        import subprocess as sp
+        import time
+
+        repo = _repo_with_main(tmp_path)
+        count = tmp_path / "count"
+        count.write_text("0")
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+n=$(cat {count}); n=$((n+1)); echo $n > {count}
+date +%s.%N >> {tmp_path}/times
+if [ "$n" = "1" ]; then echo 2 > {RETRY_MARKER}; else touch .marcus_session_done; fi
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        t1, t2 = [float(x) for x in (tmp_path / "times").read_text().split()[:2]]
+        assert t2 - t1 >= 2.0
+        assert "waiting 2s before the next chore" in result.stdout
+        assert not (workspace / RETRY_MARKER).exists() or not workspace.exists()
+
+    def test_script_caps_an_absurd_wait(self, tmp_path: Path) -> None:
+        """A marker asking for an hour is capped at the script's maximum."""
+        script = self._script_text(tmp_path)
+        assert "-gt 300" in script
+        assert "wait_s=300" in script
+
+    def _script_text(self, tmp_path: Path) -> str:
+        agent = plan_sessions(_agents(1), 1)[0]
+        return build_session_script(
+            agent=agent,
+            workspace=tmp_path / "worktrees" / "agent_unicorn_1",
+            branch="marcus/agent_unicorn_1",
+            repo=tmp_path / "implementation",
+            project_info_file=tmp_path / "project_info.json",
+            marcus_mcp_url="u",
+            register_snippet="true",
+            chore_command="true",
+        )

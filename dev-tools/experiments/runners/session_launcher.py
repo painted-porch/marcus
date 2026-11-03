@@ -49,6 +49,13 @@ SESSION_DONE_MARKER = ".marcus_session_done"
 # the next chore, so a handed-back task's commits never ride into main with
 # the next task's merge (Codex P1 on PR #779; the #730 hazard).
 CHORE_DONE_MARKER = ".marcus_chore_done"
+# Written by the worker when request_next_task returned no task: it holds
+# the retry_after_seconds. The script sleeps that long before the next
+# chore. The wait lives here because a harness may refuse a bare ``sleep``
+# in the model's shell (Claude Code blocks standalone sleeps), which turned
+# the retry into a two-second poll in a live run.
+RETRY_MARKER = ".marcus_retry_after"
+MAX_RETRY_WAIT_SECONDS = 300
 DEFAULT_SESSION_ROLE = "full-stack"
 DEFAULT_SESSION_SKILLS = [
     "python",
@@ -237,6 +244,7 @@ def build_session_script(
     """
     marker = workspace / SESSION_DONE_MARKER
     chore_marker = workspace / CHORE_DONE_MARKER
+    retry_marker = workspace / RETRY_MARKER
     sid = agent["id"]
     return f"""#!/bin/bash
 [ -f ~/.zshrc ] && source ~/.zshrc
@@ -304,7 +312,7 @@ fresh_workspace() {{
 }}
 
 cd "$WORKSPACE" || exit 1
-rm -f {marker} {chore_marker}
+rm -f {marker} {chore_marker} {retry_marker}
 echo "=========================================="
 echo "SESSION {agent["name"].upper()}"
 echo "ID: {sid}"
@@ -344,6 +352,17 @@ while true; do
     if [ $chore -ge {max_chores} ]; then
         echo "[session {sid}] chore cap {max_chores} reached, stopping"
         break
+    fi
+    # No task this chore: the worker left the server's retry_after_seconds
+    # in the retry marker and exited; wait here, outside the model.
+    if [ -f {retry_marker} ]; then
+        wait_s=$(tr -dc '0-9' < {retry_marker} | head -c 6)
+        rm -f {retry_marker}
+        [ -z "$wait_s" ] && wait_s=30
+        [ "$wait_s" -gt {MAX_RETRY_WAIT_SECONDS} ] && wait_s={MAX_RETRY_WAIT_SECONDS}
+        echo "[session {sid}] no task; waiting ${{wait_s}}s before the next chore"
+        sleep "$wait_s"
+        continue
     fi
     sleep 2
 done
