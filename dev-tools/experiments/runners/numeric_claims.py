@@ -1,0 +1,577 @@
+"""Typed numeric claims and the deterministic checker that resolves them.
+
+Every number a report states is recorded as a claim: an identifier, a
+value, a label, and enough addressing to find the truth. The checker
+resolves each claim against the staged evaluation files and returns
+one verdict per claim. It never calls a model.
+
+Three claim kinds exist, because three different things can go wrong.
+A ``lookup`` reads one value from one file, and fails when the report
+states something the data does not say. A ``derived`` figure is
+recomputed from its inputs, and fails when a ratio or a share was
+asserted rather than calculated. A ``consistency`` claim asserts a
+relation between figures, and fails when two tables disagree even
+though each matches its own source.
+
+Tolerance is declared on the claim, never decided by the checker. A
+checker that decides for itself what "approximately" means is the
+same discretion this design removes from the writing agent.
+"""
+
+from __future__ import annotations
+
+import ast
+import csv
+import json
+import math
+import operator
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+VERDICT_VERIFIED = "verified"
+VERDICT_FAILED = "failed"
+VERDICT_UNRESOLVABLE = "unresolvable"
+VERDICT_UNCOVERED = "uncovered"
+
+_NUMBER_RE = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?![\w])")
+_CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
+
+_SAFE_BINOPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+}
+_SAFE_CMPOPS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+}
+
+
+@dataclass
+class Claim:
+    """One number a report states, with everything needed to check it.
+
+    Parameters
+    ----------
+    id : str
+        Identifier referenced from the report text and slide spec.
+    value : Any
+        The value as the report states it.
+    label : str
+        What the number is, used to catch a right value under a wrong
+        heading.
+    kind : str
+        ``lookup``, ``derived`` or ``consistency``.
+    source : Optional[str]
+        For a lookup, the staged file holding the truth.
+    key : Optional[str]
+        For a lookup, the address inside that file.
+    expr : Optional[str]
+        For a derived or consistency claim, the arithmetic to apply.
+    inputs : Dict[str, str]
+        For a derived or consistency claim, the addresses its
+        variables resolve to.
+    tolerance : Optional[Dict[str, Any]]
+        ``{"type": "abs"|"rel", "value": float}``. Absent means exact.
+    """
+
+    id: str
+    value: Any
+    label: str
+    kind: str
+    source: Optional[str] = None
+    key: Optional[str] = None
+    expr: Optional[str] = None
+    inputs: Dict[str, str] = field(default_factory=dict)
+    tolerance: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "Claim":
+        """Build a claim from its JSON form.
+
+        Parameters
+        ----------
+        raw : Dict[str, Any]
+            Decoded claim object.
+
+        Returns
+        -------
+        Claim
+            The parsed claim.
+        """
+        return cls(
+            id=str(raw.get("id", "")),
+            value=raw.get("value"),
+            label=str(raw.get("label", "")),
+            kind=str(raw.get("kind", "lookup")),
+            source=raw.get("source"),
+            key=raw.get("key"),
+            expr=raw.get("expr"),
+            inputs=dict(raw.get("inputs") or {}),
+            tolerance=raw.get("tolerance"),
+        )
+
+
+@dataclass
+class CheckResult:
+    """The verdict on one claim.
+
+    Parameters
+    ----------
+    claim_id : str
+        Identifier of the claim, or a synthetic id for a coverage gap.
+    verdict : str
+        ``verified``, ``failed``, ``unresolvable`` or ``uncovered``.
+    value : Any
+        The value the report stated.
+    expected : Any
+        The value the staged data supports, when one could be resolved.
+    detail : str
+        Human-readable reason, carried back to the writer on a retry.
+    label : str
+        The claim's label, used by the slide mapping check.
+    """
+
+    claim_id: str
+    verdict: str
+    value: Any = None
+    expected: Any = None
+    detail: str = ""
+    label: str = ""
+
+
+def load_sources(staged_dir: Path) -> Dict[str, Any]:
+    """Read every staged artifact into a source map.
+
+    Parameters
+    ----------
+    staged_dir : Path
+        The evaluation directory a report is written from.
+
+    Returns
+    -------
+    Dict[str, Any]
+        File name to parsed contents: a dict for JSON, a list of row
+        dicts for CSV. Only files directly inside ``staged_dir`` are
+        included, so a claim naming a sibling evaluation directory is
+        unresolvable rather than silently checked against stale data.
+    """
+    sources: Dict[str, Any] = {}
+    for path in sorted(Path(staged_dir).glob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix == ".json":
+            try:
+                sources[path.name] = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                continue
+        elif path.suffix == ".csv":
+            with path.open(newline="") as fh:
+                sources[path.name] = list(csv.DictReader(fh))
+    return sources
+
+
+def _coerce(text: Any) -> Any:
+    """Convert a cell to a number when it looks like one.
+
+    Parameters
+    ----------
+    text : Any
+        Raw cell value.
+
+    Returns
+    -------
+    Any
+        A float when parseable, otherwise the input unchanged.
+    """
+    if isinstance(text, (int, float, bool)):
+        return text
+    if not isinstance(text, str):
+        return text
+    stripped = text.replace(",", "").replace("%", "").strip()
+    try:
+        return float(stripped)
+    except ValueError:
+        return text
+
+
+def resolve_address(address: str, sources: Dict[str, Any]) -> Any:
+    """Resolve one address against the source map.
+
+    Addresses take three forms. ``metrics.json:r2_overall`` reads a
+    JSON key. ``per_crop.csv:crop=maize:r2`` selects the row whose
+    ``crop`` column is ``maize`` and reads its ``r2`` column.
+    ``tiers.csv:sum:n_records`` sums a column across every row.
+
+    Parameters
+    ----------
+    address : str
+        The address to resolve.
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    Any
+        The resolved value.
+
+    Raises
+    ------
+    KeyError
+        When the file, row or column does not exist.
+    """
+    parts = address.split(":")
+    if len(parts) < 2:
+        raise KeyError(f"malformed address: {address}")
+    filename, rest = parts[0], parts[1:]
+    if filename not in sources:
+        raise KeyError(f"no such staged file: {filename}")
+    data = sources[filename]
+
+    if isinstance(data, dict):
+        key = rest[0]
+        if key not in data:
+            raise KeyError(f"no such key: {key} in {filename}")
+        return _coerce(data[key])
+
+    # CSV: either an aggregate or a row selector plus a column.
+    if rest[0] == "sum":
+        column = rest[1]
+        total = 0.0
+        for row in data:
+            if column not in row:
+                raise KeyError(f"no such column: {column} in {filename}")
+            total += float(_coerce(row[column]))
+        return total
+    if rest[0] == "count":
+        return float(len(data))
+    if len(rest) < 2 or "=" not in rest[0]:
+        raise KeyError(f"malformed csv address: {address}")
+    sel_col, sel_val = rest[0].split("=", 1)
+    column = rest[1]
+    for row in data:
+        if str(row.get(sel_col, "")).strip() == sel_val:
+            if column not in row:
+                raise KeyError(f"no such column: {column} in {filename}")
+            return _coerce(row[column])
+    raise KeyError(f"no row where {sel_col}={sel_val} in {filename}")
+
+
+def _safe_eval(node: ast.AST, names: Dict[str, Any]) -> Any:
+    """Evaluate an arithmetic or comparison expression safely.
+
+    Only literals, named inputs, arithmetic, comparison and unary
+    minus are permitted. Anything else raises, so a claim cannot
+    smuggle code through its expression.
+
+    Parameters
+    ----------
+    node : ast.AST
+        Parsed expression node.
+    names : Dict[str, Any]
+        Resolved input values by variable name.
+
+    Returns
+    -------
+    Any
+        The evaluated result.
+
+    Raises
+    ------
+    ValueError
+        When the expression uses an unsupported construct.
+    """
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body, names)
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id not in names:
+            raise ValueError(f"unknown input: {node.id}")
+        return names[node.id]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return -_safe_eval(node.operand, names)
+    if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_BINOPS:
+        return _SAFE_BINOPS[type(node.op)](
+            _safe_eval(node.left, names), _safe_eval(node.right, names)
+        )
+    if isinstance(node, ast.Compare) and len(node.ops) == 1:
+        op = type(node.ops[0])
+        if op not in _SAFE_CMPOPS:
+            raise ValueError("unsupported comparison")
+        return _SAFE_CMPOPS[op](
+            _safe_eval(node.left, names),
+            _safe_eval(node.comparators[0], names),
+        )
+    raise ValueError("unsupported expression")
+
+
+def _within_tolerance(
+    stated: Any, truth: Any, tolerance: Optional[Dict[str, Any]]
+) -> bool:
+    """Compare a stated value with the truth under a declared tolerance.
+
+    Parameters
+    ----------
+    stated : Any
+        Value as the report states it.
+    truth : Any
+        Value the staged data supports.
+    tolerance : Optional[Dict[str, Any]]
+        Declared tolerance, or ``None`` for exact comparison.
+
+    Returns
+    -------
+    bool
+        True when the stated value is acceptable.
+    """
+    if isinstance(truth, bool) or isinstance(stated, bool):
+        return bool(stated) == bool(truth)
+    try:
+        s = float(_coerce(stated))
+        t = float(_coerce(truth))
+    except (TypeError, ValueError):
+        return str(stated).strip() == str(truth).strip()
+    if tolerance is None:
+        return math.isclose(s, t, rel_tol=0.0, abs_tol=1e-9)
+    kind = str(tolerance.get("type", "abs"))
+    amount = float(tolerance.get("value", 0.0))
+    if kind == "rel":
+        return abs(s - t) <= abs(t) * amount
+    return abs(s - t) <= amount
+
+
+def extract_numbers(text: str) -> List[str]:
+    """Pull every figure out of report prose.
+
+    Claim references of the form ``[c12]`` are stripped first, so an
+    identifier is never mistaken for a figure.
+
+    Parameters
+    ----------
+    text : str
+        Report text.
+
+    Returns
+    -------
+    List[str]
+        Figures as they appear, in order of appearance.
+    """
+    cleaned = _CLAIM_REF_RE.sub(" ", text or "")
+    return [m.group(1) for m in _NUMBER_RE.finditer(cleaned)]
+
+
+def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
+    """Resolve and judge a single claim.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim to check.
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    CheckResult
+        The verdict.
+    """
+    base = {"claim_id": claim.id, "value": claim.value, "label": claim.label}
+    if claim.kind == "lookup":
+        address = f"{claim.source}:{claim.key}"
+        try:
+            truth = resolve_address(address, sources)
+        except KeyError as exc:
+            return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
+        ok = _within_tolerance(claim.value, truth, claim.tolerance)
+        return CheckResult(
+            verdict=VERDICT_VERIFIED if ok else VERDICT_FAILED,
+            expected=truth,
+            detail=(
+                ""
+                if ok
+                else f"{claim.label}: stated {claim.value}, " f"source says {truth}"
+            ),
+            **base,
+        )
+
+    if claim.kind in ("derived", "consistency"):
+        names: Dict[str, Any] = {}
+        for var, address in (claim.inputs or {}).items():
+            try:
+                names[var] = resolve_address(address, sources)
+            except KeyError as exc:
+                return CheckResult(
+                    verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base
+                )
+        try:
+            tree = ast.parse(claim.expr or "", mode="eval")
+            truth = _safe_eval(tree, names)
+        except (SyntaxError, ValueError, ZeroDivisionError) as exc:
+            return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
+        ok = _within_tolerance(claim.value, truth, claim.tolerance)
+        inputs_detail = ", ".join(f"{k}={v}" for k, v in names.items())
+        return CheckResult(
+            verdict=VERDICT_VERIFIED if ok else VERDICT_FAILED,
+            expected=truth,
+            detail=(
+                ""
+                if ok
+                else (
+                    f"{claim.label}: stated {claim.value}, recomputed {truth} "
+                    f"from {inputs_detail}"
+                )
+            ),
+            **base,
+        )
+
+    return CheckResult(
+        verdict=VERDICT_UNRESOLVABLE,
+        detail=f"unknown claim kind: {claim.kind}",
+        **base,
+    )
+
+
+def check_claims(
+    claims: Sequence[Claim],
+    sources: Dict[str, Any],
+    report_text: Optional[str] = None,
+) -> List[CheckResult]:
+    """Check every claim, and every number in the report text.
+
+    Parameters
+    ----------
+    claims : Sequence[Claim]
+        The claims the report declared.
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+    report_text : Optional[str]
+        When given, every figure in the text must be covered by a
+        claim; uncovered figures are returned as their own results.
+
+    Returns
+    -------
+    List[CheckResult]
+        One result per claim, followed by one per uncovered figure.
+    """
+    results = [_check_one(c, sources) for c in claims]
+    if report_text is None:
+        return results
+
+    stated = set()
+    for c in claims:
+        stated.add(str(c.value))
+        coerced = _coerce(c.value)
+        if isinstance(coerced, float):
+            stated.add(f"{coerced:g}")
+            if coerced.is_integer():
+                stated.add(str(int(coerced)))
+                stated.add(f"{int(coerced):,}")
+    for figure in extract_numbers(report_text):
+        normalized = figure.replace(",", "")
+        if figure in stated or normalized in stated:
+            continue
+        try:
+            as_float = float(normalized)
+        except ValueError:
+            continue
+        if f"{as_float:g}" in stated:
+            continue
+        results.append(
+            CheckResult(
+                claim_id=f"uncovered:{figure}",
+                verdict=VERDICT_UNCOVERED,
+                value=figure,
+                detail=f"figure {figure} appears in the report with no claim",
+            )
+        )
+    return results
+
+
+def check_slide_spec(
+    spec: Dict[str, Any],
+    accepted: Dict[str, CheckResult],
+    labels: Dict[str, str],
+) -> List[str]:
+    """Check that every slide figure maps to an accepted claim.
+
+    This replaces re-auditing the deck. A number on a slide must carry
+    the identifier of a claim that already passed, must equal that
+    claim's value, and must sit under that claim's label. A deck built
+    this way is provably a subset of the verified report.
+
+    Parameters
+    ----------
+    spec : Dict[str, Any]
+        Slide specification with ``slides`` each holding ``cells``.
+    accepted : Dict[str, CheckResult]
+        Results by claim id; only ``verified`` entries are usable.
+    labels : Dict[str, str]
+        Claim id to the label the claim was verified under.
+
+    Returns
+    -------
+    List[str]
+        One message per violation; empty when the deck is clean.
+    """
+    problems: List[str] = []
+    for index, slide in enumerate(spec.get("slides", []), start=1):
+        for cell in slide.get("cells", []):
+            value = cell.get("value")
+            claim_id = cell.get("claim")
+            where = f"slide {index}"
+            if not claim_id:
+                problems.append(f"{where}: figure {value} carries no claim id")
+                continue
+            result = accepted.get(claim_id)
+            if result is None:
+                problems.append(f"{where}: claim {claim_id} is not in the accepted set")
+                continue
+            if result.verdict != VERDICT_VERIFIED:
+                problems.append(
+                    f"{where}: claim {claim_id} did not pass " f"({result.verdict})"
+                )
+                continue
+            if not _within_tolerance(value, result.value, None):
+                problems.append(
+                    f"{where}: shows {value} but claim {claim_id} "
+                    f"was verified as {result.value}"
+                )
+                continue
+            expected_label = labels.get(claim_id)
+            cell_label = cell.get("label")
+            if expected_label and cell_label and cell_label != expected_label:
+                problems.append(
+                    f"{where}: claim {claim_id} is '{expected_label}' "
+                    f"but appears under '{cell_label}'"
+                )
+    return problems
+
+
+def load_claims(path: Path) -> List[Claim]:
+    """Read a claims file written by a report writer.
+
+    Parameters
+    ----------
+    path : Path
+        JSON file holding a ``claims`` list.
+
+    Returns
+    -------
+    List[Claim]
+        The parsed claims.
+    """
+    raw = json.loads(Path(path).read_text())
+    items: Iterable[Dict[str, Any]] = (
+        raw.get("claims", []) if isinstance(raw, dict) else raw
+    )
+    return [Claim.from_dict(item) for item in items]
