@@ -162,6 +162,16 @@ _blocker_repair_requeues: Dict[str, int] = {}
 # real give-up (Codex P2 on PR #770).
 _blocker_repair_consumed_epoch: Dict[str, int] = {}
 
+# Tasks whose completed report is currently inside the validation gate.
+# The MCP transport can re-send a slow report_task_progress(completed)
+# call after a reconnect, so two reports for the same task reach the gate
+# concurrently -- before the first marks the task DONE. The DONE guard in
+# the completed branch only catches duplicates that arrive AFTER
+# completion; this set catches the ones that OVERLAP an in-progress
+# validation. asyncio is single-threaded, so the check-and-add in
+# report_task_progress is atomic as long as no await separates them.
+_completion_in_flight: Set[str] = set()
+
 
 def _record_repair_attempt(task_id: str, agent_id: str) -> int:
     """Record that ``agent_id`` gave up on ``task_id``; return distinct count.
@@ -444,6 +454,10 @@ def _escalate_missing_verifications_response(
         A new dict tagged terminal/escalated, remediation fields intact.
     """
     escalated = dict(smoke_response)
+    # Set success explicitly rather than inheriting it from the copied
+    # input: an escalation is always a refusal, and a caller that passes
+    # a payload lacking ``success`` must still get an explicit flag.
+    escalated["success"] = False
     escalated["status"] = "smoke_verification_escalated"
     escalated["error"] = "verifications_required_escalated"
     escalated["terminal"] = True
@@ -484,6 +498,10 @@ def _escalate_behavior_evidence_response(
         A new dict tagged terminal/escalated, remediation fields intact.
     """
     escalated = dict(smoke_response)
+    # Set success explicitly rather than inheriting it from the copied
+    # input: an escalation is always a refusal, and a caller that passes
+    # a payload lacking ``success`` must still get an explicit flag.
+    escalated["success"] = False
     escalated["status"] = "smoke_verification_escalated"
     escalated["error"] = "behavior_evidence_escalated"
     escalated["terminal"] = True
@@ -596,6 +614,10 @@ def _escalate_typed_evidence_response(
         A new dict tagged terminal/escalated, remediation intact.
     """
     escalated = dict(rejection)
+    # Set success explicitly rather than inheriting it from the copied
+    # input: an escalation is always a refusal, and a caller that passes
+    # a payload lacking ``success`` must still get an explicit flag.
+    escalated["success"] = False
     escalated["status"] = "evidence_rejection_escalated"
     escalated["error"] = "typed_evidence_escalated"
     escalated["terminal"] = True
@@ -4897,6 +4919,11 @@ async def report_task_progress(
     # the function reads this flag and releases under ``asyncio`` safely.
     _release_locks_on_exit: bool = False
 
+    # True once THIS call has registered the task in _completion_in_flight,
+    # so the finally releases the marker only for the call that acquired it
+    # (a rejected duplicate must not clear the in-progress call's marker).
+    _completion_inflight_acquired: bool = False
+
     try:
         # Initialize kanban if needed
         await state.initialize_kanban()
@@ -5137,6 +5164,88 @@ async def report_task_progress(
                 f"VALIDATION GATE: Task {task_id} completed, "
                 f"found task object: {task is not None}"
             )
+
+            # Guard: an already-DONE *parent* task is refused before the
+            # validation gate. A re-sent completion -- a duplicate report,
+            # or a second agent on a task that already closed -- must not
+            # re-run the typed-evidence, approval, LLM or smoke pipeline
+            # on work that was already accepted. Mirrors the ``blocked``
+            # branch below and report_blocker, which short-circuit a DONE
+            # task the same way.
+            #
+            # Subtasks are excluded: a subtask's status is set to DONE by
+            # update_subtask_status() BEFORE the commit-verification gate
+            # accepts the completion, so a subtask can be DONE in memory
+            # while its completion was rejected (e.g. ``no_commits``).
+            # Refusing here would permanently block the legitimate retry
+            # after the agent commits (Codex P1 on PR #780). The in-flight
+            # guard below still dedupes overlapping subtask retries; making
+            # the subtask DONE mutation reflect acceptance is the deeper
+            # fix, owned by the subtask-completion lifecycle.
+            if (
+                task is not None
+                and not getattr(task, "is_subtask", False)
+                and task.status
+                in {
+                    TaskStatus.DONE,
+                    "done",
+                    "completed",
+                }
+            ):
+                logger.warning(
+                    f"report_task_progress(completed) rejected: agent "
+                    f"{agent_id} reported completion on task {task_id} "
+                    f"which is already {task.status!r}. DONE tasks are "
+                    "immutable; skipping the validation gate."
+                )
+                return {
+                    "success": False,
+                    "status": "task_already_complete",
+                    "message": (
+                        f"Task {task_id} is already complete -- no need to "
+                        "report it again. Request your next task."
+                    ),
+                }
+
+            # In-flight guard (transport-retry dedupe). The MCP transport
+            # can re-send this slow completed call after a reconnect, so a
+            # second report for the same task can reach the gate while the
+            # first is still validating -- before the first marks the task
+            # DONE, so the DONE guard above does not catch it. Reject the
+            # overlapping duplicate here. asyncio is single-threaded, so
+            # this check-and-add is atomic (no await between them): only
+            # one of two overlapping calls can pass. The marker is released
+            # in the finally, on every exit path.
+            if task_id in _completion_in_flight:
+                logger.warning(
+                    f"report_task_progress(completed) deferred: a completion "
+                    f"for task {task_id} is already inside the validation "
+                    f"gate (agent {agent_id}). Duplicate from a transport "
+                    "retry; returning a pending, retryable response."
+                )
+                # Do NOT return task_already_complete here: the in-flight
+                # original may still REJECT (no_commits or a validation
+                # failure), so telling this caller to move on would make it
+                # miss that rejection and its remediation, while
+                # request_next_task refuses a new task that is still active
+                # (Codex P2 on PR #780). Return an explicitly pending,
+                # retryable outcome instead; a re-send once the original
+                # settles gets the real result -- DONE (via the DONE guard
+                # above) or the rejection with its remediation steps.
+                return {
+                    "success": False,
+                    "status": "completion_in_progress",
+                    "retryable": True,
+                    "message": (
+                        f"A completion for task {task_id} is already being "
+                        "validated. Do not request a new task; re-send this "
+                        "same completion shortly to receive the final result "
+                        "(it may still be accepted, or rejected with "
+                        "remediation steps)."
+                    ),
+                }
+            _completion_in_flight.add(task_id)
+            _completion_inflight_acquired = True
 
             # TYPED-EVIDENCE GATE (issue #737, step 4). A find, verify,
             # or synthesize task cannot close without the evidence its
@@ -5989,6 +6098,12 @@ async def report_task_progress(
             return _build_escalation_error_response(e, escalation_payload)
         return {"success": False, "error": str(e)}
     finally:
+        # Release the transport-dedupe marker for the completed report
+        # this call acquired (see _completion_in_flight). Runs on every
+        # exit -- success, early return, or exception -- so a failed
+        # completion never leaves the task permanently un-completable.
+        if _completion_inflight_acquired:
+            _completion_in_flight.discard(task_id)
         # #206 MVP Phase 4 (Kaia review fix): single release site for
         # ALL exits — normal success, early returns at terminal-state
         # points, and the outer except. ``_release_locks_on_exit`` is

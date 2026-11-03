@@ -178,7 +178,47 @@ class TestTypedEvidenceGate:
         assert third is not None
         assert third["terminal"] is True
         assert third["error"] == "typed_evidence_escalated"
+        assert third["success"] is False
         terminalize.assert_awaited_once()
+
+
+class TestEscalationSuccessFlag:
+    """Escalation payloads must carry an explicit ``success`` flag.
+
+    The three ``_escalate_*`` builders copy the input rejection and
+    re-tag it terminal. They must set ``success=False`` explicitly rather
+    than inherit it from the copied input: a caller that escalates a
+    payload which happens to lack ``success`` would otherwise return a
+    response with no success flag, which the agent cannot read as a
+    refusal. Each input below deliberately omits ``success``.
+    """
+
+    def test_typed_evidence_escalation_sets_success_false(self) -> None:
+        """typed-evidence escalation sets success=False without inheriting."""
+        escalated = task_module._escalate_typed_evidence_response(
+            {"status": "evidence_rejected", "error": "typed_evidence_missing"}
+        )
+
+        assert escalated["success"] is False
+        assert escalated["terminal"] is True
+
+    def test_behavior_evidence_escalation_sets_success_false(self) -> None:
+        """behavior-evidence escalation sets success=False without inheriting."""
+        escalated = task_module._escalate_behavior_evidence_response(
+            {"status": "behavior_evidence_missing"}
+        )
+
+        assert escalated["success"] is False
+        assert escalated["terminal"] is True
+
+    def test_missing_verifications_escalation_sets_success_false(self) -> None:
+        """missing-verifications escalation sets success=False without inheriting."""
+        escalated = task_module._escalate_missing_verifications_response(
+            {"status": "verifications_required_but_missing"}
+        )
+
+        assert escalated["success"] is False
+        assert escalated["terminal"] is True
 
 
 class TestClaimHandoff:
