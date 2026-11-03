@@ -963,6 +963,25 @@ def _session_script(
     return path, workspace
 
 
+def _process_is_gone(pid: int) -> bool:
+    """True when ``pid`` no longer runs: absent, or a zombie nobody reaped.
+
+    In containers whose PID 1 does not reap orphans, a terminated child
+    stays a zombie, so ``os.kill(pid, 0)`` keeps succeeding although
+    cleanup stopped it (Codex P2 on PR #784). A zombie counts as gone.
+    """
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return True
+    try:
+        return proc.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
 class TestSessionScriptRunsForReal:
     """The generated bash, run against a real repo with a stub harness."""
 
@@ -1049,14 +1068,9 @@ wait
         assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
         # the harness's own child (a test runner, a dev server) is gone too
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            try:
-                os.kill(sleeper, 0)
-            except ProcessLookupError:
-                break
+        while time.monotonic() < deadline and not _process_is_gone(sleeper):
             time.sleep(0.1)
-        with pytest.raises(ProcessLookupError):
-            os.kill(sleeper, 0)
+        assert _process_is_gone(sleeper)
 
     def test_children_a_harness_left_behind_die_when_the_chore_ends(
         self, tmp_path: Path
@@ -1085,8 +1099,7 @@ exit 0
 
         assert result.returncode == 0, result.stderr
         orphan = int(pidfile.read_text().strip())
-        with pytest.raises(ProcessLookupError):
-            os.kill(orphan, 0)
+        assert _process_is_gone(orphan)
         assert not workspace.exists()
 
 
