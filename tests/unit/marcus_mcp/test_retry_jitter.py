@@ -41,7 +41,13 @@ class TestJitteredRetrySeconds:
         )
 
     def test_the_mean_stays_at_the_constant(self) -> None:
-        """The spread is symmetric: it does not lengthen the average wait."""
+        """The spread is symmetric: it does not lengthen the average wait.
+
+        2000 draws over a 20-second band have a standard error of about
+        0.13 s, so a one-second tolerance is roughly eight standard
+        errors: tight enough to catch a shifted distribution, loose
+        enough never to flake on a correct one.
+        """
         draws = [jittered_retry_seconds() for _ in range(2000)]
         assert abs(mean(draws) - RETRY_AFTER_SECONDS) < 1.0
 
@@ -51,10 +57,23 @@ class TestJitteredRetrySeconds:
         assert len(draws) > 5
 
     def test_a_custom_base_is_spread_around_itself(self) -> None:
-        """The helper spreads whatever interval it is given."""
-        draws = [jittered_retry_seconds(300) for _ in range(200)]
-        assert all(201 <= d <= 399 for d in draws)
-        assert abs(mean(draws) - 300) < 10
+        """The helper spreads whatever interval it is given, centred on it.
+
+        The bounds and the centring are both asserted deterministically. A
+        sample mean would not be: 200 draws over 201 to 399 have a standard
+        error of about 4 seconds, so any tolerance tight enough to be
+        meaningful rejects a correct implementation now and then, and
+        ``SystemRandom`` cannot be seeded to avoid it (Codex P2 on PR #788).
+        """
+        assert all(201 <= jittered_retry_seconds(300) <= 399 for _ in range(300))
+
+        with patch("secrets.SystemRandom") as system_random:
+            system_random.return_value.uniform.return_value = 300.0
+            assert jittered_retry_seconds(300) == 300
+        low, high = system_random.return_value.uniform.call_args.args
+        assert low == 300 - 300 * RETRY_JITTER_FRACTION
+        assert high == 300 + 300 * RETRY_JITTER_FRACTION
+        assert (low + high) / 2 == 300
 
     def test_a_tiny_base_never_yields_a_zero_wait(self) -> None:
         """A zero wait would turn the retry into a busy loop."""
