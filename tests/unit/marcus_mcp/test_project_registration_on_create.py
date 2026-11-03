@@ -2,6 +2,7 @@
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -114,7 +115,9 @@ async def test_create_project_registers_with_project_registry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_project_handles_missing_registry_gracefully() -> None:
+async def test_create_project_handles_missing_registry_gracefully(
+    tmp_path: Path,
+) -> None:
     """Test that create_project works even if project_registry is not available."""
     from src.marcus_mcp.tools.nlp import create_project
 
@@ -146,7 +149,9 @@ async def test_create_project_handles_missing_registry_gracefully() -> None:
         result = await create_project(
             description="Build a flight simulator game",
             project_name="Flight Simulator",
-            options=None,
+            # #588: the sqlite default now requires a project_root up front;
+            # these tests are about registry failures, not that rule.
+            options={"project_root": str(tmp_path)},
             state=state,
         )
 
@@ -157,7 +162,7 @@ async def test_create_project_handles_missing_registry_gracefully() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_project_handles_registration_errors() -> None:
+async def test_create_project_handles_registration_errors(tmp_path: Path) -> None:
     """Test that create_project continues even if registration fails."""
     from src.marcus_mcp.tools.nlp import create_project
 
@@ -196,7 +201,9 @@ async def test_create_project_handles_registration_errors() -> None:
         result = await create_project(
             description="Build a flight simulator game",
             project_name="Flight Simulator",
-            options=None,
+            # #588: the sqlite default now requires a project_root up front;
+            # these tests are about registry failures, not that rule.
+            options={"project_root": str(tmp_path)},
             state=state,
         )
 
