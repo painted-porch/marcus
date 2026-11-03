@@ -5218,17 +5218,30 @@ async def report_task_progress(
             # in the finally, on every exit path.
             if task_id in _completion_in_flight:
                 logger.warning(
-                    f"report_task_progress(completed) rejected: a completion "
+                    f"report_task_progress(completed) deferred: a completion "
                     f"for task {task_id} is already inside the validation "
                     f"gate (agent {agent_id}). Duplicate from a transport "
-                    "retry; returning already-complete."
+                    "retry; returning a pending, retryable response."
                 )
+                # Do NOT return task_already_complete here: the in-flight
+                # original may still REJECT (no_commits or a validation
+                # failure), so telling this caller to move on would make it
+                # miss that rejection and its remediation, while
+                # request_next_task refuses a new task that is still active
+                # (Codex P2 on PR #780). Return an explicitly pending,
+                # retryable outcome instead; a re-send once the original
+                # settles gets the real result -- DONE (via the DONE guard
+                # above) or the rejection with its remediation steps.
                 return {
                     "success": False,
-                    "status": "task_already_complete",
+                    "status": "completion_in_progress",
+                    "retryable": True,
                     "message": (
-                        f"Task {task_id} is already being completed. "
-                        "Request your next task."
+                        f"A completion for task {task_id} is already being "
+                        "validated. Do not request a new task; re-send this "
+                        "same completion shortly to receive the final result "
+                        "(it may still be accepted, or rejected with "
+                        "remediation steps)."
                     ),
                 }
             _completion_in_flight.add(task_id)

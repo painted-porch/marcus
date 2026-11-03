@@ -650,7 +650,10 @@ class TestAlreadyDoneCompletionGuard:
         )
 
         assert result["success"] is False
-        assert result["status"] == "task_already_complete"
+        # A pending, retryable outcome -- NOT "move on" -- so the caller
+        # does not miss a later rejection from the in-flight original.
+        assert result["status"] == "completion_in_progress"
+        assert result["retryable"] is True
         # The duplicate never ran the pipeline: no DONE write.
         state.kanban_client.update_task.assert_not_called()
 
@@ -721,7 +724,8 @@ class TestAlreadyDoneCompletionGuard:
             )
 
             assert second["success"] is False
-            assert second["status"] == "task_already_complete"
+            assert second["status"] == "completion_in_progress"
+            assert second["retryable"] is True
         finally:
             release.set()
             first_result = await asyncio.wait_for(first, timeout=2.0)
