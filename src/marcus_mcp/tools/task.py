@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import secrets
 import subprocess
 import threading
 import time
@@ -2599,6 +2600,42 @@ def build_tiered_instructions(
 # as they became ready. The blocking task's ETA is still reported for
 # humans; it just does not drive the cadence.
 RETRY_AFTER_SECONDS = 30
+# Spread applied to every retry interval, as a fraction of it. Workers that
+# register together are otherwise all told to wait the same 30 seconds and
+# poll in lockstep for the whole run: N requests arrive in the same second
+# every half minute, and N-1 of them find the task the first one just
+# claimed (the file-lock race below). One jittered wait decorrelates them,
+# and the mean stays at the constant PR #177 chose.
+RETRY_JITTER_FRACTION = 0.33
+
+
+def jittered_retry_seconds(base: int = RETRY_AFTER_SECONDS) -> int:
+    """Return a retry interval around ``base`` with the jitter spread applied.
+
+    Parameters
+    ----------
+    base : int
+        The interval to spread, in seconds. Defaults to
+        :data:`RETRY_AFTER_SECONDS`.
+
+    Returns
+    -------
+    int
+        A whole number of seconds drawn uniformly from
+        ``base ± base * RETRY_JITTER_FRACTION``, never below one. The
+        distribution is symmetric, so the expected wait is ``base``: this
+        decorrelates pollers without changing the cadence Marcus
+        documents or lengthening the wait of any one worker on average.
+
+    Notes
+    -----
+    The operator-facing waits are deliberately not jittered: a parked
+    task's ``GATE_UNAVAILABLE_RETRY_SECONDS`` is a stated interval an
+    operator reads, not a poll cadence to spread.
+    """
+    spread = base * RETRY_JITTER_FRACTION
+    drawn = secrets.SystemRandom().uniform(base - spread, base + spread)
+    return max(1, round(drawn))
 
 
 async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
@@ -2608,8 +2645,10 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     Strategy:
     - Prioritizes tasks that unlock parallel work for idle agents, and
       reports the soonest such task as ``blocking_task``
-    - Returns a FIXED wait of ``RETRY_AFTER_SECONDS``. The wait is
-      deliberately not ETA-proportional; see the constant's comment.
+    - Returns a wait of ``RETRY_AFTER_SECONDS`` with jitter applied
+      (:func:`jittered_retry_seconds`). The wait is deliberately not
+      ETA-proportional; see the constant's comment. The jitter keeps
+      workers that registered together from polling in lockstep.
 
     Uses:
     - Current progress of IN_PROGRESS tasks
@@ -2626,7 +2665,8 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     -------
     Dict[str, Any]
         Dictionary with:
-        - retry_after_seconds: int (always ``RETRY_AFTER_SECONDS``)
+        - retry_after_seconds: int (``RETRY_AFTER_SECONDS`` ± the
+          jitter spread; never ETA-derived)
         - reason: str (explanation for the wait time)
         - blocking_task: Optional[Dict] (task that's blocking progress)
     """
@@ -2642,7 +2682,7 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     # If no tasks in progress, use default wait time
     if not in_progress_tasks:
         return {
-            "retry_after_seconds": RETRY_AFTER_SECONDS,
+            "retry_after_seconds": jittered_retry_seconds(),
             "reason": "No tasks currently in progress - check back soon",
             "blocking_task": None,
         }
@@ -2719,12 +2759,13 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     # Get the best task to wait for
     target_task = candidate_tasks[0]
 
-    # The wait is the constant. This previously computed 60% of the ETA,
-    # floored it at 30 and then ceilinged it at 30 — arithmetically the
-    # constant, with the ETA discarded. The dead arithmetic read as though
-    # the wait scaled with the task, which is the opposite of the PR #177
-    # decision it implemented.
-    retry_after = RETRY_AFTER_SECONDS
+    # The wait is the constant plus jitter. It previously computed 60% of
+    # the ETA, floored it at 30 and then ceilinged it at 30 —
+    # arithmetically the constant, with the ETA discarded. The dead
+    # arithmetic read as though the wait scaled with the task, which is
+    # the opposite of the PR #177 decision it implemented. The jitter
+    # spreads pollers; it does not reintroduce ETA scaling.
+    retry_after = jittered_retry_seconds()
 
     # Format reason
     eta_minutes = int(target_task["eta_seconds"] / 60)
@@ -3263,7 +3304,7 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                                     "Task was claimed by another agent — "
                                     "retry shortly."
                                 ),
-                                "retry_after_seconds": 30,
+                                "retry_after_seconds": jittered_retry_seconds(),
                                 "retry_reason": "file_lock_race",
                             }
 

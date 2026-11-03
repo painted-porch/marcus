@@ -8,7 +8,26 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 
 from src.core.models import Priority, Task, TaskAssignment, TaskStatus
-from src.marcus_mcp.tools.task import calculate_retry_after_seconds
+from src.marcus_mcp.tools.task import (
+    RETRY_AFTER_SECONDS,
+    RETRY_JITTER_FRACTION,
+    calculate_retry_after_seconds,
+)
+
+
+def _in_retry_band(seconds: int) -> bool:
+    """True when ``seconds`` is the jittered retry cadence (epic #706).
+
+    The wait is ``RETRY_AFTER_SECONDS`` with a symmetric spread so workers
+    do not poll in lockstep; it is never ETA-derived. See
+    ``tests/unit/marcus_mcp/test_retry_jitter.py``.
+    """
+    spread = RETRY_AFTER_SECONDS * RETRY_JITTER_FRACTION
+    return (
+        round(RETRY_AFTER_SECONDS - spread)
+        <= seconds
+        <= round(RETRY_AFTER_SECONDS + spread)
+    )
 
 
 class TestCalculateRetryAfterSeconds:
@@ -16,7 +35,7 @@ class TestCalculateRetryAfterSeconds:
 
     @pytest.mark.asyncio
     async def test_no_tasks_in_progress_returns_default(self):
-        """Test returns default 30 seconds when no tasks in progress"""
+        """Test returns the jittered default when no tasks in progress"""
         # Arrange
         mock_state = Mock()
         mock_state.agent_tasks = {}  # No tasks assigned
@@ -27,7 +46,7 @@ class TestCalculateRetryAfterSeconds:
         result = await calculate_retry_after_seconds(mock_state)
 
         # Assert
-        assert result["retry_after_seconds"] == 30  # 30 seconds
+        assert _in_retry_band(result["retry_after_seconds"])
         assert "No tasks currently in progress" in result["reason"]
         assert result["blocking_task"] is None
 
@@ -84,7 +103,7 @@ class TestCalculateRetryAfterSeconds:
         # Assert
         # Retry is capped at 30 seconds for regular re-polling
         # (changed to improve multi-agent parallelization)
-        assert result["retry_after_seconds"] == 30  # Capped at 30s max
+        assert _in_retry_band(result["retry_after_seconds"])
         assert "Database Setup" in result["reason"]
         assert result["blocking_task"]["id"] == "task_1"
         assert result["blocking_task"]["progress"] == 75
@@ -139,7 +158,7 @@ class TestCalculateRetryAfterSeconds:
         # Assert
         # Historical median suggests 2 hours (7200s), but retry is capped at 30s
         # (changed to improve multi-agent parallelization)
-        assert result["retry_after_seconds"] == 30  # Capped at 30s max
+        assert _in_retry_band(result["retry_after_seconds"])
         assert "API Development" in result["reason"]
 
     @pytest.mark.asyncio
@@ -224,7 +243,7 @@ class TestCalculateRetryAfterSeconds:
         assert result["blocking_task"]["name"] == "Quick Task"
 
     @pytest.mark.asyncio
-    async def test_caps_maximum_wait_at_thirty_seconds(self):
+    async def test_never_exceeds_the_jittered_cadence(self):
         """Test wait time is capped at 30 seconds maximum for regular re-polling"""
         # Arrange
         mock_state = Mock()
@@ -272,7 +291,7 @@ class TestCalculateRetryAfterSeconds:
         # Assert
         # Even with 10 hour estimate, capped at 30 seconds for re-polling
         # (changed to improve multi-agent parallelization)
-        assert result["retry_after_seconds"] == 30
+        assert _in_retry_band(result["retry_after_seconds"])
 
 
 @pytest.mark.unit

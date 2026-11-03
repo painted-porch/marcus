@@ -126,6 +126,11 @@ On every `request_next_task` that finds nothing to offer, Marcus computes a **dr
 If there is neither, the response is `status: "BOARD_DRAINED"` with `should_exit: true` and a `drain` object carrying the counts and a reason: `complete` when every task is `DONE`, `blocked` when the remaining tasks can never become claimable (a dead lane and its dependents).
 Otherwise the usual retry response is returned, with the same `drain` object explaining why the board is not drained yet (`claimable`, `in_flight`, or `empty`; an empty board is never drained because the project may still be being created).
 
+That retry response carries `retry_after_seconds`: the constant 30-second cadence PR #177 chose, with a symmetric jitter spread of a third applied to every answer (`jittered_retry_seconds` in `src/marcus_mcp/tools/task.py`).
+Without the spread, workers that registered together were told the same number and polled in lockstep for the whole run, so N requests arrived in the same second every half minute and N-1 of them lost the file-lock race for the task the first one had just claimed.
+The mean is unchanged, so the documented cadence still holds; the wait is never derived from a task's estimate.
+
+
 The signal leans on ADR-0012 D3: a dead worker's lease is recovered within the silence timeout, so its task returns to claimable and the drain never fires over abandoned work.
 One `BLOCKED` card is treated as in flight rather than as a dead lane: a completion whose branch failed to merge into `main` is marked `BLOCKED` with a `merge_conflict` record while its own agent is told to resolve and re-report, and that card counts as in flight until the record is older than the silence timeout.
 It replaced the experiment monitor's `EXPERIMENT_COMPLETE`, which fired only when a model called `end_experiment`; the monitor, its three MCP tools (`start_experiment`, `end_experiment`, `get_experiment_status`) and that response are gone (ADR-0012 D10).

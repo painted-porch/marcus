@@ -85,23 +85,37 @@ def _state_with_task_in_progress() -> Mock:
 
 
 class TestRetryAfterIsAConstant:
-    """The wait is a deliberate constant, not an ETA-derived value."""
+    """The wait is a deliberate constant, not an ETA-derived value.
+
+    Since epic #706 it carries a symmetric jitter spread so workers that
+    registered together stop polling in lockstep
+    (``tests/unit/marcus_mcp/test_retry_jitter.py``). The cadence is still
+    the constant: these tests pin it to the band around
+    ``RETRY_AFTER_SECONDS`` and keep the ETA out of the timing.
+    """
 
     @pytest.mark.asyncio
     async def test_no_tasks_in_progress_returns_the_constant(self) -> None:
         """With nothing running, the agent is told to come back soon."""
         from src.marcus_mcp.tools.task import (
             RETRY_AFTER_SECONDS,
+            RETRY_JITTER_FRACTION,
             calculate_retry_after_seconds,
         )
 
         state = Mock()
         state.agent_tasks = {}
         state.project_tasks = []
+        state.agent_status = {}
 
         result = await calculate_retry_after_seconds(state)
 
-        assert result["retry_after_seconds"] == RETRY_AFTER_SECONDS
+        spread = RETRY_AFTER_SECONDS * RETRY_JITTER_FRACTION
+        assert (
+            round(RETRY_AFTER_SECONDS - spread)
+            <= result["retry_after_seconds"]
+            <= round(RETRY_AFTER_SECONDS + spread)
+        )
 
     @pytest.mark.asyncio
     async def test_a_long_running_task_does_not_lengthen_the_wait(self) -> None:
@@ -113,12 +127,15 @@ class TestRetryAfterIsAConstant:
         """
         from src.marcus_mcp.tools.task import (
             RETRY_AFTER_SECONDS,
+            RETRY_JITTER_FRACTION,
             calculate_retry_after_seconds,
         )
 
         result = await calculate_retry_after_seconds(_state_with_task_in_progress())
 
-        assert result["retry_after_seconds"] == RETRY_AFTER_SECONDS
+        spread = RETRY_AFTER_SECONDS * RETRY_JITTER_FRACTION
+        assert result["retry_after_seconds"] <= round(RETRY_AFTER_SECONDS + spread)
+        assert result["blocking_task"]["eta_seconds"] > result["retry_after_seconds"]
 
     @pytest.mark.asyncio
     async def test_the_blocking_task_is_still_reported(self) -> None:
