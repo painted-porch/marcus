@@ -299,6 +299,31 @@ Examples:
         ),
     )
 
+    parser.add_argument(
+        "--sessions",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Run the session launcher instead of the legacy spawn loop: "
+            "create the project over MCP, start N persistent worker "
+            "sessions (one chore per harness invocation, fresh context "
+            "each chore), wait for them to go home on BOARD_DRAINED, then "
+            "tear down. No restarts, no watchdog (epic #706 Milestone A)."
+        ),
+    )
+    parser.add_argument(
+        "--max-chores",
+        type=int,
+        default=200,
+        help="Per-session chore cap for --sessions runs (default 200).",
+    )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        default=False,
+        help="With --sessions: return as soon as the sessions are started.",
+    )
     args = parser.parse_args()
 
     experiment_dir = Path(args.experiment_dir).resolve()
@@ -348,6 +373,24 @@ Examples:
 
     config_file = experiment_dir / "config.yaml"
     config = ExperimentConfig(config_file)
+    if args.sessions is not None:
+        from runners.session_launcher import SessionLauncher
+
+        launcher = SessionLauncher(
+            config,
+            templates_dir,
+            sessions=args.sessions,
+            epictetus=args.epictetus,
+            agent_model=args.model,
+            harness=args.harness,
+            max_chores=args.max_chores,
+            wait=not args.no_wait,
+        )
+        sys.exit(0 if launcher.run() else 1)
+    print(
+        "Note: the legacy spawn loop is on its way out; the session launcher "
+        "is `--sessions N` (epic #706)."
+    )
     spawner = AgentSpawner(
         config,
         templates_dir,
