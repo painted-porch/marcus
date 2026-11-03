@@ -48,6 +48,10 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "get_task_context",
         "log_decision",
         "log_artifact",
+        # Read-only board status: named in the worker contract (redo
+        # guidance polls it) and read by the session launcher's report.
+        "get_project_status",
+        "get_agent_status",  # Read-only: a worker's own registration and task
         # Project creation
         "create_project",  # NLP project creation for autonomous agents
         # Scheduling
