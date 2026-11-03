@@ -6,11 +6,14 @@ held the same chore at once. Marcus deliberately allows it (the fence is
 Milestone B) but must count it: the count is what sizes the fence, and
 "rare" has to be a number rather than an impression.
 
-Each observation is recorded once per task and epoch pair and added to a
-per-task roll-up. The count is read by key from that roll-up, never by
-scanning the detail rows, because both persistence backends apply their
-limit around the filter and a scan would silently drop an older project's
-records once the collection outgrew the window (Codex P2 on PR #789).
+Each task's row lists the epoch pairs already counted, so recording is one
+idempotent read-modify-write of a single row under a lock: a repeat is a
+no-op, concurrent reporters cannot lose an increment, and an interrupted
+attempt is repaired by the next report. The count is read from those rows
+by key, never by scanning the detail rows, because both persistence
+backends apply their limit around the filter and a scan would silently
+drop an older project's records once the collection outgrew the window
+(Codex P2s on PR #789).
 """
 
 from typing import Any, Dict, Optional
@@ -66,7 +69,7 @@ class TestObservationIsRecorded:
 
     @pytest.mark.asyncio
     async def test_a_superseded_completion_is_recorded_and_counted(self) -> None:
-        """The detail row carries the facts; the roll-up carries the count."""
+        """The task's row carries the count; the detail row carries the facts."""
         store = _Store()
         state = _state(highest=3, store=store)
 
@@ -80,6 +83,7 @@ class TestObservationIsRecorded:
         assert detail["project_id"] == "proj-1"
         assert detail["observed_at"]
         assert store.counts()["task-1"]["count"] == 1
+        assert store.counts()["task-1"]["pairs"] == ["1:3"]
         assert state.epoch_collision_count == 1
 
     @pytest.mark.asyncio
@@ -93,6 +97,7 @@ class TestObservationIsRecorded:
 
         assert list(store.details()) == ["task-1:1:3"]
         assert store.counts()["task-1"]["count"] == 1
+        assert store.counts()["task-1"]["pairs"] == ["1:3"]
 
     @pytest.mark.asyncio
     async def test_a_second_distinct_collision_adds_to_the_task(self) -> None:
@@ -103,6 +108,7 @@ class TestObservationIsRecorded:
 
         assert sorted(store.details()) == ["task-1:1:3", "task-1:2:4"]
         assert store.counts()["task-1"]["count"] == 2
+        assert store.counts()["task-1"]["pairs"] == ["1:3", "2:4"]
 
     @pytest.mark.asyncio
     async def test_the_current_holder_is_not_a_collision(self) -> None:
@@ -250,3 +256,116 @@ class TestCountEpochCollisions:
         state.persistence = None
 
         assert await count_epoch_collisions(state, {"t"}) == 0
+
+
+class TestRecordingIsIdempotentAndSerialized:
+    """The two hazards Codex found in the first roll-up (P2s on PR #789)."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_reporters_cannot_lose_an_increment(self) -> None:
+        """Four holders reporting four distinct pairs at once count four.
+
+        Without the lock each would read the same row and the last write
+        would win, leaving the count at one.
+        """
+        import asyncio
+
+        store = _Store()
+        pairs = [(1, 5), (2, 5), (3, 5), (4, 5)]
+        await asyncio.gather(
+            *[
+                _observe_epoch_collision(
+                    _state(highest=high, store=store), "task-1", f"agent-{low}", low
+                )
+                for low, high in pairs
+            ]
+        )
+
+        row = store.counts()["task-1"]
+        assert row["count"] == 4
+        assert sorted(row["pairs"]) == ["1:5", "2:5", "3:5", "4:5"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_reports_of_the_same_pair_count_once(self) -> None:
+        """The same superseded completion arriving twice at once is one."""
+        import asyncio
+
+        store = _Store()
+        results = await asyncio.gather(
+            *[
+                _observe_epoch_collision(
+                    _state(highest=3, store=store), "task-1", "agent-a", 1
+                )
+                for _ in range(4)
+            ]
+        )
+
+        # All four observed a collision (that is what the observer reports);
+        # only one of them counted it.
+        assert results == [True, True, True, True]
+        assert store.counts()["task-1"]["count"] == 1
+        assert store.counts()["task-1"]["pairs"] == ["1:3"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_is_repaired_by_the_next_report(self) -> None:
+        """An interrupted attempt must not be excluded from the count forever.
+
+        The first attempt's row write fails; the retry has to count it,
+        which it can because the row, not a detail flag, is the record.
+        (``_observe_epoch_collision`` returns True either way: it reports
+        that a collision was observed, not that it was recorded.)
+        """
+        store = _Store()
+        state = _state(highest=3, store=store)
+        real_store = store.store
+        calls = {"n": 0}
+
+        async def flaky(collection: str, key: str, data: Any) -> None:
+            if collection == EPOCH_COLLISION_COUNT_COLLECTION:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("interrupted")
+            await real_store(collection, key, data)
+
+        state.persistence.store = flaky
+
+        await _observe_epoch_collision(state, "task-1", "agent-a", 1)
+        assert store.counts() == {}, "the interrupted attempt left nothing behind"
+
+        await _observe_epoch_collision(state, "task-1", "agent-a", 1)
+        assert store.counts()["task-1"]["count"] == 1, "the retry repaired it"
+
+    @pytest.mark.asyncio
+    async def test_a_lost_detail_row_does_not_lose_the_count(self) -> None:
+        """Provenance is written after the count and cannot undo it."""
+        store = _Store()
+        state = _state(highest=3, store=store)
+        real_store = store.store
+
+        async def no_details(collection: str, key: str, data: Any) -> None:
+            if collection == EPOCH_COLLISION_COLLECTION:
+                raise RuntimeError("provenance disk full")
+            await real_store(collection, key, data)
+
+        state.persistence.store = no_details
+
+        assert await _observe_epoch_collision(state, "task-1", "agent-a", 1) is True
+        assert store.counts()["task-1"]["count"] == 1
+        assert store.details() == {}
+
+    @pytest.mark.asyncio
+    async def test_a_corrupt_pairs_list_is_rebuilt_rather_than_trusted(self) -> None:
+        """A row whose pairs are not strings must not break the next report."""
+        store = _Store()
+        await store.store(
+            EPOCH_COLLISION_COUNT_COLLECTION, "task-1", {"pairs": "not-a-list"}
+        )
+
+        assert (
+            await _observe_epoch_collision(
+                _state(highest=3, store=store), "task-1", "agent-a", 1
+            )
+            is True
+        )
+        assert store.counts()["task-1"]["pairs"] == ["1:3"]
+        assert store.counts()["task-1"]["count"] == 1

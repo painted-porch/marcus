@@ -8,6 +8,7 @@ This module contains tools for task operations in the Marcus system:
 - unassign_task: Manually unassign a task from an agent
 """
 
+import asyncio
 import inspect
 import json
 import logging
@@ -4685,25 +4686,35 @@ def _should_validate_completion(task: Task, board_tasks: List[Task]) -> bool:
 
 
 EPOCH_COLLISION_COLLECTION = "epoch_collisions"
-# One row per task holding that task's running count. The detail rows above
-# are the provenance and the idempotency key; the count is read from here,
-# by task, so no read has to scan the whole collection. A scan would
-# truncate: both persistence backends apply their limit around the filter,
-# so once the detail rows outgrow the window an older project's collisions
-# would silently vanish from its count (Codex P2 on PR #789).
+# One row per task, holding the epoch pairs already counted for it and
+# their number. The count is read from here, by key, so no read has to
+# scan the detail rows: a scan would truncate, because both persistence
+# backends apply their limit around the filter (Codex P2 on PR #789).
 EPOCH_COLLISION_COUNT_COLLECTION = "epoch_collision_counts"
+# Serializes the read-modify-write of a task's row. Two superseded holders
+# can report the same task at once, and the persistence backends execute
+# each operation independently, so without this both would read the same
+# row and one increment would be lost. The path is rare, so a single lock
+# costs nothing (Codex P2 on PR #789).
+_EPOCH_COLLISION_LOCK = asyncio.Lock()
 
 
 async def _record_epoch_collision(
     state: Any, task_id: str, agent_id: str, lease_epoch: int, highest: int
 ) -> bool:
-    """Persist one observed epoch collision and add it to its task's count.
+    """Record one observed epoch collision against its task.
 
     The count is what sizes D11's fence (ADR-0012): with D3's liveness
     dials a collision should be rare, and "rare" has to be a number, not
-    an impression. The detail row is keyed by task and epoch pair, so an
-    agent that re-reports the same superseded completion is recorded, and
-    counted, exactly once.
+    an impression.
+
+    The task's row carries the epoch pairs already counted, so the whole
+    operation is one idempotent read-modify-write of a single row: a pair
+    that is already listed is a no-op, an interrupted attempt leaves the
+    row untouched and the next report repairs it, and the count can never
+    drift from the pairs it is derived from. The detail row is written
+    afterwards and purely for provenance, so losing it cannot lose a
+    count.
 
     Parameters
     ----------
@@ -4722,19 +4733,64 @@ async def _record_epoch_collision(
     Returns
     -------
     bool
-        True when this observation was new and has been recorded. False
-        when it was already on record, when there is no persistence, or
-        when the write failed; a failure is logged and never propagated,
-        because bookkeeping must not fail a completion.
+        True when this observation was new and has been counted. False
+        when the same epoch pair was already counted, when there is no
+        persistence, or when the write failed; a failure is logged and
+        never propagated, because bookkeeping must not fail a completion.
     """
     persistence = getattr(state, "persistence", None)
     if persistence is None:
         return False
-    detail_key = f"{task_id}:{lease_epoch}:{highest}"
-    # Provenance only: the count is read by task, because
-    # ``state.active_project_id`` is not always set when a completion
-    # arrives (it was None in the live check for PR #789) and a project id
-    # also comes in two spellings. The task row is the authority.
+    pair = f"{lease_epoch}:{highest}"
+    async with _EPOCH_COLLISION_LOCK:
+        try:
+            row = await persistence.retrieve(EPOCH_COLLISION_COUNT_COLLECTION, task_id)
+            listed = (row or {}).get("pairs")
+            pairs = (
+                [p for p in listed if isinstance(p, str)]
+                if isinstance(listed, list)
+                else []
+            )
+            if pair in pairs:
+                return False
+            pairs.append(pair)
+            await persistence.store(
+                EPOCH_COLLISION_COUNT_COLLECTION,
+                task_id,
+                {
+                    "task_id": task_id,
+                    "pairs": pairs,
+                    "count": len(pairs),
+                    "last_observed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the report path
+            logger.warning(f"Could not count the epoch collision for {task_id}: {exc}")
+            return False
+    await _store_epoch_collision_detail(
+        state, persistence, task_id, agent_id, lease_epoch, highest, pair
+    )
+    return True
+
+
+async def _store_epoch_collision_detail(
+    state: Any,
+    persistence: Any,
+    task_id: str,
+    agent_id: str,
+    lease_epoch: int,
+    highest: int,
+    pair: str,
+) -> None:
+    """Write the provenance row for a counted collision, best effort.
+
+    Separate from the count so a failure here cannot lose a count, and so
+    the count's critical section stays one row. The project id is
+    provenance taken from the task row, because
+    ``state.active_project_id`` is not always set when a completion
+    arrives (it was None in the live check for PR #789) and a project id
+    comes in two spellings.
+    """
     task = next(
         (
             t
@@ -4747,11 +4803,9 @@ async def _record_epoch_collision(
         state, "active_project_id", None
     )
     try:
-        if await persistence.retrieve(EPOCH_COLLISION_COLLECTION, detail_key):
-            return False  # already recorded and already counted
         await persistence.store(
             EPOCH_COLLISION_COLLECTION,
-            detail_key,
+            f"{task_id}:{pair}",
             {
                 "task_id": task_id,
                 "agent_id": agent_id,
@@ -4761,29 +4815,19 @@ async def _record_epoch_collision(
                 "observed_at": datetime.now(timezone.utc).isoformat(),
             },
         )
-        previous = await persistence.retrieve(EPOCH_COLLISION_COUNT_COLLECTION, task_id)
-        counted = (previous or {}).get("count")
-        await persistence.store(
-            EPOCH_COLLISION_COUNT_COLLECTION,
-            task_id,
-            {
-                "task_id": task_id,
-                "count": (counted if isinstance(counted, int) else 0) + 1,
-                "last_observed_at": datetime.now(timezone.utc).isoformat(),
-            },
+    except Exception as exc:  # noqa: BLE001 - provenance only
+        logger.warning(
+            f"Counted the epoch collision for {task_id} but could not record "
+            f"its detail row: {exc}"
         )
-    except Exception as exc:  # noqa: BLE001 - never break the report path
-        logger.warning(f"Could not record the epoch collision for {task_id}: {exc}")
-        return False
-    return True
 
 
 async def count_epoch_collisions(state: Any, task_ids: Set[str]) -> int:
-    """Return how many epoch collisions were observed on the given tasks.
+    """Return how many epoch collisions were counted on the given tasks.
 
-    Read one row per task from the roll-up collection: counting by task
-    makes the figure right even when a record's project stamp is missing,
-    and reading by key means no scan can truncate it.
+    Reads one row per task, by key: counting by task makes the figure
+    right even when a detail row's project stamp is missing, and reading
+    by key means no scan can truncate it.
 
     Parameters
     ----------
@@ -4796,7 +4840,8 @@ async def count_epoch_collisions(state: Any, task_ids: Set[str]) -> int:
     -------
     int
         The number of distinct observations across those tasks, or 0 when
-        there is no persistence or a read failed.
+        there is no persistence. A task whose row cannot be read is
+        skipped with a warning rather than failing the caller.
     """
     persistence = getattr(state, "persistence", None)
     if persistence is None or not task_ids:
