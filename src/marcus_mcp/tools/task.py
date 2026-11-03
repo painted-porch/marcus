@@ -22,6 +22,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.core.ai_powered_task_assignment import find_optimal_task_for_agent_ai_powered
+
+# Issue #629: claimability rules live in src/core/task_claimability.py so
+# the availability filter here and the gridlock detector share one rule
+# and cannot drift. Aliased to the module-local names used throughout
+# this file.
+from src.core.lease_invariants import (
+    DEFAULT_CHECKPOINT_CADENCE_MINUTES,
+    DEFAULT_SILENCE_TIMEOUT_MINUTES,
+)
 from src.core.models import (
     Priority,
     RecoveryInfo,
@@ -30,11 +39,6 @@ from src.core.models import (
     TaskStatus,
     WorkerStatus,
 )
-
-# Issue #629: claimability rules live in src/core/task_claimability.py so
-# the availability filter here and the gridlock detector share one rule
-# and cannot drift. Aliased to the module-local names used throughout
-# this file.
 from src.core.task_claimability import build_slug_to_id
 from src.core.task_claimability import deps_allow_claim as _deps_allow_claim
 from src.core.task_claimability import is_integration_task as _is_integration_task
@@ -2249,6 +2253,52 @@ def _resolve_scaffold_path(task: Task) -> str:
     return raw
 
 
+def _build_checkpoint_duty_prompt(state: Optional[Any]) -> str:
+    """State the ADR-0012 D8 checkpoint duty in Marcus's configured numbers.
+
+    The duty is what makes a dead worker's partial work salvageable: the
+    recovery handoff can only pass on commits, so work that was never
+    committed dies with the worker. Marcus therefore names the cadence it
+    expects and the silence it reads as death, rather than leaving an
+    agent to guess from a static prompt file.
+
+    This is a project-wide discipline, not an implementation decision:
+    it says *when* to commit, never what to write.
+
+    The numbers come from the live lease manager so a deployment that
+    retunes them retunes the contract too. Without one, the ADR defaults
+    are used.
+
+    Parameters
+    ----------
+    state : Optional[Any]
+        Marcus server state. Read for ``lease_manager``.
+
+    Returns
+    -------
+    str
+        The instruction layer, ready to append.
+    """
+    cadence = DEFAULT_CHECKPOINT_CADENCE_MINUTES
+    silence = DEFAULT_SILENCE_TIMEOUT_MINUTES
+    lease_manager = getattr(state, "lease_manager", None) if state else None
+    if lease_manager is not None:
+        cadence = getattr(lease_manager, "checkpoint_cadence_minutes", None) or cadence
+        silence = getattr(lease_manager, "silence_timeout_minutes", None) or silence
+    return (
+        "\n\n🕐 CHECKPOINT DUTY\n\n"
+        f"Commit your work at least every {cadence:.0f} minutes, and log a "
+        f"decision or artifact as you go.\n"
+        f"Marcus reads {silence:.0f} minutes with no tool call from you as a "
+        f"dead worker and hands this task to another agent.\n"
+        "Only committed work can be handed over. Anything uncommitted dies "
+        "with you, and the next agent starts again from nothing.\n"
+        "A checkpoint is an ordinary commit on your branch; when Marcus "
+        "accepts your completion it merges only the commits you made for "
+        "THIS task."
+    )
+
+
 def build_tiered_instructions(
     base_instructions: str,
     task: Task,
@@ -2288,6 +2338,7 @@ def build_tiered_instructions(
     -----
     Instruction layers:
     0. Mandatory workflow (ONLY for implementation tasks - Issue #168)
+    0.2. Checkpoint duty (always included — ADR-0012 D8)
     1. Base instructions (always included)
     1.1. Recovery handoff (if task was recovered from another agent)
     1.3. Contract responsibility (contract_first tasks only - GH-320)
@@ -2342,6 +2393,10 @@ def build_tiered_instructions(
             "returned retry_after_seconds and re-report the same completion."
         )
 
+    # Layer 0.2: the ADR-0012 D8 checkpoint duty, in Marcus's own numbers.
+    # Partial work is only salvageable if it was committed, so the cadence
+    # is part of the task contract rather than a hope.
+    instructions_parts.append(_build_checkpoint_duty_prompt(state))
     # Layer 1: Base instructions
     instructions_parts.append(base_instructions)
 
@@ -5270,14 +5325,18 @@ def _merge_card_range(
     )
 
     subjects = []
+    commit_times: List[int] = []
     for sha in card_commits:
-        subject = subprocess.run(
-            ["git", "log", "-1", "--format=%s", sha],
+        described = subprocess.run(
+            ["git", "log", "-1", "--format=%ct%x00%s", sha],
             cwd=repo,
             capture_output=True,
             text=True,
         ).stdout.strip()
+        when, _, subject = described.partition("\x00")
         subjects.append(f"- {sha[:8]} {subject}")
+        if when.isdigit():
+            commit_times.append(int(when))
     body = (
         f"Range {baseline_commit[:8]}..{tip[:8]} on {branch}, "
         f"{len(footprint)} file(s), {len(card_commits)} commit(s):\n"
@@ -5329,17 +5388,33 @@ def _merge_card_range(
             paths=footprint,
         )
 
+    # ADR-0012 D8: how well the checkpoint duty was kept on this task.
+    # Measured, never gated — a gate on self-reported virtue invites
+    # compliance theatre (D4). The gap from claim to the first commit is
+    # deliberately not counted here: the silence timeout already answers
+    # that, and the baseline commit's own timestamp can be much older
+    # than the claim.
+    max_gap_minutes: Optional[float] = None
+    if len(commit_times) > 1:
+        ordered = sorted(commit_times)
+        max_gap_minutes = round(
+            max(b - a for a, b in zip(ordered, ordered[1:])) / 60.0, 1
+        )
     logger.info(
-        "[worktree] Landed %d file(s) for task %s (agent %s) on main",
+        "[worktree] Landed %d file(s) for task %s (agent %s) on main; "
+        "longest gap between checkpoints: %s",
         len(footprint),
         task_id,
         agent_id,
+        f"{max_gap_minutes} min" if max_gap_minutes is not None else "n/a",
     )
     return {
         "success": True,
         "commits_merged": len(card_commits),
         "paths_landed": len(footprint),
         "mode": mode,
+        "checkpoint_commits": len(card_commits),
+        "max_checkpoint_gap_minutes": max_gap_minutes,
     }
 
 

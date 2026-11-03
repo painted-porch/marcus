@@ -28,6 +28,7 @@ involved. Precedent: ``test_merge_conflict_recovery.py``.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1023,6 +1024,66 @@ class TestBaselineLookup:
         """No assignment anywhere degrades to the whole-branch merge."""
         state = Mock(spec=[])
         assert await _baseline_commit_for_task(state, "session_1", "card-c") is None
+
+
+class TestCheckpointProfile:
+    """ADR-0012 D8: the checkpoint duty is measured, never gated."""
+
+    @pytest.mark.asyncio
+    async def test_landing_reports_the_longest_gap_between_checkpoints(
+        self, session: _Session
+    ) -> None:
+        """The merge result carries how well the duty was kept.
+
+        D4's pattern: a gate on self-reported virtue invites compliance
+        theatre, so the figure is stamped rather than enforced.
+        """
+        # Arrange — three commits, 10 then 35 minutes apart.
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        base_time = 1762000000
+        for index, (name, offset) in enumerate(
+            [("a.txt", 0), ("b.txt", 10 * 60), ("c.txt", 45 * 60)]
+        ):
+            (session.worktree / name).write_text(f"{index}\n")
+            _git(session.worktree, "add", "-A")
+            stamp = f"{base_time + offset} +0000"
+            subprocess.run(
+                ["git", "commit", "-m", f"checkpoint {index}"],
+                cwd=session.worktree,
+                check=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "GIT_AUTHOR_DATE": stamp,
+                    "GIT_COMMITTER_DATE": stamp,
+                },
+            )
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert result["checkpoint_commits"] == 3
+        assert result["max_checkpoint_gap_minutes"] == 35.0
+
+    @pytest.mark.asyncio
+    async def test_a_single_commit_has_no_gap_to_report(
+        self, session: _Session
+    ) -> None:
+        """One checkpoint means no interval exists, which is not zero."""
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.worktree, "c.txt", "C\n", "the only checkpoint")
+
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        assert result is not None and result["success"] is True
+        assert result["checkpoint_commits"] == 1
+        assert result["max_checkpoint_gap_minutes"] is None
 
 
 class TestBaselineSurvivesTheAssignmentRelease:
