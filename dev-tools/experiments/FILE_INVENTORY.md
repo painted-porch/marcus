@@ -214,7 +214,7 @@ experiments/
   - Initialises the implementation repository on `main`
   - Writes the one worker contract (`prompts/Agent_prompt.md`) into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`
   - Calls `create_project` over MCP (no project-creator agent) and commits the scaffold
-  - Starts one session per identity in `worktrees/<agent_id>`, one chore per harness invocation
+  - Starts one session per identity in `worktrees/<agent_id>`, one chore per harness invocation; fresh worktree and branch from `main` per finished chore, worktree removed on exit or kill (#628)
   - Waits for every session to exit on `BOARD_DRAINED`, prints the board counts, tears down tmux
   - Mirrors progress to `logs/runner.log`
 - **Key Classes**: `SessionLauncher`

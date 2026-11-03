@@ -40,8 +40,9 @@ STEPS FOR THIS CHORE
 4. When your completion is accepted, OR you handed the task back with a
    high-severity blocker: create an empty file named .marcus_chore_done in
    your workspace. It tells the harness you no longer hold a task, so your
-   branch is reset to main before the next chore (accepted work is already
-   merged; handed-back work must not ride into main with your next task).
+   next chore starts in a fresh worktree cut from main (accepted work is
+   already merged; handed-back work must not ride into main with your next
+   task).
    Then print a one-line summary and EXIT. Do NOT create that file while you
    still hold the task: if Marcus asks you to fix issues, or answers
    "smoke_gate_unavailable", stay in this chore and re-report as the contract

@@ -165,6 +165,7 @@ class TestSessionScript:
             agent=agent,
             workspace=tmp_path / "worktrees" / "agent_unicorn_1",
             branch="marcus/agent_unicorn_1",
+            repo=tmp_path / "implementation",
             project_info_file=tmp_path / "project_info.json",
             marcus_mcp_url="http://127.0.0.1:4298/mcp",
             register_snippet="claude mcp add --transport http marcus $MARCUS_MCP_URL || true",
@@ -177,7 +178,8 @@ class TestSessionScript:
     def test_script_keeps_the_worktree_path_shape(self, tmp_path: Path) -> None:
         """Cato reads worktrees/<agent_id>; the script works in exactly that directory."""
         script = self._script(tmp_path)
-        assert f"cd {tmp_path / 'worktrees' / 'agent_unicorn_1'}" in script
+        assert f'WORKSPACE="{tmp_path / "worktrees" / "agent_unicorn_1"}"' in script
+        assert 'cd "$WORKSPACE" || exit 1' in script
 
     def test_script_loops_one_chore_at_a_time_until_the_marker(
         self, tmp_path: Path
@@ -199,24 +201,39 @@ class TestSessionScript:
         assert "-ge 7" in script
         assert "relaunch" not in script.lower()
 
-    def test_script_resets_the_branch_only_after_a_finished_or_handed_back_chore(
+    def test_script_gives_a_finished_or_handed_back_chore_a_fresh_worktree(
         self, tmp_path: Path
     ) -> None:
         """The #730 hazard: a handed-back task's commits must not ride into main.
 
-        When the worker left the chore-done marker, the next chore starts
-        from main; when it did not (the chore ended mid-task), the branch is
-        kept so the worker resumes (Codex P1 on PR #779).
+        When the worker left the chore-done marker, the next chore gets a new
+        worktree and branch cut from main at the same path; when it did not
+        (the chore ended mid-task), the workspace is kept so the worker
+        resumes.
         """
         script = self._script(tmp_path)
         wt = tmp_path / "worktrees" / "agent_unicorn_1"
         assert f"if [ -f {wt / CHORE_DONE_MARKER} ]; then" in script
-        assert "git checkout -q -B marcus/agent_unicorn_1 main" in script
-        reset_at = script.index("git checkout -q -B marcus/agent_unicorn_1 main")
+        assert "fresh_workspace()" in script
+        assert 'git worktree add "$WORKSPACE" -b "$BRANCH" main' in script
+        assert 'git branch -D "$BRANCH"' in script
+        assert "git checkout -q -B" not in script
         check_at = script.index(f"if [ -f {wt / CHORE_DONE_MARKER} ]; then")
+        fresh_at = script.index("        fresh_workspace\n")
         chore_at = script.index("claude --add-dir /x")
-        assert check_at < reset_at < chore_at
+        assert check_at < fresh_at < chore_at
         assert f"rm -f {wt / SESSION_DONE_MARKER} {wt / CHORE_DONE_MARKER}" in script
+
+    def test_script_tears_its_worktree_down_on_exit_and_signals(
+        self, tmp_path: Path
+    ) -> None:
+        """#628: the harness owns teardown; the branch is kept for recovery."""
+        script = self._script(tmp_path)
+        assert "trap cleanup EXIT" in script
+        assert "trap on_signal HUP TERM INT" in script
+        cleanup = script[script.index("cleanup() {") : script.index("on_signal() {")]
+        assert 'git worktree remove --force "$WORKSPACE"' in cleanup
+        assert "git branch -D" not in cleanup
 
     def test_script_sets_git_identity_and_clears_a_stale_marker(
         self, tmp_path: Path
@@ -883,3 +900,136 @@ class TestFinalReport:
         log = self._run(tmp_path, {"total_tasks": 3, "completed": 3})
         assert "could not verify" in log.lower()
         assert "RESULT: all" not in log
+
+
+def _git(repo: Path, *args: str) -> str:
+    import subprocess as sp
+
+    return sp.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _repo_with_main(tmp_path: Path) -> Path:
+    """A real implementation repo with one commit on main."""
+    import subprocess as sp
+
+    repo = tmp_path / "implementation"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "README.md").write_text("scaffold\n")
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "scaffold"], cwd=repo, check=True)
+    return repo
+
+
+def _session_script(
+    tmp_path: Path, repo: Path, chore_command: str, max_chores: int = 5
+) -> tuple[Path, Path]:
+    """Write a session script around ``chore_command``; return (script, workspace)."""
+    import subprocess as sp
+
+    agent = plan_sessions(_agents(1), 1)[0]
+    workspace = tmp_path / "worktrees" / "agent_unicorn_1"
+    workspace.parent.mkdir(exist_ok=True)
+    sp.run(
+        ["git", "worktree", "add", str(workspace), "-b", "marcus/agent_unicorn_1"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    info = tmp_path / "project_info.json"
+    info.write_text('{"project_id": "p1"}')
+    script = build_session_script(
+        agent=agent,
+        workspace=workspace,
+        branch="marcus/agent_unicorn_1",
+        repo=repo,
+        project_info_file=info,
+        marcus_mcp_url="http://127.0.0.1:1/mcp",
+        register_snippet="true",
+        chore_command=chore_command,
+        max_chores=max_chores,
+    )
+    path = tmp_path / "session.sh"
+    path.write_text(script)
+    path.chmod(0o755)
+    return path, workspace
+
+
+class TestSessionScriptRunsForReal:
+    """The generated bash, run against a real repo with a stub harness."""
+
+    def test_each_chore_gets_a_fresh_branch_and_the_worktree_is_removed_at_the_end(
+        self, tmp_path: Path
+    ) -> None:
+        """Chore 1 commits and hands off; chore 2 starts from main; teardown follows.
+
+        The stub harness commits a file and writes the chore-done marker on its
+        first run, then writes the session-done marker on its second run.
+        """
+        import subprocess as sp
+
+        repo = _repo_with_main(tmp_path)
+        counter = tmp_path / "count"
+        counter.write_text("0")
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+n=$(cat {counter}); n=$((n+1)); echo $n > {counter}
+if [ "$n" = "1" ]; then
+  echo work > chore1.txt && git add -A && git commit -q -m "chore 1"
+  git rev-parse --abbrev-ref HEAD > {tmp_path}/branch1
+  git log --oneline | wc -l | tr -d ' ' > {tmp_path}/depth1
+  touch .marcus_chore_done
+else
+  git log --oneline | wc -l | tr -d ' ' > {tmp_path}/depth2
+  ls chore1.txt >/dev/null 2>&1 && echo present > {tmp_path}/leak || echo clean > {tmp_path}/leak
+  touch .marcus_session_done
+fi
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "branch1").read_text().strip() == "marcus/agent_unicorn_1"
+        # chore 1 was on top of the scaffold (2 commits); chore 2 started fresh
+        # from main (1 commit): the un-merged chore-1 commit did not ride along.
+        assert (tmp_path / "depth1").read_text().strip() == "2"
+        assert (tmp_path / "depth2").read_text().strip() == "1"
+        assert (tmp_path / "leak").read_text().strip() == "clean"
+        # teardown: the worktree is gone, the branch remains for recovery
+        assert not workspace.exists()
+        assert "worktrees/agent_unicorn_1" not in _git(repo, "worktree", "list")
+        assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
+
+    def test_a_killed_session_leaves_no_worktree_behind(self, tmp_path: Path) -> None:
+        """Kill the session mid-chore: the trap removes the worktree, keeps the branch."""
+        import os
+        import signal
+        import subprocess as sp
+        import time
+
+        repo = _repo_with_main(tmp_path)
+        script, workspace = _session_script(tmp_path, repo, "sleep 30")
+
+        proc = sp.Popen(
+            ["bash", str(script)], stdout=sp.PIPE, stderr=sp.PIPE, text=True
+        )
+        deadline = time.monotonic() + 10
+        while (
+            time.monotonic() < deadline
+            and not (workspace / "project_info.json").exists()
+        ):
+            time.sleep(0.1)
+        os.kill(proc.pid, signal.SIGTERM)
+        out, _ = proc.communicate(timeout=20)
+
+        assert "worktree removed" in out
+        assert not workspace.exists()
+        assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
