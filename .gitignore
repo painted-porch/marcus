@@ -22,6 +22,10 @@ mlruns/
 
 # Runtime state — generated, never commit
 data/
+# ...and a `data` symlink: `data/` matches a directory only, so a live-check
+# symlink pointing at a shared data directory slipped into a commit once
+# (Codex P1 on PR #789) and would stop Marcus starting on any other machine.
+/data
 *.db
 .coverage
 htmlcov/
