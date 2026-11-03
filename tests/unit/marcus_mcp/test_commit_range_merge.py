@@ -646,6 +646,124 @@ class TestBaselineLookup:
         assert await _baseline_commit_for_task(state, "session_1", "card-c") is None
 
 
+class TestBaselineSurvivesTheAssignmentRelease:
+    """The retry after a conflict must not widen the merge (Codex P1, #790)."""
+
+    @pytest.mark.asyncio
+    async def test_conflict_retry_still_merges_only_the_card(
+        self, session: _Session, tmp_path: Path
+    ) -> None:
+        """A resolved conflict re-reported later lands the card, not the branch.
+
+        A completion releases the assignment **before** it merges, so by the
+        time the agent fixes the conflict and reports again, the in-memory
+        assignment and its persisted row are both gone. If the baseline went
+        with them, the retry would merge the whole branch and carry a
+        refused card into main — the exact defect #730 closes.
+        """
+        # Arrange — a real persistence store, and a refused card already on
+        # the session branch.
+        from src.core.assignment_persistence import AssignmentPersistence
+
+        persistence = AssignmentPersistence(storage_dir=tmp_path / "assignments")
+        _commit(session.worktree, "refused.txt", "refused\n", "card B (refused)")
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        await persistence.save_assignment(
+            session.agent_id,
+            "card-c",
+            {"name": "card c", "baseline_commit": baseline},
+        )
+        await persistence.record_task_baseline("card-c", session.agent_id, baseline)
+
+        # The card's work, which conflicts with main.
+        _commit(session.worktree, "README.md", "session edit\n", "card C")
+        _commit(session.repo, "README.md", "main edit\n", "main moved on")
+        state = _make_state(session.repo)
+        state.agent_tasks = {}
+        state.assignment_persistence = persistence
+
+        found = await _baseline_commit_for_task(state, session.agent_id, "card-c")
+        assert found == baseline
+        first = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", state, baseline_commit=found
+        )
+        assert first is not None and first["error"] == "merge_conflict"
+
+        # The completion released the assignment before merging.
+        await persistence.remove_assignment(session.agent_id)
+
+        # The agent resolves the conflict the way the failure message says.
+        subprocess.run(
+            ["git", "merge", "main", "--no-edit"],
+            cwd=session.worktree,
+            capture_output=True,
+        )
+        (session.worktree / "README.md").write_text("resolved\n")
+        _git(session.worktree, "add", "-A")
+        _git(session.worktree, "commit", "--no-edit")
+
+        # Act — the retry, with no assignment row left anywhere.
+        assert await persistence.get_assignment(session.agent_id) is None
+        retry_baseline = await _baseline_commit_for_task(
+            state, session.agent_id, "card-c"
+        )
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", state, baseline_commit=retry_baseline
+        )
+
+        # Assert
+        assert retry_baseline == baseline, "the baseline did not survive release"
+        assert result is not None and result["success"] is True
+        assert (session.repo / "README.md").read_text() == "resolved\n"
+        assert not (
+            session.repo / "refused.txt"
+        ).exists(), "a refused card rode into main on the conflict retry"
+
+    @pytest.mark.asyncio
+    async def test_the_store_keeps_one_baseline_per_holder(
+        self, tmp_path: Path
+    ) -> None:
+        """Two agents that held the same task each keep their own start point.
+
+        A recovery gives the task to a second agent, whose branch starts
+        somewhere else entirely.
+        """
+        from src.core.assignment_persistence import AssignmentPersistence
+
+        persistence = AssignmentPersistence(storage_dir=tmp_path / "assignments")
+        await persistence.record_task_baseline("card-c", "session_1", "a" * 40)
+        await persistence.record_task_baseline("card-c", "session_2", "b" * 40)
+
+        assert await persistence.get_task_baseline("card-c", "session_1") == "a" * 40
+        assert await persistence.get_task_baseline("card-c", "session_2") == "b" * 40
+        assert await persistence.get_task_baseline("card-c", "session_3") is None
+        assert await persistence.get_task_baseline("card-x", "session_1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_write_does_not_truncate_marks_it_never_read(
+        self, tmp_path: Path
+    ) -> None:
+        """A fresh process writing one baseline must keep the others.
+
+        The epoch store lost every other task's mark this way; the baseline
+        store reads before it writes for the same reason.
+        """
+        from src.core.assignment_persistence import AssignmentPersistence
+
+        first = AssignmentPersistence(storage_dir=tmp_path / "assignments")
+        await first.record_task_baseline("card-a", "session_1", "a" * 40)
+        await first.record_task_baseline("card-b", "session_1", "b" * 40)
+
+        # A second instance, as a restart would have: nothing read yet.
+        second = AssignmentPersistence(storage_dir=tmp_path / "assignments")
+        await second.record_task_baseline("card-c", "session_1", "c" * 40)
+
+        third = AssignmentPersistence(storage_dir=tmp_path / "assignments")
+        assert await third.get_task_baseline("card-a", "session_1") == "a" * 40
+        assert await third.get_task_baseline("card-b", "session_1") == "b" * 40
+        assert await third.get_task_baseline("card-c", "session_1") == "c" * 40
+
+
 class TestCommitGateScoping:
     """The commit gate must ask about the card, not about the branch."""
 

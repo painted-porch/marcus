@@ -544,11 +544,15 @@ async def _baseline_commit_for_task(
 ) -> Optional[str]:
     """Recover the baseline commit captured when this card was claimed.
 
-    The in-memory assignment is authoritative while it exists. After a
-    Marcus restart it does not, so the persisted assignment row is the
-    fallback — the baseline is written there at claim time precisely so
-    that a restart mid-card does not silently widen the merge back to
-    the whole branch.
+    Three sources, in order of authority:
+
+    1. the in-memory assignment, while it exists;
+    2. the persisted assignment row, which survives a Marcus restart;
+    3. the per-task baseline store, which survives the **assignment
+       release** a completion performs before it merges. Without this
+       third source, an agent sent back to resolve a merge conflict
+       would report again with no baseline and have its whole branch
+       merged — the very thing issue #730 closes (Codex P1 on PR #790).
 
     A record pointing at a different task is ignored: a baseline from
     another card would merge the wrong range.
@@ -581,12 +585,22 @@ async def _baseline_commit_for_task(
         record = await persistence.get_assignment(agent_id)
     except Exception as exc:  # noqa: BLE001 - never fail a completion
         logger.debug(f"Could not read persisted assignment for {agent_id}: {exc}")
+        record = None
+    if record and record.get("task_id") == task_id:
+        baseline = (record.get("task_data") or {}).get("baseline_commit")
+        if baseline:
+            return str(baseline)
+
+    # The per-task store, which outlives the assignment row.
+    get_task_baseline = getattr(persistence, "get_task_baseline", None)
+    if get_task_baseline is None:
         return None
-    if not record or record.get("task_id") != task_id:
+    try:
+        recorded = await get_task_baseline(task_id, agent_id)
+    except Exception as exc:  # noqa: BLE001 - never fail a completion
+        logger.debug(f"Could not read the baseline for task {task_id}: {exc}")
         return None
-    task_data = record.get("task_data") or {}
-    baseline = task_data.get("baseline_commit")
-    return str(baseline) if baseline else None
+    return str(recorded) if recorded else None
 
 
 def _record_missing_verification_attempt(task_id: str) -> int:
@@ -3593,6 +3607,15 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         "baseline_commit": assignment.baseline_commit,
                     },
                 )
+                # And again keyed by TASK, in a store the completion does
+                # not delete. A completion releases the assignment before
+                # it merges, so an agent sent back to resolve a merge
+                # conflict would otherwise report again with no baseline
+                # and have its whole branch merged (Codex P1 on PR #790).
+                if assignment.baseline_commit:
+                    await state.assignment_persistence.record_task_baseline(
+                        optimal_task.id, agent_id, assignment.baseline_commit
+                    )
 
                 # ADR-0012 D11 fencing token. 0 means "no epoch" and never
                 # compares equal to a real claim, so a deployment without a

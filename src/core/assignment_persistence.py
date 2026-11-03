@@ -45,6 +45,11 @@ class AssignmentPersistence:
         # agent so they survive the assignment removal that recovery
         # performs.
         self.task_epochs_file = self.storage_dir / "task_epochs.json"
+        # Issue #730 baselines, keyed by TASK and agent so they survive the
+        # assignment removal that a completion performs. The merge of a
+        # task's commit range needs the baseline again on a retry, and by
+        # then the assignment row is gone.
+        self.task_baselines_file = self.storage_dir / "task_baselines.json"
 
         # In-memory cache
         self._assignments_cache: Dict[str, Dict[str, Any]] = {}
@@ -54,6 +59,8 @@ class AssignmentPersistence:
         # single mark happens to be in memory, destroying every other
         # task's high-water mark and re-opening the fence for all of them.
         self._task_epochs_loaded: bool = False
+        self._task_baselines_cache: Dict[str, Dict[str, str]] = {}
+        self._task_baselines_loaded: bool = False
         self._lock_manager = EventLoopLockManager()
 
     @property
@@ -286,6 +293,105 @@ class AssignmentPersistence:
         async with aiofiles.open(tmp_path, "w") as f:
             await f.write(json.dumps(self._task_epochs_cache, indent=2))
         tmp_path.replace(self.task_epochs_file)
+
+    async def record_task_baseline(
+        self, task_id: str, worker_id: str, baseline_commit: str
+    ) -> None:
+        """
+        Record the commit a worker's task started from (issue #730).
+
+        Stored in ``task_baselines.json``, **deliberately separate from
+        the assignment rows**, for the same reason the epoch marks are:
+        a completion deletes the assignment row before the merge runs, so
+        a worker that is sent back to resolve a merge conflict and then
+        reports again would find no baseline and Marcus would fall back
+        to merging its whole branch — carrying work from a task whose
+        completion it had refused.
+
+        Keyed by task and then by worker, so two workers that held the
+        same task (a recovery) each keep their own starting point.
+
+        Parameters
+        ----------
+            task_id
+                The task the baseline belongs to.
+            worker_id
+                The worker that claimed it.
+            baseline_commit
+                The worker's branch tip at claim time.
+        """
+        async with self.lock:
+            self._ensure_task_baselines_loaded()
+            for_task = dict(self._task_baselines_cache.get(task_id) or {})
+            for_task[worker_id] = baseline_commit
+            self._task_baselines_cache[task_id] = for_task
+            await self._write_task_baselines()
+
+    async def get_task_baseline(self, task_id: str, worker_id: str) -> Optional[str]:
+        """
+        Read the commit a worker's task started from (issue #730).
+
+        Parameters
+        ----------
+            task_id
+                The task to look up.
+            worker_id
+                The worker whose starting point is wanted.
+
+        Returns
+        -------
+            The baseline commit, or None when none was recorded.
+        """
+        async with self.lock:
+            self._ensure_task_baselines_loaded()
+            baseline = (self._task_baselines_cache.get(task_id) or {}).get(worker_id)
+            return str(baseline) if baseline else None
+
+    def _ensure_task_baselines_loaded(self) -> None:
+        """Read the baseline store into the cache once. Caller holds the lock.
+
+        Synchronous for the same reason as the epoch store's loader: it
+        runs inside the lock on the write path and the file is small. A
+        corrupt store degrades to "no baseline", which merges the whole
+        branch — logged loudly, because that is the behaviour issue #730
+        exists to avoid.
+        """
+        if self._task_baselines_loaded:
+            return
+        self._task_baselines_loaded = True
+        if not self.task_baselines_file.exists():
+            return
+        try:
+            content = self.task_baselines_file.read_text()
+            loaded = json.loads(content) if content else {}
+            if isinstance(loaded, dict):
+                merged: Dict[str, Dict[str, str]] = {
+                    task: dict(agents)
+                    for task, agents in loaded.items()
+                    if isinstance(agents, dict)
+                }
+                for task, agents in self._task_baselines_cache.items():
+                    merged.setdefault(task, {}).update(agents)
+                self._task_baselines_cache = merged
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(
+                f"Failed to read task baselines from "
+                f"{self.task_baselines_file}: {e}. A completion that needs "
+                "its baseline will merge the whole branch instead of the "
+                "task's commit range (issue #730)."
+            )
+
+    async def _write_task_baselines(self) -> None:
+        """Persist the baselines. Caller holds the lock.
+
+        Temp file plus atomic rename, matching the other two stores: an
+        interrupted in-place write leaves a truncated file, and an empty
+        baseline store silently widens every later merge.
+        """
+        tmp_path = self.task_baselines_file.with_suffix(".json.tmp")
+        async with aiofiles.open(tmp_path, "w") as f:
+            await f.write(json.dumps(self._task_baselines_cache, indent=2))
+        tmp_path.replace(self.task_baselines_file)
 
     async def remove_assignment(self, worker_id: str) -> None:
         """

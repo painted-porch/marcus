@@ -1032,9 +1032,14 @@ class TestRecoveryHandoffDualWrite:
         # Assert
         instructions = mock_task.recovery_info.instructions
         expected_range = f"{baseline[:12]}..marcus/agent-001"
-        assert f"git cherry-pick {expected_range}" in instructions
-        assert "do not merge the whole branch" in instructions.lower()
+        # Applied as a patch, not replayed: the range can hold merge
+        # commits (the dead agent merging main in) and intermediate states
+        # a later commit already fixed, so a cherry-pick of it stops half
+        # way (Codex P2 on PR #790).
+        assert f"git diff {expected_range} | git apply --3way" in instructions
+        assert "do not merge or cherry-pick the whole branch" in instructions.lower()
         assert "git merge marcus/agent-001" not in instructions
+        assert "git cherry-pick marcus/agent-001" not in instructions
 
 
 class TestExpiredLeaseProgressCapture:

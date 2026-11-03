@@ -262,7 +262,7 @@ agent dies, commits they made still live on that branch. The recovery
 instructions tell the **next** agent exactly how to pick them up:
 
 ```
-git cherry-pick <baseline>..marcus/<dead-agent>
+git diff <baseline>..marcus/<dead-agent> | git apply --3way
 git log <baseline>..marcus/<dead-agent>
 ```
 
@@ -276,6 +276,11 @@ A branch is scoped to a session, not to a task (ADR-0012 D1), so one branch
 can also carry other tasks the session had in flight.
 Merging the whole branch would pull that unrelated work into the new
 claimant's worktree, including any task whose completion Marcus refused.
+
+The range is applied as a **patch**, not replayed commit by commit.
+A dead agent's range can contain a merge of `main` (agents merge `main` to resolve a conflict) and intermediate states a later commit in the same range already fixed.
+Replaying such a range stops part way: a merge commit has no single parent to apply, and a commit whose content is already on `main` applies as empty.
+Applying the range's net diff with a three-way merge brings across the agent's resolutions and skips what is already present.
 When no baseline was recorded, the handoff says so and asks the claimant to
 read the branch and take only this task's commits.
 
@@ -379,7 +384,7 @@ T+46m   Lease expires past grace (45 min of silence + 1 min grace). LeaseMonitor
             │     time_spent_minutes=2.0,
             │     recovery_reason="lease_expired",
             │     previous_agent_branch="marcus/Agent-A",
-            │     instructions="git cherry-pick <baseline>..marcus/Agent-A ...",
+            │     instructions="git diff <baseline>..marcus/Agent-A | git apply --3way ...",
             │     recovery_expires_at=now+24h
             │   )
             ├─ task.recovery_info = <info>
@@ -404,13 +409,13 @@ T+180s  Agent-B calls request_next_task.
         ├─ build_tiered_instructions(task, agent=Agent-B):
         │   └─ Layer 1.1: Recovery Handoff
         │       "⚠️ RECOVERY ADDENDUM — recovered from Agent-A
-        │        git cherry-pick <baseline>..marcus/Agent-A
+        │        git diff <baseline>..marcus/Agent-A | git apply --3way
         │        git log marcus/Agent-A
         │        Previous agent reached 15% ..."
         │
         └─ Lease created for Agent-B (fresh 45-minute silence window, fresh budget)
 
-T+181s  Agent-B cherry-picks Agent-A's range, sees their commits,
+T+181s  Agent-B applies Agent-A's range, sees their work,
         continues the task from 15%.
 ```
 

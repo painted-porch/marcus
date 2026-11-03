@@ -1495,11 +1495,25 @@ class AssignmentLeaseManager:
                 lease.agent_id,
                 exc,
             )
+            record = None
+        if record and record.get("task_id") == lease.task_id:
+            baseline = (record.get("task_data") or {}).get("baseline_commit")
+            if baseline:
+                return str(baseline)
+
+        # The per-task store outlives the assignment row, which recovery
+        # itself removes.
+        get_task_baseline = getattr(persistence, "get_task_baseline", None)
+        if get_task_baseline is None:
             return None
-        if not record or record.get("task_id") != lease.task_id:
+        try:
+            recorded = await get_task_baseline(lease.task_id, lease.agent_id)
+        except Exception as exc:  # noqa: BLE001 - recovery must not fail here
+            logger.debug(
+                "Could not read the baseline for task %s: %s", lease.task_id, exc
+            )
             return None
-        baseline = (record.get("task_data") or {}).get("baseline_commit")
-        return str(baseline) if baseline else None
+        return str(recorded) if recorded else None
 
     async def recover_expired_lease(self, lease: AssignmentLease) -> bool:
         """
@@ -1592,17 +1606,22 @@ class AssignmentLeaseManager:
             if baseline_commit:
                 pickup_range = f"{baseline_commit[:12]}..{previous_branch}"
                 pickup_block = (
-                    f"**FIRST: Pick up this task's commits from the "
-                    f"previous agent:**\n"
+                    f"**FIRST: Pick up this task's work from the previous "
+                    f"agent:**\n"
                     f"```\n"
-                    f"git cherry-pick {pickup_range}\n"
+                    f"git diff {pickup_range} | git apply --3way\n"
+                    f"# resolve any conflicts, then: git add -A && git commit\n"
                     f"```\n"
-                    f"That range holds the commits they made for THIS "
-                    f"task. Their branch may also carry other tasks' "
-                    f"work — do not merge the whole branch.\n\n"
+                    f"That range is what they changed while holding THIS "
+                    f"task, including any conflict resolutions they made. "
+                    f"Their branch may also carry other tasks' work, so do "
+                    f"not merge or cherry-pick the whole branch. Applying "
+                    f"the range as a patch (rather than replaying its "
+                    f"commits) is deliberate: the range can contain merge "
+                    f"commits and states a later commit already fixed.\n\n"
                 )
                 inspect_command = f"git log {pickup_range}"
-                diff_command = f"git diff {baseline_commit[:12]}..{previous_branch}"
+                diff_command = f"git diff {pickup_range}"
             else:
                 pickup_block = (
                     f"**FIRST: Pick up committed work from the previous "
