@@ -295,6 +295,10 @@ reap_chore() {{
 }}
 cleanup() {{
     trap - EXIT HUP TERM INT
+    # Every direct child first (a pause's sleep whose pid was not yet
+    # recorded when the signal landed, or the harness itself), then the
+    # chore's whole process group.
+    pkill -TERM -P $$ >/dev/null 2>&1
     [ -n "$WAIT_PID" ] && kill "$WAIT_PID" >/dev/null 2>&1
     reap_chore
     cd "$REPO" 2>/dev/null || exit 0
