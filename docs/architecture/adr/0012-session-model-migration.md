@@ -49,6 +49,11 @@ Sessions pull `main` before starting each new card.
   all; gate cannot evaluate one session's work); clone-per-session (heavyweight;
   its real payoff is *remote* sessions — documented as the future for distributed
   pools).
+- **Implemented 2026-11-03.** The session script keeps one worktree and branch at
+`worktrees/<agent_id>` for the session's life and pulls `main` before each new card.
+"A new card" means the previous chore ended holding no task; a chore that ended still holding its task resumes on the tree as it stands, because pulling `main` under a half-finished card is the agent's decision.
+A pull that conflicts is aborted and left for the agent, which merges `main` itself as its contract says: the mechanical path never resolves (D2).
+This depends on the merge unit being one card (#730); without that, a branch spanning many cards is exactly how refused work reaches `main`.
 
 ### D2 — Merge home: hybrid — mechanical when clean, integrator card when not
 

@@ -239,8 +239,11 @@ WORKER_SYSTEM_PROMPT: |
   - Example: get_task_context returns artifact → Read("docs/api/users.yaml")
 
   GIT_WORKFLOW:
-  - You work in an isolated git worktree on your dedicated branch
+  - You work in an isolated git worktree on your dedicated branch, and both
+    are yours for your whole session, across every task you take
   - Before starting EACH task: run `git merge main --no-edit` to get latest completed work
+  - If that merge reports conflicts, resolve them and commit the merge; do
+    not leave conflict markers in the tree and do not abandon the task
   - Commit messages MUST describe implementations: "feat(task-123): implement POST /api/users returning {id, email, token}"
   - Include technical details: "feat(task-123): add User model with email validation"
   - Document API contracts in code comments and docstrings

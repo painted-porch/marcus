@@ -17,9 +17,10 @@ machinery. The launcher deletes it instead of fixing it:
   the worker registers (idempotently), takes one task, does it, reports it,
   exits, and the script invokes it again with a fresh context. That loop is
   the per-chore context reset the design calls O5 at minimum.
-- each chore gets a fresh worktree and branch cut from ``main`` (same path,
-  so cost attribution keeps working), and the session script removes its
-  worktree when the session goes home or is killed (#628),
+- the session keeps **one** worktree and branch for its whole life
+  (``worktrees/<agent_id>``, ADR-0012 D1), pulls ``main`` before each new
+  card, and the script's exit trap removes the worktree when the session
+  goes home or is killed (#628),
 - it never restarts a dead worker and has no watchdog; it waits for every
   session to go home, which a worker does when ``request_next_task``
   returns ``BOARD_DRAINED`` and it writes ``.marcus_session_done``,
@@ -199,15 +200,30 @@ def build_session_script(
 ) -> str:
     """Return the bash script that runs one session until it goes home.
 
-    Each loop iteration is one chore. A chore gets a workspace of its own:
-    when the previous chore ended with the worker no longer holding a task
-    (it wrote ``CHORE_DONE_MARKER``), the worktree is removed and created
-    again from ``main`` on a fresh branch of the same name, so a branch holds
-    exactly one chore's commits and nothing from a handed-back task can ride
-    into ``main`` with the next one (#730). A chore that ended mid-task (no
-    marker) keeps its workspace so the worker resumes. The workspace path
-    (``worktrees/<agent_id>``) never changes, because cost attribution reads
-    it.
+    Each loop iteration is one chore. The **workspace belongs to the
+    session, not the chore** (ADR-0012 D1): one worktree and one branch at
+    ``worktrees/<agent_id>`` for the session's whole life, which is also the
+    path cost attribution reads. Worktree count equals session count, with
+    no churn.
+
+    Before each new card the script discards anything left uncommitted and
+    pulls ``main``, so the session builds on what other sessions have
+    landed and starts from a tree that holds only committed work. "A new
+    card" means the previous chore ended holding no task (it wrote
+    ``CHORE_DONE_MARKER``), or this is the first chore. A chore that ended
+    **still holding** its task resumes on the tree as it stands, because
+    both decisions — what to keep and whether to pull — belong to the
+    agent while a card is in flight.
+
+    The discard matters because the workspace now outlives the chore: a
+    worker that hands a task back with a blocker is not asked to commit or
+    clean up, and leftovers would otherwise be committed into the next
+    card's range and land on ``main`` with it.
+
+    A branch now spans many cards, which is safe only because Marcus merges
+    one card's commit range rather than the whole branch (#730): work from a
+    card whose completion was refused stays on the branch and never rides
+    into ``main`` with the next card.
 
     The script owns teardown (#628): an exit trap removes the worktree when
     the session goes home, hits the chore cap, or is killed, so no run leaves
@@ -314,16 +330,33 @@ on_signal() {{
 trap cleanup EXIT
 trap on_signal HUP TERM INT
 
-# A fresh workspace for a fresh chore: the same path, a new worktree, and a
-# new branch of the same name cut from main.
-fresh_workspace() {{
-    cd "$REPO" || exit 1
-    git worktree remove --force "$WORKSPACE" >/dev/null 2>&1 || true
-    git worktree prune >/dev/null 2>&1 || true
-    git branch -D "$BRANCH" >/dev/null 2>&1 || true
-    git worktree add "$WORKSPACE" -b "$BRANCH" main >/dev/null 2>&1 || exit 1
+# Start a new card from a clean tree. The workspace now outlives the chore
+# (ADR-0012 D1), so anything a previous chore left uncommitted would
+# otherwise still be there — and a worker that hands a task back with a
+# blocker is not asked to commit or clean up. Those leftovers would be
+# committed into the NEXT card's range and land on main with it, which is
+# exactly what per-card merging exists to prevent (Codex P1 on PR #791).
+# Only at a card boundary: a chore that still holds its task keeps its tree.
+clean_tree() {{
     cd "$WORKSPACE" || exit 1
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "[session {sid}] discarding uncommitted leftovers before the next card"
+        git reset -q --hard >/dev/null 2>&1 || true
+        git clean -qfd >/dev/null 2>&1 || true
+    fi
     cp {project_info_file} ./project_info.json
+}}
+
+# Pull main before starting a new card (ADR-0012 D1). Marcus's mechanical
+# path never resolves a conflict, and neither does this one: a merge that
+# conflicts is aborted and left for the agent, which merges main itself as
+# its contract says and resolves deliberately.
+pull_main() {{
+    cd "$WORKSPACE" || exit 1
+    if ! git merge main --no-edit >/dev/null 2>&1; then
+        git merge --abort >/dev/null 2>&1 || true
+        echo "[session {sid}] main conflicts with this branch; left for the agent"
+    fi
 }}
 
 cd "$WORKSPACE" || exit 1
@@ -342,13 +375,20 @@ while true; do
     chore=$((chore + 1))
     echo ""
     echo "[session {sid}] chore $chore"
-    if [ -f {chore_marker} ]; then
-        # The previous chore's task was accepted (already merged) or handed
-        # back (must not ride into main): this chore gets a fresh workspace.
-        fresh_workspace
-        echo "[session {sid}] fresh worktree from main for a new chore"
+    if [ -f {chore_marker} ] || [ $chore -eq 1 ]; then
+        # A new card is starting: the previous chore ended holding no task
+        # (accepted, or handed back), or this is the session's first chore.
+        # Take whatever other sessions have landed on main first.
+        rm -f {chore_marker}
+        clean_tree
+        pull_main
+        echo "[session {sid}] starting a new card on {branch}"
+    else
+        # The chore ended while still holding its task (Marcus asked for
+        # fixes, or the chore died). Resume on the tree as it stands: pulling
+        # main under a half-finished card is the agent's call, not ours.
+        echo "[session {sid}] resuming the held task on {branch}"
     fi
-    git merge main --no-edit 2>/dev/null || true
     # The harness runs as a background job we wait on: a kill of this
     # session is handled at once (bash defers traps while a foreground
     # command runs), and with job control on the job is its own process
