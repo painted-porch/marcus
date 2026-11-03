@@ -13,10 +13,14 @@ the completion path at all, and they hid two real defects:
 * an agent whose lapsed lease was silently re-granted a new epoch was
   fenced on its own completion.
 
-The fence has since been removed entirely — it contradicted Marcus's
-documented false-positive recovery compensation. What remains is the
-ownership hardening plus record-only observation of the collision. These
-tests cover what actually ships.
+The fence was then removed entirely, because it contradicted Marcus's
+documented false-positive recovery compensation: the agent's next report
+recreated its lease. D3's liveness retune deleted that compensation, and
+Milestone B brought the fence back at the resources a completion touches
+— the board's DONE write and the merge into main — deciding from the
+durable epoch high-water mark rather than from in-memory ownership.
+A refused completion is preserved and reconciled on the board.
+These tests cover what actually ships.
 
 Every test here drives the actual ``report_task_progress`` entry point
 with a real ``AssignmentLeaseManager``, and asserts on what the agent
@@ -198,6 +202,57 @@ class TestLoneAgentCompletesNormally:
         assert result.get("status") != "stale_epoch"
         # No collision, so no card claiming there was one.
         assert len(state.created_cards) == 0
+
+
+class TestTheCardSurvivesAnEarlyReturn:
+    """The hook must run before the paths that return early on success."""
+
+    @pytest.mark.asyncio
+    async def test_a_stub_warning_completion_still_opens_the_card(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """Validation escalation and stub warnings return before the end.
+
+        The hook used to sit after those returns, so a replacement whose
+        completion carried stub warnings left the displaced session's
+        work with no card at all — and that session has been told to
+        request its next task, so nothing else would open one (Codex P2
+        on PR #794).
+        """
+        # Arrange — a refusal recorded while the replacement works.
+        task = _make_task()
+        lease_a = await manager.create_lease(task.id, "agent-a")
+        await manager.release_lease(task.id, reason="lease_expired")
+        await manager.create_lease(task.id, "agent-b")
+        state = _make_state(manager, task, agent_id=None)
+
+        await report_task_progress(
+            agent_id="agent-a",
+            task_id=task.id,
+            status="completed",
+            progress=100,
+            message="done",
+            state=state,
+            lease_epoch=lease_a.lease_epoch,
+        )
+        assert len(state.created_cards) == 0
+        recorded = (task.source_context or {}).get("refused_attempts") or []
+        assert [a["agent_id"] for a in recorded] == ["agent-a"]
+
+        # Act — the replacement completes.
+        result = await report_task_progress(
+            agent_id="agent-b",
+            task_id=task.id,
+            status="completed",
+            progress=100,
+            message="finished it properly",
+            state=state,
+        )
+
+        # Assert — accepted, and the card exists however it returned.
+        assert result.get("success") is True
+        assert len(state.created_cards) == 1
+        assert "marcus/agent-a" in state.created_cards[0]["description"]
 
 
 class TestHolderKeepsItsEpochAcrossALapse:
@@ -480,21 +535,22 @@ class TestBoardOwnershipIsProtected:
         assert "agent-b" in assigned
 
 
-class TestEpochIsRecordedNotEnforced:
-    """The epoch is observed. No completion is refused for a stale one.
+class TestEpochIsRecordedAndEnforced:
+    """The epoch is observed, and then it decides.
 
-    Fencing was removed because Marcus already ships a documented
-    compensation for false-positive recovery — the agent's next
-    ``report_task_progress`` recreates the lease. That says "recovery may
-    have been wrong"; a fence says "recovery was right". Both cannot be
-    authoritative. Resolving that belongs with D3's liveness retune.
+    Fencing was deferred while Marcus still shipped a compensation for
+    false-positive recovery — the agent's next ``report_task_progress``
+    recreated the lease, which says "recovery may have been wrong" where
+    a fence says "recovery was right". D3's liveness retune deleted that
+    compensation, which is what made the fence coherent, so Milestone B
+    enforces it at the resources a completion touches.
     """
 
     @pytest.mark.asyncio
-    async def test_a_superseded_completion_is_still_accepted(
+    async def test_a_superseded_completion_is_refused(
         self, manager: AssignmentLeaseManager
     ) -> None:
-        """A displaced agent's completion is NOT refused today."""
+        """A displaced agent's completion does not reach the board or main."""
         task = _make_task()
         lease_a = await manager.create_lease(task.id, "agent-a")
         await manager.release_lease(task.id, reason="lease_expired")
@@ -512,9 +568,79 @@ class TestEpochIsRecordedNotEnforced:
             lease_epoch=lease_a.lease_epoch,
         )
 
-        assert result.get("status") != "stale_epoch"
-        # And no reconciliation card: that mechanism is gone.
+        assert result.get("success") is False
+        assert result.get("status") == "fenced_stale_epoch"
+        assert result.get("current_lease_epoch") > lease_a.lease_epoch
+        # Nothing was discarded: the refused attempt is on the task, and
+        # the card waits until a completion is accepted, because the
+        # replacement here is still working (Codex P1 on PR #794).
         assert len(state.created_cards) == 0
+        recorded = (task.source_context or {}).get("refused_attempts") or []
+        assert [a["agent_id"] for a in recorded] == ["agent-a"]
+        assert recorded[0]["branch"] == "marcus/agent-a"
+
+    @pytest.mark.asyncio
+    async def test_the_card_opens_once_the_replacement_completes(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """Both implementations exist at acceptance, so that is when it opens."""
+        task = _make_task()
+        lease_a = await manager.create_lease(task.id, "agent-a")
+        await manager.release_lease(task.id, reason="lease_expired")
+        await manager.create_lease(task.id, "agent-b")
+        state = _make_state(manager, task, agent_id=None)
+
+        await report_task_progress(
+            agent_id="agent-a",
+            task_id=task.id,
+            status="completed",
+            progress=100,
+            message="done",
+            state=state,
+            lease_epoch=lease_a.lease_epoch,
+        )
+        assert len(state.created_cards) == 0
+
+        from src.marcus_mcp.tools.task import maybe_open_reconciliation_card
+
+        task.status = TaskStatus.DONE
+        card_id = await maybe_open_reconciliation_card(state, task, task.id)
+
+        assert card_id is not None
+        assert len(state.created_cards) == 1
+        card = state.created_cards[0]
+        assert "Reconcile two completions" in card["name"]
+        assert "marcus/agent-a" in card["description"]
+
+    @pytest.mark.asyncio
+    async def test_the_board_is_not_marked_done_by_a_fenced_report(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """The fence sits before the DONE write, not after it.
+
+        A fence that only shaped the response would leave the board
+        saying the displaced agent finished the task.
+        """
+        task = _make_task()
+        lease_a = await manager.create_lease(task.id, "agent-a")
+        await manager.release_lease(task.id, reason="lease_expired")
+        await manager.create_lease(task.id, "agent-b")
+
+        state = _make_state(manager, task, agent_id=None)
+
+        await report_task_progress(
+            agent_id="agent-a",
+            task_id=task.id,
+            status="completed",
+            progress=100,
+            message="done",
+            state=state,
+            lease_epoch=lease_a.lease_epoch,
+        )
+
+        for call in state.kanban_client.update_task.await_args_list:
+            update = call.args[1] if len(call.args) > 1 else call.kwargs.get("updates")
+            assert (update or {}).get("status") != TaskStatus.DONE
 
     @pytest.mark.asyncio
     async def test_the_collision_is_observed(

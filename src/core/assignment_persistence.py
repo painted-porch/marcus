@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import aiofiles
 
@@ -50,6 +50,12 @@ class AssignmentPersistence:
         # task's commit range needs the baseline again on a retry, and by
         # then the assignment row is gone.
         self.task_baselines_file = self.storage_dir / "task_baselines.json"
+        # ADR-0012 D11 refused completions, keyed by TASK. Kept in
+        # Marcus's own state rather than on the board: only the sqlite
+        # provider round-trips ``source_context``, and a board refresh
+        # replaces cached task objects, so a board-only record is lost
+        # on Planka, GitHub and Linear (Codex P2 on PR #794).
+        self.refused_attempts_file = self.storage_dir / "refused_attempts.json"
 
         # In-memory cache
         self._assignments_cache: Dict[str, Dict[str, Any]] = {}
@@ -61,6 +67,8 @@ class AssignmentPersistence:
         self._task_epochs_loaded: bool = False
         self._task_baselines_cache: Dict[str, Dict[str, str]] = {}
         self._task_baselines_loaded: bool = False
+        self._refused_attempts_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._refused_attempts_loaded: bool = False
         self._lock_manager = EventLoopLockManager()
 
     @property
@@ -392,6 +400,141 @@ class AssignmentPersistence:
         async with aiofiles.open(tmp_path, "w") as f:
             await f.write(json.dumps(self._task_baselines_cache, indent=2))
         tmp_path.replace(self.task_baselines_file)
+
+    async def record_refused_attempt(
+        self, task_id: str, attempt: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Record a completion the ADR-0012 D11 fence refused.
+
+        Kept here, in Marcus's own state, because the board cannot be
+        relied on to hold it: only the sqlite provider round-trips
+        ``source_context``, and ``refresh_project_state`` replaces
+        cached task objects with freshly hydrated ones, so a board-only
+        record disappears on the next refresh. The reconciliation card
+        is opened from this record when a completion is finally
+        accepted, which can be much later.
+
+        Deduplicated by ``(agent_id, lease_epoch)``, so a displaced
+        session repeating its report adds nothing while a second
+        displaced session is kept.
+
+        Parameters
+        ----------
+            task_id
+                The contested task.
+            attempt
+                The refusal: agent id, branch, lease epoch, timestamp.
+
+        Returns
+        -------
+            Every refused attempt recorded for this task, oldest first.
+        """
+        async with self.lock:
+            self._ensure_refused_attempts_loaded()
+            recorded = [dict(a) for a in self._refused_attempts_cache.get(task_id, [])]
+            key = (attempt.get("agent_id"), attempt.get("lease_epoch"))
+            if not any(
+                (a.get("agent_id"), a.get("lease_epoch")) == key for a in recorded
+            ):
+                recorded.append(dict(attempt))
+            self._refused_attempts_cache[task_id] = recorded
+            await self._write_refused_attempts()
+            return [dict(a) for a in recorded]
+
+    async def mark_refused_attempts_reconciled(
+        self, task_id: str, card_id: str, attempts: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Note which refused completions a reconciliation card covers.
+
+        Without this, a displaced session repeating its report after its
+        card has been completed opens a second card for the same
+        refusal, re-litigating a settled decision and possibly replacing
+        its outcome. A genuinely new refusal is still uncovered, so it
+        still gets a card.
+
+        Parameters
+        ----------
+            task_id
+                The contested task.
+            card_id
+                The reconciliation card now covering these attempts.
+            attempts
+                The attempts the card names, matched on agent and epoch.
+        """
+        covered = {(a.get("agent_id"), a.get("lease_epoch")) for a in attempts}
+        async with self.lock:
+            self._ensure_refused_attempts_loaded()
+            stored = self._refused_attempts_cache.get(task_id)
+            if not stored:
+                return
+            for record in stored:
+                if (record.get("agent_id"), record.get("lease_epoch")) in covered:
+                    record["reconciled_by"] = card_id
+            await self._write_refused_attempts()
+
+    async def get_refused_attempts(self, task_id: str) -> List[Dict[str, Any]]:
+        """
+        Read the completions the fence refused for a task.
+
+        Parameters
+        ----------
+            task_id
+                The task to look up.
+
+        Returns
+        -------
+            Every refused attempt, oldest first; empty when there were
+            none.
+        """
+        async with self.lock:
+            self._ensure_refused_attempts_loaded()
+            return [dict(a) for a in self._refused_attempts_cache.get(task_id, [])]
+
+    def _ensure_refused_attempts_loaded(self) -> None:
+        """Read the refusal store into the cache once. Caller holds the lock.
+
+        Synchronous for the same reason as the other two stores: it runs
+        inside the lock on the write path and the file is small. A
+        corrupt store degrades to "no refusals", which means a
+        reconciliation card is not opened — logged loudly, because the
+        refused work would then sit on its branch unmentioned.
+        """
+        if self._refused_attempts_loaded:
+            return
+        self._refused_attempts_loaded = True
+        if not self.refused_attempts_file.exists():
+            return
+        try:
+            content = self.refused_attempts_file.read_text()
+            loaded = json.loads(content) if content else {}
+            if isinstance(loaded, dict):
+                merged: Dict[str, List[Dict[str, Any]]] = {
+                    task: [dict(a) for a in attempts]
+                    for task, attempts in loaded.items()
+                    if isinstance(attempts, list)
+                }
+                for task, attempts in self._refused_attempts_cache.items():
+                    merged.setdefault(task, []).extend(attempts)
+                self._refused_attempts_cache = merged
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(
+                f"Failed to read refused completions from "
+                f"{self.refused_attempts_file}: {e}. A contested task may "
+                "complete without a reconciliation card, leaving the "
+                "refused work on its branch unmentioned (ADR-0012 D11)."
+            )
+
+    async def _write_refused_attempts(self) -> None:
+        """Persist the refusals. Caller holds the lock.
+
+        Temp file plus atomic rename, matching the other stores.
+        """
+        tmp_path = self.refused_attempts_file.with_suffix(".json.tmp")
+        async with aiofiles.open(tmp_path, "w") as f:
+            await f.write(json.dumps(self._refused_attempts_cache, indent=2))
+        tmp_path.replace(self.refused_attempts_file)
 
     async def remove_assignment(self, worker_id: str) -> None:
         """

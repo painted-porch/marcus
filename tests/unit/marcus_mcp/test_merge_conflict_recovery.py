@@ -329,6 +329,52 @@ class TestAttemptMergeRecoveryHappyPath:
         assert update_data["status"] == TaskStatus.DONE
 
     @pytest.mark.asyncio
+    async def test_recovery_opens_a_pending_reconciliation_card(self, tmp_path) -> None:
+        """A displaced session's refusal is reconciled after this path too.
+
+        This path marks the task DONE without going through
+        ``report_task_progress``, so a refusal recorded while the
+        replacement was conflicted would otherwise never get its card and
+        the refused work would sit on its branch unmentioned (Codex P2 on
+        PR #794).
+        """
+        from src.core.assignment_persistence import AssignmentPersistence
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_recoverable_repo(tmp_path)
+        task = _make_blocked_task()
+        state = _make_state(impl, blocked_task=task)
+        created: list = []
+
+        async def _create_task(task_data):
+            created.append(task_data)
+            card = _make_blocked_task()
+            card.id = "recon_card"
+            card.name = task_data["name"]
+            card.description = task_data["description"]
+            return card
+
+        state.kanban_client.create_task = AsyncMock(side_effect=_create_task)
+        state.kanban_client.get_all_tasks = AsyncMock(return_value=[task])
+        persistence = AssignmentPersistence(storage_dir=tmp_path / "assignments")
+        await persistence.record_refused_attempt(
+            task.id,
+            {
+                "agent_id": "displaced_session",
+                "branch": "marcus/displaced_session",
+                "lease_epoch": 1,
+                "refused_at": "2026-11-03T00:00:00+00:00",
+            },
+        )
+        state.assignment_persistence = persistence
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        assert result is not None and result["success"] is True
+        assert len(created) == 1, "the recovery left the refusal unreconciled"
+        assert "marcus/displaced_session" in created[0]["description"]
+
+    @pytest.mark.asyncio
     async def test_recovery_clears_merge_conflict_from_source_context(
         self, tmp_path
     ) -> None:

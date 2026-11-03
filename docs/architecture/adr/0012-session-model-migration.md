@@ -361,6 +361,57 @@ actually happens — which is what the eventual design should be sized against.
 Kaia architecture review: Simon `f9c511c8`.
 Stop-rule record: Simon `07f37159`.
 
+#### D11 resolution (2026-11-03): the fence, at the resource
+
+The three gaps the amendment named are closed, in the order it required.
+
+**The contradiction is gone.** D3's liveness retune deleted the re-grant
+compensation, so "the agent's next report recreates the lease" no longer
+competes with "this agent is displaced".
+O1 also landed, so in-memory ownership is rehydrated on restart rather than
+being a fourth authority that starts empty.
+
+**The enforcement point is named: the resources.**
+The fence runs inside the completion path before the board's DONE write and
+before the merge into `main`, and it decides from the **durable epoch
+high-water mark** (`task_epochs.json`), not from in-memory ownership.
+A report carrying no epoch cannot be fenced by token and falls through to the
+ownership guard, which is the pre-D11 behaviour.
+
+**The merge resource is protected from the other end too**, by issue #730:
+a completion merges one task's commit range rather than the whole branch, so a
+fenced session's commits cannot ride into `main` on its next accepted task.
+The amendment called #730 "this one, observed from the other end"; both ends
+are now closed.
+
+**Nothing is discarded.** A fenced completion is recorded on the task
+(`source_context.refused_attempts`: the agent, its branch, its epoch and the
+time), and a board-visible reconciliation card at URGENT priority with no
+dependencies names every refused attempt alongside what is on `main`, leaving
+three outcomes open: keep what is on `main`, take a refused branch's work, or
+combine them. The card asks for a `log_decision` recording what was kept and
+why. That is what closes obligation **O3**.
+
+**The card is a decision task, not an implementation task.** It carries
+only a `reconciliation` label, and the commit gate skips it: one permitted
+outcome is keeping the work already on `main`, which changes no files, so a
+gate demanding commits would make the valid answer unreachable without
+manufacturing one.
+
+**The card waits for the replacement to finish.** It is opened when the fence
+fires on an already-finished task, and otherwise at the moment a completion
+for that task is accepted. Opened while the replacement is still working, it
+would send an agent — immediately, since it has no dependencies — to
+reconcile against an implementation that is not on `main` yet, and the
+replacement could then land and overwrite the recorded decision. A task
+recovered more than once displaces several sessions, and each refusal updates
+the card so no branch goes unmentioned.
+
+**Sizing.** Milestone A's acceptance run measured **0** collisions, so the
+fence is not responding to a measured rate: it closes a path that is rare by
+construction (the pinned dials) but not impossible, and whose failure is
+silent and expensive when it happens.
+
 ---
 
 ## Inherited obligations (review-found gaps — not choices)
