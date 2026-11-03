@@ -732,12 +732,23 @@ class MarcusServer:
             return
         if active_project is None or self.kanban_client is None:
             return
-        served = getattr(self.kanban_client, "project_id", None)
-        if served != active_project.id:
+        # The scope to compare is the PROVIDER's project id, kept in
+        # provider_config; the registry row's own id is a Marcus-generated
+        # UUID for projects added through add_project or discovery (Codex
+        # P2 on PR #774). Clients that do not expose a project_id (Planka,
+        # GitHub scope by board or repo) are not checked.
+        missing = object()
+        served = getattr(self.kanban_client, "project_id", missing)
+        if served is missing:
+            return
+        provider_config = getattr(active_project, "provider_config", None) or {}
+        expected = provider_config.get("project_id") or active_project.id
+        if str(served) != str(expected):
             logger.warning(
                 "BOARD MISMATCH: the registry's active project is "
-                f"'{active_project.name}' ({active_project.id}) but the served "
-                f"kanban client is scoped to project_id={served} "
+                f"'{active_project.name}' (registry id {active_project.id}, "
+                f"provider project_id {expected}) but the served kanban client "
+                f"is scoped to project_id={served} "
                 f"(db={getattr(self.kanban_client, 'db_path', None)}). Agents "
                 "will see that board, not the registry's. Fix the registry or "
                 "the provider config; see issue #766."

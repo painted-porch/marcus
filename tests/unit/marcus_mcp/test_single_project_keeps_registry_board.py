@@ -12,6 +12,7 @@ mismatch can never again be silent.
 
 import logging
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -64,10 +65,18 @@ def _config(single_project_mode: bool = True) -> Mock:
     return cfg
 
 
-def _project(project_id: str = "proj-1", name: str = "simple-calculator") -> Mock:
+def _project(
+    project_id: str = "proj-1",
+    name: str = "simple-calculator",
+    provider_project_id: Optional[str] = None,
+) -> Mock:
+    """A registry row; ``provider_project_id`` is what the provider scopes by."""
     project = Mock()
     project.id = project_id
     project.name = name
+    project.provider_config = (
+        {"project_id": provider_project_id} if provider_project_id else {}
+    )
     return project
 
 
@@ -153,6 +162,43 @@ class TestSingleProjectModeServesTheRegistryBoard:
         with caplog.at_level(logging.WARNING, logger="src.marcus_mcp.server"):
             await _run_initialize(fake)
 
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @pytest.mark.asyncio
+    async def test_scope_is_compared_with_the_provider_project_id(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A registry row added through add_project has its own UUID.
+
+        The provider's project id lives in provider_config; a client scoped
+        to that id is correct and must not be warned about (Codex P2 on
+        PR #774).
+        """
+        registry_row = _project(
+            "4c9cf448-6209-43c2-8626-de5b0217527c",  # Marcus-generated
+            provider_project_id="b45355cf",  # what the board is filtered by
+        )
+        fake = _fake_server(
+            scoped_client=_scoped("b45355cf"), active_project=registry_row
+        )
+
+        with caplog.at_level(logging.WARNING, logger="src.marcus_mcp.server"):
+            await _run_initialize(fake)
+
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @pytest.mark.asyncio
+    async def test_client_without_a_project_id_is_not_checked(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Providers that scope by board or repo expose no project_id; stay quiet."""
+        client = Mock(spec=["connect", "create_task"])  # no project_id attribute
+        fake = _fake_server(scoped_client=client, active_project=_project("proj-1"))
+
+        with caplog.at_level(logging.WARNING, logger="src.marcus_mcp.server"):
+            await _run_initialize(fake)
+
+        assert fake.kanban_client is client
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     @pytest.mark.asyncio
