@@ -580,12 +580,15 @@ class Persistence:
             try:
                 decision = Decision(
                     decision_id=item["decision_id"],
-                    task_id=item["task_id"],
+                    task_id=item.get("task_id"),
                     agent_id=item["agent_id"],
                     timestamp=datetime.fromisoformat(item["timestamp"]),
                     what=item["what"],
                     why=item["why"],
                     impact=item["impact"],
+                    project_id=item.get("project_id"),
+                    subject=item.get("subject"),
+                    kind=item.get("kind", "decision"),
                 )
                 decisions.append(decision)
             except Exception as e:

@@ -154,6 +154,119 @@ class TestProjectHistoryPersistence:
         assert decisions[1].project_id == "test_project_001"
 
     @pytest.mark.asyncio
+    async def test_load_decisions_includes_project_level_opinions(
+        self,
+        persistence: ProjectHistoryPersistence,
+        temp_db: Path,
+    ) -> None:
+        """A project-level opinion (no task) loads by project_id alone.
+
+        Deliberation layer B2: an opinion about the project rather than
+        a task carries ``task_id=None``, so the task-id filter derived
+        from conversation logs can never match it.  ``project_id`` is
+        load-bearing for it, even when no conversation log exists yet.
+        """
+        # Arrange: no conversation logs at all
+        persistence.db_path = temp_db
+        persistence._backend = SQLitePersistence(db_path=temp_db)
+        await persistence._backend.store(
+            "decisions",
+            "dec_op_1",
+            {
+                "decision_id": "dec_op_1",
+                "task_id": None,
+                "agent_id": "agent_002",
+                "timestamp": "2026-11-03T12:00:00+00:00",
+                "what": "the farm is flooded",
+                "why": "water source breached the north plot",
+                "impact": "food supply",
+                "subject": "farm.flooded",
+                "kind": "assessment",
+                "project_id": "test_project_001",
+            },
+        )
+
+        # Act
+        decisions = await persistence.load_decisions("test_project_001")
+
+        # Assert
+        assert [d.decision_id for d in decisions] == ["dec_op_1"]
+        assert decisions[0].task_id is None
+        assert decisions[0].subject == "farm.flooded"
+        assert decisions[0].kind == "assessment"
+
+    @pytest.mark.asyncio
+    async def test_load_decisions_excludes_other_projects_opinions(
+        self,
+        persistence: ProjectHistoryPersistence,
+        temp_db: Path,
+    ) -> None:
+        """A project-level opinion for another project is not returned."""
+        # Arrange
+        persistence.db_path = temp_db
+        persistence._backend = SQLitePersistence(db_path=temp_db)
+        await persistence._backend.store(
+            "decisions",
+            "dec_op_other",
+            {
+                "decision_id": "dec_op_other",
+                "task_id": None,
+                "agent_id": "agent_002",
+                "timestamp": "2026-11-03T12:00:00+00:00",
+                "what": "the farm is flooded",
+                "why": "water",
+                "impact": "food",
+                "subject": "farm.flooded",
+                "kind": "assessment",
+                "project_id": "some_other_project",
+            },
+        )
+
+        # Act
+        decisions = await persistence.load_decisions("test_project_001")
+
+        # Assert
+        assert decisions == []
+
+    @pytest.mark.asyncio
+    async def test_load_decisions_still_matches_task_scoped_rows_by_task_id(
+        self,
+        persistence: ProjectHistoryPersistence,
+        temp_db: Path,
+        sample_decisions: list[dict[str, Any]],
+    ) -> None:
+        """Rows with no project_id still load through the task-id filter."""
+        # Arrange: strip project_id from a stored row, keep its task in the logs
+        persistence.db_path = temp_db
+        persistence._backend = SQLitePersistence(db_path=temp_db)
+        legacy = dict(sample_decisions[0])
+        legacy["project_id"] = None
+        await persistence._backend.store("decisions", legacy["decision_id"], legacy)
+        conversations_dir = persistence.marcus_root / "logs" / "conversations"
+        conversations_dir.mkdir(parents=True, exist_ok=True)
+        import json
+
+        with open(conversations_dir / "conversations_legacy.jsonl", "w") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "project_id": "test_project_001",
+                            "task_id": "task_001",
+                        },
+                        "message": "legacy",
+                    }
+                )
+                + "\n"
+            )
+
+        # Act
+        decisions = await persistence.load_decisions("test_project_001")
+
+        # Assert
+        assert "dec_1_123.456" in [d.decision_id for d in decisions]
+
+    @pytest.mark.asyncio
     async def test_load_decisions_timezone_aware(
         self,
         persistence: ProjectHistoryPersistence,

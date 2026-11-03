@@ -208,16 +208,25 @@ class DependentTask:
 
 @dataclass
 class Decision:
-    """An architectural decision made during development."""
+    """An architectural decision, or an opinion, recorded on the board.
+
+    ``kind="decision"`` is a choice made while doing ``task_id``.
+    ``kind="assessment"`` is an opinion an agent posts about the project
+    (deliberation layer); it may have no task, and its ``subject`` slug is
+    what lets several agents' opinions on the same thing be counted
+    together.
+    """
 
     decision_id: str
-    task_id: str
+    task_id: Optional[str]
     agent_id: str
     timestamp: datetime
     what: str  # What was decided
     why: str  # Why it was decided
     impact: str  # Impact on other components
     project_id: Optional[str] = None  # Project this decision belongs to
+    subject: Optional[str] = None  # Normalised slug: farm.flooded, schema.users
+    kind: str = "decision"  # "decision" or "assessment"
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage."""
@@ -230,6 +239,8 @@ class Decision:
             "why": self.why,
             "impact": self.impact,
             "project_id": self.project_id,
+            "subject": self.subject,
+            "kind": self.kind,
         }
 
 
@@ -386,22 +397,35 @@ class Context:
         )
 
     async def log_decision(
-        self, agent_id: str, task_id: str, what: str, why: str, impact: str
+        self,
+        agent_id: str,
+        task_id: Optional[str],
+        what: str,
+        why: str,
+        impact: str,
+        subject: Optional[str] = None,
+        kind: str = "decision",
     ) -> Decision:
-        """Log an architectural decision made by an agent.
+        """Log an architectural decision, or an opinion, made by an agent.
 
         Parameters
         ----------
         agent_id : str
             ID of the agent making the decision.
-        task_id : str
-            Current task ID.
+        task_id : Optional[str]
+            Current task ID, or None for a project-level opinion that is
+            not about any one task.
         what : str
             What was decided.
         why : str
             Reasoning behind the decision.
         impact : str
             Expected impact on other components.
+        subject : Optional[str]
+            Normalised slug naming what the entry is about; opinions on
+            the same subject are counted together.
+        kind : str
+            ``"decision"`` (default) or ``"assessment"`` for an opinion.
 
         Returns
         -------
@@ -419,6 +443,8 @@ class Context:
             why=why,
             impact=impact,
             project_id=self.project_id,
+            subject=subject,
+            kind=kind,
         )
 
         self.decisions.append(decision)
@@ -429,7 +455,7 @@ class Context:
             await self._persist_decision_safe(decision)
 
         # Cross-reference to dependent tasks
-        if task_id in self.dependencies:
+        if task_id is not None and task_id in self.dependencies:
             for dep_task in self.dependencies[task_id]:
                 logger.info(f"Decision affects dependent task: {dep_task.task_name}")
 

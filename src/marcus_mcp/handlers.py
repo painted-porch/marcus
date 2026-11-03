@@ -63,6 +63,7 @@ from .tools.code_metrics import (  # Code metrics tools
     get_repository_metrics,
 )
 from .tools.context import (  # Context tools
+    give_opinion,
     log_decision,
 )
 from .tools.cost_tracking import (
@@ -457,6 +458,51 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     },
                 },
                 "required": ["agent_id", "task_id", "decision"],
+            },
+        ),
+        types.Tool(
+            name="give_opinion",
+            description=(
+                "Post an opinion about the project to the board: something "
+                "you observed that other agents should weigh, whether or not "
+                "it is about the task you hold. Opinions on the same subject "
+                "from different agents are counted together."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent giving the opinion",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": (
+                            "Short slug naming what it is about, e.g. "
+                            "farm.flooded or schema.users (normalised by Marcus)"
+                        ),
+                    },
+                    "what": {
+                        "type": "string",
+                        "description": "The assessment itself",
+                    },
+                    "why": {
+                        "type": "string",
+                        "description": "What you saw that led to it",
+                    },
+                    "impact": {
+                        "type": "string",
+                        "description": "What it affects",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": (
+                            "The task it relates to; omit for an opinion "
+                            "about the project as a whole"
+                        ),
+                    },
+                },
+                "required": ["agent_id", "subject", "what"],
             },
         ),
         types.Tool(
@@ -1531,6 +1577,24 @@ async def handle_tool_call(
                     task_id=task_id,
                     decision=decision,
                     state=state,
+                )
+
+        elif name == "give_opinion":
+            agent_id = arguments.get("agent_id") if arguments else None
+            subject = arguments.get("subject") if arguments else None
+            what = arguments.get("what") if arguments else None
+
+            if not agent_id or not subject or not what:
+                result = {"error": "agent_id, subject, and what are required"}
+            else:
+                result = await give_opinion(
+                    agent_id=agent_id,
+                    subject=subject,
+                    what=what,
+                    state=state,
+                    why=arguments.get("why", ""),
+                    impact=arguments.get("impact", ""),
+                    task_id=arguments.get("task_id"),
                 )
 
         elif name == "get_task_context":

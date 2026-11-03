@@ -44,6 +44,8 @@ Context & Collaboration
 
 .. autofunction:: log_decision
 
+.. autofunction:: give_opinion
+
 .. autofunction:: log_artifact
 
 

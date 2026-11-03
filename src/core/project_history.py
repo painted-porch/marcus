@@ -47,13 +47,22 @@ class Decision:
     kanban_comment_url : Optional[str]
         URL to the Kanban comment where this was also logged
     project_id : Optional[str]
-        Project identifier for validation/debugging. Note: Conversation logs
-        are the authoritative source for project-task mapping. This field is
-        stored for data integrity verification but is not used for filtering.
+        Project identifier. Conversation logs remain the primary source for
+        the project-task mapping of task-scoped decisions; ``project_id`` is
+        load-bearing for project-level opinions (``task_id`` is None), which
+        no task-id filter can reach.
+    subject : Optional[str]
+        Normalised slug naming what the entry is about (``farm.flooded``,
+        ``schema.users``). Opinions on the same subject are counted
+        together; architectural decisions may leave it empty.
+    kind : str
+        ``"decision"`` for an architectural decision made while doing a
+        task, ``"assessment"`` for an opinion an agent posts to the board
+        (deliberation layer).
     """
 
     decision_id: str
-    task_id: str
+    task_id: Optional[str]
     agent_id: str
     timestamp: datetime
     what: str
@@ -63,6 +72,8 @@ class Decision:
     confidence: float = 0.8
     kanban_comment_url: Optional[str] = None
     project_id: Optional[str] = None
+    subject: Optional[str] = None
+    kind: str = "decision"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -78,11 +89,17 @@ class Decision:
             "confidence": self.confidence,
             "kanban_comment_url": self.kanban_comment_url,
             "project_id": self.project_id,
+            "subject": self.subject,
+            "kind": self.kind,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Decision":
-        """Create from dictionary loaded from JSON."""
+        """Create from dictionary loaded from JSON.
+
+        Rows written before the opinion fields existed load as task-scoped
+        architectural decisions (``subject=None``, ``kind="decision"``).
+        """
         # Parse timestamp and ensure it's timezone-aware
         ts = datetime.fromisoformat(data["timestamp"])
         if ts.tzinfo is None:
@@ -91,7 +108,7 @@ class Decision:
 
         return cls(
             decision_id=data["decision_id"],
-            task_id=data["task_id"],
+            task_id=data.get("task_id"),
             agent_id=data["agent_id"],
             timestamp=ts,
             what=data["what"],
@@ -101,6 +118,8 @@ class Decision:
             confidence=data.get("confidence", 0.8),
             kanban_comment_url=data.get("kanban_comment_url"),
             project_id=data.get("project_id"),
+            subject=data.get("subject"),
+            kind=data.get("kind", "decision"),
         )
 
 
@@ -565,14 +584,14 @@ class ProjectHistoryPersistence:
         """
         Load decisions for a project from SQLite with pagination.
 
-        Filters decisions by task_id, using conversation logs to identify
-        project-specific tasks.
-
-        Design Decision: Conversation logs are the authoritative source of truth
-        for project-task mapping. While decisions contain a project_id field,
-        we filter by task_id (derived from conversations) to maintain a single
-        source of truth and avoid data inconsistencies. The project_id field
-        in Decision is used for validation and debugging only.
+        A row belongs to the project when its ``task_id`` is one of the
+        project's tasks (derived from conversation logs) OR its
+        ``project_id`` matches. The second clause is what makes a
+        project-level opinion (``task_id`` None, deliberation layer B2)
+        reachable: no task-id filter can match it, so ``project_id`` is
+        load-bearing for it. Conversation logs remain the source for the
+        task-scoped mapping, so rows written before ``project_id`` was
+        stamped still load.
 
         Parameters
         ----------
@@ -602,19 +621,24 @@ class ProjectHistoryPersistence:
 
                 if not project_task_ids:
                     logger.debug(
-                        f"No task IDs found for project {project_id} in conversations"
+                        f"No task IDs found for project {project_id} in "
+                        "conversations; only project-level rows can match"
                     )
-                    return []
 
-                # Create filter function for task IDs
-                def task_filter(item: dict[str, Any]) -> bool:
-                    return item.get("task_id") in project_task_ids
+                # A row is the project's by task (conversation-derived) or
+                # by its stamped project_id; the latter is the only route
+                # for a project-level opinion with no task.
+                def project_filter(item: dict[str, Any]) -> bool:
+                    if item.get("project_id") == project_id:
+                        return True
+                    task_id = item.get("task_id")
+                    return task_id is not None and task_id in project_task_ids
 
                 # Query decisions with filter and pagination
                 # Use reasonable limit to avoid memory issues
                 query_limit = min(limit, 10000)
                 all_decisions = await backend.query(
-                    "decisions", filter_func=task_filter, limit=query_limit + offset
+                    "decisions", filter_func=project_filter, limit=query_limit + offset
                 )
 
                 # Apply offset and limit

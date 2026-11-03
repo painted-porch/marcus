@@ -2,11 +2,13 @@
 
 This module contains tools for context management:
 - log_decision: Log architectural decisions
+- give_opinion: Post an opinion about the project to the board
 - get_task_context: Get context for a specific task
 """
 
 import copy
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -124,6 +126,163 @@ async def log_decision(
             "success": True,
             "decision_id": logged_decision.decision_id,
             "message": "Decision logged and cross-referenced to dependent tasks",
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+#: Anything that is not a lowercase letter or digit separates slug parts.
+_SUBJECT_SEPARATOR = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_subject(subject: str) -> str:
+    """Return the canonical slug for an opinion subject.
+
+    Several agents flagging the same thing is the signal the deliberation
+    layer counts, and a count by subject is only as good as the agents'
+    agreement on the string. So Marcus owns the spelling: lowercase, any
+    run of characters that is not a letter or digit becomes one dot, and
+    leading or trailing dots are dropped. ``Farm Flooded``,
+    ``farm_flooded`` and ``farm.flooded`` are one subject.
+
+    Parameters
+    ----------
+    subject : str
+        The subject as the agent wrote it.
+
+    Returns
+    -------
+    str
+        The canonical slug, or an empty string when nothing is left.
+    """
+    return _SUBJECT_SEPARATOR.sub(".", subject.lower()).strip(".")
+
+
+def _about_card_id(state: Any) -> Optional[str]:
+    """Return the id of the board's About card, if the board has one.
+
+    ``create_project`` writes one card per project named
+    ``About: <project_name>`` with ``source_type="project_about"``. It is
+    the natural home for a comment that is about the project rather
+    than about any one task.
+    """
+    for task in getattr(state, "project_tasks", None) or []:
+        if getattr(task, "source_type", None) == "project_about" or str(
+            getattr(task, "name", "")
+        ).startswith("About: "):
+            return str(task.id)
+    return None
+
+
+async def give_opinion(
+    agent_id: str,
+    subject: str,
+    what: str,
+    state: Any,
+    why: str = "",
+    impact: str = "",
+    task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Post an opinion about the project to the board.
+
+    An opinion is a marker other agents can read and corroborate: "the
+    farm is flooded", "this schema is wrong", "mobs at the north edge and
+    no walls". It need not be about the task the agent holds, which is
+    what ``log_decision`` cannot express. It is stored as a ``Decision``
+    with ``kind="assessment"`` and a normalised ``subject`` so that
+    ``query_project_history(..., "opinions")`` can count how many
+    distinct agents said the same thing.
+
+    Parameters
+    ----------
+    agent_id : str
+        The agent giving the opinion.
+    subject : str
+        What the opinion is about, as a short slug (``farm.flooded``,
+        ``schema.users``). Normalised by ``normalize_subject``.
+    what : str
+        The assessment itself.
+    state : Any
+        Marcus server state instance.
+    why : str, optional
+        What the agent saw that led to it.
+    impact : str, optional
+        What it affects.
+    task_id : Optional[str], optional
+        The task the opinion relates to, if any. Without it the opinion
+        is project-level and its board comment lands on the About card.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``success``, ``decision_id``, the canonical ``subject``, ``kind``
+        and ``task_id``; or ``success=False`` with ``error``.
+    """
+    try:
+        if not getattr(state, "context", None):
+            return {"success": False, "error": "Context system not enabled"}
+
+        canonical = normalize_subject(subject or "")
+        if not canonical:
+            return {
+                "success": False,
+                "error": (
+                    "subject is required: a short slug naming what the "
+                    "opinion is about, for example farm.flooded or "
+                    "schema.users"
+                ),
+            }
+        why = why.strip() if why and why.strip() else "Not specified"
+        impact = impact.strip() if impact and impact.strip() else "Not specified"
+
+        logged_decision = await state.context.log_decision(
+            agent_id=agent_id,
+            task_id=task_id,
+            what=what,
+            why=why,
+            impact=impact,
+            subject=canonical,
+            kind="assessment",
+        )
+
+        # Keep the opinion visible to a human watching the board: on the
+        # task when there is one, else on the project's About card.
+        target_id = task_id or _about_card_id(state)
+        if state.kanban_client and target_id:
+            try:
+                comment = (
+                    f"💬 OPINION by {agent_id} on {canonical}\n"
+                    f"Assessment: {what}\n"
+                    f"Why: {why}\n"
+                    f"Impact: {impact}"
+                )
+                await state.kanban_client.add_comment(target_id, comment)
+            except Exception as e:
+                # The opinion is recorded either way
+                logger.warning(f"Failed to add kanban comment for opinion: {e}")
+        elif not target_id:
+            logger.debug(
+                "No task and no About card for opinion %s by %s; no board comment",
+                canonical,
+                agent_id,
+            )
+
+        if hasattr(state, "events") and state.events:
+            await state.events.publish_nowait(
+                "opinion_logged", agent_id, logged_decision.to_dict()
+            )
+
+        await _persist_decision_to_history(logged_decision, state)
+
+        return {
+            "success": True,
+            "decision_id": logged_decision.decision_id,
+            "subject": canonical,
+            "kind": "assessment",
+            "task_id": task_id,
+            "message": "Opinion recorded on the board",
         }
 
     except Exception as e:
@@ -1231,6 +1390,8 @@ async def _persist_decision_to_history(logged_decision: Any, state: Any) -> None
             confidence=0.8,  # Default confidence
             kanban_comment_url=kanban_comment_url,
             project_id=project_id,
+            subject=getattr(logged_decision, "subject", None),
+            kind=getattr(logged_decision, "kind", "decision"),
         )
 
         # Persist to project history

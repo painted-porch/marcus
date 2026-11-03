@@ -37,6 +37,7 @@ An agent must be capable of calling these tools:
 | `report_task_progress` | Report progress at milestones (25/50/75/100%) |
 | `report_blocker` | Report a blocking problem and receive AI suggestions |
 | `log_decision` | Record an architectural decision to the board |
+| `give_opinion` | Post an opinion about the project to the board (a hazard, a bottleneck, a wrong assumption), under a subject slug so other agents' opinions on the same thing count together |
 | `log_artifact` | Store a file reference (spec, design doc, schema) |
 
 ---
@@ -100,6 +101,9 @@ c. If task received:
    i.   If task has dependencies: call get_task_context(task_id)
    ii.  Do the work
    iii. Call log_decision for any significant architectural choice made
+        Call give_opinion for something you observed that other agents should
+        weigh, whether or not it is about this task (name the subject with a
+        short slug such as `farm.flooded` so opinions on it count together)
    iv.  Call log_artifact for any file produced (spec, schema, design doc, etc.)
    v.   Call report_task_progress at 25%, 50%, 75%, 100%
         (if blocked: call report_blocker instead)
