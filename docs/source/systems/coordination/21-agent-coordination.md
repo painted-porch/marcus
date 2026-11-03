@@ -114,6 +114,21 @@ Registration  →  Capability   → Task Matching → Optimization → Kanban Up
    - Performance tracking
    - Next task preparation
 
+### The drain signal (when workers go home)
+
+A worker's loop ends only when the server says so.
+On every `request_next_task` that finds nothing to offer, Marcus computes a **drain verdict** for the agent's project (`src/marcus_mcp/coordinator/drain.py`):
+
+- **Claimable** work: a `TODO` task nobody owns, not a decomposed parent, whose dependency gate passes (the same `deps_allow_claim` and design-slug resolution the assignment filter uses; for a subtask, the parent's dependencies too).
+  Claimable is judged board-wide, not per agent, so a task another worker could take keeps the board alive even if the caller is not eligible for it.
+- **In-flight** work: a live lease on a project task, an `IN_PROGRESS` card, a task being assigned right now, a persisted assignment, or a `TODO` card that still names an assignee (an orphan the reconciler will clear).
+
+If there is neither, the response is `status: "BOARD_DRAINED"` with `should_exit: true` and a `drain` object carrying the counts and a reason: `complete` when every task is `DONE`, `blocked` when the remaining tasks can never become claimable (a dead lane and its dependents).
+Otherwise the usual retry response is returned, with the same `drain` object explaining why the board is not drained yet (`claimable`, `in_flight`, or `empty`; an empty board is never drained because the project may still be being created).
+
+The signal leans on ADR-0012 D3: a dead worker's lease is recovered within the silence timeout, so its task returns to claimable and the drain never fires over abandoned work.
+It replaces the experiment monitor's `EXPERIMENT_COMPLETE`, which fired only when a model called `end_experiment`; that path remains until the launcher step removes the monitor (D10).
+
 ## Special System Characteristics
 
 ### AI-Powered Intelligence

@@ -120,6 +120,56 @@ def deps_allow_claim(
     return True, degraded
 
 
+def build_slug_to_id(tasks: List[Task]) -> Dict[str, str]:
+    """Map design-task slugs to board ids for dependency resolution.
+
+    Bundled design tasks are created with slug ids like
+    ``design_productivity_tools`` and get replaced with board ids when
+    synced. Dependencies still reference the slug, so both the assignment
+    filter and the drain verdict resolve slugs before gating.
+
+    Parameters
+    ----------
+    tasks : List[Task]
+        The (project-scoped) tasks to index.
+
+    Returns
+    -------
+    Dict[str, str]
+        ``slug -> task id`` for every design task that carries a domain label.
+    """
+    slug_to_id: Dict[str, str] = {}
+    for task in tasks:
+        labels = getattr(task, "labels", None) or []
+        if not (task.name and "Design" in task.name and len(labels) >= 3):
+            continue
+        domain_labels = [
+            label for label in labels if label.lower() not in ("design", "architecture")
+        ]
+        if domain_labels:
+            domain = domain_labels[-1]
+            slug_to_id[f"design_{domain.lower().replace(' ', '_')}"] = str(task.id)
+    return slug_to_id
+
+
+def resolve_dependency_ids(task: Task, slug_to_id: Dict[str, str]) -> List[str]:
+    """Return a task's dependency ids with design slugs resolved.
+
+    Parameters
+    ----------
+    task : Task
+        The task whose dependencies are read.
+    slug_to_id : Dict[str, str]
+        From :func:`build_slug_to_id`.
+
+    Returns
+    -------
+    List[str]
+        Dependency ids, slugs replaced where a mapping exists.
+    """
+    return [slug_to_id.get(dep_id, dep_id) for dep_id in (task.dependencies or [])]
+
+
 def phase_satisfied_by(task: Task) -> Set[TaskStatus]:
     """Statuses that satisfy an earlier-phase requirement for ``task``.
 
