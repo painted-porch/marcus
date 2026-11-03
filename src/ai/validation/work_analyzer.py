@@ -170,8 +170,11 @@ class WorkAnalyzer:
         file_manifest = self._collect_file_manifest(project_root)
         logger.info(f"File manifest: {len(file_manifest)} files in project")
 
-        # 5. Get design artifacts from state
-        design_artifacts = state.task_artifacts.get(task.id, []).copy()
+        # 5. Get design artifacts from state. The store is created by
+        #    MarcusServer.__init__, but a state that never logged an
+        #    artifact (older servers, test doubles) may not carry it,
+        #    and the gate must not crash on that (#795).
+        design_artifacts = getattr(state, "task_artifacts", {}).get(task.id, []).copy()
         logger.debug(f"Found {len(design_artifacts)} design artifacts")
 
         # 6. Get decisions from get_task_context
@@ -451,7 +454,7 @@ class WorkAnalyzer:
                 return str(main_workspace)
 
         # Fallback: extract from logged artifacts
-        artifacts = state.task_artifacts.get(task.id, [])
+        artifacts = getattr(state, "task_artifacts", {}).get(task.id, [])
         if artifacts and "project_root" in artifacts[0]:
             return str(artifacts[0]["project_root"])
 
