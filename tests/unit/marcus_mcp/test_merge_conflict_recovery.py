@@ -30,7 +30,7 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -78,6 +78,39 @@ def _make_blocked_task(
             }
         },
     )
+
+
+def _git(cwd: Path, *args: str) -> None:
+    """Run git in ``cwd`` and raise on failure.
+
+    Parameters
+    ----------
+    cwd : Path
+        Directory to run in.
+    *args : str
+        Git arguments.
+    """
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _git_out(cwd: Path, *args: str) -> str:
+    """Run git in ``cwd`` and return stripped stdout.
+
+    Parameters
+    ----------
+    cwd : Path
+        Directory to run in.
+    *args : str
+        Git arguments.
+
+    Returns
+    -------
+    str
+        Stripped stdout.
+    """
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True
+    ).stdout.strip()
 
 
 def _setup_recoverable_repo(tmp_path: Path) -> Path:
@@ -267,16 +300,67 @@ def _setup_untracked_collision_repo(tmp_path: Path) -> Path:
     return impl
 
 
-def _make_state(impl: Path, *, blocked_task: Task) -> MagicMock:
-    """Marcus state mock with the inputs the recovery helper reads."""
+def _make_state(
+    impl: Path,
+    *,
+    blocked_task: Task,
+    baseline: Optional[str] = None,
+    storage: Optional[Path] = None,
+) -> MagicMock:
+    """Marcus state mock with the inputs the recovery helper reads.
+
+    Parameters
+    ----------
+    impl : Path
+        The implementation repository, reported as ``project_root``.
+    blocked_task : Task
+        The BLOCKED task the sweep will pick up.
+    baseline : Optional[str]
+        When given, recorded in a real ``AssignmentPersistence`` as the
+        task's claim-time baseline. Recovery refuses without one, so a
+        test that expects a landing has to supply it.
+    storage : Optional[Path]
+        Where that store lives. Required when ``baseline`` is given.
+
+    Returns
+    -------
+    MagicMock
+        The state double.
+    """
     state = MagicMock()
     state.kanban_client = MagicMock()
     state.kanban_client._load_workspace_state = MagicMock(
         return_value={"project_root": str(impl)}
     )
     state.kanban_client.update_task = AsyncMock(return_value={"success": True})
+    state.kanban_client.get_all_tasks = AsyncMock(return_value=[blocked_task])
     state.project_tasks = [blocked_task]
+    state.agent_tasks = {}
+    if baseline is not None:
+        from src.core.assignment_persistence import AssignmentPersistence
+
+        assert storage is not None, "a baseline needs somewhere to live"
+        state.assignment_persistence = AssignmentPersistence(storage_dir=storage)
+        state.pending_baseline = (baseline, blocked_task.id)
+    else:
+        state.assignment_persistence = None
     return state
+
+
+async def _with_baseline(state: MagicMock, agent_id: str = "agent_X") -> None:
+    """Write the recorded baseline into the state's store.
+
+    Separate from ``_make_state`` because the store's writes are async.
+
+    Parameters
+    ----------
+    state : MagicMock
+        A state built with ``baseline=``.
+    agent_id : str
+        The agent that claimed the task.
+    """
+    baseline, task_id = state.pending_baseline
+    await state.assignment_persistence.record_task_baseline(task_id, agent_id, baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -284,49 +368,216 @@ def _make_state(impl: Path, *, blocked_task: Task) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
-class TestAttemptMergeRecoveryHappyPath:
-    """Stale-base false-conflict recoveries (the common case)."""
+class TestRecoveryLandsOnlyThisTask:
+    """Issue #796: the rescue must not merge the whole session branch."""
 
     @pytest.mark.asyncio
-    async def test_rebase_succeeds_merges_branch_returns_success(
-        self, tmp_path
-    ) -> None:
-        """When the rebase is clean, the branch lands in main and the task
-        recovers.
+    async def test_a_refused_task_on_the_branch_stays_off_main(self, tmp_path) -> None:
+        """The headline case, which the old rebase-and-fast-forward failed.
 
-        Verifies the end-to-end path: rebase succeeds, fast-forward
-        merge lands the agent's commit in main, ``kanban_client.update_task``
-        is called with status=DONE, and the helper returns a success dict.
+        The branch carries a task Marcus refused and then this task's
+        own work. Rescuing this task must land its work and leave the
+        refused commit's file off main.
         """
         from src.marcus_mcp.tools.task import _attempt_merge_recovery
 
         impl = _setup_recoverable_repo(tmp_path)
+        wt = impl.parent / "worktrees" / "agent_X"
+
+        # A refused task's commit, then this task's baseline, then its work.
+        _git(wt, "rm", "-q", "agent_X.txt")
+        (wt / "refused.txt").write_text("work Marcus refused\n")
+        _git(wt, "add", "-A")
+        _git(wt, "commit", "-m", "refused task")
+        baseline = _git_out(wt, "rev-parse", "HEAD")
+        (wt / "mine.txt").write_text("this task's work\n")
+        _git(wt, "add", "-A")
+        _git(wt, "commit", "-m", "this task")
+
+        task = _make_blocked_task()
+        state = _make_state(
+            impl,
+            blocked_task=task,
+            baseline=baseline,
+            storage=tmp_path / "assignments",
+        )
+        await _with_baseline(state)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        assert result is not None and result["success"] is True
+        assert result["method"] == "task_scoped_landing"
+        assert (impl / "mine.txt").exists(), "this task's work did not land"
+        assert not (impl / "refused.txt").exists(), "a refused task reached main"
+        # main's own file is untouched.
+        assert (impl / "mainonly.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_without_a_baseline_the_task_stays_blocked(self, tmp_path) -> None:
+        """No baseline means the landing could only be widened, so it stops.
+
+        On the completion path a missing baseline falls back to merging
+        the whole branch, because an agent is waiting and its work should
+        not be dropped. Here nobody is waiting, and widening is the
+        defect this path exists to stop.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_recoverable_repo(tmp_path)
+        before = _git_out(impl, "rev-parse", "main")
         task = _make_blocked_task()
         state = _make_state(impl, blocked_task=task)
 
         result = await _attempt_merge_recovery(task=task, state=state)
 
-        # Helper reports success
-        assert result is not None
-        assert result["success"] is True
-        assert result["task_id"] == task.id
+        assert result is None
+        assert _git_out(impl, "rev-parse", "main") == before
+        assert not (impl / "agent_X.txt").exists()
 
-        # The agent's file is now in main (rebase replayed cleanly,
-        # fast-forward merge succeeded).
-        assert (impl / "agent_X.txt").exists()
-        assert (impl / "agent_X.txt").read_text() == "agent X work\n"
-        # And main's own file is still there.
-        assert (impl / "mainonly.txt").exists()
+    @pytest.mark.asyncio
+    async def test_recovery_marks_the_task_done_and_clears_the_conflict(
+        self, tmp_path
+    ) -> None:
+        """On success the board stops saying BLOCKED and loses the record."""
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
 
-        # The task was transitioned to DONE on the kanban.
-        state.kanban_client.update_task.assert_awaited_once()
-        kanban_call = state.kanban_client.update_task.call_args
-        update_data = (
-            kanban_call.args[1]
-            if len(kanban_call.args) > 1
-            else kanban_call.kwargs["update_data"]
+        impl = _setup_recoverable_repo(tmp_path)
+        wt = impl.parent / "worktrees" / "agent_X"
+        baseline = _git_out(wt, "rev-parse", "HEAD~1")
+        task = _make_blocked_task()
+        state = _make_state(
+            impl,
+            blocked_task=task,
+            baseline=baseline,
+            storage=tmp_path / "assignments",
         )
+        await _with_baseline(state)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        assert result is not None and result["success"] is True
+        assert (impl / "agent_X.txt").read_text() == "agent X work\n"
+        state.kanban_client.update_task.assert_awaited()
+        call = state.kanban_client.update_task.call_args
+        update_data = call.args[1] if len(call.args) > 1 else call.kwargs["update_data"]
         assert update_data["status"] == TaskStatus.DONE
+        assert "merge_conflict" not in (update_data.get("source_context") or {})
+
+    @pytest.mark.asyncio
+    async def test_the_agents_worktree_is_left_exactly_as_it_was(
+        self, tmp_path
+    ) -> None:
+        """The sweep no longer stashes, resets or rebases anything.
+
+        It used to do all three to make room for a rebase, which meant a
+        sweep running on someone else's poll could disturb an agent's
+        uncommitted work. There is nothing left to disturb.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_recoverable_repo(tmp_path)
+        wt = impl.parent / "worktrees" / "agent_X"
+        baseline = _git_out(wt, "rev-parse", "HEAD~1")
+        # Uncommitted and untracked work the agent still has in hand.
+        (wt / "agent_X.txt").write_text("agent X work, edited but not committed\n")
+        (wt / "scratch.log").write_text("a gate run left this\n")
+        head_before = _git_out(wt, "rev-parse", "HEAD")
+        status_before = _git_out(wt, "status", "--porcelain")
+
+        task = _make_blocked_task()
+        state = _make_state(
+            impl,
+            blocked_task=task,
+            baseline=baseline,
+            storage=tmp_path / "assignments",
+        )
+        await _with_baseline(state)
+
+        await _attempt_merge_recovery(task=task, state=state)
+
+        assert _git_out(wt, "rev-parse", "HEAD") == head_before
+        assert _git_out(wt, "status", "--porcelain") == status_before
+        assert (wt / "scratch.log").exists()
+        assert (
+            wt / "agent_X.txt"
+        ).read_text() == "agent X work, edited but not committed\n"
+        assert _git_out(wt, "stash", "list") == "", "the sweep stashed something"
+
+    @pytest.mark.asyncio
+    async def test_a_still_conflicting_task_stays_blocked(self, tmp_path) -> None:
+        """A genuine unresolved conflict is the honest BLOCKED case."""
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_recoverable_repo(tmp_path)
+        wt = impl.parent / "worktrees" / "agent_X"
+        baseline = _git_out(wt, "rev-parse", "HEAD")
+        # Both sides change the same line after the baseline.
+        (wt / "base.txt").write_text("the agent's line\n")
+        _git(wt, "add", "-A")
+        _git(wt, "commit", "-m", "agent edits base.txt")
+        (impl / "base.txt").write_text("main's line\n")
+        _git(impl, "add", "-A")
+        _git(impl, "commit", "-m", "main edits base.txt")
+        before = _git_out(impl, "rev-parse", "main")
+
+        task = _make_blocked_task()
+        state = _make_state(
+            impl,
+            blocked_task=task,
+            baseline=baseline,
+            storage=tmp_path / "assignments",
+        )
+        await _with_baseline(state)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        assert result is None
+        assert _git_out(impl, "rev-parse", "main") == before
+        assert (impl / "base.txt").read_text() == "main's line\n"
+        assert _git_out(impl, "status", "--porcelain") == ""
+
+    @pytest.mark.asyncio
+    async def test_manual_resolution_in_progress_is_not_disturbed(
+        self, tmp_path
+    ) -> None:
+        """A worktree mid-merge is left alone.
+
+        The blocker message tells the agent to resolve the conflict in
+        that worktree, and this sweep runs on any other agent's no-task
+        poll. A branch tip that is still the commit which failed would
+        only fail again, so retrying there is churn at best.
+        """
+        from src.marcus_mcp.tools.task import _attempt_merge_recovery
+
+        impl = _setup_recoverable_repo(tmp_path)
+        wt = impl.parent / "worktrees" / "agent_X"
+        baseline = _git_out(wt, "rev-parse", "HEAD~1")
+        # Put the worktree mid-merge, as a resolving agent would.
+        (wt / "base.txt").write_text("agent's side\n")
+        _git(wt, "add", "-A")
+        _git(wt, "commit", "-m", "agent edits base.txt")
+        (impl / "base.txt").write_text("main's side\n")
+        _git(impl, "add", "-A")
+        _git(impl, "commit", "-m", "main edits base.txt")
+        subprocess.run(
+            ["git", "merge", "main", "--no-edit"], cwd=wt, capture_output=True
+        )
+        assert _git_out(wt, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
+
+        task = _make_blocked_task()
+        state = _make_state(
+            impl,
+            blocked_task=task,
+            baseline=baseline,
+            storage=tmp_path / "assignments",
+        )
+        await _with_baseline(state)
+
+        result = await _attempt_merge_recovery(task=task, state=state)
+
+        assert result is None
+        # The resolution in progress is untouched.
+        assert _git_out(wt, "rev-parse", "--verify", "--quiet", "MERGE_HEAD")
 
     @pytest.mark.asyncio
     async def test_recovery_opens_a_pending_reconciliation_card(self, tmp_path) -> None:
@@ -334,16 +585,22 @@ class TestAttemptMergeRecoveryHappyPath:
 
         This path marks the task DONE without going through
         ``report_task_progress``, so a refusal recorded while the
-        replacement was conflicted would otherwise never get its card and
-        the refused work would sit on its branch unmentioned (Codex P2 on
-        PR #794).
+        replacement was conflicted would otherwise never get its card
+        (Codex P2 on PR #794).
         """
-        from src.core.assignment_persistence import AssignmentPersistence
         from src.marcus_mcp.tools.task import _attempt_merge_recovery
 
         impl = _setup_recoverable_repo(tmp_path)
+        wt = impl.parent / "worktrees" / "agent_X"
+        baseline = _git_out(wt, "rev-parse", "HEAD~1")
         task = _make_blocked_task()
-        state = _make_state(impl, blocked_task=task)
+        state = _make_state(
+            impl,
+            blocked_task=task,
+            baseline=baseline,
+            storage=tmp_path / "assignments",
+        )
+        await _with_baseline(state)
         created: list = []
 
         async def _create_task(task_data):
@@ -355,9 +612,7 @@ class TestAttemptMergeRecoveryHappyPath:
             return card
 
         state.kanban_client.create_task = AsyncMock(side_effect=_create_task)
-        state.kanban_client.get_all_tasks = AsyncMock(return_value=[task])
-        persistence = AssignmentPersistence(storage_dir=tmp_path / "assignments")
-        await persistence.record_refused_attempt(
+        await state.assignment_persistence.record_refused_attempt(
             task.id,
             {
                 "agent_id": "displaced_session",
@@ -366,236 +621,12 @@ class TestAttemptMergeRecoveryHappyPath:
                 "refused_at": "2026-11-03T00:00:00+00:00",
             },
         )
-        state.assignment_persistence = persistence
 
         result = await _attempt_merge_recovery(task=task, state=state)
 
         assert result is not None and result["success"] is True
         assert len(created) == 1, "the recovery left the refusal unreconciled"
         assert "marcus/displaced_session" in created[0]["description"]
-
-    @pytest.mark.asyncio
-    async def test_recovery_clears_merge_conflict_from_source_context(
-        self, tmp_path
-    ) -> None:
-        """On success the ``source_context.merge_conflict`` record is removed.
-
-        Otherwise the task would look like it still has a merge
-        conflict even after recovery — downstream tooling (recovery
-        sweepers, dashboards) would misclassify it.
-        """
-        from src.marcus_mcp.tools.task import _attempt_merge_recovery
-
-        impl = _setup_recoverable_repo(tmp_path)
-        task = _make_blocked_task()
-        state = _make_state(impl, blocked_task=task)
-
-        await _attempt_merge_recovery(task=task, state=state)
-
-        # Inspect the update_data passed to update_task.
-        kanban_call = state.kanban_client.update_task.call_args
-        update_data = (
-            kanban_call.args[1]
-            if len(kanban_call.args) > 1
-            else kanban_call.kwargs["update_data"]
-        )
-        # source_context still exists (other fields may have been set)
-        # but the merge_conflict entry must be gone.
-        ctx = update_data.get("source_context", {})
-        assert "merge_conflict" not in ctx
-
-
-# ---------------------------------------------------------------------------
-# _attempt_merge_recovery — dirty worktree index (bug #700)
-# ---------------------------------------------------------------------------
-
-
-class TestAttemptMergeRecoveryDirtyWorktreeIndex:
-    """A dirty worktree index must not permanently wedge recovery (#700).
-
-    A failed integration merge or gate-test side effects can leave the
-    agent's worktree with uncommitted changes.  Before the fix, the
-    recovery path ran ``git rebase main`` straight into that dirty state
-    and git aborted with "Your index contains uncommitted changes" /
-    "You have unstaged changes", so the task stayed BLOCKED forever even
-    though it was a mechanically-recoverable stale-base conflict.
-    """
-
-    @pytest.mark.asyncio
-    async def test_dirty_worktree_is_cleaned_and_recovery_succeeds(
-        self, tmp_path
-    ) -> None:
-        """Recovery cleans uncommitted cruft, then rebases and lands the work.
-
-        This is a stale-base false conflict (recoverable), but the
-        worktree carries both a staged and an unstaged change on entry.
-        The fix discards that uncommitted state before rebasing; the
-        agent's committed work is untouched and replays onto main.
-        """
-        from src.marcus_mcp.tools.task import _attempt_merge_recovery
-
-        impl = _setup_recoverable_repo(tmp_path)
-        _dirty_worktree_index(impl)
-        task = _make_blocked_task()
-        state = _make_state(impl, blocked_task=task)
-
-        result = await _attempt_merge_recovery(task=task, state=state)
-
-        # Recovery succeeded despite the dirty index on entry.
-        assert result is not None
-        assert result["success"] is True
-
-        # The agent's committed work landed in main (rebase replayed it).
-        assert (impl / "agent_X.txt").exists()
-        assert (impl / "agent_X.txt").read_text() == "agent X work\n"
-        # Main's own file survives.
-        assert (impl / "mainonly.txt").exists()
-
-        # The uncommitted cruft was discarded, not carried into main.
-        assert not (impl / "leftover.txt").exists()
-
-        # Task transitioned to DONE.
-        state.kanban_client.update_task.assert_awaited_once()
-        kanban_call = state.kanban_client.update_task.call_args
-        update_data = (
-            kanban_call.args[1]
-            if len(kanban_call.args) > 1
-            else kanban_call.kwargs["update_data"]
-        )
-        assert update_data["status"] == TaskStatus.DONE
-
-    @pytest.mark.asyncio
-    async def test_manual_resolution_in_progress_is_not_disturbed(
-        self, tmp_path
-    ) -> None:
-        """A concurrent sweep must never wipe an in-progress manual resolve.
-
-        The merge-conflict blocker message asks the agent to resolve the
-        conflict in its worktree (``git merge main``; edit; add; commit).
-        This recovery runs on other agents' no-task polls, so if it fired
-        mid-resolution and reset the worktree it would destroy the agent's
-        work.  When a merge is in progress (``MERGE_HEAD`` present),
-        recovery must fence: return None and leave the edits untouched.
-        """
-        from src.marcus_mcp.tools.task import _attempt_merge_recovery
-
-        impl = _setup_unrecoverable_repo(tmp_path)
-        wt = tmp_path / "worktrees" / "agent_X"
-
-        # Agent starts resolving: `git merge main` conflicts, then they
-        # write a resolution into the working tree (not yet committed).
-        subprocess.run(
-            ["git", "merge", "main"],
-            cwd=wt,
-            capture_output=True,
-            text=True,
-        )
-        (wt / "conflict.txt").write_text("carefully merged by hand\n")
-
-        task = _make_blocked_task()
-        state = _make_state(impl, blocked_task=task)
-
-        result = await _attempt_merge_recovery(task=task, state=state)
-
-        # Recovery fenced — task stays BLOCKED, no DONE transition.
-        assert result is None
-        state.kanban_client.update_task.assert_not_called()
-
-        # The agent's in-progress resolution is preserved, not reset.
-        assert (wt / "conflict.txt").read_text() == "carefully merged by hand\n"
-
-    @pytest.mark.asyncio
-    async def test_untracked_collision_is_set_aside_and_recovery_succeeds(
-        self, tmp_path
-    ) -> None:
-        """An untracked file that collides with newer main must not wedge us.
-
-        ``git reset --hard`` ignores untracked paths, so a stale untracked
-        file whose name main now tracks would abort the rebase with
-        "untracked working tree files would be overwritten by checkout".
-        Setting untracked files aside (stash ``--include-untracked``) lets
-        the mechanical rebase proceed.
-        """
-        from src.marcus_mcp.tools.task import _attempt_merge_recovery
-
-        impl = _setup_untracked_collision_repo(tmp_path)
-        task = _make_blocked_task()
-        state = _make_state(impl, blocked_task=task)
-
-        result = await _attempt_merge_recovery(task=task, state=state)
-
-        # Recovery succeeded despite the untracked collision on entry.
-        assert result is not None
-        assert result["success"] is True
-
-        # The agent's committed work landed in main.
-        assert (impl / "agent_X.txt").exists()
-        # main's own committed lock.txt is intact (main's version, not the
-        # worktree's stale untracked copy).
-        assert (impl / "lock.txt").read_text() == "generated on main\n"
-
-        # Task transitioned to DONE.
-        kanban_call = state.kanban_client.update_task.call_args
-        update_data = (
-            kanban_call.args[1]
-            if len(kanban_call.args) > 1
-            else kanban_call.kwargs["update_data"]
-        )
-        assert update_data["status"] == TaskStatus.DONE
-
-
-# ---------------------------------------------------------------------------
-# _attempt_merge_recovery — failure path
-# ---------------------------------------------------------------------------
-
-
-class TestAttemptMergeRecoveryRealConflict:
-    """When rebase has real content conflicts, leave the task BLOCKED."""
-
-    @pytest.mark.asyncio
-    async def test_real_content_conflict_aborts_rebase_returns_none(
-        self, tmp_path
-    ) -> None:
-        """The rebase aborts on overlapping line changes; the task stays
-        BLOCKED so a human (or future MCP recovery tool) can resolve.
-
-        Critical: the worktree must NOT be left in a half-rebase state.
-        ``git rebase --abort`` cleans it up regardless of how this
-        function exits.
-        """
-        from src.marcus_mcp.tools.task import _attempt_merge_recovery
-
-        impl = _setup_unrecoverable_repo(tmp_path)
-        task = _make_blocked_task()
-        state = _make_state(impl, blocked_task=task)
-
-        result = await _attempt_merge_recovery(task=task, state=state)
-
-        # Helper reports recovery failed (None or success=False).
-        assert result is None or result.get("success") is False
-
-        # No kanban transition to DONE — task stays BLOCKED.
-        if state.kanban_client.update_task.called:
-            kanban_call = state.kanban_client.update_task.call_args
-            update_data = (
-                kanban_call.args[1]
-                if len(kanban_call.args) > 1
-                else kanban_call.kwargs.get("update_data", {})
-            )
-            assert update_data.get("status") != TaskStatus.DONE
-
-        # Worktree is back to a clean state (no rebase in progress).
-        wt = tmp_path / "worktrees" / "agent_X"
-        rebase_dir = wt / ".git" / "rebase-merge"
-        rebase_apply = wt / ".git" / "rebase-apply"
-        # Neither rebase-state directory should remain.
-        assert not rebase_dir.exists()
-        assert not rebase_apply.exists()
-
-
-# ---------------------------------------------------------------------------
-# _attempt_merge_recovery — edge cases (defensive)
-# ---------------------------------------------------------------------------
 
 
 class TestAttemptMergeRecoveryDefensive:
