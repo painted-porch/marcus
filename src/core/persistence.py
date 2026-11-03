@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,36 @@ from src.core.paths import DATA_DIR_ENV
 logger = logging.getLogger(__name__)
 
 
+#: A JSON field name as it may appear in a ``where`` prefilter.
+_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _where_values(expected: Any) -> List[Any]:
+    """Return the list of acceptable values behind one ``where`` entry."""
+    if isinstance(expected, (list, tuple, set, frozenset)):
+        return list(expected)
+    return [expected]
+
+
+def _matches_where(item: Dict[str, Any], where: Optional[Dict[str, Any]]) -> bool:
+    """Apply a ``where`` prefilter in Python (the file backend, and tests).
+
+    Each entry is ``field: value`` or ``field: [values]``; ``None`` in the
+    values matches a field that is null or absent. Entries are ANDed.
+    """
+    if not where:
+        return True
+    for field, expected in where.items():
+        values = _where_values(expected)
+        actual = item.get(field)
+        if actual is None:
+            if not any(v is None for v in values):
+                return False
+        elif actual not in [v for v in values if v is not None]:
+            return False
+    return True
+
+
 class PersistenceBackend:
     """Base class for persistence backends."""
 
@@ -37,9 +68,34 @@ class PersistenceBackend:
         raise NotImplementedError
 
     async def query(
-        self, collection: str, filter_func: Optional[Any] = None, limit: int = 100
+        self,
+        collection: str,
+        filter_func: Optional[Any] = None,
+        limit: int = 100,
+        where: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """Query data from a collection with optional filtering."""
+        """Query data from a collection, newest stored first.
+
+        Parameters
+        ----------
+        collection : str
+            Collection to read.
+        filter_func : Optional[Any]
+            Python predicate applied to every candidate row. The limit
+            counts rows that pass it, so a match behind many newer
+            non-matching rows is still found.
+        limit : int
+            Maximum number of matching rows to return.
+        where : Optional[Dict[str, Any]]
+            Prefilter on JSON fields applied before the limit: ``field:
+            value`` or ``field: [values]``; ``None`` matches a null or
+            absent field. Entries are ANDed. Backends that can push this
+            into storage do, which is what keeps a per-project read
+            cheap on a shared database.
+        offset : int
+            Number of matching rows to skip, newest first.
+        """
         raise NotImplementedError
 
     async def delete(self, collection: str, key: str) -> None:
@@ -146,7 +202,12 @@ class FilePersistence(PersistenceBackend):
                 return None
 
     async def query(
-        self, collection: str, filter_func: Optional[Any] = None, limit: int = 100
+        self,
+        collection: str,
+        filter_func: Optional[Any] = None,
+        limit: int = 100,
+        where: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """Query data from a collection."""
         lock = self._get_lock(collection)
@@ -164,14 +225,19 @@ class FilePersistence(PersistenceBackend):
                 # Convert to list of items
                 items = [{"_key": k, **v} for k, v in data.items()]
 
-                # Apply filter if provided
+                # Apply the prefilter and the predicate before any limit
+                if where:
+                    items = [item for item in items if _matches_where(item, where)]
                 if filter_func:
                     items = [item for item in items if filter_func(item)]
 
-                # Sort by stored time (newest first) and limit
-                items.sort(key=lambda x: x.get("_stored_at", ""), reverse=True)
+                # Sort by stored time (newest first; key breaks ties), then page
+                items.sort(
+                    key=lambda x: (x.get("_stored_at", ""), x.get("_key", "")),
+                    reverse=True,
+                )
 
-                return items[:limit]
+                return items[offset : offset + limit]
 
             except Exception as e:
                 logger.error(f"Error querying {collection}: {e}")
@@ -345,33 +411,86 @@ class SQLitePersistence(PersistenceBackend):
 
         return await asyncio.get_event_loop().run_in_executor(None, _retrieve)
 
+    @staticmethod
+    def _where_sql(where: Optional[Dict[str, Any]]) -> tuple[str, List[Any]]:
+        """Translate a ``where`` prefilter into SQL on the JSON ``data`` column.
+
+        Returns the clause to append after ``WHERE collection = ?`` (empty
+        when there is nothing to add) and its bound parameters. Field
+        names are validated as identifiers; values are always bound.
+        """
+        if not where:
+            return "", []
+        clauses: List[str] = []
+        params: List[Any] = []
+        for field, expected in where.items():
+            if not _FIELD_NAME.match(field):
+                raise ValueError(f"invalid where field name: {field!r}")
+            path = f"json_extract(data, '$.{field}')"
+            values = _where_values(expected)
+            non_null = [v for v in values if v is not None]
+            parts: List[str] = []
+            if non_null:
+                parts.append(f"{path} IN ({', '.join('?' * len(non_null))})")
+                params.extend(non_null)
+            if any(v is None for v in values):
+                parts.append(f"{path} IS NULL")
+            # An empty list of values matches nothing.
+            clauses.append("(" + " OR ".join(parts or ["0"]) + ")")
+        return " AND " + " AND ".join(clauses), params
+
     async def query(
-        self, collection: str, filter_func: Optional[Any] = None, limit: int = 100
+        self,
+        collection: str,
+        filter_func: Optional[Any] = None,
+        limit: int = 100,
+        where: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """Query data from SQLite."""
+        """Query data from SQLite.
+
+        The ``where`` prefilter runs in SQL before any limit. A Python
+        ``filter_func`` is applied by streaming the ordered rows, so the
+        limit counts matches rather than candidates: the old
+        ``LIMIT limit * 2`` prefetch returned an empty page whenever a
+        match sat behind more than twice the limit in newer non-matching
+        rows (Codex P2 on PR #800).
+        """
+        where_sql, where_params = self._where_sql(where)
+        # The order is total (key breaks same-second ties) so that "the
+        # newest N" is one well-defined set and paging never overlaps.
+        base_sql = (
+            "SELECT key, data, stored_at FROM persistence WHERE collection = ?"
+            f"{where_sql} ORDER BY stored_at DESC, key DESC"
+        )
+        base_params: List[Any] = [collection, *where_params]
+
+        def _load(row: Any) -> Dict[str, Any]:
+            item: Dict[str, Any] = json.loads(row[1])
+            item["_key"] = row[0]
+            item["_stored_at"] = row[2]
+            return item
 
         def _query() -> List[Dict[str, Any]]:
             with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.execute(
-                    """
-                    SELECT key, data FROM persistence
-                    WHERE collection = ?
-                    ORDER BY stored_at DESC
-                    LIMIT ?
-                """,
-                    (collection, limit * 2),
-                )  # Get extra for filtering
+                if filter_func is None:
+                    cursor = conn.execute(
+                        base_sql + " LIMIT ? OFFSET ?", (*base_params, limit, offset)
+                    )
+                    return [_load(row) for row in cursor]
 
-                items = []
-                for row in cursor:
-                    item = json.loads(row[1])
-                    item["_key"] = row[0]
-
-                    if not filter_func or filter_func(item):
-                        items.append(item)
-                        if len(items) >= limit:
-                            break
-
+                items: List[Dict[str, Any]] = []
+                skipped = 0
+                for row in conn.execute(base_sql, base_params):
+                    item = _load(row)
+                    if not filter_func(item):
+                        continue
+                    if skipped < offset:
+                        skipped += 1
+                        continue
+                    items.append(item)
+                    if len(items) >= limit:
+                        break
                 return items
 
         return await asyncio.get_event_loop().run_in_executor(None, _query)
@@ -606,10 +725,17 @@ class Persistence:
         return await self.backend.retrieve(collection, key)
 
     async def query(
-        self, collection: str, filter_func: Optional[Any] = None, limit: int = 100
+        self,
+        collection: str,
+        filter_func: Optional[Any] = None,
+        limit: int = 100,
+        where: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """Query a collection."""
-        return await self.backend.query(collection, filter_func, limit)
+        """Query a collection (see ``PersistenceBackend.query``)."""
+        return await self.backend.query(
+            collection, filter_func, limit, where=where, offset=offset
+        )
 
     async def delete(self, collection: str, key: str) -> None:
         """Delete data from a collection."""
@@ -669,7 +795,12 @@ class MemoryPersistence(PersistenceBackend):
             return self.data[collection].get(key)
 
     async def query(
-        self, collection: str, filter_func: Optional[Any] = None, limit: int = 100
+        self,
+        collection: str,
+        filter_func: Optional[Any] = None,
+        limit: int = 100,
+        where: Optional[Dict[str, Any]] = None,
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """Query data from memory."""
         lock = self._get_lock(collection)
@@ -680,14 +811,19 @@ class MemoryPersistence(PersistenceBackend):
             # Convert to list of items
             items = [{"_key": k, **v} for k, v in self.data[collection].items()]
 
-            # Apply filter if provided
+            # Apply the prefilter and the predicate before any limit
+            if where:
+                items = [item for item in items if _matches_where(item, where)]
             if filter_func:
                 items = [item for item in items if filter_func(item)]
 
-            # Sort by stored time (newest first) and limit
-            items.sort(key=lambda x: x.get("_stored_at", ""), reverse=True)
+            # Sort by stored time (newest first; key breaks ties), then page
+            items.sort(
+                key=lambda x: (x.get("_stored_at", ""), x.get("_key", "")),
+                reverse=True,
+            )
 
-            return items[:limit]
+            return items[offset : offset + limit]
 
     async def delete(self, collection: str, key: str) -> None:
         """Delete data from memory."""

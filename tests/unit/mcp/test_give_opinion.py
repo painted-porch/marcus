@@ -164,32 +164,15 @@ class TestGiveOpinion:
         assert persist.await_args.kwargs["project_id"] == "p-agent"
 
     @pytest.mark.asyncio
-    async def test_unregistered_agent_falls_back_to_the_active_project(self) -> None:
-        """Without a registration, the active project is the best stamp."""
+    async def test_unregistered_agent_cannot_post_a_task_less_opinion(self) -> None:
+        """An active project is never guessed for an agent that never registered.
+
+        A task-less row is readable only through its project stamp, and
+        stamping the server's active project for an unknown caller would
+        be a guess beside the refuse-rather-than-strand rule.
+        """
         state = _make_state()
         state.agent_project_map = {}
-
-        with patch(
-            "src.marcus_mcp.tools.context._persist_decision_to_history",
-            new_callable=AsyncMock,
-        ):
-            result = await give_opinion(
-                agent_id="agent-2",
-                subject="farm.flooded",
-                what="the farm is flooded",
-                state=state,
-            )
-
-        assert result["success"] is True
-        assert state.context.log_decision.await_args.kwargs["project_id"] == "p-active"
-
-    @pytest.mark.asyncio
-    async def test_task_less_opinion_with_no_project_is_refused(self) -> None:
-        """A row no project can read back is refused rather than stranded."""
-        state = _make_state()
-        state.agent_project_map = {}
-        state.context.project_id = None
-        state.current_project_id = None
 
         result = await give_opinion(
             agent_id="agent-2",
@@ -199,7 +182,7 @@ class TestGiveOpinion:
         )
 
         assert result["success"] is False
-        assert "project" in result["error"]
+        assert "not registered" in result["error"]
         state.context.log_decision.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -207,8 +190,6 @@ class TestGiveOpinion:
         """With a task, the task-id clause makes the row readable."""
         state = _make_state()
         state.agent_project_map = {}
-        state.context.project_id = None
-        state.current_project_id = None
         state.context.log_decision = AsyncMock(
             return_value=_logged_decision(task_id="task-9")
         )

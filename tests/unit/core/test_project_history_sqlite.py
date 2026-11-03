@@ -144,14 +144,14 @@ class TestProjectHistoryPersistence:
         # Act
         decisions = await persistence.load_decisions(project_id)
 
-        # Assert
+        # Assert (rows stored in the same second are ordered by key, newest
+        # first, so compare as a set rather than by position)
         assert len(decisions) == 2
-        assert isinstance(decisions[0], Decision)
-        assert decisions[0].what == "Chose PostgreSQL"
-        assert decisions[0].task_id == "task_001"
-        assert decisions[0].project_id == "test_project_001"
-        assert decisions[1].what == "Chose React"
-        assert decisions[1].project_id == "test_project_001"
+        assert all(isinstance(d, Decision) for d in decisions)
+        by_what = {d.what: d for d in decisions}
+        assert by_what["Chose PostgreSQL"].task_id == "task_001"
+        assert by_what["Chose PostgreSQL"].project_id == "test_project_001"
+        assert by_what["Chose React"].project_id == "test_project_001"
 
     @pytest.mark.asyncio
     async def test_load_decisions_includes_project_level_opinions(
@@ -227,6 +227,125 @@ class TestProjectHistoryPersistence:
 
         # Assert
         assert decisions == []
+
+    @pytest.mark.asyncio
+    async def test_load_decisions_finds_an_opinion_behind_many_newer_foreign_rows(
+        self,
+        persistence: ProjectHistoryPersistence,
+        temp_db: Path,
+    ) -> None:
+        """A shared database full of newer foreign rows cannot hide ours.
+
+        Codex P2 on PR #800: the backend applied its SQL limit before the
+        project filter, so one target-project opinion behind 2 x limit
+        newer rows from other projects came back as an empty page.
+        """
+        import json
+        import sqlite3
+        from datetime import datetime, timedelta, timezone
+
+        persistence.db_path = temp_db
+        persistence._backend = SQLitePersistence(db_path=temp_db)
+        t0 = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
+        rows = [
+            (
+                "dec_target",
+                {
+                    "decision_id": "dec_target",
+                    "task_id": None,
+                    "agent_id": "agent_002",
+                    "timestamp": t0.isoformat(),
+                    "what": "the farm is flooded",
+                    "why": "water",
+                    "impact": "food",
+                    "subject": "farm.flooded",
+                    "kind": "assessment",
+                    "project_id": "test_project_001",
+                },
+                0,
+            )
+        ]
+        rows += [
+            (
+                f"dec_foreign_{i}",
+                {
+                    "decision_id": f"dec_foreign_{i}",
+                    "task_id": f"task_{i}",
+                    "agent_id": "agent_009",
+                    "timestamp": (t0 + timedelta(minutes=i + 1)).isoformat(),
+                    "what": "elsewhere",
+                    "why": "elsewhere",
+                    "impact": "elsewhere",
+                    "project_id": "some_other_project",
+                },
+                i + 1,
+            )
+            for i in range(24)
+        ]
+        with sqlite3.connect(temp_db) as conn:
+            for key, data, minute in rows:
+                conn.execute(
+                    "INSERT INTO persistence (collection, key, data, stored_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        "decisions",
+                        key,
+                        json.dumps(data),
+                        (t0 + timedelta(minutes=minute)).isoformat(),
+                    ),
+                )
+            conn.commit()
+
+        # Act: limit 5, so the old SQL prefetch of 10 rows held only foreign ones
+        decisions = await persistence.load_decisions("test_project_001", limit=5)
+
+        # Assert
+        assert [d.decision_id for d in decisions] == ["dec_target"]
+
+    @pytest.mark.asyncio
+    async def test_load_decisions_keeps_the_task_id_safety_net_for_mis_stamped_rows(
+        self,
+        persistence: ProjectHistoryPersistence,
+        temp_db: Path,
+    ) -> None:
+        """A row stamped with another project but made on our task still loads."""
+        import json
+
+        persistence.db_path = temp_db
+        persistence._backend = SQLitePersistence(db_path=temp_db)
+        await persistence._backend.store(
+            "decisions",
+            "dec_mis",
+            {
+                "decision_id": "dec_mis",
+                "task_id": "task_001",
+                "agent_id": "agent_001",
+                "timestamp": "2026-11-03T12:00:00+00:00",
+                "what": "chose postgres",
+                "why": "acid",
+                "impact": "data",
+                "project_id": "some_other_project",
+            },
+        )
+        conversations_dir = persistence.marcus_root / "logs" / "conversations"
+        conversations_dir.mkdir(parents=True, exist_ok=True)
+        with open(conversations_dir / "conversations_mis.jsonl", "w") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "project_id": "test_project_001",
+                            "task_id": "task_001",
+                        },
+                        "message": "mis-stamped",
+                    }
+                )
+                + "\n"
+            )
+
+        decisions = await persistence.load_decisions("test_project_001")
+
+        assert [d.decision_id for d in decisions] == ["dec_mis"]
 
     @pytest.mark.asyncio
     async def test_load_decisions_still_matches_task_scoped_rows_by_task_id(

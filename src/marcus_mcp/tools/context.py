@@ -185,25 +185,23 @@ def _about_card_id(state: Any) -> Optional[str]:
 
 
 def _project_for_agent(agent_id: str, state: Any) -> Optional[str]:
-    """Return the project an opinion by ``agent_id`` belongs to.
+    """Return the project an opinion by ``agent_id`` belongs to, if registered.
 
-    The agent's registration (``state.agent_project_map``) is the truth;
-    ``Context.project_id`` and ``state.current_project_id`` are the
-    server's ACTIVE project at call time, which on a multi-project server
-    need not be the agent's, and which is ``None`` before any project has
-    been selected (marcus-44 review of PR #800).
+    The agent's registration (``state.agent_project_map``) is the only
+    source used. ``register_agent`` refuses a registration without a
+    ``project_id`` and the map is rehydrated from persisted registrations
+    after a restart, so a registered agent is always found. The server's
+    ACTIVE project (``Context.project_id``, ``state.current_project_id``)
+    is deliberately not a fallback: it is ``None`` before any project is
+    selected and need not be the agent's on a multi-project server, and
+    an unregistered caller has no business posting an opinion
+    (marcus-44 review of PR #800).
     """
     mapping = getattr(state, "agent_project_map", None)
     if isinstance(mapping, dict):
         mapped = mapping.get(agent_id)
         if mapped:
             return str(mapped)
-    for candidate in (
-        getattr(getattr(state, "context", None), "project_id", None),
-        getattr(state, "current_project_id", None),
-    ):
-        if isinstance(candidate, str) and candidate:
-            return candidate
     return None
 
 
@@ -270,7 +268,7 @@ async def give_opinion(
         impact = impact.strip() if impact and impact.strip() else "Not specified"
 
         # A task-less opinion is readable only through its project stamp,
-        # so it is refused when no project can be resolved rather than
+        # so it is refused when the agent is not registered rather than
         # written where no reader will ever find it.
         project_id = _project_for_agent(agent_id, state)
         if project_id is None and task_id is None:
@@ -278,9 +276,9 @@ async def give_opinion(
                 "success": False,
                 "error": (
                     "no project to record a project-level opinion against: "
-                    f"agent {agent_id} is not registered to a project and "
-                    "no project is active. Register with a project_id, or "
-                    "pass task_id for an opinion about a task."
+                    f"agent {agent_id} is not registered. Call register_agent "
+                    "with a project_id first, or pass task_id for an opinion "
+                    "about a task."
                 ),
             }
 

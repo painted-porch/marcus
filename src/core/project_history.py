@@ -578,6 +578,82 @@ class ProjectHistoryPersistence:
 
         logger.info(f"Saved snapshot for project {snapshot.project_id}")
 
+    #: Task ids per storage query; stays under SQLite's historical 999
+    #: bound-variable limit with room for the other parameters.
+    _TASK_ID_CHUNK = 500
+
+    async def _load_project_rows(
+        self, collection: str, project_id: str, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
+        """
+        Load the rows of ``collection`` that belong to ``project_id``, paged.
+
+        A row belongs to the project when its stamped ``project_id``
+        matches, or when its ``task_id`` is one of the project's tasks
+        according to the conversation logs. The second clause is the
+        pre-stamp safety net: it loads rows written before ``project_id``
+        was stamped and rows stamped with another project while a task of
+        this one was being worked. The first clause is the only route for
+        a project-level opinion (``task_id`` None).
+
+        Both clauses run as storage prefilters, so a shared database full
+        of other projects' rows is never scanned in Python (Codex P2 on PR
+        #800: the backend used to apply its limit before the project
+        filter, and a project's rows behind enough newer foreign rows came
+        back as an empty page). Each clause fetches ``limit + offset``
+        rows, which is enough for the union's newest ``limit + offset`` to
+        be exact; the union is ordered newest first and then paged.
+
+        Parameters
+        ----------
+        collection : str
+            ``"decisions"`` or ``"artifacts"``
+        project_id : str
+            Project identifier
+        limit : int
+            Maximum rows to return (capped at 10000)
+        offset : int
+            Rows to skip, newest first
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Raw rows, newest first, deduplicated by storage key
+        """
+        page_limit = min(limit, 10000)
+        fetch = page_limit + offset
+        rows = await self._backend.query(
+            collection, where={"project_id": project_id}, limit=fetch
+        )
+        project_task_ids = sorted(
+            await self._get_task_ids_from_conversations(project_id)
+        )
+        for start in range(0, len(project_task_ids), self._TASK_ID_CHUNK):
+            chunk = project_task_ids[start : start + self._TASK_ID_CHUNK]
+            rows.extend(
+                await self._backend.query(
+                    collection, where={"task_id": chunk}, limit=fetch
+                )
+            )
+
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for row in rows:
+            key = str(row.get("_key", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+        # Newest first, with the key breaking same-second ties: the same
+        # total order the backends page by, so the union of each clause's
+        # newest ``fetch`` rows contains the union's newest ``fetch`` rows
+        # and paging never overlaps.
+        unique.sort(
+            key=lambda r: (str(r.get("_stored_at", "")), str(r.get("_key", ""))),
+            reverse=True,
+        )
+        return unique[offset : offset + page_limit]
+
     async def load_decisions(
         self, project_id: str, limit: int = 10000, offset: int = 0
     ) -> list[Decision]:
@@ -611,38 +687,9 @@ class ProjectHistoryPersistence:
 
         with error_context("load_decisions", custom_context={"project_id": project_id}):
             try:
-                # Use pooled backend instance
-                backend = self._backend
-
-                # Get task IDs for this project from conversation logs
-                project_task_ids = await self._get_task_ids_from_conversations(
-                    project_id
+                paginated_decisions = await self._load_project_rows(
+                    "decisions", project_id, limit, offset
                 )
-
-                if not project_task_ids:
-                    logger.debug(
-                        f"No task IDs found for project {project_id} in "
-                        "conversations; only project-level rows can match"
-                    )
-
-                # A row is the project's by task (conversation-derived) or
-                # by its stamped project_id; the latter is the only route
-                # for a project-level opinion with no task.
-                def project_filter(item: dict[str, Any]) -> bool:
-                    if item.get("project_id") == project_id:
-                        return True
-                    task_id = item.get("task_id")
-                    return task_id is not None and task_id in project_task_ids
-
-                # Query decisions with filter and pagination
-                # Use reasonable limit to avoid memory issues
-                query_limit = min(limit, 10000)
-                all_decisions = await backend.query(
-                    "decisions", filter_func=project_filter, limit=query_limit + offset
-                )
-
-                # Apply offset and limit
-                paginated_decisions = all_decisions[offset : offset + limit]
 
                 # Parse decisions
                 decisions = []
@@ -658,8 +705,7 @@ class ProjectHistoryPersistence:
 
                 logger.debug(
                     f"Loaded {len(decisions)} decisions for project {project_id} "
-                    f"(from {len(project_task_ids)} tasks, "
-                    f"limit={limit}, offset={offset})"
+                    f"(limit={limit}, offset={offset})"
                 )
                 return decisions
 
@@ -674,14 +720,10 @@ class ProjectHistoryPersistence:
         """
         Load artifact metadata for a project from SQLite with pagination.
 
-        Filters artifacts by task_id, using conversation logs to identify
-        project-specific tasks.
-
-        Design Decision: Conversation logs are the authoritative source of truth
-        for project-task mapping. While artifacts contain a project_id field,
-        we filter by task_id (derived from conversations) to maintain a single
-        source of truth and avoid data inconsistencies. The project_id field
-        in ArtifactMetadata is used for validation and debugging only.
+        Same membership rule and storage prefilters as ``load_decisions``:
+        a row is the project's by its stamped ``project_id`` or by a
+        ``task_id`` found in the project's conversation logs; see
+        ``_load_project_rows``.
 
         Parameters
         ----------
@@ -701,33 +743,9 @@ class ProjectHistoryPersistence:
 
         with error_context("load_artifacts", custom_context={"project_id": project_id}):
             try:
-                # Use pooled backend instance
-                backend = self._backend
-
-                # Get task IDs for this project from conversation logs
-                project_task_ids = await self._get_task_ids_from_conversations(
-                    project_id
+                paginated_artifacts = await self._load_project_rows(
+                    "artifacts", project_id, limit, offset
                 )
-
-                if not project_task_ids:
-                    logger.debug(
-                        f"No task IDs found for project {project_id} in conversations"
-                    )
-                    return []
-
-                # Create filter function for task IDs
-                def task_filter(item: dict[str, Any]) -> bool:
-                    return item.get("task_id") in project_task_ids
-
-                # Query artifacts with filter and pagination
-                # Use reasonable limit to avoid memory issues
-                query_limit = min(limit, 10000)
-                all_artifacts = await backend.query(
-                    "artifacts", filter_func=task_filter, limit=query_limit + offset
-                )
-
-                # Apply offset and limit
-                paginated_artifacts = all_artifacts[offset : offset + limit]
 
                 # Parse artifacts
                 artifacts = []
@@ -743,8 +761,7 @@ class ProjectHistoryPersistence:
 
                 logger.debug(
                     f"Loaded {len(artifacts)} artifacts for project {project_id} "
-                    f"(from {len(project_task_ids)} tasks, "
-                    f"limit={limit}, offset={offset})"
+                    f"(limit={limit}, offset={offset})"
                 )
                 return artifacts
 
