@@ -4739,40 +4739,6 @@ async def _sweep_blocked_merge_conflicts(state: Any) -> int:
     return recovered
 
 
-def _commit_parents(repo: Any, sha: str) -> List[str]:
-    """Return the parent shas of ``sha``, newest-first as git lists them.
-
-    Parameters
-    ----------
-    repo : Any
-        Repository path (str or Path) to run git in.
-    sha : str
-        Commit to inspect.
-
-    Returns
-    -------
-    List[str]
-        Parent shas, or an empty list when the commit cannot be read.
-    """
-    try:
-        listing = subprocess.run(
-            ["git", "rev-list", "--parents", "-n", "1", sha],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except Exception as exc:  # noqa: BLE001 - treat as no parents
-        logger.debug(f"Could not read parents of {sha[:8]} in {repo}: {exc}")
-        return []
-    if listing.returncode != 0:
-        logger.debug(
-            f"git rev-list --parents failed for {sha[:8]}: " f"{listing.stderr.strip()}"
-        )
-        return []
-    return listing.stdout.split()[1:]
-
-
 def _is_ancestor(repo: Any, candidate: str, descendant: str) -> bool:
     """Report whether ``candidate`` is an ancestor of ``descendant``.
 
@@ -4789,8 +4755,8 @@ def _is_ancestor(repo: Any, candidate: str, descendant: str) -> bool:
     -------
     bool
         True only when git confirms the ancestry. A git failure answers
-        False, which keeps a merge base out of the set rather than
-        adding one Marcus cannot justify.
+        False, which takes the cautious branch rather than one Marcus
+        cannot justify.
     """
     try:
         ancestry = subprocess.run(
@@ -4798,7 +4764,7 @@ def _is_ancestor(repo: Any, candidate: str, descendant: str) -> bool:
             cwd=repo,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=10,
         )
     except Exception as exc:  # noqa: BLE001 - answer "not an ancestor"
         logger.debug(
@@ -4809,49 +4775,145 @@ def _is_ancestor(repo: Any, candidate: str, descendant: str) -> bool:
     return ancestry.returncode == 0
 
 
-def _effective_merge_bases(
-    repo: Any,
-    baseline_commit: str,
-    card_commits: List[str],
-) -> List[str]:
-    """Build the base set for a per-card three-way merge.
+def _card_footprint(repo: Any, baseline_commit: str, tip: str) -> Optional[List[str]]:
+    """List the files this task changed, from its baseline to its tip.
 
-    The claim-time baseline is the first base: everything the session
-    had committed before this card starts there, so earlier cards —
-    including any whose completion Marcus refused — sit in the base and
-    are therefore **not** treated as new work to bring into ``main``.
-
-    Any commit of ``main`` the agent already integrated into this card
-    joins the base set. Agents resolve a conflict by merging ``main``
-    into their branch, and that integration point has to be in the base
-    or git reads the agent's resolved file and ``main``'s own version as
-    two unrelated creations and reports a conflict the agent has in fact
-    already settled. ``git merge-recursive`` accepts several bases and
-    merges them into a virtual base, which is exactly the shape needed.
+    The footprint, not the commit list, is what gets landed. Working from
+    the files rather than replaying commits is what makes a resolution the
+    agent already made survive: the content of the agent's tree is taken
+    as it stands, and no intermediate state is reapplied.
 
     Parameters
     ----------
     repo : Any
         Repository path (str or Path) to run git in.
     baseline_commit : str
-        Branch tip captured when the card was claimed.
-    card_commits : List[str]
-        The card's commit range, oldest first.
+        The branch tip captured when the task was claimed.
+    tip : str
+        The branch tip now.
 
     Returns
     -------
-    List[str]
-        Merge bases, starting with ``baseline_commit``.
+    Optional[List[str]]
+        Paths the task touched, possibly empty. None when git could not
+        answer, which the caller treats as a refusal rather than widening
+        the merge.
     """
-    bases = [baseline_commit]
-    for sha in card_commits:
-        parents = _commit_parents(repo, sha)
-        if len(parents) < 2:
-            continue
-        for parent in parents:
-            if parent not in bases and _is_ancestor(repo, parent, "main"):
-                bases.append(parent)
-    return bases
+    try:
+        listing = subprocess.run(
+            ["git", "diff", "--name-only", "-z", f"{baseline_commit}..{tip}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:  # noqa: BLE001 - caller refuses
+        logger.warning("[worktree] Could not read the task's footprint: %s", exc)
+        return None
+    if listing.returncode != 0:
+        logger.warning(
+            "[worktree] Could not read the task's footprint: %s",
+            listing.stderr.strip(),
+        )
+        return None
+    return [path for path in listing.stdout.split("\0") if path]
+
+
+def _take_tip_paths(repo: Any, tip: str, paths: List[str]) -> Optional[str]:
+    """Copy ``tip``'s version of ``paths`` into the current tree.
+
+    Used when the agent has already integrated the current ``main``: its
+    tree is then strictly newer for everything it touched, so there is
+    nothing to merge and no conflict to have. A path the task deleted is
+    deleted here too.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path), checked out on the merge target.
+    tip : str
+        The agent's branch tip.
+    paths : List[str]
+        The task's footprint.
+
+    Returns
+    -------
+    Optional[str]
+        None on success, or the first error message.
+    """
+    for path in paths:
+        exists = subprocess.run(
+            ["git", "cat-file", "-e", f"{tip}:{path}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if exists.returncode == 0:
+            taken = subprocess.run(
+                ["git", "checkout", tip, "--", path],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+            if taken.returncode != 0:
+                return f"could not take {path}: {taken.stderr.strip()}"
+        else:
+            subprocess.run(
+                ["git", "rm", "-q", "--ignore-unmatch", "--", path],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+    return None
+
+
+def _apply_footprint_three_way(
+    repo: Any, base: str, tip: str, paths: List[str]
+) -> Optional[str]:
+    """Merge ``tip``'s footprint into the current tree against ``base``.
+
+    Used when ``main`` has moved since the agent last integrated it, so
+    there are genuinely concurrent changes. The patch is generated with
+    ``--binary`` so an image or other binary asset in the footprint
+    transfers rather than failing to apply, and it is applied with a
+    three-way merge so a concurrent edit elsewhere in the same file is
+    preserved instead of clobbered.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path), checked out on the merge target.
+    base : str
+        Common ancestor to merge against.
+    tip : str
+        The agent's branch tip.
+    paths : List[str]
+        The task's footprint.
+
+    Returns
+    -------
+    Optional[str]
+        None on success, or the conflict/error detail.
+    """
+    patch = subprocess.run(
+        ["git", "diff", "--binary", f"{base}..{tip}", "--", *paths],
+        cwd=repo,
+        capture_output=True,
+    )
+    if patch.returncode != 0:
+        return (patch.stderr or b"").decode("utf-8", "replace").strip()
+    if not patch.stdout.strip():
+        return None
+    applied = subprocess.run(
+        ["git", "apply", "--3way", "--index"],
+        cwd=repo,
+        input=patch.stdout,
+        capture_output=True,
+    )
+    if applied.returncode != 0:
+        detail = (applied.stderr or applied.stdout or b"").decode("utf-8", "replace")
+        return detail.strip()
+    return None
 
 
 def _merge_card_range(
@@ -4864,138 +4926,186 @@ def _merge_card_range(
     card_commits: List[str],
     pre_merge_sha: str,
 ) -> Dict[str, Any]:
-    """Land one card's changes on ``main``, all or nothing.
+    """Land one task's changes on the merge target, all or nothing.
 
-    Performs a three-way merge whose base set is the card's starting
-    point (see :func:`_effective_merge_bases`), whose "ours" side is
-    ``main`` and whose "theirs" side is the session branch tip. The
-    result is the card's net change integrated into ``main`` as a single
-    commit; the agent's individual commits stay on the session branch,
-    and the landing commit's message names the range so any line on
-    ``main`` can be traced back to them.
+    What gets landed is the task's **footprint**: the files it changed
+    between the baseline captured at claim and its branch tip. Working
+    from files rather than replaying commits is deliberate — a replay
+    reapplies intermediate states that a later commit in the same range
+    already fixed, so a task the agent had finished resolving would
+    conflict on its own history.
 
-    A single commit per card — rather than a replay of each commit — is
-    deliberate. Replaying commits one by one reapplies intermediate
-    states that a later commit in the same range already fixed, so a
-    card the agent had finished resolving would conflict on its own
-    history.
+    Two cases, decided by whether the agent has integrated the current
+    merge target:
 
-    Marcus never resolves a conflict on the agent's behalf (ADR-0012 D2:
-    the mechanical path never resolves, rebases, or recovers). A
-    conflicted merge therefore rolls ``main`` back to exactly where it
-    was and reports failure.
+    * **It has** (the target is an ancestor of the branch tip, which is
+      the normal case because the harness pulls before each task and the
+      contract asks the agent to as well). The agent's tree is then
+      strictly newer for everything it touched, so its version of the
+      footprint is taken as it stands. No merge, no conflict, and any
+      resolution the agent made is preserved exactly.
+    * **It has not** (the target moved after the agent's last
+      integration). The footprint is merged three-way against their
+      common ancestor, with a binary-capable patch, so a concurrent
+      change elsewhere in the same file survives. A real conflict rolls
+      the target back and hands the task to the agent, whose own
+      ``git merge main`` then moves it into the first case.
+
+    Work from a task whose completion Marcus refused stays out either
+    way, because it is not in this task's footprint — unless it sits in
+    the same file as this task's own changes, in which case the two are
+    inseparable in that file's content. That residual is named in
+    ADR-0012 D2 rather than guessed at.
 
     Parameters
     ----------
     repo : Any
-        Main repository path, already checked out on ``main`` with a
-        clean working tree.
+        Repository path (str or Path), already checked out on the merge
+        target with a clean working tree.
     branch : str
         The session branch, ``marcus/{agent_id}``.
     agent_id : str
         Completing agent, named in the landing commit and the failure.
     task_id : str
-        The card being completed.
+        The task being completed.
     baseline_commit : str
-        Branch tip captured when the card was claimed.
+        Branch tip captured when the task was claimed.
     card_commits : List[str]
-        The card's commits, oldest first. May be empty.
+        The task's commits, oldest first, used for provenance. May be
+        empty.
     pre_merge_sha : str
-        Where ``main`` stood before the merge, used to roll back.
+        Where the target stood before this call, used to roll back.
 
     Returns
     -------
     Dict[str, Any]
-        ``{"success": True, "commits_merged": n}`` when the card landed,
-        otherwise a failure dict carrying ``error`` and ``message`` with
-        ``main`` restored to ``pre_merge_sha``.
+        ``{"success": True, "commits_merged": n, ...}`` when the task
+        landed, otherwise a failure dict carrying ``error`` and
+        ``message`` with the target restored to ``pre_merge_sha``.
     """
-    if not card_commits:
-        logger.info(
-            "[worktree] Task %s added no commits to %s; nothing to merge",
-            task_id,
-            branch,
-        )
-        return {"success": True, "commits_merged": 0}
-
-    bases = _effective_merge_bases(repo, baseline_commit, card_commits)
-    logger.info(
-        "[worktree] Merging %d commit(s) for task %s from %s onto main " "(base%s %s)",
-        len(card_commits),
-        task_id,
-        branch,
-        "s" if len(bases) > 1 else "",
-        ", ".join(base[:8] for base in bases),
-    )
-
-    merge = subprocess.run(
-        ["git", "merge-recursive", *bases, "--", "HEAD", branch],
+    tip_read = subprocess.run(
+        ["git", "rev-parse", branch],
         cwd=repo,
         capture_output=True,
         text=True,
     )
+    tip = tip_read.stdout.strip() if tip_read.returncode == 0 else ""
 
     def _rollback() -> None:
-        """Restore ``main`` to where it stood before the merge."""
+        """Restore the merge target to where it stood before this call."""
         subprocess.run(
             ["git", "reset", "--hard", pre_merge_sha],
             cwd=repo,
             capture_output=True,
         )
-
-    if merge.returncode not in (0, 1):
-        # git merge-recursive itself failed (missing command, corrupt
-        # object). Never widen to a whole-branch merge here: that is the
-        # defect issue #730 exists to close.
-        detail = (merge.stderr or merge.stdout).strip()
-        logger.error(
-            "[worktree] Range merge failed for task %s on %s: %s",
-            task_id,
-            branch,
-            detail,
+        subprocess.run(
+            ["git", "clean", "-qfd"],
+            cwd=repo,
+            capture_output=True,
         )
+
+    def _refuse(error: str, detail: str, message: str) -> Dict[str, Any]:
+        """Roll back and build the refusal."""
         _rollback()
         return {
             "success": False,
-            "error": "range_merge_failed",
+            "error": error,
             "commits_merged": 0,
-            "message": (
-                f"Your task passed validation but Marcus could not merge "
-                f"its commits onto main: {detail}. Main was left "
-                f"unchanged. This needs an operator, not another attempt."
-            ),
+            "detail": detail,
+            "message": message,
         }
 
-    if merge.returncode == 1:
-        detail = (merge.stdout or merge.stderr).strip()
-        logger.warning(
-            "[worktree] Conflict merging task %s from %s: %s",
+    footprint = _card_footprint(repo, baseline_commit, tip) if tip else None
+    if footprint is None:
+        logger.error(
+            "[worktree] Could not scope task %s on %s; refusing rather than "
+            "widening the merge (issue #730)",
             task_id,
             branch,
-            detail,
         )
-        _rollback()
+        return _refuse(
+            "range_merge_failed",
+            "footprint unreadable",
+            "Your task passed validation but Marcus could not work out "
+            "which files it changed, so it merged nothing. Main was left "
+            "unchanged. This needs an operator, not another attempt.",
+        )
+
+    if not footprint:
+        logger.info(
+            "[worktree] Task %s changed no files on %s; nothing to merge",
+            task_id,
+            branch,
+        )
         return {
-            "success": False,
-            "error": "merge_conflict",
-            "commits_merged": 0,
-            "message": (
-                f"Your task passed validation but its commits conflict "
-                f"with main:\n{detail}\nMain was left unchanged. Please "
+            "success": True,
+            "commits_merged": len(card_commits),
+            "paths_landed": 0,
+        }
+
+    if _is_ancestor(repo, pre_merge_sha, tip):
+        mode = "take-tip"
+        failure = _take_tip_paths(repo, tip, footprint)
+        if failure is not None:
+            logger.error(
+                "[worktree] Could not take task %s's files from %s: %s",
+                task_id,
+                branch,
+                failure,
+            )
+            return _refuse(
+                "range_merge_failed",
+                failure,
+                f"Your task passed validation but Marcus could not copy its "
+                f"files onto main: {failure}. Main was left unchanged.",
+            )
+    else:
+        mode = "three-way"
+        base_read = subprocess.run(
+            ["git", "merge-base", pre_merge_sha, tip],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        if base_read.returncode != 0:
+            return _refuse(
+                "range_merge_failed",
+                base_read.stderr.strip(),
+                "Your task passed validation but Marcus could not find a "
+                "common ancestor between your branch and main, so it merged "
+                "nothing. Main was left unchanged.",
+            )
+        conflict = _apply_footprint_three_way(
+            repo, base_read.stdout.strip(), tip, footprint
+        )
+        if conflict is not None:
+            logger.warning(
+                "[worktree] Conflict landing task %s from %s: %s",
+                task_id,
+                branch,
+                conflict,
+            )
+            return _refuse(
+                "merge_conflict",
+                conflict,
+                f"Your task passed validation but its changes conflict with "
+                f"main:\n{conflict}\nMain was left unchanged. Please "
                 f"resolve:\n"
                 f"  git merge main\n"
                 f"  (resolve conflicts in your editor)\n"
                 f"  git add . && git commit\n"
-                f"Then report completion again."
-            ),
-        }
+                f"Then report completion again.",
+            )
 
-    tip = subprocess.run(
-        ["git", "rev-parse", branch],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    logger.info(
+        "[worktree] Landing %d file(s) for task %s from %s (%s, base %s)",
+        len(footprint),
+        task_id,
+        branch,
+        mode,
+        baseline_commit[:8],
+    )
+
     subjects = []
     for sha in card_commits:
         subject = subprocess.run(
@@ -5006,10 +5116,14 @@ def _merge_card_range(
         ).stdout.strip()
         subjects.append(f"- {sha[:8]} {subject}")
     body = (
-        f"Range {baseline_commit[:8]}..{tip[:8]} on {branch} "
-        f"({len(card_commits)} commit(s)):\n" + "\n".join(subjects)
+        f"Range {baseline_commit[:8]}..{tip[:8]} on {branch}, "
+        f"{len(footprint)} file(s), {len(card_commits)} commit(s):\n"
+        + "\n".join(subjects)
     )
 
+    subprocess.run(
+        ["git", "add", "-A", "--", *footprint], cwd=repo, capture_output=True
+    )
     commit = subprocess.run(
         [
             "git",
@@ -5026,8 +5140,8 @@ def _merge_card_range(
     if commit.returncode != 0:
         combined = f"{commit.stdout}\n{commit.stderr}"
         if "nothing to commit" in combined or "no changes added" in combined:
-            # The card's net change is already present on main (another
-            # session landed identical content, or the work was a no-op).
+            # The task's files are already byte-identical on main (another
+            # session landed the same content, or the work was a no-op).
             logger.info(
                 "[worktree] Task %s brought no net change to main",
                 task_id,
@@ -5036,32 +5150,33 @@ def _merge_card_range(
             return {
                 "success": True,
                 "commits_merged": len(card_commits),
+                "paths_landed": 0,
                 "net_change": False,
             }
         logger.error(
-            "[worktree] Could not commit the merge for task %s: %s",
+            "[worktree] Could not commit the landing for task %s: %s",
             task_id,
             combined.strip(),
         )
-        _rollback()
-        return {
-            "success": False,
-            "error": "range_merge_failed",
-            "commits_merged": 0,
-            "message": (
-                f"Your task passed validation but Marcus could not commit "
-                f"its merge onto main: {combined.strip()}. Main was left "
-                f"unchanged."
-            ),
-        }
+        return _refuse(
+            "range_merge_failed",
+            combined.strip(),
+            f"Your task passed validation but Marcus could not commit it "
+            f"onto main: {combined.strip()}. Main was left unchanged.",
+        )
 
     logger.info(
-        "[worktree] Landed %d commit(s) for task %s (agent %s) on main",
-        len(card_commits),
+        "[worktree] Landed %d file(s) for task %s (agent %s) on main",
+        len(footprint),
         task_id,
         agent_id,
     )
-    return {"success": True, "commits_merged": len(card_commits)}
+    return {
+        "success": True,
+        "commits_merged": len(card_commits),
+        "paths_landed": len(footprint),
+        "mode": mode,
+    }
 
 
 async def _merge_agent_branch_to_main(

@@ -262,7 +262,7 @@ agent dies, commits they made still live on that branch. The recovery
 instructions tell the **next** agent exactly how to pick them up:
 
 ```
-git diff <baseline>..marcus/<dead-agent> | git apply --3way
+git diff --binary <baseline>..marcus/<dead-agent> | git apply --3way
 git log <baseline>..marcus/<dead-agent>
 ```
 

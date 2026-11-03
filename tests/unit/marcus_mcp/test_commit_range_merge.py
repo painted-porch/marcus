@@ -306,7 +306,9 @@ class TestMergeByCommitRange:
         )
 
         # Assert
-        assert result == {"success": True, "commits_merged": 0}
+        assert result is not None
+        assert result["success"] is True
+        assert result["paths_landed"] == 0
         assert _git(session.repo, "rev-parse", "main") == main_before
         assert not (session.repo / "b.txt").exists()
 
@@ -399,7 +401,10 @@ class TestMergeByCommitRange:
         )
 
         # Assert
-        assert result == {"success": True, "commits_merged": 2}
+        assert result is not None
+        assert result["success"] is True
+        assert result["commits_merged"] == 2
+        assert result["paths_landed"] == 2
         assert (session.repo / "one.txt").exists()
         assert (session.repo / "two.txt").exists()
         # Exactly one new commit on main, and it is not a merge commit.
@@ -443,6 +448,166 @@ class TestMergeByCommitRange:
             "agent_without_branch", "card-c", session.state, baseline_commit=None
         )
         assert result is None
+
+
+class TestLandingTheFootprint:
+    """What lands is the files the task changed, not a replay of commits.
+
+    These are the cases the first implementation got wrong (Codex review
+    on PR #790): it built a merge base out of the baseline plus whatever
+    of main the agent had integrated, and when those two snapshots
+    conflicted with each other the merge failed on a resolution the agent
+    had already made — and failed the same way on every retry.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_resolution_made_after_merging_main_lands(
+        self, session: _Session
+    ) -> None:
+        """The agent resolved it; Marcus must not re-litigate it.
+
+        Task A lands. Another agent then edits the same lines on main.
+        The session merges main for task B and resolves that overlap.
+        Task B must land, and ``main`` must end up with the resolution.
+        """
+        # Arrange — task A, landed.
+        baseline_a = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.worktree, "shared.txt", "one\nA edit\nthree\n", "task A")
+        landed_a = await _merge_agent_branch_to_main(
+            session.agent_id, "card-a", session.state, baseline_commit=baseline_a
+        )
+        assert landed_a is not None and landed_a["success"] is True
+
+        # Another agent edits the same line on main.
+        _commit(session.repo, "shared.txt", "one\nother agent\nthree\n", "elsewhere")
+
+        # Task B: the session merges main, resolves, and does its own work.
+        baseline_b = _git(session.worktree, "rev-parse", "HEAD")
+        subprocess.run(
+            ["git", "merge", "main", "--no-edit"],
+            cwd=session.worktree,
+            capture_output=True,
+        )
+        (session.worktree / "shared.txt").write_text("one\nresolved both\nthree\n")
+        _git(session.worktree, "add", "-A")
+        subprocess.run(
+            ["git", "commit", "--no-edit"], cwd=session.worktree, capture_output=True
+        )
+        _commit(session.worktree, "b.txt", "B\n", "task B work")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-b", session.state, baseline_commit=baseline_b
+        )
+
+        # Assert
+        assert result is not None, "the landing returned nothing"
+        assert result["success"] is True, result
+        assert (
+            session.repo / "shared.txt"
+        ).read_text() == "one\nresolved both\nthree\n"
+        assert (session.repo / "b.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_a_binary_file_lands(self, session: _Session) -> None:
+        """An image in the footprint transfers.
+
+        A plain text diff emits only "Binary files differ", which cannot
+        be applied, so the patch is generated with ``--binary``.
+        """
+        # Arrange — a binary file, and main moved so the three-way path runs.
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        blob = bytes(range(256)) * 4
+        (session.worktree / "logo.png").write_bytes(blob)
+        _git(session.worktree, "add", "-A")
+        _git(session.worktree, "commit", "-m", "task with a binary asset")
+        _commit(session.repo, "elsewhere.txt", "x\n", "main moved elsewhere")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert (session.repo / "logo.png").read_bytes() == blob
+
+    @pytest.mark.asyncio
+    async def test_a_deletion_lands(self, session: _Session) -> None:
+        """A file the task removed is removed on main too."""
+        # Arrange
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _git(session.worktree, "rm", "-q", "README.md")
+        _git(session.worktree, "commit", "-m", "task removes the readme")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert not (session.repo / "README.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_refused_work_in_the_same_file_rides_along(
+        self, session: _Session
+    ) -> None:
+        """The one case the footprint cannot separate, pinned deliberately.
+
+        When a refused task and this task changed the **same file**, the
+        two are inseparable in that file's content: there is no version of
+        the file that has this task's work without the earlier change.
+        Marcus lands it rather than guessing, and names the residual in
+        ADR-0012 D2. A refused task's changes to *other* files still stay
+        out, which is what the surrounding tests cover.
+        """
+        # Arrange
+        _commit(session.worktree, "app.py", "refused change\n", "refused task")
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(
+            session.worktree,
+            "app.py",
+            "refused change\nand this task\n",
+            "this task, same file",
+        )
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert (
+            session.repo / "app.py"
+        ).read_text() == "refused change\nand this task\n"
+
+    @pytest.mark.asyncio
+    async def test_a_concurrent_edit_to_another_line_is_kept(
+        self, session: _Session
+    ) -> None:
+        """A three-way landing must not clobber someone else's work."""
+        # Arrange — both sides change different lines of the same file.
+        _commit(session.repo, "poem.txt", "one\ntwo\nthree\n", "seed the file")
+        subprocess.run(
+            ["git", "merge", "main", "--no-edit"],
+            cwd=session.worktree,
+            check=True,
+            capture_output=True,
+        )
+        baseline = _git(session.worktree, "rev-parse", "HEAD")
+        _commit(session.worktree, "poem.txt", "one\ntwo\nTHREE\n", "task edits line 3")
+        _commit(session.repo, "poem.txt", "ONE\ntwo\nthree\n", "main edits line 1")
+
+        # Act
+        result = await _merge_agent_branch_to_main(
+            session.agent_id, "card-c", session.state, baseline_commit=baseline
+        )
+
+        # Assert
+        assert result is not None and result["success"] is True
+        assert (session.repo / "poem.txt").read_text() == "ONE\ntwo\nTHREE\n"
 
 
 class TestRangeMergeFailureModes:

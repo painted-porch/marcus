@@ -70,15 +70,22 @@ Marcus merges that range into `main` as a single commit and leaves the agent's i
   explicitly refused.
 A card whose completion the D11 fence rejects leaves its commits on the branch; the session's next accepted card would then land them in `main`, with nobody deciding that and the reconciliation card still open.
 Per-card merging keeps the accept/reject decision and the contents of `main` in agreement.
-- **Base set:** the baseline, plus any commit of `main` the agent had already merged into the card's range.
-Agents record a conflict resolution by merging `main` into their branch; without that commit in the base, git reads the agent's resolved file and `main`'s own version as two unrelated creations and reports a conflict the agent has already settled.
-- **Rollback:** a conflicted range merge restores `main` to exactly where it stood and reports the failure.
+- **The unit in practice is the card's footprint:** the files it changed between the baseline and its branch tip.
+Working from files rather than from commits is what makes an agent's own conflict resolution survive, because the content of its tree is taken as it stands and no intermediate state is reapplied.
+- **Two cases, decided by integration.** When the agent has already integrated the current `main` — the normal case, since the harness pulls before each card and the contract asks the agent to as well — its tree is strictly newer for everything it touched, so Marcus takes its version of the footprint with no merge and no possibility of conflict.
+When `main` has moved since that integration, the footprint is merged three-way against the common ancestor, with a binary-capable patch so an image in the footprint transfers.
+- **Rollback:** a conflicted landing restores `main` to exactly where it stood and hands the card back.
+The agent's own `git merge main` then moves it into the first case, so a conflict is recoverable rather than a dead end.
 Marcus still never resolves.
+- **Named residual:** when a refused card and the current card changed the **same file**, the two are inseparable in that file's content — there is no version of the file holding this card's work without the earlier change. Marcus lands it rather than guessing, and D11's reconciliation card is where the refused card's fate is decided. A refused card's changes to *other* files stay out.
 - **Rejected:** branch-per-card (contradicts D1); replaying each commit
   individually (reapplies intermediate states a later commit in the same range
-  already fixed, so a resolved card conflicts on its own history); quarantining
-  rejected commits (Marcus rewriting an agent's history is exactly the
-  intelligence this path forbids).
+  already fixed, so a resolved card conflicts on its own history); building a
+  merge base from the baseline plus the agent's integrated `main` (those two
+  snapshots can conflict with each other, which reconstructs a conflicted
+  ancestor and rejects a resolution the agent had already made — found in
+  review of PR #790); quarantining rejected commits (Marcus rewriting an
+  agent's history is exactly the intelligence this path forbids).
 - **Rejected:** launcher-executes-all (a dumb ops layer inherits conflict
   resolution → rebuilds #700 elsewhere); integrator-card-always (every trivial
   merge waits for a session and burns tokens).

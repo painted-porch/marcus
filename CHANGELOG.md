@@ -28,8 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Marcus merges one task's commits into `main`, not a whole agent branch (#730, ADR-0012 D2 and D8).
 The claim records the agent's branch tip as that task's **baseline**, persists it with the assignment so it survives a restart, and reads it in the agent's own worktree rather than in the main repo, whose `main` moves whenever another session lands work.
-On completion only the changes between the baseline and the branch tip are merged, as a single commit whose message names the range and the commits behind it; a conflict restores `main` to exactly where it stood and hands the task back.
-The three-way merge takes the baseline plus any commit of `main` the agent had already merged in as its bases, so a conflict the agent has already resolved does not come back.
+On completion Marcus lands the task's **footprint** — the files it changed between the baseline and its branch tip — as a single commit whose message names the range, the file count and the commits behind it; a conflict restores `main` to exactly where it stood and hands the task back.
+When the agent has already integrated the current `main`, which the harness and the contract both arrange, its tree is taken as it stands for those files: no merge, no possible conflict, and any resolution it made is preserved.
+When `main` has moved since, the footprint is merged three-way against the common ancestor with a binary-capable patch, so an image in the footprint transfers and a concurrent edit elsewhere in the same file survives.
+A refused task's changes to other files stay out; a refused task's changes to the *same* file cannot be separated from this task's own and are named as a residual in ADR-0012 D2.
 The baseline is recorded twice: with the assignment, and in a per-task store that the completion does not delete, because a completion releases the assignment **before** it merges and an agent sent back to resolve a merge conflict would otherwise report again with no baseline and have its whole branch merged.
 Without a recorded baseline the old whole-branch merge still runs, and a git-level failure refuses rather than widening.
 Why it matters: a task whose completion Marcus refuses leaves its commits on the branch, and merging the branch again on the session's next accepted task would land refused work in `main` with nobody deciding that.

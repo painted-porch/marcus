@@ -1609,7 +1609,7 @@ class AssignmentLeaseManager:
                     f"**FIRST: Pick up this task's work from the previous "
                     f"agent:**\n"
                     f"```\n"
-                    f"git diff {pickup_range} | git apply --3way\n"
+                    f"git diff --binary {pickup_range} | git apply --3way\n"
                     f"# resolve any conflicts, then: git add -A && git commit\n"
                     f"```\n"
                     f"That range is what they changed while holding THIS "
@@ -1621,7 +1621,7 @@ class AssignmentLeaseManager:
                     f"commits and states a later commit already fixed.\n\n"
                 )
                 inspect_command = f"git log {pickup_range}"
-                diff_command = f"git diff {pickup_range}"
+                diff_command = f"git diff --binary {pickup_range}"
             else:
                 pickup_block = (
                     f"**FIRST: Pick up committed work from the previous "
