@@ -1461,6 +1461,60 @@ class AssignmentLeaseManager:
                 return task
         return None
 
+    async def _baseline_commit_for_lease(self, lease: AssignmentLease) -> Optional[str]:
+        """Read the baseline commit recorded when this card was claimed.
+
+        The baseline is the agent's branch tip at claim time. It turns
+        "the dead session's branch" into "the commits that belong to
+        this card", which is what a recovery handoff needs to hand
+        forward under ADR-0012 D1: one session branch spans many cards,
+        so merging the whole branch would pull the session's other
+        in-flight work into the new claimant's worktree (issue #730).
+
+        Parameters
+        ----------
+        lease : AssignmentLease
+            The expired lease being recovered.
+
+        Returns
+        -------
+        Optional[str]
+            Baseline commit sha, or None when it was never recorded (a
+            card claimed before issue #730, or a deployment with no
+            worktrees).
+        """
+        persistence = getattr(self, "assignment_persistence", None)
+        if persistence is None:
+            return None
+        try:
+            record = await persistence.get_assignment(lease.agent_id)
+        except Exception as exc:  # noqa: BLE001 - recovery must not fail here
+            logger.debug(
+                "Could not read assignment for %s while building the "
+                "recovery handoff: %s",
+                lease.agent_id,
+                exc,
+            )
+            record = None
+        if record and record.get("task_id") == lease.task_id:
+            baseline = (record.get("task_data") or {}).get("baseline_commit")
+            if baseline:
+                return str(baseline)
+
+        # The per-task store outlives the assignment row, which recovery
+        # itself removes.
+        get_task_baseline = getattr(persistence, "get_task_baseline", None)
+        if get_task_baseline is None:
+            return None
+        try:
+            recorded = await get_task_baseline(lease.task_id, lease.agent_id)
+        except Exception as exc:  # noqa: BLE001 - recovery must not fail here
+            logger.debug(
+                "Could not read the baseline for task %s: %s", lease.task_id, exc
+            )
+            return None
+        return str(recorded) if recorded else None
+
     async def recover_expired_lease(self, lease: AssignmentLease) -> bool:
         """
         Recover a task with an expired lease.
@@ -1543,6 +1597,46 @@ class AssignmentLeaseManager:
             except Exception:  # noqa: BLE001 - never crash recovery
                 pass
 
+            # ADR-0012 D1 scopes a branch to the session, not the card,
+            # so "merge their branch" would hand this claimant every
+            # other card that session had in flight. The baseline
+            # recorded at claim time narrows the handoff to the commits
+            # that belong to THIS card (issue #730).
+            baseline_commit = await self._baseline_commit_for_lease(lease)
+            if baseline_commit:
+                pickup_range = f"{baseline_commit[:12]}..{previous_branch}"
+                pickup_block = (
+                    f"**FIRST: Pick up this task's work from the previous "
+                    f"agent:**\n"
+                    f"```\n"
+                    f"git diff --binary {pickup_range} | git apply --3way\n"
+                    f"# resolve any conflicts, then: git add -A && git commit\n"
+                    f"```\n"
+                    f"That range is what they changed while holding THIS "
+                    f"task, including any conflict resolutions they made. "
+                    f"Their branch may also carry other tasks' work, so do "
+                    f"not merge or cherry-pick the whole branch. Applying "
+                    f"the range as a patch (rather than replaying its "
+                    f"commits) is deliberate: the range can contain merge "
+                    f"commits and states a later commit already fixed.\n\n"
+                )
+                inspect_command = f"git log {pickup_range}"
+                diff_command = f"git diff --binary {pickup_range}"
+            else:
+                pickup_block = (
+                    f"**FIRST: Pick up committed work from the previous "
+                    f"agent:**\n"
+                    f"```\n"
+                    f"git log {previous_branch}\n"
+                    f"```\n"
+                    f"Marcus has no record of where their work for this "
+                    f"task starts, so read the branch and take only the "
+                    f"commits that belong to this task. Their branch may "
+                    f"also carry other tasks' work.\n\n"
+                )
+                inspect_command = f"git log {previous_branch}"
+                diff_command = f"git diff main..{previous_branch}"
+
             recovery_info = RecoveryInfo(
                 recovered_at=now,
                 recovered_from_agent=lease.agent_id,
@@ -1553,15 +1647,9 @@ class AssignmentLeaseManager:
                 instructions=(
                     f"⚠️ **RECOVERY ADDENDUM** - This task was recovered "
                     f"from agent {lease.agent_id}\n\n"
-                    f"**FIRST: Pick up committed work from the previous "
-                    f"agent:**\n"
-                    f"```\n"
-                    f"git merge {previous_branch} --no-edit\n"
-                    f"```\n"
-                    f"This merges any commits the previous agent made "
-                    f"before they disconnected.\n\n"
-                    f"**Then check what was done:**\n"
-                    f"1. Run `git log {previous_branch}` to see their "
+                    + pickup_block
+                    + f"**Then check what was done:**\n"
+                    f"1. Run `{inspect_command}` to see their "
                     f"commits\n"
                     f"2. Check for artifacts or design documents\n"
                     f"3. Previous agent reached "
@@ -1580,16 +1668,20 @@ class AssignmentLeaseManager:
                         " reachable.\n\n"
                         if lease.last_progress_message.strip()
                         else f"**Previous agent left no progress notes.**\n"
-                        f"Check `git log {previous_branch}` and `git "
-                        f"diff main {previous_branch}` to discover what "
-                        f"was committed. Do NOT re-implement files that "
-                        f"already exist on the branch — read them "
-                        f"first.\n\n"
+                        f"Run `{inspect_command}` and `{diff_command}` to "
+                        f"discover what was committed for this task. Do "
+                        f"NOT re-implement files that already exist — "
+                        f"read them first.\n\n"
                     )
                     + f"**Recovery Context:**\n"
                     f"- Previous agent: {lease.agent_id}\n"
                     f"- Previous branch: {previous_branch}\n"
-                    f"- Time they spent: "
+                    + (
+                        f"- This task's commits: {pickup_range}\n"
+                        if baseline_commit
+                        else ""
+                    )
+                    + f"- Time they spent: "
                     f"{time_spent_minutes:.1f} minutes\n"
                     f"- Recovery reason: lease expired (no progress "
                     f"updates)\n"

@@ -62,6 +62,34 @@ spawns a board-visible integrator card** claimed by an intelligent session.
   need intelligence, it stops and escalates. Every merge is audited.
 - **Hard rule:** the mechanical path never resolves, rebases, or recovers. No
   intelligence in the dumb path, ever.
+- **Merge unit — one card, never one branch** *(added 2026-11-03, issue #730)*.
+D1 scopes the branch to the session, so "merge it" has to say what *it* is.
+The unit is the card: the changes between the branch tip captured when the card was claimed (its **baseline**) and the branch tip at completion.
+Marcus merges that range into `main` as a single commit and leaves the agent's individual commits on the session branch, named in the landing commit's message.
+- **Why the unit matters:** merging the whole branch would carry work Marcus
+  explicitly refused.
+A card whose completion the D11 fence rejects leaves its commits on the branch; the session's next accepted card would then land them in `main`, with nobody deciding that and the reconciliation card still open.
+Per-card merging keeps the accept/reject decision and the contents of `main` in agreement.
+- **The unit in practice is the card's footprint:** the files it changed between the baseline and its branch tip.
+Working from files rather than from commits is what makes an agent's own conflict resolution survive, because the content of its tree is taken as it stands and no intermediate state is reapplied.
+- **Two cases, decided by integration.** When the agent has already integrated the current `main` — the normal case, since the harness pulls before each card and the contract asks the agent to as well — its tree is strictly newer for everything it touched, so Marcus takes its version of the footprint with no merge and no possibility of conflict.
+When `main` has moved since that integration, the footprint is merged three-way against the common ancestor, with a binary-capable patch so an image in the footprint transfers.
+- **What counts as touched:** the paths every commit in the range touched, with rename detection off, plus the endpoint difference.
+The per-commit union catches a file the agent deliberately reverted to its claim-time content after integrating `main`, which an endpoint diff reads as untouched; rename detection off keeps both ends of a rename, or the source survives on `main`.
+A footprint path the agent's tree no longer has is deleted on `main`, because a three-way patch whose ancestor predates the file cannot express that — but only when the path existed at the baseline, so a path the task created and removed inside its own range never deletes another session's concurrent addition, and only when `main` has not changed it since, because a delete-versus-edit is a judgement call rather than a sweep.
+- **Rollback:** a conflicted landing restores `main` to exactly where it stood and hands the card back.
+Cleanup is restricted to the footprint: a repository-wide `git clean -fd` would delete untracked files that were already there and have nothing to do with the card.
+The agent's own `git merge main` then moves it into the first case, so a conflict is recoverable rather than a dead end.
+Marcus still never resolves.
+- **Named residual:** when a refused card and the current card changed the **same file**, the two are inseparable in that file's content — there is no version of the file holding this card's work without the earlier change. Marcus lands it rather than guessing, and D11's reconciliation card is where the refused card's fate is decided. A refused card's changes to *other* files stay out.
+- **Rejected:** branch-per-card (contradicts D1); replaying each commit
+  individually (reapplies intermediate states a later commit in the same range
+  already fixed, so a resolved card conflicts on its own history); building a
+  merge base from the baseline plus the agent's integrated `main` (those two
+  snapshots can conflict with each other, which reconstructs a conflicted
+  ancestor and rejects a resolution the agent had already made — found in
+  review of PR #790); quarantining rejected commits (Marcus rewriting an
+  agent's history is exactly the intelligence this path forbids).
 - **Rejected:** launcher-executes-all (a dumb ops layer inherits conflict
   resolution → rebuilds #700 elsewhere); integrator-card-always (every trivial
   merge waits for a session and burns tokens).
@@ -141,11 +169,16 @@ documented fleet future.
 
 ### D8 — Partial-work recovery: resume-by-instruction + checkpoint duty
 
-Keep the existing recovery handoff (next claimant merges the dead session's branch,
-reads progress notes and decisions, continues) — it survives D1 cleanly. Add a
+Keep the existing recovery handoff (next claimant picks up the dead session's
+committed work, reads progress notes and decisions, continues). Add a
 **checkpoint obligation** to the session contract: commit + log a decision at each
 meaningful unit, at minimum **every 20 minutes** (default; paired with D3's
 45-min silence timeout to satisfy the D11 ≥ 2× invariant).
+
+**What is handed forward** *(corrected 2026-11-03, issue #730)*: the dead
+session's **commit range for this card**, not its branch.
+This decision originally said "merges the dead session's branch", which was true while one agent held one card and wrong under D1, where that branch also carries the session's other in-flight cards.
+The handoff names `<baseline>..marcus/<agent_id>` and tells the claimant to take that range; when no baseline was recorded it says so and asks the claimant to read the branch rather than swallow it.
 
 - **Why:** at coarse granularity, non-resumable death wastes hours. The checkpoint
   duty makes resumability a property of the work rather than luck — and it *is*

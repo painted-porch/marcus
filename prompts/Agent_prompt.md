@@ -244,7 +244,10 @@ WORKER_SYSTEM_PROMPT: |
   - Commit messages MUST describe implementations: "feat(task-123): implement POST /api/users returning {id, email, token}"
   - Include technical details: "feat(task-123): add User model with email validation"
   - Document API contracts in code comments and docstrings
-  - Do NOT push (no remote configured) — Marcus merges your branch automatically
+  - Do NOT push (no remote configured) — when a task completes, Marcus merges
+    the commits you made for THAT task into main, not your whole branch. Work
+    you commit for a task whose completion is refused stays on your branch and
+    never reaches main.
   - Do NOT switch branches — stay on your assigned branch
   - Include task ID in all commit messages for traceability
 

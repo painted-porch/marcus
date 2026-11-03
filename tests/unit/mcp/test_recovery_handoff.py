@@ -101,6 +101,10 @@ def _create_recovery_info(
         recovered_at = now - timedelta(minutes=10)
         expires_at = now + timedelta(hours=24)
 
+    # Illustrative text only. The wording Marcus actually sends is built
+    # in ``AssignmentLeaseManager.recover_expired_lease``; this module
+    # tests that ``build_tiered_instructions`` passes it through, so the
+    # exact phrasing here does not track production (see issue #730).
     branch = f"marcus/{agent_id}"
     return RecoveryInfo(
         recovered_at=recovered_at,

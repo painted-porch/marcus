@@ -139,6 +139,33 @@ class TestRequestTaskRedoHappyPath:
         )
 
     @pytest.mark.asyncio
+    async def test_redo_does_not_tell_the_claimant_to_merge_the_branch(
+        self,
+    ) -> None:
+        """The redo note points at main, not at the previous session branch.
+
+        A redo follows a completion, so Marcus has already landed that
+        attempt on main — the claimant has the code. Telling it to merge
+        the previous branch was harmless when a branch held one card and
+        wrong once a branch spans a session (issue #730, ADR-0012 D1).
+        """
+        task = _make_task(assigned_to="agent_unicorn_1_3")
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="wrong shape",
+                state=state,
+            )
+
+        info = task.recovery_info
+        assert info is not None
+        assert "git merge marcus/agent_unicorn_1_3" not in info.instructions
+        assert "already on main" in info.instructions
+
+    @pytest.mark.asyncio
     async def test_redo_emits_task_redo_requested_event(self) -> None:
         """The redo emits a task_redo_requested event for observability."""
         task = _make_task()
