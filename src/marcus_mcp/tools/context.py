@@ -117,15 +117,6 @@ async def log_decision(
                 "decision_logged", agent_id, logged_decision.to_dict()
             )
 
-        # Record in active experiment if one is running
-        from src.experiments.live_experiment_monitor import get_active_monitor
-
-        monitor = get_active_monitor()
-        if monitor and monitor.is_running:
-            monitor.record_decision(
-                agent_id=agent_id, task_id=task_id, decision=decision
-            )
-
         # Persist to project history for post-project analysis
         await _persist_decision_to_history(logged_decision, state)
 
@@ -180,16 +171,6 @@ async def get_task_context(task_id: str, state: Any) -> Dict[str, Any]:
             "project": project_name,
         },
     )
-
-    # Record in the active experiment if one is running (mirrors
-    # log_decision above). Without this, context_requests stays 0 and the
-    # runner's spawn-thrash detector cannot see a claimed agent pulling
-    # context as a sign of forward progress.
-    from src.experiments.live_experiment_monitor import get_active_monitor
-
-    _monitor = get_active_monitor()
-    if _monitor and _monitor.is_running:
-        _monitor.record_context_request(agent_id=agent_id, task_id=task_id)
 
     try:
         # Check if this is a subtask

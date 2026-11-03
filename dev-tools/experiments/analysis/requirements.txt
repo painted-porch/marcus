@@ -14,3 +14,9 @@ mlflow>=2.8.0
 
 # CLI progress bars
 tqdm>=4.65.0
+
+# Experiment tracking (the analysis and single-agent scripts read MLflow runs;
+# Marcus core no longer depends on mlflow since the experiment monitor was
+# deleted, epic #706 / ADR-0012 D10). The upper bound is deliberate: a minor
+# mlflow upgrade once turned `mypy src/` red with no commit causing it.
+mlflow>=2.10.0,<3.17.0

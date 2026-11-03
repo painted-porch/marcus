@@ -603,9 +603,9 @@ class ActiveLayerSignal:
 
 # A layer no longer needs an agent once every task in it is "settled":
 # DONE or BLOCKED. BLOCKED is terminal — report_blocker releases the
-# lease and Marcus never auto-resolves it — and Marcus's own completion
-# formula treats ``completed + blocked == total`` as done
-# (live_experiment_monitor._check_completion). The active-layer cursor
+# lease and Marcus never auto-resolves it — and the drain signal treats
+# a board with no claimable task and no live lease as drained even when
+# blocked tasks remain. The active-layer cursor
 # must agree, or a single blocked task pins the cursor and starves every
 # downstream layer indefinitely (issue #595).
 _SETTLED_STATUSES = (TaskStatus.DONE, TaskStatus.BLOCKED)

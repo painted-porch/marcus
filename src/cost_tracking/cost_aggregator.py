@@ -453,8 +453,9 @@ class CostAggregator:
         row is derived from recorded events. The query then enriches each
         project row with a human-readable ``project_name`` from the
         ``experiments`` table as a best-effort label; this is NULL for
-        projects whose runs never called ``start_experiment``, and the
-        dashboard falls back to the raw ``project_id`` in that case.
+        projects whose runs never opened an MLflow experiment (the former
+        ``start_experiment`` tool, deleted with the experiment monitor), and
+        the dashboard falls back to the raw ``project_id`` in that case.
 
         Each row carries event count, token total, cost, and first/last
         activity timestamps so the dashboard can show "active in the last
@@ -473,9 +474,8 @@ class CostAggregator:
             doesn't get mistaken for a real project.
         """
         # LEFT JOIN to experiments to pull a human-readable project_name
-        # when one exists. The experiments table is only populated when a
-        # run opts into MLflow tracking (start_experiment), so many
-        # projects will have NULL here.
+        # when one exists. The experiments table was only populated by the
+        # deleted MLflow experiment monitor, so most projects have NULL here.
         #
         # JOIN-safety invariant: this query relies on
         # ``experiments.run_id`` being unique (it's the primary
@@ -561,8 +561,8 @@ class CostAggregator:
 
         Mirrors :meth:`run_summary` but scoped to ``project_id``,
         because Marcus's coordination model identifies work by project,
-        not by MLflow experiment. Most Marcus runs never call
-        ``start_experiment`` and therefore have no row in the
+        not by MLflow experiment. Marcus runs no longer open MLflow
+        experiments (the monitor is gone) and have no row in the
         ``experiments`` table — but they still produce token events
         attributed to a project. This method drives the project-first
         dashboard surface.

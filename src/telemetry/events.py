@@ -18,7 +18,6 @@ actually ship?" — the contract surface is one file.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -30,8 +29,6 @@ __all__ = [
     "fire_agent_registered",
     "fire_epictetus_result",
     "fire_error_occurred",
-    "fire_experiment_completed",
-    "fire_experiment_started",
     "fire_lease_expired",
     "fire_planning_intent_fidelity",
     "fire_project_cost_summary",
@@ -150,82 +147,6 @@ def fire_project_created(
         get_telemetry_client().capture("project_created", properties)
     except Exception as exc:  # noqa: BLE001 - never crash the tool path
         logger.debug("fire_project_created failed: %s", exc)
-
-
-# -- experiment_started -------------------------------------------------------
-
-
-def fire_experiment_started(agent_count: int) -> None:
-    """Emit the ``experiment_started`` event after ``start_experiment`` succeeds.
-
-    Best-effort: all errors are swallowed.
-
-    Parameters
-    ----------
-    agent_count : int
-        Number of agents registered with the experiment at start time.
-        May be 0 if the experiment starts before any agents register —
-        agents typically register after.
-    """
-    try:
-        properties = {
-            "agent_count": agent_count,
-            "runner": os.environ.get("MARCUS_RUNNER", _RUNNER_DEFAULT),
-        }
-        get_telemetry_client().capture("experiment_started", properties)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("fire_experiment_started failed: %s", exc)
-
-
-# -- experiment_completed -----------------------------------------------------
-
-
-def fire_experiment_completed(result: Dict[str, Any]) -> None:
-    """Emit the ``experiment_completed`` event after ``end_experiment``.
-
-    Reads aggregate metrics from ``result['final_metrics']``.  Best-
-    effort; swallows all errors.  Does NOT fire when ``result['success']``
-    is falsy.
-
-    Parameters
-    ----------
-    result : dict
-        The ``end_experiment`` return value.  Expects:
-
-        - ``success``  : bool
-        - ``final_metrics`` : dict with the following sub-keys
-          (all optional, defaulted to 0 when absent):
-
-          - ``total_tasks`` : int
-          - ``total_task_completions`` : int
-          - ``total_blockers`` : int
-          - ``total_registered_agents`` : int
-          - ``duration_seconds`` : float
-    """
-    try:
-        if not result or not result.get("success"):
-            return
-
-        metrics = result.get("final_metrics") or {}
-        total_tasks = int(metrics.get("total_tasks") or 0)
-        completed = int(metrics.get("total_task_completions") or 0)
-        blockers = int(metrics.get("total_blockers") or 0)
-        agents = int(metrics.get("total_registered_agents") or 0)
-        duration_s = float(metrics.get("duration_seconds") or 0)
-
-        completion_pct = (completed / total_tasks * 100) if total_tasks else 0
-        blocker_rate = (blockers / total_tasks) if total_tasks else 0
-
-        properties = {
-            "total_tasks": total_tasks,
-            "completion_pct": round(completion_pct, 2),
-            "duration_minutes": int(duration_s // 60),
-            "agent_count": agents,
-            "blocker_rate": round(blocker_rate, 4),
-        }
-        get_telemetry_client().capture("experiment_completed", properties)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("fire_experiment_completed failed: %s", exc)
 
 
 # -- task_completed -----------------------------------------------------------
@@ -617,9 +538,8 @@ def fire_project_cost_summary(summary: Dict[str, Any]) -> None:
         ``cost_usd_cents`` / ``task_count``.  Note this is NOT the
         raw ``cost_aggregator.project_summary()`` return value — that
         is a nested object whose totals live under a ``summary`` key.
-        Callers must flatten it first (see ``end_experiment`` in
-        ``src/marcus_mcp/tools/experiments.py``).  May contain extra
-        identifying fields; the allowlist filter drops them.
+        Callers must flatten it first.  May contain extra identifying
+        fields; the allowlist filter drops them.
     """
     try:
         filtered: Dict[str, Any] = {

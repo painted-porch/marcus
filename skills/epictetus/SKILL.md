@@ -196,7 +196,7 @@ other — the API shows what agents reported; the logs show what actually happen
 tmux list-panes -t <session> -a -F "#{pane_id}|#{pane_title}|#{window_name}"
 ```
 
-Cross-reference with Marcus agent registry (via MCP `get_experiment_status`
+Cross-reference with Marcus agent registry (via MCP `list_registered_agents`
 if API is up, or infer from pane titles if not).
 **Only capture panes for worker agents.** Skip these roles:
 - `monitor` / `monitoring`

@@ -1737,3 +1737,91 @@ class TestGetLatestOpenRunForProject:
         )
 
         assert store.get_latest_open_run_for_project(dashed) == "r_canon"
+
+
+class TestCloseCurrentRunForProject:
+    """``close_current_run_for_project`` closes the newest run and nothing older.
+
+    The drain signal may fire once per worker. The first call must close
+    the project's current run; later calls must be no-ops even when older
+    runs for the project were never closed, instead of walking backward
+    and stamping history with today's counts (Codex P2 on PR #782).
+    """
+
+    def _seed(self, store: CostStore) -> None:
+        store.record_run(
+            Run(
+                run_id="r_old",
+                project_id="proj_x",
+                project_name="x",
+                started_at=datetime(2026, 5, 13, 10, tzinfo=timezone.utc),
+            )
+        )
+        store.record_run(
+            Run(
+                run_id="r_new",
+                project_id="proj_x",
+                project_name="x",
+                started_at=datetime(2026, 5, 13, 11, tzinfo=timezone.utc),
+            )
+        )
+
+    def _rows(self, store: CostStore) -> dict:
+        return {
+            run_id: (ended_at, total_tasks)
+            for run_id, ended_at, total_tasks in store.conn.execute(
+                "SELECT run_id, ended_at, total_tasks FROM runs ORDER BY run_id"
+            )
+        }
+
+    def test_first_call_closes_the_newest_run(self, store: CostStore) -> None:
+        """The current run is stamped; the older open run is left alone."""
+        self._seed(store)
+        end = datetime(2026, 5, 13, 12, tzinfo=timezone.utc)
+
+        assert (
+            store.close_current_run_for_project("proj_x", ended_at=end, total_tasks=8)
+            == "r_new"
+        )
+        rows = self._rows(store)
+        assert rows["r_new"] == (end.isoformat(), 8)
+        assert rows["r_old"] == (None, None)
+
+    def test_second_call_is_a_no_op_even_with_older_open_runs(
+        self, store: CostStore
+    ) -> None:
+        """Once the current run is closed, repeated calls touch nothing."""
+        self._seed(store)
+        end = datetime(2026, 5, 13, 12, tzinfo=timezone.utc)
+        store.close_current_run_for_project("proj_x", ended_at=end, total_tasks=8)
+
+        later = datetime(2026, 5, 13, 13, tzinfo=timezone.utc)
+        assert (
+            store.close_current_run_for_project(
+                "proj_x", ended_at=later, total_tasks=99
+            )
+            is None
+        )
+        rows = self._rows(store)
+        assert rows["r_new"] == (end.isoformat(), 8)
+        assert rows["r_old"] == (None, None)
+
+    def test_unknown_project_returns_none(self, store: CostStore) -> None:
+        """A project with no runs is a no-op."""
+        end = datetime(2026, 5, 13, 12, tzinfo=timezone.utc)
+        assert store.close_current_run_for_project("ghost", ended_at=end) is None
+
+    def test_normalizes_dashed_project_ids(self, store: CostStore) -> None:
+        """Dashed and dashless forms of the same project id resolve alike."""
+        dashless = "0123456789abcdef0123456789abcdef"
+        dashed = "01234567-89ab-cdef-0123-456789abcdef"
+        store.record_run(
+            Run(
+                run_id="r_canon",
+                project_id=dashless,
+                project_name="c",
+                started_at=datetime(2026, 5, 13, 10, tzinfo=timezone.utc),
+            )
+        )
+        end = datetime(2026, 5, 13, 12, tzinfo=timezone.utc)
+        assert store.close_current_run_for_project(dashed, ended_at=end) == "r_canon"

@@ -45,10 +45,6 @@ async def _register(state: Mock, **overrides: Any) -> Any:
         patch("src.marcus_mcp.tools.agent.conversation_logger"),
         patch("src.marcus_mcp.tools.agent.log_thinking"),
         patch("src.marcus_mcp.tools.agent.log_agent_event"),
-        patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ),
     ):
         return await register_agent(**kwargs)
 

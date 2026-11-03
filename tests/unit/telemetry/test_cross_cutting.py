@@ -70,10 +70,6 @@ def _fire_calls() -> dict:
             options={},
             actual_decomposer="feature_based",
         ),
-        "fire_experiment_started": lambda: ev.fire_experiment_started(3),
-        "fire_experiment_completed": lambda: ev.fire_experiment_completed(
-            {"success": True, "final_metrics": {}}
-        ),
         "fire_task_completed": lambda: ev.fire_task_completed(
             _FakeTask(labels=["backend"])
         ),

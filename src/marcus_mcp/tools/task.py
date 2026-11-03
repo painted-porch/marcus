@@ -2750,6 +2750,100 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     }
 
 
+def _close_run_on_drain(project_id: Optional[str], verdict: Any) -> Optional[str]:
+    """Close the project's current cost-store run when the board drains.
+
+    The ``runs`` table (``src/cost_tracking/cost_store.py``) opens a row per
+    ``create_project`` and used to close it only when a model called the
+    ``end_experiment`` tool. That tool is gone (ADR-0012 D10: a run is not a
+    core concept), so the board's own verdict closes the row: the first
+    drained ``request_next_task`` for a project stamps ``ended_at`` and the
+    final counts, and emits the ``project_cost_summary`` telemetry event
+    that used to ride on ``end_experiment``. Every later drain for the same
+    project is a no-op, because the close targets the *current* run and
+    refuses an already-closed one (so older unclosed rows are never
+    touched). Best effort: a cost-store failure never blocks the drain
+    response.
+
+    Parameters
+    ----------
+    project_id : Optional[str]
+        The agent's project.
+    verdict : Any
+        The :class:`DrainVerdict` that ended the run.
+
+    Returns
+    -------
+    Optional[str]
+        The closed ``run_id``, or None when nothing was open or the store
+        was unavailable.
+    """
+    if not project_id:
+        return None
+    try:
+        from src.cost_tracking.cost_recorder import get_recorder
+
+        store = get_recorder().store
+        closed = store.close_current_run_for_project(
+            project_id=project_id,
+            ended_at=datetime.now(timezone.utc),
+            total_tasks=verdict.tasks_total,
+            completed_tasks=verdict.tasks_done,
+            blocked_tasks=verdict.tasks_blocked,
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail the drain on bookkeeping
+        logger.warning("Could not close the run for project %s: %s", project_id, exc)
+        return None
+    if not closed:
+        return None
+    logger.info(
+        "Closed run %s for project %s on BOARD_DRAINED (%s)",
+        closed,
+        project_id,
+        verdict.reason,
+    )
+    _fire_cost_summary_for_project(project_id, store)
+    return str(closed)
+
+
+def _fire_cost_summary_for_project(project_id: str, store: Any) -> None:
+    """Emit ``project_cost_summary`` once for a run that just closed.
+
+    ``CostAggregator.project_summary`` returns a nested object (totals under
+    ``summary``, cost in dollars); the telemetry helper wants a flat dict
+    with ``cost_usd_cents`` and ``task_count``, so it is flattened here.
+    Best effort; telemetry never affects the drain.
+
+    Parameters
+    ----------
+    project_id : str
+        The project whose run closed.
+    store : Any
+        The cost store the aggregator reads.
+    """
+    try:
+        from src.cost_tracking.cost_aggregator import CostAggregator
+        from src.telemetry.events import fire_project_cost_summary
+
+        summary = CostAggregator(store).project_summary(project_id)
+        if not summary:
+            return
+        totals = summary.get("summary") or {}
+        cost_usd = totals.get("total_cost_usd") or 0
+        fire_project_cost_summary(
+            {
+                "input_tokens": totals.get("input_tokens") or 0,
+                "output_tokens": totals.get("output_tokens") or 0,
+                "cache_read_tokens": totals.get("cache_read_tokens") or 0,
+                "cache_creation_tokens": totals.get("cache_creation_tokens") or 0,
+                "cost_usd_cents": round(cost_usd * 100),
+                "task_count": len(summary.get("by_task") or []),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("project_cost_summary not emitted for %s: %s", project_id, exc)
+
+
 async def request_next_task(agent_id: str, state: Any) -> Any:
     """
     Agents call this to request their next optimal task.
@@ -3526,6 +3620,7 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     headline,
                     {"drain": _drain_verdict.to_dict(), **project_context},
                 )
+                _close_run_on_drain(_drain_project_id, _drain_verdict)
                 return {
                     "success": False,
                     "status": "BOARD_DRAINED",
@@ -3563,54 +3658,6 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                             "diagnosis": gridlock_result["diagnosis"],
                         },
                     )
-
-            # Check if the experiment has ended — return terminal signal so
-            # agents exit cleanly instead of retrying indefinitely.
-            #
-            # Guard: match the monitor's project_id to the agent's registered
-            # project.  Without this, a stale monitor from a previous
-            # experiment (auto-stopped, set_active_monitor not yet cleared)
-            # would fire EXPERIMENT_COMPLETE for agents of a new experiment
-            # that starts before the Marcus server is restarted.
-            from src.experiments.live_experiment_monitor import get_active_monitor
-
-            _monitor = get_active_monitor()
-            _agent_project_id = (
-                state.agent_project_map.get(agent_id, "")
-                if hasattr(state, "agent_project_map")
-                else ""
-            )
-            # Only fire if the agent's project is known AND matches the monitor.
-            # An empty _agent_project_id means the agent hasn't registered yet;
-            # treat that as "no match" so unregistered agents are never
-            # incorrectly terminated by a stale/finished monitor.
-            _project_id_matches = bool(_agent_project_id) and (
-                _monitor is not None
-                and hasattr(_monitor, "project_id")
-                and _monitor.project_id == _agent_project_id
-            )
-            if (
-                _monitor is not None
-                and _monitor.was_started
-                and not _monitor.is_running
-                and _project_id_matches
-            ):
-                sep = "=" * 70
-                return {
-                    "success": False,
-                    "status": "EXPERIMENT_COMPLETE",
-                    "message": (
-                        f"\n\n{sep}\n"
-                        "EXPERIMENT COMPLETE\n"
-                        f"{sep}\n\n"
-                        "The experiment has ended. All project work is done.\n\n"
-                        "REQUIRED ACTION:\n"
-                        "1. Print a brief summary of your contributions\n"
-                        "2. Exit — do NOT retry or request more tasks\n\n"
-                        f"{sep}\n"
-                    ),
-                    "should_exit": True,
-                }
 
             # Check if there are any TODO tasks remaining
             # Only run diagnostics for LOGGING if tasks exist but can't be assigned
@@ -4883,22 +4930,6 @@ async def report_task_progress(
         },
     )
 
-    # Record the progress heartbeat in the active experiment monitor so
-    # the runner's spawn-thrash detector sees a claimed task advancing
-    # (report_task_progress at 25/50/75%) as real progress, not only
-    # completions. Counted on every report — a report arriving at all
-    # proves the agent is alive and working its task.
-    from src.experiments.live_experiment_monitor import get_active_monitor
-
-    _progress_monitor = get_active_monitor()
-    if _progress_monitor and _progress_monitor.is_running:
-        _progress_monitor.record_progress(
-            agent_id=agent_id,
-            task_id=task_id,
-            progress=progress,
-            status=status,
-        )
-
     # Escalation flag — set when the retry ceiling is hit during
     # validation. The task is routed through the normal completion
     # path (kanban update, lease cleanup, branch merge) but the
@@ -5562,7 +5593,7 @@ async def report_task_progress(
                             f"after subtask {task_id} completion"
                         )
 
-            # Calculate actual hours for experiment tracking
+            # Calculate actual hours for the memory record below
             task_assignment = state.agent_tasks.get(agent_id)
             if task_assignment:
                 start_time = task_assignment.assigned_at
@@ -5571,21 +5602,8 @@ async def report_task_progress(
                     start_time = start_time.replace(tzinfo=timezone.utc)
                 now_utc = datetime.now(timezone.utc)
                 actual_hours = (now_utc - start_time).total_seconds() / 3600
-                duration_seconds = (now_utc - start_time).total_seconds()
             else:
                 actual_hours = 1.0  # Default if no assignment found
-                duration_seconds = 3600.0  # 1 hour default
-
-            # Record in active experiment if one is running
-            from src.experiments.live_experiment_monitor import get_active_monitor
-
-            monitor = get_active_monitor()
-            if monitor and monitor.is_running:
-                monitor.record_task_completion(
-                    task_id=task_id,
-                    agent_id=agent_id,
-                    duration_seconds=duration_seconds,
-                )
 
             # Memory recording moved to post-merge for #651 honesty
             # (Kaia review on PR #653).  Pre-fix, this block recorded
@@ -6806,18 +6824,6 @@ async def report_blocker(
                 task_id,
                 agent_id,
                 severity,
-            )
-
-        # Record in active experiment if one is running
-        from src.experiments.live_experiment_monitor import get_active_monitor
-
-        monitor = get_active_monitor()
-        if monitor and monitor.is_running:
-            monitor.record_blocker(
-                agent_id=agent_id,
-                task_id=task_id,
-                description=blocker_description,
-                severity=severity,
             )
 
         # Add detailed comment. Both kinds are recorded — an advisory

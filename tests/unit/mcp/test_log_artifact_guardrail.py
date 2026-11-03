@@ -23,16 +23,6 @@ import pytest
 
 from src.marcus_mcp.tools.attachment import log_artifact
 
-# Pre-stub the live_experiment_monitor module so that tests which patch
-# subprocess.run don't accidentally trigger mlflow's module-level
-# subprocess.check_output call (platform detection) when the real module
-# would be imported for the first time inside log_artifact's function body.
-_MONITOR_MODULE_PATH = "src.experiments.live_experiment_monitor"
-if _MONITOR_MODULE_PATH not in sys.modules:
-    _mock_monitor_mod = Mock()
-    _mock_monitor_mod.get_active_monitor = Mock(return_value=None)
-    sys.modules[_MONITOR_MODULE_PATH] = _mock_monitor_mod
-
 pytestmark = pytest.mark.unit
 
 

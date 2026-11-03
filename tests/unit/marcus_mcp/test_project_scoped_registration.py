@@ -81,10 +81,6 @@ class TestRegisterAgentProjectScope:
             patch("src.marcus_mcp.tools.agent.conversation_logger"),
             patch("src.marcus_mcp.tools.agent.log_thinking"),
             patch("src.marcus_mcp.tools.agent.log_agent_event"),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
         ):
             result = await register_agent(
                 agent_id="agent_unicorn_1",
@@ -107,10 +103,6 @@ class TestRegisterAgentProjectScope:
             patch("src.marcus_mcp.tools.agent.conversation_logger"),
             patch("src.marcus_mcp.tools.agent.log_thinking"),
             patch("src.marcus_mcp.tools.agent.log_agent_event"),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
         ):
             await register_agent(
                 agent_id="agent_a",
@@ -142,10 +134,6 @@ class TestRegisterAgentProjectScope:
             patch("src.marcus_mcp.tools.agent.conversation_logger"),
             patch("src.marcus_mcp.tools.agent.log_thinking"),
             patch("src.marcus_mcp.tools.agent.log_agent_event"),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
         ):
             await register_agent(
                 agent_id="agent_unicorn_1",
@@ -167,10 +155,6 @@ class TestRegisterAgentProjectScope:
             patch("src.marcus_mcp.tools.agent.conversation_logger"),
             patch("src.marcus_mcp.tools.agent.log_thinking"),
             patch("src.marcus_mcp.tools.agent.log_agent_event"),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
         ):
             result = await register_agent(
                 agent_id="agent_unicorn_1",
@@ -197,10 +181,6 @@ class TestRegisterAgentProjectScope:
             patch("src.marcus_mcp.tools.agent.conversation_logger"),
             patch("src.marcus_mcp.tools.agent.log_thinking"),
             patch("src.marcus_mcp.tools.agent.log_agent_event"),
-            patch(
-                "src.experiments.live_experiment_monitor.get_active_monitor",
-                return_value=None,
-            ),
         ):
             result = await register_agent(
                 agent_id="agent_unicorn_1",

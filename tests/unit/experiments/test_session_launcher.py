@@ -742,3 +742,125 @@ class TestCreateProjectTimeout:
         )
         assert launcher.create_project() is True
         assert seen[0] == CREATE_PROJECT_TIMEOUT_SECONDS
+
+
+class TestUnfinishedReport:
+    """The end-of-run statement of what did and did not get built."""
+
+    def test_clean_run_says_all_complete(self) -> None:
+        """No unfinished tasks: one line, with the count."""
+        from runners.session_launcher import format_unfinished_report
+
+        lines = format_unfinished_report([], total=9)
+        assert len(lines) == 1
+        assert "9/9" in lines[0]
+        assert "complete" in lines[0].lower()
+
+    def test_unfinished_work_is_named_with_reasons(self) -> None:
+        """Every unfinished task is named with its status and reason."""
+        from runners.session_launcher import format_unfinished_report
+
+        text = "\n".join(
+            format_unfinished_report(
+                [
+                    {
+                        "id": "abc123",
+                        "name": "Implement CLI Entry Point",
+                        "status": "blocked",
+                        "reason": "needs a paid API key",
+                    },
+                    {
+                        "id": "def456",
+                        "name": "Write README",
+                        "status": "todo",
+                        "reason": "never claimed by an agent",
+                    },
+                ],
+                total=10,
+            )
+        )
+        assert "8/10" in text
+        assert "2 task(s) did NOT complete" in text
+        assert "Implement CLI Entry Point" in text and "needs a paid API key" in text
+        assert "Write README" in text and "never claimed by an agent" in text
+        assert "missing" in text.lower()
+
+    def test_absent_list_says_it_could_not_verify(self) -> None:
+        """No trustworthy list must never read as success."""
+        from runners.session_launcher import format_unfinished_report
+
+        text = "\n".join(format_unfinished_report(None, total=9)).lower()
+        assert "could not" in text
+        assert "complete" not in text.split("could not")[0]
+
+    def test_zero_total_does_not_claim_all_complete(self) -> None:
+        """A board that reports no tasks is not a finished board."""
+        from runners.session_launcher import format_unfinished_report
+
+        text = "\n".join(format_unfinished_report([], total=0)).lower()
+        assert "all 0/0" not in text
+        assert "could not" in text
+
+
+class TestFinalReport:
+    """The launcher reads the board once at the end and names the gaps."""
+
+    def _run(self, tmp_path: Path, project: Dict[str, Any]) -> str:
+        config = _config(tmp_path)
+        host = _host(tmp_path)
+        host.count_live_panes = Mock(return_value=0)
+        mcp = _mcp({"success": True, "project_id": "p1", "tasks_created": 3})
+
+        def _call(name: str, arguments: Any = None) -> Any:
+            if name == "create_project":
+                return {"success": True, "project_id": "p1", "tasks_created": 3}
+            if name == "get_project_status":
+                return {"success": True, "project": project}
+            return {}
+
+        mcp.call_tool = Mock(side_effect=_call)
+        launcher = SessionLauncher(
+            config,
+            TEMPLATE.parent,
+            sessions=1,
+            host=host,
+            mcp_factory=lambda t: mcp,
+            sleep=lambda s: None,
+        )
+        with (
+            patch("runners.session_launcher.shutil.which", return_value="/x"),
+            patch("runners.session_launcher.check_mcp_health", return_value=True),
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ),
+        ):
+            assert launcher.run() is True
+        return (Path(config.experiment_dir) / "logs" / "runner.log").read_text()
+
+    def test_names_unfinished_tasks_from_project_status(self, tmp_path: Path) -> None:
+        """The RESULT lines come from get_project_status's unfinished_tasks."""
+        log = self._run(
+            tmp_path,
+            {
+                "total_tasks": 3,
+                "completed": 2,
+                "unfinished_tasks": [
+                    {
+                        "id": "deadbeef",
+                        "name": "Write README",
+                        "status": "todo",
+                        "reason": "never claimed by an agent",
+                    }
+                ],
+            },
+        )
+        assert "RESULT: 2/3 tasks complete" in log
+        assert "Write README" in log
+        assert "never claimed by an agent" in log
+
+    def test_says_could_not_verify_without_the_list(self, tmp_path: Path) -> None:
+        """A status without the list is reported as unverified, not as done."""
+        log = self._run(tmp_path, {"total_tasks": 3, "completed": 3})
+        assert "could not verify" in log.lower()
+        assert "RESULT: all" not in log

@@ -9,10 +9,11 @@ has been "open" since insertion. This blocks any dashboard query
 filtering on ``ended_at IS NOT NULL`` and prevents wall-clock-time
 analysis (cost-per-minute, coordination tax rate, run duration).
 
-Going forward, ``end_experiment`` closes runs live for the
-``path=marcus`` and ``path=posidonius`` flows. This backfill closes
-the rest: historical runs that pre-date the fix, and runs from
-``path=direct`` usage where the user never invokes ``end_experiment``.
+Going forward, the board closes runs live: the first ``request_next_task``
+that returns ``BOARD_DRAINED`` for a project stamps its open run. This
+backfill closes the rest: historical runs that pre-date the fix, and runs
+whose board never drained (abandoned projects, ``path=direct`` sessions
+that stopped asking for work).
 
 Heuristic
 ---------

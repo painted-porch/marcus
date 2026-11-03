@@ -127,7 +127,8 @@ If there is neither, the response is `status: "BOARD_DRAINED"` with `should_exit
 Otherwise the usual retry response is returned, with the same `drain` object explaining why the board is not drained yet (`claimable`, `in_flight`, or `empty`; an empty board is never drained because the project may still be being created).
 
 The signal leans on ADR-0012 D3: a dead worker's lease is recovered within the silence timeout, so its task returns to claimable and the drain never fires over abandoned work.
-It replaces the experiment monitor's `EXPERIMENT_COMPLETE`, which fired only when a model called `end_experiment`; that path remains until the launcher step removes the monitor (D10).
+It replaced the experiment monitor's `EXPERIMENT_COMPLETE`, which fired only when a model called `end_experiment`; the monitor, its three MCP tools (`start_experiment`, `end_experiment`, `get_experiment_status`) and that response are gone (ADR-0012 D10).
+The first drained `request_next_task` for a project also closes the project's open row in the cost store's `runs` table, the job `end_experiment` used to do.
 
 ## Special System Characteristics
 

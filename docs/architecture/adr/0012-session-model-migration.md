@@ -173,6 +173,11 @@ Shape-B gate, coordination experiments) keep full run semantics.
 
 - **Why:** the product vision is continuous operation; the research instrument
   needs runs. This split serves both without compromise.
+- **Landed 2026-11-03:** the `LiveExperimentMonitor`, the `start_experiment` /
+  `end_experiment` / `get_experiment_status` tools, the MLflow tracker and the
+  `EXPERIMENT_COMPLETE` response are deleted; `mlflow` is no longer a core
+  dependency. The board's drain verdict closes the cost-store run, and
+  `get_project_status` names the unfinished tasks for the launcher's report.
 
 ### D11 — False-recovery fencing: the two-robots-one-chore rule *(added 2026-07-06)*
 

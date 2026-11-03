@@ -446,7 +446,7 @@ def _request_state(tasks: List[Task], **kwargs: Any) -> Mock:
     return state
 
 
-def _no_task_patches(monitor: Any = None) -> Any:
+def _no_task_patches() -> Any:
     from contextlib import ExitStack
 
     stack = ExitStack()
@@ -454,12 +454,6 @@ def _no_task_patches(monitor: Any = None) -> Any:
         patch(
             "src.marcus_mcp.tools.task.find_optimal_task_for_agent",
             new=AsyncMock(return_value=None),
-        )
-    )
-    stack.enter_context(
-        patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=monitor,
         )
     )
     stack.enter_context(
@@ -532,23 +526,6 @@ class TestRequestNextTaskDrain:
         assert result["retry_after_seconds"] == 30
         assert result["drain"]["reason"] == "in_flight"
 
-    @pytest.mark.asyncio
-    async def test_drain_is_decided_before_the_experiment_monitor(self) -> None:
-        """A drained board is drained whatever a (stale) monitor says."""
-        from src.marcus_mcp.tools.task import request_next_task
-
-        monitor = Mock()
-        monitor.was_started = True
-        monitor.is_running = True  # would otherwise mean "keep retrying"
-        monitor.project_id = PROJECT
-        state = _request_state([_task("a", TaskStatus.DONE)])
-
-        with _no_task_patches(monitor):
-            result = await request_next_task(agent_id="agent-1", state=state)
-
-        assert result["status"] == "BOARD_DRAINED"
-
-    @pytest.mark.asyncio
     async def test_unregistered_agent_never_gets_drained(self) -> None:
         """No project: no verdict; the usual retry applies."""
         from src.marcus_mcp.tools.task import request_next_task
@@ -580,3 +557,125 @@ class TestRequestNextTaskDrain:
 
         assert "should_exit" not in result
         assert result["retry_after_seconds"] == 30
+
+
+class TestDrainClosesTheRun:
+    """The board's verdict, not a tool call, closes the cost-store run."""
+
+    @pytest.mark.asyncio
+    async def test_complete_drain_closes_the_latest_open_run(self) -> None:
+        """A drained board stamps ended_at and the final counts on the run."""
+        from src.marcus_mcp.tools.task import request_next_task
+
+        tasks = [_task("a", TaskStatus.DONE), _task("b", TaskStatus.DONE)]
+        state = _request_state(tasks)
+        store = Mock()
+        store.close_current_run_for_project = Mock(return_value="run-1")
+        recorder = Mock(store=store)
+
+        with (
+            _no_task_patches(),
+            patch(
+                "src.cost_tracking.cost_recorder.get_recorder", return_value=recorder
+            ),
+        ):
+            result = await request_next_task("agent-1", state)
+
+        assert result["status"] == "BOARD_DRAINED"
+        kwargs = store.close_current_run_for_project.call_args.kwargs
+        assert kwargs["project_id"] == PROJECT
+        assert kwargs["total_tasks"] == 2
+        assert kwargs["completed_tasks"] == 2
+        assert kwargs["blocked_tasks"] == 0
+        assert kwargs["ended_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_cost_store_failure_does_not_block_the_drain(self) -> None:
+        """Bookkeeping errors are logged; the worker still gets BOARD_DRAINED."""
+        from src.marcus_mcp.tools.task import request_next_task
+
+        tasks = [_task("a", TaskStatus.DONE)]
+        state = _request_state(tasks)
+
+        with (
+            _no_task_patches(),
+            patch(
+                "src.cost_tracking.cost_recorder.get_recorder",
+                side_effect=RuntimeError("no store"),
+            ),
+        ):
+            result = await request_next_task("agent-1", state)
+
+        assert result["status"] == "BOARD_DRAINED"
+        assert result["should_exit"] is True
+
+    @pytest.mark.asyncio
+    async def test_cost_summary_fires_once_when_a_run_closes(self) -> None:
+        """The project_cost_summary event rides on the real close, flattened."""
+        from src.marcus_mcp.tools.task import request_next_task
+
+        tasks = [_task("a", TaskStatus.DONE)]
+        state = _request_state(tasks)
+        store = Mock()
+        store.close_current_run_for_project = Mock(return_value="run-1")
+        recorder = Mock(store=store)
+        aggregator = Mock()
+        aggregator.project_summary = Mock(
+            return_value={
+                "summary": {
+                    "input_tokens": 1000,
+                    "output_tokens": 200,
+                    "cache_read_tokens": 50,
+                    "cache_creation_tokens": 5,
+                    "total_cost_usd": 0.1234,
+                },
+                "by_task": [{"task_id": "a"}],
+            }
+        )
+
+        with (
+            _no_task_patches(),
+            patch(
+                "src.cost_tracking.cost_recorder.get_recorder", return_value=recorder
+            ),
+            patch(
+                "src.cost_tracking.cost_aggregator.CostAggregator",
+                return_value=aggregator,
+            ),
+            patch("src.telemetry.events.fire_project_cost_summary") as fire,
+        ):
+            await request_next_task("agent-1", state)
+
+        fire.assert_called_once_with(
+            {
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "cache_read_tokens": 50,
+                "cache_creation_tokens": 5,
+                "cost_usd_cents": 12,
+                "task_count": 1,
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_repeated_drain_does_not_close_or_fire_again(self) -> None:
+        """A second worker's drain finds the run already closed: no close, no event."""
+        from src.marcus_mcp.tools.task import request_next_task
+
+        tasks = [_task("a", TaskStatus.DONE)]
+        state = _request_state(tasks)
+        store = Mock()
+        store.close_current_run_for_project = Mock(return_value=None)
+        recorder = Mock(store=store)
+
+        with (
+            _no_task_patches(),
+            patch(
+                "src.cost_tracking.cost_recorder.get_recorder", return_value=recorder
+            ),
+            patch("src.telemetry.events.fire_project_cost_summary") as fire,
+        ):
+            result = await request_next_task("agent-1", state)
+
+        assert result["status"] == "BOARD_DRAINED"
+        fire.assert_not_called()

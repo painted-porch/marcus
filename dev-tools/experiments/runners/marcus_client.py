@@ -1,8 +1,8 @@
 """
 Minimal MCP-over-HTTP client for the experiment runner (issue #595 Fix 3).
 
-The runner's control loop polls Marcus many times per run
-(``get_desired_agent_count``, ``get_experiment_status``). This module
+The session launcher calls Marcus several times per run
+(``create_project``, ``get_project_status``). This module
 provides a small client that performs the MCP handshake once and reuses
 the session for every subsequent tool call.
 

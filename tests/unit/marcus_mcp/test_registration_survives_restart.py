@@ -730,19 +730,15 @@ class TestRegisterAgentPersists:
         from src.marcus_mcp.tools.agent import register_agent
 
         state = self._state(tmp_path)
-        with patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ):
-            result = await register_agent(
-                agent_id="agent-a",
-                name="Alice",
-                role="Backend Developer",
-                skills=["python"],
-                state=state,
-                project_id="proj-1",
-                vendor="anthropic",
-            )
+        result = await register_agent(
+            agent_id="agent-a",
+            name="Alice",
+            role="Backend Developer",
+            skills=["python"],
+            state=state,
+            project_id="proj-1",
+            vendor="anthropic",
+        )
 
         assert result["success"] is True
         on_disk = await RegistrationPersistence(tmp_path).load()
@@ -766,18 +762,14 @@ class TestRegisterAgentPersists:
         state.agent_status["agent-a"] = existing
         state.agent_project_map["agent-a"] = "proj-1"
 
-        with patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ):
-            await register_agent(
-                agent_id="agent-a",
-                name="Alice",
-                role="Backend Developer",
-                skills=["python", "sql"],
-                state=state,
-                project_id="proj-1",
-            )
+        await register_agent(
+            agent_id="agent-a",
+            name="Alice",
+            role="Backend Developer",
+            skills=["python", "sql"],
+            state=state,
+            project_id="proj-1",
+        )
 
         refreshed = state.agent_status["agent-a"]
         assert refreshed.current_tasks == [task]
@@ -797,18 +789,14 @@ class TestRegisterAgentPersists:
         state.registration_persistence = Mock()
         state.registration_persistence.save = AsyncMock(side_effect=OSError("disk"))
 
-        with patch(
-            "src.experiments.live_experiment_monitor.get_active_monitor",
-            return_value=None,
-        ):
-            result = await register_agent(
-                agent_id="agent-a",
-                name="Alice",
-                role="dev",
-                skills=[],
-                state=state,
-                project_id="proj-1",
-            )
+        result = await register_agent(
+            agent_id="agent-a",
+            name="Alice",
+            role="dev",
+            skills=[],
+            state=state,
+            project_id="proj-1",
+        )
 
         assert result["success"] is True
         assert "agent-a" in state.agent_status

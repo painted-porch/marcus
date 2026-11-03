@@ -33,10 +33,6 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "diagnose_project",  # Diagnose project issues
         "capture_stall_snapshot",  # Capture snapshot when development stalls
         "replay_snapshot_conversations",  # Replay conversations from snapshot
-        # Experiment tracking
-        "start_experiment",
-        "end_experiment",
-        "get_experiment_status",
         # Project history queries
         "query_project_history",
         "list_project_history_files",
@@ -57,10 +53,6 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         # Scheduling
         "get_optimal_agent_count",  # Calculate optimal agent count using CPM
         "get_desired_agent_count",  # Live layered-spawning signal (#595 Fix 3)
-        # Experiment tracking
-        "start_experiment",
-        "end_experiment",
-        "get_experiment_status",
         # Project history queries
         "query_project_history",
         "list_project_history_files",
