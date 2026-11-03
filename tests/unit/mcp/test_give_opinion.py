@@ -74,7 +74,12 @@ def _make_state(with_about_card: bool = True) -> Mock:
     state.kanban_client.add_comment = AsyncMock(return_value={"success": True})
     state.project_tasks = [_about_card()] if with_about_card else []
     state.current_project_name = "Wheat Farm"
+    # The active project IS the agent's project in the default fixture, so
+    # the board comment goes through the active client; the cross-project
+    # tests below move the active project away.
+    state.current_project_id = "p-agent"
     state.agent_project_map = {"agent-2": "p-agent"}
+    state.project_manager = None
     state.events = None
     return state
 
@@ -207,6 +212,68 @@ class TestGiveOpinion:
             )
 
         assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_comment_goes_to_the_agents_own_board_not_the_active_one(
+        self,
+    ) -> None:
+        """On a multi-project server the marker lands on project B's board.
+
+        The row is stamped with the agent's project; the comment must go
+        to the same project's About card through that project's kanban
+        client, not the active project's (Codex P2 on PR #800).
+        """
+        state = _make_state()
+        state.current_project_id = "p-active"
+        other_about = _about_card()
+        other_about.id = "about_b"
+        other_about.name = "About: Project B"
+        other_client = Mock()
+        other_client.get_all_tasks = AsyncMock(return_value=[other_about])
+        other_client.add_comment = AsyncMock(return_value={"success": True})
+        state.project_manager = Mock()
+        state.project_manager.get_project_board = AsyncMock(
+            return_value=(other_client, "Project B")
+        )
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new_callable=AsyncMock,
+        ):
+            result = await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+            )
+
+        assert result["success"] is True
+        state.project_manager.get_project_board.assert_awaited_once_with("p-agent")
+        target, _ = other_client.add_comment.await_args.args
+        assert target == "about_b"
+        state.kanban_client.add_comment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_project_board_skips_the_comment(self) -> None:
+        """If the registry cannot produce B's board, record without a comment."""
+        state = _make_state()
+        state.current_project_id = "p-active"
+        state.project_manager = Mock()
+        state.project_manager.get_project_board = AsyncMock(return_value=None)
+
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new_callable=AsyncMock,
+        ):
+            result = await give_opinion(
+                agent_id="agent-2",
+                subject="farm.flooded",
+                what="the farm is flooded",
+                state=state,
+            )
+
+        assert result["success"] is True
+        state.kanban_client.add_comment.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_about_card_is_matched_by_exact_name_first(self) -> None:

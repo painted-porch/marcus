@@ -159,8 +159,8 @@ def normalize_subject(subject: str) -> str:
     return _SUBJECT_SEPARATOR.sub(".", subject.lower()).strip(".")
 
 
-def _about_card_id(state: Any) -> Optional[str]:
-    """Return the id of the board's About card, if the board has one.
+def _about_card_id(tasks: List[Any], project_name: Optional[str]) -> Optional[str]:
+    """Return the id of a board's About card, if the board has one.
 
     ``create_project`` writes one card per project named
     ``About: <project_name>`` with ``source_type="project_about"``. It is
@@ -169,8 +169,6 @@ def _about_card_id(state: Any) -> Optional[str]:
     cards could share a board); ``source_type`` round-trips on sqlite but
     not on every provider, so the name prefix is the last resort.
     """
-    tasks = getattr(state, "project_tasks", None) or []
-    project_name = getattr(state, "current_project_name", None)
     if isinstance(project_name, str) and project_name:
         exact = f"About: {project_name}"
         for task in tasks:
@@ -182,6 +180,38 @@ def _about_card_id(state: Any) -> Optional[str]:
         ).startswith("About: "):
             return str(task.id)
     return None
+
+
+async def _board_for_opinion(
+    state: Any, project_id: Optional[str]
+) -> tuple[Any, Optional[str], List[Any]]:
+    """Return the kanban client, project name and tasks an opinion's comment goes to.
+
+    The active project's board serves when the opinion belongs to it (or
+    to no project at all). When the agent is registered to another
+    project on a multi-project server, that project's own board is
+    resolved through the project manager, so the marker lands where the
+    opinion's readers look rather than on whichever project happens to
+    be active (Codex P2 on PR #800).
+    """
+    active_project_id = getattr(state, "current_project_id", None)
+    manager = getattr(state, "project_manager", None)
+    if project_id is None or project_id == active_project_id or manager is None:
+        return (
+            getattr(state, "kanban_client", None),
+            getattr(state, "current_project_name", None),
+            list(getattr(state, "project_tasks", None) or []),
+        )
+    board = await manager.get_project_board(project_id)
+    if board is None:
+        return None, None, []
+    client, project_name = board
+    try:
+        tasks = list(await client.get_all_tasks() or [])
+    except Exception as e:  # noqa: BLE001 - a missing card list only costs the comment
+        logger.warning(f"Could not list tasks for project {project_id}: {e}")
+        tasks = []
+    return client, project_name, tasks
 
 
 def _project_for_agent(agent_id: str, state: Any) -> Optional[str]:
@@ -294,9 +324,13 @@ async def give_opinion(
         )
 
         # Keep the opinion visible to a human watching the board: on the
-        # task when there is one, else on the project's About card.
-        target_id = task_id or _about_card_id(state)
-        if state.kanban_client and target_id:
+        # task when there is one, else on the project's About card, and
+        # always on the board of the project the opinion belongs to.
+        board_client, board_name, board_tasks = await _board_for_opinion(
+            state, project_id
+        )
+        target_id = task_id or _about_card_id(board_tasks, board_name)
+        if board_client and target_id:
             try:
                 comment = (
                     f"💬 OPINION by {agent_id} on {canonical}\n"
@@ -304,7 +338,7 @@ async def give_opinion(
                     f"Why: {why}\n"
                     f"Impact: {impact}"
                 )
-                await state.kanban_client.add_comment(target_id, comment)
+                await board_client.add_comment(target_id, comment)
             except Exception as e:
                 # The opinion is recorded either way
                 logger.warning(f"Failed to add kanban comment for opinion: {e}")

@@ -9,9 +9,29 @@ transport is told a different contract from an agent on the other.
 
 import pytest
 
+from src.marcus_mcp.agent_server import AGENT_ALLOWED_TOOLS
 from src.marcus_mcp.handlers import get_all_tool_definitions, get_tool_definitions
+from src.marcus_mcp.tools.auth import ROLE_TOOLS
 
 pytestmark = pytest.mark.unit
+
+
+class TestGiveOpinionStdioAllowlists:
+    """Test suite for the stdio-side allowlists (Codex P2 on PR #800).
+
+    An authenticated stdio client of type ``agent`` is filtered through
+    ``ROLE_TOOLS["agent"]`` before dispatch, and the restricted
+    ``AgentMarcusServer`` has its own list; a tool missing from either is
+    advertised in the schema and refused on call.
+    """
+
+    def test_authenticated_agent_role_allows_give_opinion(self) -> None:
+        """The auth-layer allowlist for agents includes the tool."""
+        assert "give_opinion" in ROLE_TOOLS["agent"]
+
+    def test_restricted_agent_server_allows_give_opinion(self) -> None:
+        """The restricted agent server's allowlist includes the tool."""
+        assert "give_opinion" in AGENT_ALLOWED_TOOLS
 
 
 class TestGiveOpinionStdioDefinition:

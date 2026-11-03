@@ -18,6 +18,26 @@ import mcp.types as types  # noqa: E402
 from src.marcus_mcp.handlers import get_tool_definitions  # noqa: E402
 from src.marcus_mcp.server import MarcusServer  # noqa: E402
 
+#: Tools the restricted agent server serves. Kept as a module constant so
+#: the list can be asserted against the other agent surfaces (issue #800:
+#: give_opinion was added to the groups and the HTTP endpoint but not here).
+AGENT_ALLOWED_TOOLS = [
+    "register_agent",
+    "get_agent_status",
+    "list_registered_agents",
+    "request_next_task",
+    "report_task_progress",
+    "report_blocker",
+    "request_task_redo",
+    "get_project_status",
+    "get_task_context",
+    "log_decision",
+    "give_opinion",
+    "log_artifact",
+    "ping",
+    "check_assignment_health",
+]
+
 
 class AgentMarcusServer(MarcusServer):
     """Marcus MCP Server configured specifically for coding agents."""
@@ -38,21 +58,7 @@ class AgentMarcusServer(MarcusServer):
         ) -> List[types.TextContent | types.ImageContent | types.EmbeddedResource]:
             """Handle tool calls."""
             # Check if this is an allowed agent tool
-            allowed_tools = [
-                "register_agent",
-                "get_agent_status",
-                "list_registered_agents",
-                "request_next_task",
-                "report_task_progress",
-                "report_blocker",
-                "request_task_redo",
-                "get_project_status",
-                "get_task_context",
-                "log_decision",
-                "log_artifact",
-                "ping",
-                "check_assignment_health",
-            ]
+            allowed_tools = AGENT_ALLOWED_TOOLS
 
             if name not in allowed_tools:
                 return [
