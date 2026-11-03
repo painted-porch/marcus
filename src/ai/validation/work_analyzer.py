@@ -868,7 +868,18 @@ class WorkAnalyzer:
             if proc.returncode != 0:
                 # Test failed - parse error. Runner executed, so this
                 # result is authoritative.
-                error_output = stderr.decode("utf-8", errors="ignore")
+                # Test runners write the real failure (collection errors
+                # such as a Python ImportError, tracebacks and the failure
+                # summary) to stdout; stderr usually carries only warnings
+                # (PytestConfigWarning, DeprecationWarning, Node
+                # deprecations). Decoding stderr alone drops the real
+                # error and surfaces the warnings as evidence, so combine
+                # both streams, stdout first.
+                stdout_text = stdout.decode("utf-8", errors="ignore")
+                stderr_text = stderr.decode("utf-8", errors="ignore")
+                error_output = "\n".join(
+                    stream for stream in (stdout_text, stderr_text) if stream.strip()
+                )
                 issues = self._parse_test_failure(error_output, project_type)
                 return ValidationResult(
                     passed=False,
@@ -1171,7 +1182,7 @@ class WorkAnalyzer:
         Parameters
         ----------
         error_output : str
-            Test stderr output
+            Combined test stdout and stderr output
         project_type : dict[str, str]
             Project type info
 

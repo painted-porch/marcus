@@ -371,6 +371,47 @@ class TestRuntimeValidation:
                 in result.issues[0].remediation
             )
 
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_validate_runtime_reads_error_from_stdout(
+        self,
+        analyzer: WorkAnalyzer,
+        mock_task: Mock,
+        nodejs_evidence: WorkEvidence,
+    ) -> None:
+        """Runtime validation must surface the real error from stdout.
+
+        Test runners write the actual failure (collection errors such as
+        a Python ImportError, tracebacks, and the failure summary) to
+        stdout, while stderr often carries only warnings
+        (PytestConfigWarning, DeprecationWarning, Node deprecations).
+        Decoding stderr alone drops the real error and surfaces the
+        warnings as evidence, so the stored evidence must reflect the
+        error on stdout.
+        """
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate = AsyncMock(
+            return_value=(
+                # Real error on STDOUT, where runners actually emit it.
+                b"Error: Cannot find module 'identity-obj-proxy'\n"
+                b"Require stack:\n- jest.config.js",
+                # STDERR carries only warnings.
+                b"(node:123) Warning: deprecated API usage\n",
+            )
+        )
+
+        with patch("asyncio.create_subprocess_shell", return_value=mock_proc):
+            result = await analyzer._validate_runtime(mock_task, nodejs_evidence)
+
+        assert result.passed is False
+        # The missing dependency reported on stdout must be detected,
+        # not dropped in favour of the stderr warning.
+        assert len(result.issues) == 1
+        assert "identity-obj-proxy" in result.issues[0].issue
+        # The surfaced reasoning must contain the real error.
+        assert "identity-obj-proxy" in result.ai_reasoning
+
     @pytest.mark.asyncio
     async def test_validate_runtime_timeout(
         self, analyzer: WorkAnalyzer, mock_task: Mock, nodejs_evidence: WorkEvidence

@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.core.models import Priority, TaskAssignment
+from src.core.models import Priority, Task, TaskAssignment, TaskStatus
 from src.marcus_mcp.tools.task import report_task_progress
 
 pytestmark = pytest.mark.unit
@@ -556,4 +556,63 @@ class TestTransactionalLateCompletionAccept:
 
         assert result["success"] is False
         assert result["status"] == "stale_completion"
+        state.kanban_client.update_task.assert_not_called()
+
+
+class TestAlreadyDoneCompletionGuard:
+    """A completion report on an already-DONE task must be refused
+    before the validation gate runs.
+
+    A duplicate completion — the agent re-sends ``completed``, or a
+    second agent reports a task that already closed — should not
+    re-trigger the typed-evidence, approval, LLM or smoke validation
+    pipeline. The ``blocked`` branch of report_task_progress and
+    report_blocker already short-circuit a DONE task; the ``completed``
+    branch must do the same. Distinct from the stale-completion guard:
+    here the reporting agent legitimately holds the task, but the work
+    has already been accepted.
+    """
+
+    def _done_task(self, task_id: str, agent_id: str) -> Task:
+        """A board task already in the DONE state."""
+        now = datetime.now(timezone.utc)
+        return Task(
+            id=task_id,
+            name="Already complete",
+            description="",
+            status=TaskStatus.DONE,
+            priority=Priority.MEDIUM,
+            assigned_to=agent_id,
+            created_at=now,
+            updated_at=now,
+            due_date=None,
+            estimated_hours=1.0,
+            dependencies=[],
+            task_type="implement",
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejects_completion_when_task_already_done(self) -> None:
+        """Agent holds the task, but it is already DONE on the board →
+        refuse with task_already_complete before the validation gate.
+        """
+        state = _make_state_with_assignment("agent-001", task_id="task-343")
+        # The board reports the task already complete.
+        state.kanban_client.get_all_tasks = AsyncMock(
+            return_value=[self._done_task("task-343", "agent-001")]
+        )
+
+        result = await report_task_progress(
+            agent_id="agent-001",
+            task_id="task-343",
+            status="completed",
+            progress=100,
+            message="finished again",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "task_already_complete"
+        assert "task-343" in result["message"]
+        # The validation / completion pipeline never ran: no DONE write.
         state.kanban_client.update_task.assert_not_called()

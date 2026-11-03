@@ -31,11 +31,16 @@ def _make_task(
 ) -> Any:
     from src.core.models import Priority, Task, TaskStatus
 
+    # IN_PROGRESS is the realistic pre-completion status: the completion
+    # pipeline marks a task DONE only after validation. report_task_progress
+    # now refuses a completion on an already-DONE task before the gate, so a
+    # fixture that starts DONE would be short-circuited instead of exercising
+    # the stub-warning path this test covers.
     return Task(
         id=task_id,
         name="Build WeatherCard",
         description="desc",
-        status=TaskStatus.DONE,
+        status=TaskStatus.IN_PROGRESS,
         priority=Priority.MEDIUM,
         assigned_to="agent-1",
         created_at=datetime.now(timezone.utc),

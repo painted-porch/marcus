@@ -444,6 +444,10 @@ def _escalate_missing_verifications_response(
         A new dict tagged terminal/escalated, remediation fields intact.
     """
     escalated = dict(smoke_response)
+    # Set success explicitly rather than inheriting it from the copied
+    # input: an escalation is always a refusal, and a caller that passes
+    # a payload lacking ``success`` must still get an explicit flag.
+    escalated["success"] = False
     escalated["status"] = "smoke_verification_escalated"
     escalated["error"] = "verifications_required_escalated"
     escalated["terminal"] = True
@@ -484,6 +488,10 @@ def _escalate_behavior_evidence_response(
         A new dict tagged terminal/escalated, remediation fields intact.
     """
     escalated = dict(smoke_response)
+    # Set success explicitly rather than inheriting it from the copied
+    # input: an escalation is always a refusal, and a caller that passes
+    # a payload lacking ``success`` must still get an explicit flag.
+    escalated["success"] = False
     escalated["status"] = "smoke_verification_escalated"
     escalated["error"] = "behavior_evidence_escalated"
     escalated["terminal"] = True
@@ -596,6 +604,10 @@ def _escalate_typed_evidence_response(
         A new dict tagged terminal/escalated, remediation intact.
     """
     escalated = dict(rejection)
+    # Set success explicitly rather than inheriting it from the copied
+    # input: an escalation is always a refusal, and a caller that passes
+    # a payload lacking ``success`` must still get an explicit flag.
+    escalated["success"] = False
     escalated["status"] = "evidence_rejection_escalated"
     escalated["error"] = "typed_evidence_escalated"
     escalated["terminal"] = True
@@ -5137,6 +5149,33 @@ async def report_task_progress(
                 f"VALIDATION GATE: Task {task_id} completed, "
                 f"found task object: {task is not None}"
             )
+
+            # Guard: an already-DONE task is refused before the
+            # validation gate. A re-sent completion -- a duplicate report,
+            # or a second agent on a task that already closed -- must not
+            # re-run the typed-evidence, approval, LLM or smoke pipeline
+            # on work that was already accepted. Mirrors the ``blocked``
+            # branch below and report_blocker, which short-circuit a DONE
+            # task the same way.
+            if task is not None and task.status in {
+                TaskStatus.DONE,
+                "done",
+                "completed",
+            }:
+                logger.warning(
+                    f"report_task_progress(completed) rejected: agent "
+                    f"{agent_id} reported completion on task {task_id} "
+                    f"which is already {task.status!r}. DONE tasks are "
+                    "immutable; skipping the validation gate."
+                )
+                return {
+                    "success": False,
+                    "status": "task_already_complete",
+                    "message": (
+                        f"Task {task_id} is already complete -- no need to "
+                        "report it again. Request your next task."
+                    ),
+                }
 
             # TYPED-EVIDENCE GATE (issue #737, step 4). A find, verify,
             # or synthesize task cannot close without the evidence its
