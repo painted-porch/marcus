@@ -80,7 +80,10 @@ from src.marcus_mcp.coordinator.eligibility import (  # noqa: E402
 )
 from src.marcus_mcp.handlers import handle_tool_call  # noqa: E402
 from src.marcus_mcp.heartbeat import HeartbeatFastMCP  # noqa: E402
-from src.marcus_mcp.tool_groups import get_tools_for_endpoint  # noqa: E402
+from src.marcus_mcp.tool_groups import (  # noqa: E402
+    ALL_TOOLS_ENDPOINT,
+    get_tools_for_endpoint,
+)
 from src.monitoring.assignment_monitor import AssignmentMonitor  # noqa: E402
 from src.monitoring.project_monitor import ProjectMonitor  # noqa: E402
 
@@ -210,6 +213,11 @@ class MarcusServer:
         self.agent_project_map: Dict[str, str] = {}  # agent_id → project_id (GH-388)
         self.project_state: Optional[ProjectState] = None
         self.project_tasks: List[Any] = []
+        # Artifacts logged per task (log_artifact). Created here rather
+        # than lazily by the first log_artifact call, because the
+        # validation gate reads it on every implementation completion
+        # and crashed on a process that had not logged one yet (#795).
+        self.task_artifacts: Dict[str, List[Dict[str, Any]]] = {}
 
         # Assignment persistence and locking
         self.assignment_persistence = AssignmentPersistence()
@@ -1633,233 +1641,18 @@ class MarcusServer:
         return self._endpoint_apps[endpoint_type]
 
     def _register_fastmcp_tools(self) -> None:
-        """Register all tools with FastMCP instance."""
-        # Import only what we need for avoiding duplicates
-        # Actual imports happen inside each function to avoid conflicts
+        """Register every tool on the ``--all-tools`` FastMCP instance.
 
+        The surface is the union of the endpoint groups, resolved through
+        the same registration path the endpoints use. It used to be a
+        hand-copied list here, which drifted and silently lost
+        ``log_decision`` and ``log_artifact``, so an agent on an
+        ``--all-tools`` server could not record provenance at all (#795).
+        """
         if self._fastmcp is None:
             raise RuntimeError("FastMCP instance not initialized")
 
-        # Store reference to self for closures
-        server = self
-
-        # Register core tools with proper signatures
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def ping(echo: str = "") -> Dict[str, Any]:
-            """Check Marcus status and connectivity."""
-            from .tools.system import ping as ping_impl
-
-            return await ping_impl(echo=echo, state=server)
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def register_agent(
-            agent_id: str,
-            name: str,
-            role: str,
-            skills: List[str] = [],
-            project_id: str = "",
-            vendor: str = "",
-            principal: str = "agent",
-        ) -> Dict[str, Any]:
-            """Register a new agent with the Marcus system."""
-            from src.logging.mcp_tool_logger import log_mcp_tool_response
-
-            from .tools.agent import register_agent as impl
-
-            result = await impl(
-                agent_id=agent_id,
-                name=name,
-                role=role,
-                skills=skills,
-                project_id=project_id,
-                vendor=vendor,
-                principal=principal,
-                state=server,
-            )
-
-            # Log MCP tool response
-            log_mcp_tool_response(
-                tool_name="register_agent",
-                arguments={
-                    "agent_id": agent_id,
-                    "name": name,
-                    "role": role,
-                    "skills": skills,
-                    "project_id": project_id,
-                    "vendor": vendor,
-                    "principal": principal,
-                },
-                response=result,
-            )
-
-            return result
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def get_agent_status(agent_id: str) -> Dict[str, Any]:
-            """Get status and current assignment for an agent."""
-            from .tools.agent import get_agent_status as impl
-
-            return await impl(agent_id=agent_id, state=server)
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def request_next_task(agent_id: str) -> Dict[str, Any]:
-            """Request the next optimal task assignment for an agent."""
-            from .tools.task import request_next_task as impl
-
-            result = await impl(agent_id=agent_id, state=server)
-            return result  # type: ignore[no-any-return]
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def report_task_progress(
-            agent_id: str,
-            task_id: str,
-            status: str,
-            progress: int = 0,
-            message: str = "",
-            start_command: Optional[str] = None,
-            readiness_probe: Optional[str] = None,
-            verifications: Optional[List[Dict[str, Any]]] = None,
-            evidence: Optional[Dict[str, Any]] = None,
-            lease_epoch: Optional[int] = None,
-        ) -> Dict[str, Any]:
-            """Report progress on a task.
-
-            For integration verification tasks (type:integration
-            label), the agent MUST declare either ``verifications``
-            (preferred, #523 Slice B) OR ``start_command`` (legacy)
-            when marking the task complete.  Marcus runs each
-            declared command as a subprocess and rejects the
-            completion if any exits non-zero.  ``verifications``
-            takes precedence over ``start_command`` when both are
-            provided.
-
-            ``evidence`` (issue #677): for app types Marcus classified
-            with a behavior-evidence contract (web, data pipeline, CLI,
-            library, API service, ML), the agent must additionally
-            submit behavior evidence captured by actually RUNNING the
-            assembled product (e.g. web → ``dom`` + ``console_errors``;
-            pipeline → ``output``; CLI → ``exit_code`` + ``stdout``).
-            Marcus judges the submitted evidence against the per-type
-            bar — a build that exits 0 and a server that returns 200 do
-            not pass.  See the report_task_progress docstring in
-            tools/task.py for the full contract and examples.
-            """
-            from .tools.task import report_task_progress as impl
-
-            return await impl(
-                agent_id=agent_id,
-                task_id=task_id,
-                status=status,
-                progress=progress,
-                message=message,
-                state=server,
-                start_command=start_command,
-                readiness_probe=readiness_probe,
-                verifications=verifications,
-                evidence=evidence,
-                lease_epoch=lease_epoch,
-            )
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def export_case(case_id: str) -> Dict[str, Any]:
-            """Export one case's complete audit bundle (#737).
-
-            Operator-facing. Evidence in the bundle includes ``raw``,
-            so in multi-endpoint deployments this tool belongs on the
-            human endpoint only; the single-endpoint pilot exposes it
-            to every connected client, which the report states as a
-            limit alongside self-declared identity.
-            """
-            from .tools.audit_tools import export_case as impl
-
-            return await impl(case_id=case_id, state=server)
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def get_task_context(task_id: str) -> Dict[str, Any]:
-            """Get the full context for a specific task.
-
-            Issue #737: on the core agent surface because a verify
-            worker reads the claim it must check through this tool
-            (the task's board-written ``inputs``, never the upstream
-            agent's raw output), and the worker instructions have
-            always told agents to call it before starting work.
-            """
-            from .tools.context import get_task_context as impl
-
-            return await impl(task_id=task_id, state=server)
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def report_blocker(
-            agent_id: str,
-            task_id: str,
-            blocker_description: str,
-            severity: str = "medium",
-        ) -> Dict[str, Any]:
-            """Report a blocker on a task."""
-            from .tools.task import report_blocker as impl
-
-            return await impl(
-                agent_id=agent_id,
-                task_id=task_id,
-                blocker_description=blocker_description,
-                severity=severity,
-                state=server,
-            )
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def request_task_redo(
-            agent_id: str,
-            task_id: str,
-            reason: str,
-        ) -> Dict[str, Any]:
-            """Send a completed task back to the board for a fresh agent to redo."""
-            from .tools.task import request_task_redo as impl
-
-            return await impl(
-                agent_id=agent_id,
-                task_id=task_id,
-                reason=reason,
-                state=server,
-            )
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def get_all_board_tasks(board_id: str, project_id: str) -> Dict[str, Any]:
-            """Get all tasks from a specific Planka board for validation/inspection."""
-            from .tools.task import get_all_board_tasks as impl
-
-            return await impl(
-                board_id=board_id,
-                project_id=project_id,
-                state=server,
-            )
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def get_project_status() -> Dict[str, Any]:
-            """Get current project status and metrics."""
-            from .tools.project import get_project_status as impl
-
-            result = await impl(state=server)
-            return (
-                dict(result)
-                if isinstance(result, dict)
-                else {"error": "Invalid response format"}
-            )
-
-        @self._fastmcp.tool()  # type: ignore[misc]
-        async def create_project(
-            description: str,
-            project_name: str,
-            options: Optional[Dict[str, Any]] = None,
-        ) -> Dict[str, Any]:
-            """Create a complete project from natural language description."""
-            from .tools.nlp import create_project as impl
-
-            return await impl(
-                description=description,
-                project_name=project_name,
-                options=options,
-                state=server,
-            )
+        self._register_endpoint_tools(self._fastmcp, ALL_TOOLS_ENDPOINT)
 
     def _register_endpoint_tools(self, app: FastMCP, endpoint_type: str) -> None:
         """Register tools for a specific endpoint based on allowed tools."""

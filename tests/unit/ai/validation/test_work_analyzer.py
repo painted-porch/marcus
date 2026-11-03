@@ -214,6 +214,33 @@ class TestWorkAnalyzer:
                 assert evidence.design_artifacts[0]["filename"] == "api-spec.yaml"
 
     @pytest.mark.asyncio
+    async def test_gather_evidence_tolerates_state_without_task_artifacts(
+        self, analyzer: WorkAnalyzer, mock_task: Mock, mock_state: Mock
+    ) -> None:
+        """No artifact logged yet means no artifacts, not a crash (#795).
+
+        ``state.task_artifacts`` used to be created lazily by
+        ``log_artifact``; a process that validated before any agent
+        logged one raised ``AttributeError`` here and the gate failed
+        open.
+        """
+        del mock_state.task_artifacts
+
+        with patch("src.ai.validation.work_analyzer.os.walk", return_value=[]):
+            with patch(
+                "src.ai.validation.work_analyzer.get_task_context",
+                new_callable=AsyncMock,
+            ) as mock_context:
+                mock_context.return_value = {
+                    "success": True,
+                    "context": {"decisions": []},
+                }
+
+                evidence = await analyzer.gather_evidence(mock_task, mock_state)
+
+                assert evidence.design_artifacts == []
+
+    @pytest.mark.asyncio
     async def test_gather_evidence_gets_decisions_from_context(
         self, analyzer: WorkAnalyzer, mock_task: Mock, mock_state: Mock
     ) -> None:

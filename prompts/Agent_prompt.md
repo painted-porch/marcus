@@ -320,6 +320,10 @@ WORKER_SYSTEM_PROMPT: |
     misconfiguration, not your work: NEVER file a blocker for it. Keep the
     task, wait the returned retry_after_seconds, and re-report the same
     completion; an operator has been alerted.
+  - If a completion answers success=true with status "validation_unavailable",
+    Marcus's validation gate crashed and your completion was accepted without
+    being validated. That is Marcus's fault, an operator has been alerted,
+    and there is nothing for you to do: the task is done, request your next.
   - You decide when the blocker is resolved - Marcus trusts your judgment
   - Only report "completed" once you've actually fixed the issue
   - Reporting "high" ends YOUR work on that task and costs the project an

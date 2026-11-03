@@ -6811,6 +6811,14 @@ async def report_task_progress(
     validation_escalated: bool = False
     escalation_payload: Optional[Dict[str, Any]] = None
 
+    # #795: set when the validation gate itself raised. The policy stays
+    # log-and-continue (a gate crash is Marcus's fault, not the agent's,
+    # and parking the task on a programmer error has no resolution path
+    # the agent can act on), but it is no longer silent: every reply the
+    # completion exits through carries the stamp, and an operator_needed
+    # event is logged, the way smoke_gate_unavailable is handled.
+    unavailable_payload: Optional[Dict[str, Any]] = None
+
     # #206 MVP Phase 4 (Kaia review fix): flag-driven release so EVERY
     # early-return path that puts the task in a terminal state (DONE or
     # BLOCKED in kanban) frees its file locks. The function has several
@@ -7284,9 +7292,15 @@ async def report_task_progress(
                                 else:
                                     return failure_response
                     except Exception as e:
-                        # Validation system failed - log and allow completion
+                        # Validation system failed: log, alert an operator,
+                        # and allow the completion with the fault stamped
+                        # on it (#795). Before this, a crashed gate was
+                        # indistinguishable from a passed one.
                         logger.error(f"Validation system error: {e}")
                         logger.exception("Validation exception details:")
+                        unavailable_payload = _alert_validation_unavailable(
+                            task, agent_id, e, state
+                        )
                 else:
                     logger.info(
                         f"VALIDATION GATE: Skipping validation for {task_id} "
@@ -7969,18 +7983,21 @@ async def report_task_progress(
                     # Task is DONE in kanban — warnings are non-blocking.
                     # Release file locks.
                     _release_locks_on_exit = True
-                    return {
-                        "success": True,
-                        "message": "Progress updated successfully",
-                        "stub_warnings": _stub_findings,
-                        "stub_warning_message": (
-                            f"Task completed but "
-                            f"{len(_stub_findings)} output file(s) still "
-                            "contain stub markers (data-stub= or "
-                            "// REPLACE this stub). Replace each placeholder "
-                            "with a real implementation."
-                        ),
-                    }
+                    return _stamp_validation_unavailable(
+                        {
+                            "success": True,
+                            "message": "Progress updated successfully",
+                            "stub_warnings": _stub_findings,
+                            "stub_warning_message": (
+                                f"Task completed but "
+                                f"{len(_stub_findings)} output file(s) still "
+                                "contain stub markers (data-stub= or "
+                                "// REPLACE this stub). Replace each "
+                                "placeholder with a real implementation."
+                            ),
+                        },
+                        unavailable_payload,
+                    )
 
         # Emit task_completed telemetry only when this report was a
         # completion (Marcus #416, Stage 3 of #9).  Look up the task
@@ -8019,7 +8036,10 @@ async def report_task_progress(
             f"total_ms={_timer.total_ms()} "
             f"phases={_timer.to_phase_durations()}"
         )
-        return {"success": True, "message": "Progress updated successfully"}
+        return _stamp_validation_unavailable(
+            {"success": True, "message": "Progress updated successfully"},
+            unavailable_payload,
+        )
 
     except Exception as e:
         # Atomicity guarantee for the escalation path (review of
@@ -8051,7 +8071,9 @@ async def report_task_progress(
                 f"Next completion attempt will re-run the pipeline."
             )
             return _build_escalation_error_response(e, escalation_payload)
-        return {"success": False, "error": str(e)}
+        return _stamp_validation_unavailable(
+            {"success": False, "error": str(e)}, unavailable_payload
+        )
     finally:
         # Release the transport-dedupe marker for the completed report
         # this call acquired (see _completion_in_flight). Runs on every
@@ -8079,6 +8101,110 @@ async def report_task_progress(
                     task_id,
                     _release_err,
                 )
+
+
+def _alert_validation_unavailable(
+    task: Any, agent_id: str, error: BaseException, state: Any
+) -> Dict[str, Any]:
+    """Record that the validation gate raised instead of judging (#795).
+
+    Logs an ``OPERATOR NEEDED`` line, fires an ``operator_needed`` event
+    with ``source="validation_gate"`` (the same channel the smoke gate
+    uses when it cannot run), and returns the annotation that
+    ``_stamp_validation_unavailable`` merges into the completion reply.
+    The completion itself still goes through: the fault is Marcus's,
+    the agent cannot fix it, and parking the task on a programmer error
+    would only idle the agent until someone fixed the code.
+
+    Parameters
+    ----------
+    task : Any
+        The task whose completion was being validated.
+    agent_id : str
+        The reporting agent.
+    error : BaseException
+        The exception the gate raised.
+    state : Any
+        Marcus server state; ``log_event`` is used when present.
+
+    Returns
+    -------
+    Dict[str, Any]
+        The annotation to merge into the reply: ``validation_unavailable``,
+        ``operator_needed``, ``validation_error`` and ``operator_action``.
+    """
+    project_id = getattr(getattr(state, "kanban_client", None), "project_id", None)
+    reason = f"{type(error).__name__}: {error}"
+    operator_action = (
+        f"Marcus's validation gate raised while judging task {task.id}; the "
+        "completion was accepted UNVALIDATED. Look for 'Validation exception "
+        "details' in the server log, fix the gate, and review the task's "
+        "output by hand if it matters."
+    )
+    logger.error(
+        f"OPERATOR NEEDED: validation gate unavailable for task {task.id} "
+        f"({reason}). {operator_action}"
+    )
+    log_event = getattr(state, "log_event", None)
+    if callable(log_event):
+        try:
+            log_event(
+                "operator_needed",
+                {
+                    "task_id": task.id,
+                    "agent_id": agent_id,
+                    "project_id": project_id,
+                    "reason": reason,
+                    "operator_action": operator_action,
+                    "source": "validation_gate",
+                },
+            )
+        except Exception:  # noqa: BLE001 - an alert must not break the reply
+            pass
+    return {
+        "validation_unavailable": True,
+        "operator_needed": True,
+        "validation_error": reason,
+        "operator_action": operator_action,
+    }
+
+
+def _stamp_validation_unavailable(
+    response: Dict[str, Any], unavailable_payload: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Merge the #795 validation-unavailable annotation into a reply.
+
+    Applied at every exit a completion can take after the gate raised
+    (plain success, stub-warning success, pipeline error) so the stamp
+    is never dropped. A successful reply also gets
+    ``status="validation_unavailable"``; an error reply keeps its error
+    as the thing the agent acts on and carries the stamp beside it.
+
+    Parameters
+    ----------
+    response : Dict[str, Any]
+        The reply the completion path built.
+    unavailable_payload : Optional[Dict[str, Any]]
+        The annotation from ``_alert_validation_unavailable``, or
+        ``None`` when the gate ran normally.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``response`` unchanged when there is nothing to stamp, else a
+        copy with the annotation merged in.
+    """
+    if not unavailable_payload:
+        return response
+    stamped: Dict[str, Any] = {**response, **unavailable_payload}
+    if response.get("success"):
+        stamped["status"] = "validation_unavailable"
+        stamped["message"] = (
+            f"{response.get('message', '')} (validation unavailable: Marcus's "
+            "validation gate raised and the completion was accepted "
+            "unvalidated; an operator was alerted. Nothing for you to do.)"
+        ).strip()
+    return stamped
 
 
 def _build_escalation_error_response(

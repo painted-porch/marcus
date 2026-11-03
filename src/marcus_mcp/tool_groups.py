@@ -146,6 +146,16 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
 }
 
 
+ALL_TOOLS_ENDPOINT = "all"
+"""The pseudo-endpoint ``--all-tools`` serves: the union of every group.
+
+It is resolved here rather than listed in ``TOOL_GROUPS`` so that a tool
+added to any group is on the all-tools surface without a second edit
+(issue #795: a hand-copied list drifted and lost ``log_decision`` and
+``log_artifact``).
+"""
+
+
 def get_tools_for_endpoint(endpoint_type: str) -> Set[str]:
     """
     Get the set of tool names available for a specific endpoint type.
@@ -153,13 +163,16 @@ def get_tools_for_endpoint(endpoint_type: str) -> Set[str]:
     Parameters
     ----------
     endpoint_type : str
-        The type of endpoint ('human', 'agent', or 'analytics')
+        The type of endpoint ('human', 'agent', 'analytics'), or
+        ``ALL_TOOLS_ENDPOINT`` for the union of every group.
 
     Returns
     -------
     Set[str]
         Set of tool names available for this endpoint
     """
+    if endpoint_type == ALL_TOOLS_ENDPOINT:
+        return set().union(*TOOL_GROUPS.values())
     return TOOL_GROUPS.get(endpoint_type, set())
 
 
