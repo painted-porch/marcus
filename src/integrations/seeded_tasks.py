@@ -98,7 +98,7 @@ def validate_seed_specs(specs: Any) -> List[str]:
         if isinstance(hours, bool) or not isinstance(hours, (int, float)) or hours <= 0:
             errors.append(f"{where}.estimated_hours must be a positive number")
         priority = spec.get("priority", "medium")
-        if priority not in {p.value for p in Priority}:
+        if not isinstance(priority, str) or priority not in {p.value for p in Priority}:
             errors.append(
                 f"{where}.priority must be one of "
                 f"{', '.join(p.value for p in Priority)}"

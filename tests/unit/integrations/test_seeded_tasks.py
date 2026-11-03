@@ -152,3 +152,12 @@ class TestValidatorEdges:
             )
             == []
         )
+
+    def test_unhashable_priority_is_one_error_not_a_type_error(self) -> None:
+        """``priority: []`` is reported like any other bad priority."""
+        errors = validate_seed_specs([{"name": "A", "priority": []}])
+        assert len(errors) == 1 and errors[0].startswith(
+            "tasks[0].priority must be one of"
+        )
+        errors = validate_seed_specs([{"name": "A", "priority": {"x": 1}}])
+        assert len(errors) == 1 and "priority must be one of" in errors[0]
