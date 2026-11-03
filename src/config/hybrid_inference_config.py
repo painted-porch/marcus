@@ -4,8 +4,11 @@ Allows tuning of thresholds to optimize the balance between
 accuracy and API call costs.
 """
 
-from dataclasses import dataclass
+import logging
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -84,6 +87,47 @@ class HybridInferenceConfig:
     When exceeded, inference falls back to explicit dependencies only.
     The phases run in a worker thread, so the loop keeps serving meanwhile.
     Default: 20 seconds"""
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> "HybridInferenceConfig":
+        """Build a validated config from the loaded ``hybrid_inference`` settings.
+
+        The server's ``MarcusConfig.hybrid_inference`` is a settings
+        dataclass with the same field names; until this existed the server
+        built its inferer with the defaults, so the documented knobs had no
+        effect on ``request_next_task`` (Codex P2 on PR #776). Invalid
+        values fall back to the defaults with a warning rather than
+        stopping the server.
+
+        Parameters
+        ----------
+        settings : Any
+            A dataclass instance or any object carrying the field names.
+
+        Returns
+        -------
+        HybridInferenceConfig
+            The validated config.
+        """
+        if settings is None:
+            return cls()
+        if is_dataclass(settings) and not isinstance(settings, type):
+            raw: dict[str, Any] = asdict(settings)
+        else:
+            raw = {
+                name: getattr(settings, name)
+                for name in cls().to_dict()
+                if hasattr(settings, name)
+            }
+        try:
+            config = cls.from_dict(raw)
+            config.validate()
+            return config
+        except (TypeError, ValueError) as error:
+            logger.warning(
+                f"Invalid hybrid_inference settings ({error}); using defaults"
+            )
+            return cls()
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "HybridInferenceConfig":

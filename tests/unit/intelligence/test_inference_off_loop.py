@@ -216,6 +216,61 @@ class TestConfig:
         assert again.inference_time_budget_seconds == 5.0
 
 
+class TestSettingsReachTheInferer:
+    """The documented knobs must govern the server's inferer, not just a dataclass."""
+
+    def test_from_settings_carries_the_new_limits(self) -> None:
+        """A settings dataclass with the same field names converts and validates."""
+        from src.config.marcus_config import HybridInferenceSettings
+
+        settings = HybridInferenceSettings(
+            max_tasks_for_inference=50, inference_time_budget_seconds=5.0
+        )
+
+        config = HybridInferenceConfig.from_settings(settings)
+
+        assert config.max_tasks_for_inference == 50
+        assert config.inference_time_budget_seconds == 5.0
+        assert (
+            config.pattern_confidence_threshold == settings.pattern_confidence_threshold
+        )
+
+    def test_from_settings_falls_back_on_invalid_values(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A bad value warns and uses the defaults instead of stopping the server."""
+        from src.config.marcus_config import HybridInferenceSettings
+
+        with caplog.at_level(logging.WARNING):
+            config = HybridInferenceConfig.from_settings(
+                HybridInferenceSettings(max_tasks_for_inference=0)
+            )
+
+        assert config.max_tasks_for_inference == 200
+        assert any("hybrid_inference" in r.getMessage() for r in caplog.records)
+
+    def test_from_settings_none_is_defaults(self) -> None:
+        """No settings at all means the shipped defaults."""
+        assert HybridInferenceConfig.from_settings(None).max_tasks_for_inference == 200
+
+    def test_context_passes_the_config_to_the_inferer(self) -> None:
+        """Context hands the config through when it builds the hybrid inferer."""
+        from unittest.mock import patch
+
+        from src.core.context import Context
+
+        config = HybridInferenceConfig(max_tasks_for_inference=7)
+        with patch("src.core.context.HybridDependencyInferer") as inferer_cls:
+            Context(
+                use_hybrid_inference=True,
+                ai_engine=Mock(),
+                hybrid_inference_config=config,
+            )
+
+        inferer_cls.assert_called_once()
+        assert inferer_cls.call_args.args[1] is config
+
+
 class TestScopedInputAtTheRequestSite:
     """request_next_task analyses the agent's project, never the whole file."""
 

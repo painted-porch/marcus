@@ -311,12 +311,19 @@ class MarcusServer:
             # Use hybrid inference settings from config
             use_hybrid = True
 
+            from src.config.hybrid_inference_config import HybridInferenceConfig
+
             self.context = Context(
                 events=self.events,
                 persistence=self.persistence,
                 use_hybrid_inference=use_hybrid
                 and config_loader.hybrid_inference.enable_ai_inference,
                 ai_engine=self.ai_engine if use_hybrid else None,
+                # The documented hybrid_inference knobs (thresholds, task
+                # cap, time budget) reach the inferer only through here.
+                hybrid_inference_config=HybridInferenceConfig.from_settings(
+                    config_loader.hybrid_inference
+                ),
             )
             # Link global context to project manager for project_id syncing
             self.project_manager.set_global_context(self.context)

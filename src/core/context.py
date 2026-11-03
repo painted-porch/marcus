@@ -251,6 +251,7 @@ class Context:
         persistence: Optional[Any] = None,
         use_hybrid_inference: bool = True,
         ai_engine: Optional[Any] = None,
+        hybrid_inference_config: Optional[Any] = None,
         project_id: Optional[str] = None,
     ):
         """Initialize the Context system.
@@ -265,6 +266,9 @@ class Context:
             Whether to use hybrid dependency inference if available.
         ai_engine : Optional[Any]
             Optional AI engine for hybrid inference.
+        hybrid_inference_config : Optional[Any]
+            ``HybridInferenceConfig`` for the inferer (thresholds, the task
+            cap, the time budget). None means the inferer's defaults.
         project_id : Optional[str]
             Project identifier for tracking decisions and artifacts.
         """
@@ -287,7 +291,9 @@ class Context:
         # Set up dependency inference strategy
         self.hybrid_inferer = None
         if use_hybrid_inference and HYBRID_AVAILABLE and ai_engine:
-            self.hybrid_inferer = HybridDependencyInferer(ai_engine)
+            self.hybrid_inferer = HybridDependencyInferer(
+                ai_engine, hybrid_inference_config
+            )
             logger.info("Using hybrid dependency inference for better accuracy")
 
         # Mark that persisted data needs loading (lazy loading)
