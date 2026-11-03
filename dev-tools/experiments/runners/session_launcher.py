@@ -257,11 +257,18 @@ BRANCH="{branch}"
 # worktree when the session goes home, hits the chore cap, or is killed.
 # The branch stays so a dead worker's commits remain reachable for the next
 # agent (Marcus's recovery path reads it).
+# Job control gives each chore its own process group, so a kill of this
+# session can stop the harness AND everything it started (test runners,
+# dev servers) before the workspace is removed from under them.
+set -m
 CHORE_PID=""
 cleanup() {{
     trap - EXIT HUP TERM INT
     if [ -n "$CHORE_PID" ]; then
-        kill "$CHORE_PID" >/dev/null 2>&1 || true
+        kill -TERM -- "-$CHORE_PID" >/dev/null 2>&1 \
+            || kill -TERM "$CHORE_PID" >/dev/null 2>&1 || true
+        sleep 1
+        kill -KILL -- "-$CHORE_PID" >/dev/null 2>&1 || true
         wait "$CHORE_PID" 2>/dev/null
     fi
     cd "$REPO" 2>/dev/null || exit 0
@@ -312,9 +319,11 @@ while true; do
         echo "[session {sid}] fresh worktree from main for a new chore"
     fi
     git merge main --no-edit 2>/dev/null || true
-    # The harness runs as a child we wait on, so a kill of this session is
-    # handled at once (bash defers traps while a foreground command runs)
-    # and the trap can stop the harness before removing the worktree.
+    # The harness runs as a background job we wait on: a kill of this
+    # session is handled at once (bash defers traps while a foreground
+    # command runs), and with job control on the job is its own process
+    # group, so the trap can stop the harness and its children before
+    # removing the worktree.
     {chore_command} &
     CHORE_PID=$!
     wait "$CHORE_PID"

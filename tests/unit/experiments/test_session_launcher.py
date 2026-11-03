@@ -1009,27 +1009,47 @@ fi
         assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
 
     def test_a_killed_session_leaves_no_worktree_behind(self, tmp_path: Path) -> None:
-        """Kill the session mid-chore: the trap removes the worktree, keeps the branch."""
+        """Kill the session mid-chore: the trap stops the chore's whole process
+        tree, removes the worktree, and keeps the branch (Codex P2 on PR #784:
+        signalling only the harness PID left its children running in a
+        directory that was then deleted from under them)."""
         import os
         import signal
         import subprocess as sp
         import time
 
         repo = _repo_with_main(tmp_path)
-        script, workspace = _session_script(tmp_path, repo, "sleep 30")
+        grandchild_pid = tmp_path / "grandchild.pid"
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+sleep 60 &
+echo $! > {grandchild_pid}
+wait
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
 
         proc = sp.Popen(
             ["bash", str(script)], stdout=sp.PIPE, stderr=sp.PIPE, text=True
         )
         deadline = time.monotonic() + 10
-        while (
-            time.monotonic() < deadline
-            and not (workspace / "project_info.json").exists()
-        ):
+        while time.monotonic() < deadline and not grandchild_pid.exists():
             time.sleep(0.1)
+        time.sleep(0.2)
+        sleeper = int(grandchild_pid.read_text().strip())
         os.kill(proc.pid, signal.SIGTERM)
         out, _ = proc.communicate(timeout=20)
 
         assert "worktree removed" in out
         assert not workspace.exists()
         assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
+        # the harness's own child (a test runner, a dev server) is gone too
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(sleeper, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        with pytest.raises(ProcessLookupError):
+            os.kill(sleeper, 0)
