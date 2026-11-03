@@ -38,6 +38,11 @@ from runners.marcus_client import MarcusMCPClient
 from runners.spawn_agents import AgentSpawner, check_mcp_health
 
 SESSION_DONE_MARKER = ".marcus_session_done"
+# Written by the worker when it no longer holds a task (completion accepted
+# or task handed back). The script then resets the branch to main before
+# the next chore, so a handed-back task's commits never ride into main with
+# the next task's merge (Codex P1 on PR #779; the #730 hazard).
+CHORE_DONE_MARKER = ".marcus_chore_done"
 DEFAULT_SESSION_ROLE = "full-stack"
 DEFAULT_SESSION_SKILLS = [
     "python",
@@ -170,11 +175,14 @@ def build_session_script(
 ) -> str:
     """Return the bash script that runs one session until it goes home.
 
-    Each loop iteration is one chore: sync the worktree with ``main``, run
-    the harness once on the session prompt, then stop if the worker left
-    the drained marker. There is no restart of a crashed harness beyond
-    the next iteration, no watchdog, and a chore cap so a misbehaving
-    prompt cannot loop forever.
+    Each loop iteration is one chore: if the previous chore ended with the
+    worker no longer holding a task (it wrote ``CHORE_DONE_MARKER``), reset
+    the branch to ``main`` so no stale commits can ride into the next
+    task's merge; sync the worktree with ``main``; run the harness once on
+    the session prompt; stop if the worker left the drained marker. A chore
+    that ended mid-task (no marker) keeps its branch so the worker resumes.
+    There is no restart of a crashed harness beyond the next iteration, no
+    watchdog, and a chore cap so a misbehaving prompt cannot loop forever.
 
     Parameters
     ----------
@@ -201,6 +209,7 @@ def build_session_script(
         The script text.
     """
     marker = workspace / SESSION_DONE_MARKER
+    chore_marker = workspace / CHORE_DONE_MARKER
     return f"""#!/bin/bash
 [ -f ~/.zshrc ] && source ~/.zshrc
 [ -f ~/.bashrc ] && source ~/.bashrc
@@ -213,7 +222,7 @@ export GIT_AUTHOR_EMAIL="{agent["id"]}@marcus.ai"
 export GIT_COMMITTER_NAME="{agent["name"]}"
 export GIT_COMMITTER_EMAIL="{agent["id"]}@marcus.ai"
 cd {workspace} || exit 1
-rm -f {marker}
+rm -f {marker} {chore_marker}
 echo "=========================================="
 echo "SESSION {agent["name"].upper()}"
 echo "ID: {agent["id"]}"
@@ -228,6 +237,13 @@ while true; do
     chore=$((chore + 1))
     echo ""
     echo "[session {agent["id"]}] chore $chore"
+    if [ -f {chore_marker} ]; then
+        # The previous chore's task was accepted (already merged) or handed
+        # back (must not ride into main): start this chore from main.
+        rm -f {chore_marker}
+        git checkout -q -B {branch} main
+        echo "[session {agent["id"]}] branch reset to main for a fresh chore"
+    fi
     git merge main --no-edit 2>/dev/null || true
     {chore_command}
     rc=$?

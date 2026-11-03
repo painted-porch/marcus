@@ -26,6 +26,9 @@ STEPS FOR THIS CHORE
    - If you receive no task and the response has "retry_after_seconds":
      run `sleep <retry_after_seconds>` in your shell, then EXIT. The harness
      re-invokes you and you will ask again. Do NOT poll inside this chore.
+   - If the response says you ALREADY have a task assigned (a previous
+     chore ended before it was finished), continue that task: its id and
+     name are in the response. Go to step 4 with it.
    - If you receive a task: save its "lease_epoch" and go to step 4.
 4. Do the task:
    - FIRST run `git merge main --no-edit` to pick up completed work.
@@ -47,8 +50,13 @@ STEPS FOR THIS CHORE
    - If genuinely stuck, report_blocker with severity "medium" (you keep the
      task and get suggestions). Use "high" ONLY for work nobody can finish;
      it hands the task back and ends your part in it.
-5. When the completion is accepted (or you handed the task back), print a
-   one-line summary and EXIT. The harness starts your next chore.
+5. When the completion is accepted, OR you handed the task back with a
+   high-severity blocker: create an empty file named .marcus_chore_done in
+   your workspace. It tells the harness you no longer hold a task, so your
+   branch is reset to main before the next chore (accepted work is already
+   merged; handed-back work must not ride into main with your next task).
+   Then print a one-line summary and EXIT. The harness starts your next
+   chore. Do NOT create that file if you still hold the task.
 
 RULES
 - You are fully autonomous: never ask for permission or clarification.

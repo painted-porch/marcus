@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from runners.session_launcher import (
+    CHORE_DONE_MARKER,
     DEFAULT_SESSION_ROLE,
     SESSION_DONE_MARKER,
     SessionLauncher,
@@ -122,6 +123,8 @@ class TestSessionPrompt:
         assert "retry_after_seconds" in prompt
         assert "lease_epoch" in prompt
         assert "smoke_gate_unavailable" in prompt
+        assert CHORE_DONE_MARKER in prompt
+        assert "ALREADY have a task" in prompt
 
     def test_prompt_never_asks_the_worker_to_loop_or_self_declare_completion(
         self, tmp_path: Path
@@ -182,6 +185,25 @@ class TestSessionScript:
         script = self._script(tmp_path, max_chores=7)
         assert "-ge 7" in script
         assert "relaunch" not in script.lower()
+
+    def test_script_resets_the_branch_only_after_a_finished_or_handed_back_chore(
+        self, tmp_path: Path
+    ) -> None:
+        """The #730 hazard: a handed-back task's commits must not ride into main.
+
+        When the worker left the chore-done marker, the next chore starts
+        from main; when it did not (the chore ended mid-task), the branch is
+        kept so the worker resumes (Codex P1 on PR #779).
+        """
+        script = self._script(tmp_path)
+        wt = tmp_path / "worktrees" / "agent_unicorn_1"
+        assert f"if [ -f {wt / CHORE_DONE_MARKER} ]; then" in script
+        assert "git checkout -q -B marcus/agent_unicorn_1 main" in script
+        reset_at = script.index("git checkout -q -B marcus/agent_unicorn_1 main")
+        check_at = script.index(f"if [ -f {wt / CHORE_DONE_MARKER} ]; then")
+        chore_at = script.index("claude --add-dir /x")
+        assert check_at < reset_at < chore_at
+        assert f"rm -f {wt / SESSION_DONE_MARKER} {wt / CHORE_DONE_MARKER}" in script
 
     def test_script_sets_git_identity_and_clears_a_stale_marker(
         self, tmp_path: Path
