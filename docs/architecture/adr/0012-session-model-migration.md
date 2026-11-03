@@ -180,6 +180,19 @@ committed work, reads progress notes and decisions, continues). Add a
 meaningful unit, at minimum **every 20 minutes** (default; paired with D3's
 45-min silence timeout to satisfy the D11 ≥ 2× invariant).
 
+**Implemented 2026-11-03.** The duty reaches the agent in Marcus's own
+configured numbers, as an instruction layer on every task: commit at least
+every `checkpoint_cadence_minutes`, and know that `silence_timeout_minutes`
+of quiet is read as death and that only committed work can be handed over.
+The recovery handoff states the same cadence, so a claimant that finds no
+commits in the dead session's range knows the worker stopped before its
+first checkpoint rather than wondering what it missed.
+Compliance is **measured, never gated**, following D4: when a task lands,
+Marcus records how many commits its range held and the longest gap between
+them.
+A gate on self-reported virtue invites compliance theatre; the cadence is
+enforced by the D3 silence timeout, which cannot be gamed retroactively.
+
 **What is handed forward** *(corrected 2026-11-03, issue #730)*: the dead
 session's **commit range for this card**, not its branch.
 This decision originally said "merges the dead session's branch", which was true while one agent held one card and wrong under D1, where that branch also carries the session's other in-flight cards.

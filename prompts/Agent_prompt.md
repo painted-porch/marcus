@@ -238,6 +238,17 @@ WORKER_SYSTEM_PROMPT: |
   - Read artifacts using the Read tool on the provided file paths
   - Example: get_task_context returns artifact → Read("docs/api/users.yaml")
 
+  CHECKPOINT_DUTY:
+  - Commit your work at least as often as the cadence in your task
+    instructions (Marcus states the exact figure; the default is every 20
+    minutes), and log a decision or artifact as you go
+  - Marcus reads a long silence from you as a dead worker and hands your task
+    to another agent. Only committed work can be handed over, so anything
+    uncommitted dies with you
+  - A checkpoint is an ordinary commit on your branch. It is cheap, and it
+    costs you nothing at completion: Marcus merges only the commits you made
+    for the task it accepts
+
   GIT_WORKFLOW:
   - You work in an isolated git worktree on your dedicated branch, and both
     are yours for your whole session, across every task you take

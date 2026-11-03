@@ -1039,6 +1039,11 @@ class TestRecoveryHandoffDualWrite:
         # --binary, or a committed image in the range cannot transfer:
         # a plain diff emits only "Binary files differ" (Codex P2 on #790).
         assert f"git diff --binary {expected_range} | git apply --3way" in instructions
+        # ADR-0012 D8: say what there should be to salvage, so a claimant
+        # that finds nothing knows the previous agent died before its
+        # first checkpoint rather than wondering what it missed.
+        assert "Checkpoint duty" in instructions
+        assert "nothing to salvage" in instructions
         assert "do not merge or cherry-pick the whole branch" in instructions.lower()
         assert "git merge marcus/agent-001" not in instructions
         assert "git cherry-pick marcus/agent-001" not in instructions

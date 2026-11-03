@@ -1681,6 +1681,13 @@ class AssignmentLeaseManager:
                         if baseline_commit
                         else ""
                     )
+                    + (
+                        f"- Checkpoint duty: they were asked to commit at "
+                        f"least every {self.checkpoint_cadence_minutes:.0f} "
+                        f"minutes, so expect commits in that range. If there "
+                        f"are none, they stopped before their first "
+                        f"checkpoint and there is nothing to salvage.\n"
+                    )
                     + f"- Time they spent: "
                     f"{time_spent_minutes:.1f} minutes\n"
                     f"- Recovery reason: lease expired (no progress "
