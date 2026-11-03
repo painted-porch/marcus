@@ -66,6 +66,12 @@ _retry_tracker: Optional[Any] = None
 # in kanban and reintroduced the workflow stall the ceiling was
 # meant to prevent.
 MAX_VALIDATION_RETRIES = 3
+
+# Seconds an agent waits before re-reporting a completion that the smoke
+# gate could not evaluate because of a Marcus-side misconfiguration (the
+# task is parked, not rejected). Long enough for an operator to act, short
+# enough that every re-report keeps the lease alive under ADR-0012 D3.
+GATE_UNAVAILABLE_RETRY_SECONDS = 300
 _singleton_lock = threading.Lock()  # Thread-safe initialization
 
 
@@ -1616,7 +1622,11 @@ async def _run_product_smoke_gate(
         ``None`` if verification passed. A rejection dict with
         ``success=False``, ``status="smoke_verification_failed"``,
         and a ``blocker`` payload if verification failed or both
-        ``verifications`` and ``start_command`` were missing.
+        ``verifications`` and ``start_command`` were missing. When the
+        gate itself cannot run (no usable ``project_root``), a parked
+        response with ``status="smoke_gate_unavailable"``,
+        ``operator_needed=True`` and ``retry_after_seconds``: the task
+        stays with the agent and an operator is alerted.
 
     Notes
     -----
@@ -1636,29 +1646,87 @@ async def _run_product_smoke_gate(
     # This is the same source of truth used by
     # ``_merge_agent_branch_to_main`` so the smoke gate sees the
     # same project root that the agent's git operations target.
-    # Helper: build a rejection dict for smoke-gate infrastructure failures.
-    # Integration tasks MUST be verifiable — "cannot run the gate" is a
-    # hard rejection, not a pass.  The caller's log-and-continue except
-    # clause is intentionally reserved for exceptions (programmer errors in
-    # the verification system), not for resolvable configuration failures
-    # such as a missing or misconfigured workspace state.
-    def _gate_unavailable(reason: str) -> Dict[str, Any]:
+    # Helper: PARK the task when the gate itself cannot run. Integration
+    # tasks MUST be verifiable, so "cannot run the gate" is never a pass
+    # (Codex P2-2), but it is not the agent's failure either: under
+    # Invariant #2 (v2) verification is Marcus's job, and a gate Marcus
+    # cannot run is Marcus's misconfiguration. The old response told the
+    # agent to "fix the workspace state" (it cannot) and the per-task
+    # instructions told it to file a blocker, so in the 2026-11-02
+    # calculator run two high blockers spent two of the lane's three repair
+    # requeues on a missing project_root. Now: the completion is refused
+    # with its own status, the task stays IN_PROGRESS with the lease
+    # intact, the agent is told to wait and re-report, and an operator is
+    # alerted with the exact key to fix. The caller's log-and-continue
+    # except clause stays reserved for exceptions (programmer errors in the
+    # verification system), not for resolvable configuration failures.
+    async def _gate_unavailable(reason: str) -> Dict[str, Any]:
+        project_id = getattr(getattr(state, "kanban_client", None), "project_id", None)
+        # Hold the lease outside the D3 budget while the operator acts:
+        # the wait is Marcus's time, not the agent's (Codex P2 on PR #775).
+        lease_manager = getattr(state, "lease_manager", None)
+        if lease_manager is not None:
+            try:
+                parked = lease_manager.park_for_operator(
+                    task.id, window_seconds=2 * GATE_UNAVAILABLE_RETRY_SECONDS
+                )
+                if inspect.isawaitable(parked):
+                    await parked
+            except Exception as park_error:  # noqa: BLE001 - never break the reply
+                logger.warning(
+                    f"Could not park the lease for {task.id} while the gate is "
+                    f"unavailable: {park_error}"
+                )
+        operator_action = (
+            f"Set provider_config.project_root for project {project_id or '?'} "
+            "in the project registry (data/marcus_state/projects.json, or the "
+            "project_root option of create_project) to the absolute path of "
+            "the workspace, then restart or re-select the project. Until then "
+            f"task {task.id} is parked with agent {agent_id}."
+        )
+        logger.error(
+            f"OPERATOR NEEDED: smoke gate unavailable for task {task.id} "
+            f"({reason}). {operator_action}"
+        )
+        log_event = getattr(state, "log_event", None)
+        if callable(log_event):
+            try:
+                log_event(
+                    "operator_needed",
+                    {
+                        "task_id": task.id,
+                        "agent_id": agent_id,
+                        "project_id": project_id,
+                        "reason": reason,
+                        "operator_action": operator_action,
+                        "source": "smoke_gate",
+                    },
+                )
+            except Exception:  # noqa: BLE001 - an alert must not break the reply
+                pass
         return {
             "success": False,
-            "status": "smoke_verification_failed",
+            "status": "smoke_gate_unavailable",
             "error": "smoke_gate_unavailable",
+            "operator_needed": True,
+            "retry_after_seconds": GATE_UNAVAILABLE_RETRY_SECONDS,
             "agent_id": agent_id,
             "task_id": task.id,
             "failure_summary": reason,
+            "operator_action": operator_action,
             "blocker": (
                 f"Marcus could not run the product smoke gate: {reason}. "
-                "Ensure the experiment runner has written workspace state "
-                "with a valid project_root before the integration task runs."
+                "This is a Marcus-side misconfiguration, not a defect in the "
+                "deliverable. " + operator_action
             ),
             "message": (
-                f"Marcus rejected this integration-task completion because "
-                f"the smoke gate could not be initialised: {reason}. "
-                "Fix the workspace state and re-report completion."
+                "Marcus could not run its own verification gate for this "
+                f"integration task: {reason}. This is NOT a problem with your "
+                "work and there is nothing in the workspace for you to fix. "
+                "Do NOT file a blocker and do NOT give the task up. Keep the "
+                f"task, wait {GATE_UNAVAILABLE_RETRY_SECONDS} seconds, and "
+                "re-report completion with the same evidence; an operator has "
+                "been alerted to fix the configuration."
             ),
         }
 
@@ -1673,14 +1741,14 @@ async def _run_product_smoke_gate(
                 f"PRODUCT SMOKE GATE: Failed to load workspace state "
                 f"for {task.id}: {ws_err}. Rejecting completion."
             )
-            return _gate_unavailable(f"workspace state load failed: {ws_err}")
+            return await _gate_unavailable(f"workspace state load failed: {ws_err}")
 
     if not project_root:
         logger.warning(
             f"PRODUCT SMOKE GATE: No project_root resolved for "
             f"{task.id}. Rejecting completion."
         )
-        return _gate_unavailable("project_root not found in workspace state")
+        return await _gate_unavailable("project_root not found in workspace state")
 
     project_root_path = _Path(project_root)
     if not project_root_path.is_dir():
@@ -1688,7 +1756,9 @@ async def _run_product_smoke_gate(
             f"PRODUCT SMOKE GATE: project_root {project_root!r} is "
             f"not a directory. Rejecting completion for {task.id}."
         )
-        return _gate_unavailable(f"project_root {project_root!r} is not a directory")
+        return await _gate_unavailable(
+            f"project_root {project_root!r} is not a directory"
+        )
 
     # ---- Self-verify-mode gate (issue #677 rework) ----
     # Marcus is NOT a tool-using agent harness — its only executor is this
@@ -2025,7 +2095,11 @@ def build_tiered_instructions(
             "If the smoke gate cannot be satisfied (e.g. the product is "
             "genuinely broken), call report_blocker instead of retrying "
             "report_task_progress — retrying without fixing the issue will "
-            "cause your lease to expire."
+            "cause your lease to expire.\n\n"
+            "If instead Marcus replies with status 'smoke_gate_unavailable', "
+            "the gate itself could not run (a Marcus-side misconfiguration, "
+            "not your work): do NOT file a blocker, keep the task, wait the "
+            "returned retry_after_seconds and re-report the same completion."
         )
 
     # Layer 1: Base instructions

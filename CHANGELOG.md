@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - In the default `single_project_mode`, Marcus now serves the project registry's active board instead of silently replacing it with the provider's unscoped default at startup (#766); a scope mismatch between the registry and the served client is logged at WARNING with both sides named. `MARCUS_DATA_DIR` now isolates the project registry as well as the subtask store.
+- When the integration smoke gate cannot run because of a Marcus-side misconfiguration (no usable `project_root`), the completion is now parked instead of blamed on the agent: `report_task_progress` returns `status: "smoke_gate_unavailable"` with `operator_needed: true` and a retry interval, the task stays with the agent and its lease intact, an `operator_needed` event names the registry key to fix, and the per-task instructions and worker prompt tell the agent not to file a blocker. Previously two correct high blockers spent two of a lane's three repair requeues on a server misconfiguration.
 - A given-up task is re-offered at most three times in total after give-ups (#769), whoever gave up, so a lone persistent agent is no longer handed the same impossible task forever; lane death now reaches memory, the subtask store, the card and the provider's blocked column, and duplicate or no-lease give-ups count nothing.
 - Moving a GitHub issue to the blocked or in-progress column no longer wipes its other labels.
 

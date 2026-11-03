@@ -1,21 +1,19 @@
 """
-Unit tests for _run_product_smoke_gate infrastructure-failure rejections (P2-2 fix).
+Unit tests for _run_product_smoke_gate when the gate itself cannot run.
 
-Codex P2-2 post-mortem: _run_product_smoke_gate previously returned None
-(pass) in three error paths where the smoke gate could not be initialised:
-  1. workspace state load raised an exception
-  2. project_root not present in workspace state
-  3. project_root path is not a directory
-
-None is the "verification passed" sentinel; these cases should be hard
-rejections so that integration tasks cannot slip through on misconfigured
-environments.
-
-Tests:
-- workspace state load failure  → smoke_gate_unavailable rejection
-- project_root missing from state → smoke_gate_unavailable rejection
-- project_root not a directory   → smoke_gate_unavailable rejection
-- valid project_root + passing verify_deliverable → returns None (pass)
+Three paths leave the gate unable to start: the workspace state cannot be
+loaded, it carries no project_root, or project_root is not a directory.
+None of them is the agent's fault, and none may pass (Codex P2-2: ``None``
+is the "verification passed" sentinel). Since the 2026-11-02 calculator
+run they also may not be blamed on the agent: the old response told the
+agent to "fix the workspace state", which it cannot, and the per-task
+instructions told it to file a blocker, so two high blockers spent two of
+the lane's three repair requeues on a server misconfiguration. The gate
+now PARKS the task: the completion is refused with status
+``smoke_gate_unavailable``, the task stays IN_PROGRESS with the lease
+intact, the agent is told to wait and re-report, and an operator is
+alerted. Under Invariant #2 (v2) verification is Marcus's job, so a gate
+Marcus cannot run is Marcus's fault.
 """
 
 from pathlib import Path
@@ -105,7 +103,7 @@ class TestSmokeGateUnavailable:
         assert result is not None, "Must not return None (pass) on ws load failure"
         assert result["success"] is False
         assert result["error"] == "smoke_gate_unavailable"
-        assert result["status"] == "smoke_verification_failed"
+        assert result["status"] == "smoke_gate_unavailable"
         assert "workspace state load failed" in result["failure_summary"]
         assert result["task_id"] == "task-ws-err"
 
@@ -210,15 +208,18 @@ class TestSmokeGateUnavailable:
         assert result["agent_id"] == "agent-id-check"
 
     @pytest.mark.asyncio
-    async def test_rejection_blocker_mentions_workspace_state(self) -> None:
-        """
-        Verify the blocker message guides the agent toward the root cause.
+    async def test_unavailable_gate_parks_the_task_and_alerts_an_operator(
+        self,
+    ) -> None:
+        """The agent keeps the task, waits, re-reports; it never files a blocker.
 
-        The message must mention 'workspace state' so the agent (or the
-        experiment runner) knows where to look.
+        The response names the operator action (the registry key), says the
+        fault is Marcus's, and carries a retry interval; an operator_needed
+        event is logged on the server.
         """
-        task = _make_task("task-blocker-msg")
+        task = _make_task("task-parked")
         state = _make_state(ws_state=None)  # _load_workspace_state returns None
+        state.log_event = Mock()
 
         result = await _run_product_smoke_gate(
             task=task,
@@ -229,4 +230,75 @@ class TestSmokeGateUnavailable:
         )
 
         assert result is not None
-        assert "workspace state" in result["blocker"].lower()
+        assert result["status"] == "smoke_gate_unavailable"
+        assert result["operator_needed"] is True
+        assert result["retry_after_seconds"] > 0
+        assert "should_exit" not in result
+        text = result["message"].lower()
+        assert "not a problem with your work" in text
+        assert "do not file a blocker" in text
+        assert "keep the task" in text
+        assert "project_root" in result["operator_action"]
+        state.log_event.assert_called_once()
+        assert state.log_event.call_args.args[0] == "operator_needed"
+        assert state.log_event.call_args.args[1]["task_id"] == "task-parked"
+
+    @pytest.mark.asyncio
+    async def test_parking_holds_the_lease_outside_the_budget(self) -> None:
+        """The lease manager is asked to park the lease for the wait."""
+        from src.marcus_mcp.tools.task import GATE_UNAVAILABLE_RETRY_SECONDS
+
+        task = _make_task("task-lease")
+        state = _make_state(ws_state={})
+        state.log_event = Mock()
+        state.lease_manager = Mock()
+        state.lease_manager.park_for_operator = AsyncMock()
+
+        result = await _run_product_smoke_gate(
+            task=task,
+            agent_id="agent-7",
+            state=state,
+            start_command="make serve",
+            readiness_probe=None,
+        )
+
+        assert result is not None and result["status"] == "smoke_gate_unavailable"
+        state.lease_manager.park_for_operator.assert_awaited_once_with(
+            "task-lease", window_seconds=2 * GATE_UNAVAILABLE_RETRY_SECONDS
+        )
+
+    @pytest.mark.asyncio
+    async def test_parking_tolerates_no_lease_manager(self) -> None:
+        """Deployments without a lease manager still get the parked response."""
+        task = _make_task("task-no-lm")
+        state = _make_state(ws_state={})
+        state.log_event = Mock()
+        state.lease_manager = None
+
+        result = await _run_product_smoke_gate(
+            task=task,
+            agent_id="agent-8",
+            state=state,
+            start_command="make serve",
+            readiness_probe=None,
+        )
+
+        assert result is not None and result["status"] == "smoke_gate_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_parking_tolerates_a_state_without_log_event(self) -> None:
+        """A bare state object still gets the parked response."""
+        task = _make_task("task-bare")
+        state = _make_state(ws_state={})
+        del state.log_event
+
+        result = await _run_product_smoke_gate(
+            task=task,
+            agent_id="agent-6",
+            state=state,
+            start_command="make serve",
+            readiness_probe=None,
+        )
+
+        assert result is not None
+        assert result["status"] == "smoke_gate_unavailable"

@@ -228,6 +228,11 @@ WORKER_SYSTEM_PROMPT: |
   3. Request your next task
 
   Important:
+  - If report_task_progress answers with status "smoke_gate_unavailable",
+    Marcus could not run its own verification gate. That is Marcus's
+    misconfiguration, not your work: NEVER file a blocker for it. Keep the
+    task, wait the returned retry_after_seconds, and re-report the same
+    completion; an operator has been alerted.
   - You decide when the blocker is resolved - Marcus trusts your judgment
   - Only report "completed" once you've actually fixed the issue
   - Reporting "high" ends YOUR work on that task and costs the project an

@@ -159,3 +159,17 @@ class TestDrainSignalContract:
         text = " ".join(CANONICAL_PROMPT.read_text().lower().split())
         assert "total_tasks == completed" not in text
         assert "only the board_drained signal ends your loop" in text
+
+
+class TestGateUnavailableContract:
+    """A gate Marcus cannot run is Marcus's fault; the worker must not file a blocker."""
+
+    def test_names_the_parked_status(self) -> None:
+        """The canonical prompt names smoke_gate_unavailable."""
+        assert "smoke_gate_unavailable" in CANONICAL_PROMPT.read_text()
+
+    def test_says_wait_and_re_report_not_blocker(self) -> None:
+        """The instruction is to keep the task, wait, and re-report."""
+        text = " ".join(CANONICAL_PROMPT.read_text().lower().split())
+        assert "never file a blocker" in text
+        assert "re-report" in text
