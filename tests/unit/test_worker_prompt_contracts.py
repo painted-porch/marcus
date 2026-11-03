@@ -221,6 +221,13 @@ class TestLoopContract:
         assert "composition work, not a redo" in text
         assert "fix it in place" in text
 
+    def test_redone_work_is_merged_before_reverification(self) -> None:
+        """Marcus merges the redo into main; the waiter must pull main first."""
+        text = " ".join(CANONICAL_PROMPT.read_text().split())
+        redo = text[text.index("REDO VS BLOCKER") :]
+        assert "git merge main --no-edit" in redo[: redo.index("Mechanical GLUE")]
+        assert "BEFORE you re-verify" in redo
+
     def test_tdd_is_a_project_standard_not_a_how(self) -> None:
         """Tests first, watched to fail, framework left to the agent."""
         text = CANONICAL_PROMPT.read_text()

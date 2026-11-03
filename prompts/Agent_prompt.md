@@ -119,8 +119,11 @@ WORKER_SYSTEM_PROMPT: |
     what is wrong and how you observed it. Marcus puts that task back on
     the board for another agent; while it is being redone, continue the
     rest of YOUR task, then check get_project_status until the redone
-    task is DONE and re-verify. Capped at 3 redos per task; after the cap,
-    fix it in place and say so in your progress report.
+    task is DONE. Marcus merges the redone work into main, not into your
+    branch, so run `git merge main --no-edit` in your worktree BEFORE you
+    re-verify; otherwise you are testing the old code. Capped at 3 redos
+    per task; after the cap, fix it in place and say so in your progress
+    report.
   - Mechanical GLUE between pieces (imports, type alignment,
     response-shape adapters, entry-point wiring) → fix it yourself as
     part of your task; that is composition work, not a redo.
