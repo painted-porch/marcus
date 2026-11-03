@@ -1660,8 +1660,23 @@ async def _run_product_smoke_gate(
     # alerted with the exact key to fix. The caller's log-and-continue
     # except clause stays reserved for exceptions (programmer errors in the
     # verification system), not for resolvable configuration failures.
-    def _gate_unavailable(reason: str) -> Dict[str, Any]:
+    async def _gate_unavailable(reason: str) -> Dict[str, Any]:
         project_id = getattr(getattr(state, "kanban_client", None), "project_id", None)
+        # Hold the lease outside the D3 budget while the operator acts:
+        # the wait is Marcus's time, not the agent's (Codex P2 on PR #775).
+        lease_manager = getattr(state, "lease_manager", None)
+        if lease_manager is not None:
+            try:
+                parked = lease_manager.park_for_operator(
+                    task.id, window_seconds=2 * GATE_UNAVAILABLE_RETRY_SECONDS
+                )
+                if inspect.isawaitable(parked):
+                    await parked
+            except Exception as park_error:  # noqa: BLE001 - never break the reply
+                logger.warning(
+                    f"Could not park the lease for {task.id} while the gate is "
+                    f"unavailable: {park_error}"
+                )
         operator_action = (
             f"Set provider_config.project_root for project {project_id or '?'} "
             "in the project registry (data/marcus_state/projects.json, or the "
@@ -1726,14 +1741,14 @@ async def _run_product_smoke_gate(
                 f"PRODUCT SMOKE GATE: Failed to load workspace state "
                 f"for {task.id}: {ws_err}. Rejecting completion."
             )
-            return _gate_unavailable(f"workspace state load failed: {ws_err}")
+            return await _gate_unavailable(f"workspace state load failed: {ws_err}")
 
     if not project_root:
         logger.warning(
             f"PRODUCT SMOKE GATE: No project_root resolved for "
             f"{task.id}. Rejecting completion."
         )
-        return _gate_unavailable("project_root not found in workspace state")
+        return await _gate_unavailable("project_root not found in workspace state")
 
     project_root_path = _Path(project_root)
     if not project_root_path.is_dir():
@@ -1741,7 +1756,9 @@ async def _run_product_smoke_gate(
             f"PRODUCT SMOKE GATE: project_root {project_root!r} is "
             f"not a directory. Rejecting completion for {task.id}."
         )
-        return _gate_unavailable(f"project_root {project_root!r} is not a directory")
+        return await _gate_unavailable(
+            f"project_root {project_root!r} is not a directory"
+        )
 
     # ---- Self-verify-mode gate (issue #677 rework) ----
     # Marcus is NOT a tool-using agent harness — its only executor is this

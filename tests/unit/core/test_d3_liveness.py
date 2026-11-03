@@ -476,6 +476,93 @@ class TestTheCeilingIsHard:
         assert await manager.renew_lease("t1", 90, "", agent_id="agent-a") is None
 
 
+class TestParkForOperator:
+    """The one exception to the hard ceiling: time Marcus itself is broken.
+
+    The smoke gate parks a task it cannot evaluate because of a Marcus-side
+    misconfiguration; the agent re-reports until an operator acts. That
+    wait must not spend the agent's budget (Codex P2 on PR #775).
+    """
+
+    @pytest.mark.asyncio
+    async def test_park_moves_the_budget_past_the_window(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """A lease near its ceiling is held for the whole window."""
+        lease = await manager.create_lease(
+            "t1", "agent-a", _task("t1", estimated_hours=0.05)
+        )
+        now = datetime.now(timezone.utc)
+        lease.budget_deadline = now + 1 * MINUTE
+        lease.lease_expires = now + 1 * MINUTE
+
+        parked = await manager.park_for_operator("t1", window_seconds=600)
+
+        assert parked is not None
+        assert parked.lease_expires >= now + 9 * MINUTE
+        assert parked.budget_deadline is not None
+        assert parked.budget_deadline >= parked.lease_expires
+        assert parked.effective_expiry >= now + 9 * MINUTE
+
+    @pytest.mark.asyncio
+    async def test_repeated_parks_keep_the_lease_alive_without_stacking(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """Each re-report re-anchors on now; the window never accumulates."""
+        lease = await manager.create_lease(
+            "t1", "agent-a", _task("t1", estimated_hours=0.05)
+        )
+        first = await manager.park_for_operator("t1", window_seconds=600)
+        assert first is not None
+        first_expiry = first.lease_expires
+
+        second = await manager.park_for_operator("t1", window_seconds=600)
+
+        assert second is not None
+        assert second.lease_expires - first_expiry < 1 * MINUTE
+        assert lease.budget_deadline is not None
+        assert lease.budget_deadline >= second.lease_expires
+
+    @pytest.mark.asyncio
+    async def test_a_generous_budget_is_left_alone(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """Parking only ever moves the ceiling later, never earlier."""
+        lease = await manager.create_lease(
+            "t1", "agent-a", _task("t1", estimated_hours=4.0)
+        )
+        before = lease.budget_deadline
+
+        await manager.park_for_operator("t1", window_seconds=600)
+
+        assert lease.budget_deadline == before
+
+    @pytest.mark.asyncio
+    async def test_an_expired_lease_cannot_be_parked(
+        self, manager: AssignmentLeaseManager
+    ) -> None:
+        """Recovery owns an expired lease; parking does not resurrect it."""
+        lease = await manager.create_lease(
+            "t1", "agent-a", _task("t1", estimated_hours=0.05)
+        )
+        lease.budget_deadline = datetime.now(timezone.utc) - 1 * MINUTE
+
+        assert await manager.park_for_operator("t1", window_seconds=600) is None
+        assert await manager.park_for_operator("missing", window_seconds=600) is None
+
+    @pytest.mark.asyncio
+    async def test_park_is_persisted(
+        self, manager: AssignmentLeaseManager, persistence: AsyncMock
+    ) -> None:
+        """The moved ceiling survives a restart like any other lease field."""
+        await manager.create_lease("t1", "agent-a", _task("t1", estimated_hours=0.05))
+        persistence.update_assignment_fields.reset_mock()
+
+        await manager.park_for_operator("t1", window_seconds=600)
+
+        assert persistence.update_assignment_fields.await_count >= 1
+
+
 class TestPersistence:
     """Test suite for the ceiling surviving a restart."""
 

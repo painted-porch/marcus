@@ -701,6 +701,75 @@ class AssignmentLeaseManager:
 
             return lease
 
+    async def park_for_operator(
+        self, task_id: str, window_seconds: int = 600
+    ) -> Optional[AssignmentLease]:
+        """Hold a lease while Marcus itself cannot proceed, outside the budget.
+
+        The smoke gate parks an integration task when it cannot run because
+        of a Marcus-side misconfiguration (no usable ``project_root``): the
+        agent keeps the task and re-reports every few minutes until an
+        operator fixes the configuration. That wait is Marcus's time, not
+        the agent's, so it is the one place the ADR-0012 D3 budget ceiling
+        is moved rather than enforced: each call sets ``lease_expires`` to
+        ``now + window_seconds`` and pushes ``budget_deadline`` out to at
+        least that moment (Codex P2 on PR #775). The silence dial still
+        applies in full: an agent that stops re-reporting is recovered as
+        usual, and the window is anchored on ``now`` so repeated parks do
+        not stack.
+
+        Parameters
+        ----------
+        task_id : str
+            The parked task.
+        window_seconds : int, optional
+            How long the lease is held past this moment (default 600).
+
+        Returns
+        -------
+        Optional[AssignmentLease]
+            The parked lease, or None if there is no live lease to hold.
+        """
+        async with self.lease_lock:
+            lease = self.active_leases.get(task_id)
+            if not lease:
+                logger.warning(f"No active lease found for task {task_id} to park")
+                return None
+            if lease.is_expired:
+                logger.warning(
+                    f"Cannot park expired lease for task {task_id}; recovery owns it"
+                )
+                return None
+
+            now = datetime.now(timezone.utc)
+            window_end = now + timedelta(seconds=window_seconds)
+            lease.last_renewed = now
+            lease.lease_expires = window_end
+            if lease.budget_deadline is not None and lease.budget_deadline < window_end:
+                lease.budget_deadline = window_end
+            lease.update_timestamps.append(now)
+
+            await self._persist_lease(lease)
+
+            budget_text = (
+                lease.budget_deadline.isoformat() if lease.budget_deadline else "none"
+            )
+            logger.info(
+                f"Parked lease for task {task_id} pending an operator "
+                f"({window_seconds}s, expires {lease.lease_expires.isoformat()}, "
+                f"budget now {budget_text})"
+            )
+            self.lease_history.append(
+                {
+                    "event": "lease_parked_for_operator",
+                    "task_id": task_id,
+                    "timestamp": now.isoformat(),
+                    "window_seconds": window_seconds,
+                    "new_expiry": lease.lease_expires.isoformat(),
+                }
+            )
+            return lease
+
     async def extend_for_validation(
         self, task_id: str, window_seconds: int = 600
     ) -> Optional[AssignmentLease]:

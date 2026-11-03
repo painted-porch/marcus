@@ -244,6 +244,48 @@ class TestSmokeGateUnavailable:
         assert state.log_event.call_args.args[1]["task_id"] == "task-parked"
 
     @pytest.mark.asyncio
+    async def test_parking_holds_the_lease_outside_the_budget(self) -> None:
+        """The lease manager is asked to park the lease for the wait."""
+        from src.marcus_mcp.tools.task import GATE_UNAVAILABLE_RETRY_SECONDS
+
+        task = _make_task("task-lease")
+        state = _make_state(ws_state={})
+        state.log_event = Mock()
+        state.lease_manager = Mock()
+        state.lease_manager.park_for_operator = AsyncMock()
+
+        result = await _run_product_smoke_gate(
+            task=task,
+            agent_id="agent-7",
+            state=state,
+            start_command="make serve",
+            readiness_probe=None,
+        )
+
+        assert result is not None and result["status"] == "smoke_gate_unavailable"
+        state.lease_manager.park_for_operator.assert_awaited_once_with(
+            "task-lease", window_seconds=2 * GATE_UNAVAILABLE_RETRY_SECONDS
+        )
+
+    @pytest.mark.asyncio
+    async def test_parking_tolerates_no_lease_manager(self) -> None:
+        """Deployments without a lease manager still get the parked response."""
+        task = _make_task("task-no-lm")
+        state = _make_state(ws_state={})
+        state.log_event = Mock()
+        state.lease_manager = None
+
+        result = await _run_product_smoke_gate(
+            task=task,
+            agent_id="agent-8",
+            state=state,
+            start_command="make serve",
+            readiness_probe=None,
+        )
+
+        assert result is not None and result["status"] == "smoke_gate_unavailable"
+
+    @pytest.mark.asyncio
     async def test_parking_tolerates_a_state_without_log_event(self) -> None:
         """A bare state object still gets the parked response."""
         task = _make_task("task-bare")
