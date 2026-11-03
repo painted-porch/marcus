@@ -262,6 +262,89 @@ async def _store_config_snapshot(
 _recent_create_project_calls: Dict[str, tuple[float, Optional[Dict[str, Any]]]] = {}
 
 
+def _validate_project_root_option(
+    options: Optional[Dict[str, Any]], project_name: str
+) -> Optional[Dict[str, Any]]:
+    """Enforce ``options.project_root`` for the sqlite provider (issue #588).
+
+    ``project_root`` is where agents write code and where Marcus runs the
+    integration smoke gate. It was documented as REQUIRED and never
+    checked: a project created without it carried ``project_root: null``
+    in the registry, its design artifacts went to a default under
+    ``~/.marcus``, and the first consumer that could not proceed was the
+    smoke gate on the final task, a failure the agent cannot repair. The
+    check runs before any state is touched. Providers other than sqlite
+    keep their legacy behaviour and only log a warning.
+
+    Parameters
+    ----------
+    options : Optional[Dict[str, Any]]
+        The ``create_project`` options.
+    project_name : str
+        For the log line.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A rejection response, or None when creation may proceed. A valid
+        absolute path that does not exist yet is created, which is what
+        the experiment runner does for its ``implementation`` directory.
+    """
+    from src.config.marcus_config import get_config
+    from src.core.error_framework import InvalidConfigurationError
+
+    cfg_provider = get_config().kanban.provider or "sqlite"
+    provider = options.get("provider", cfg_provider) if options else cfg_provider
+    raw_root = options.get("project_root") if options else None
+
+    def _reject(detail: str) -> Dict[str, Any]:
+        error = InvalidConfigurationError(
+            config_key="options.project_root",
+            expected_format="absolute path to the directory where agents write code",
+        )
+        logger.error(
+            f"[create_project] rejected '{project_name}': {detail} "
+            "(options.project_root is required for the sqlite provider, #588)"
+        )
+        return {
+            "success": False,
+            "error": f"{error.message}. {detail}",
+            "error_code": "project_root_required",
+            "error_type": "InvalidConfigurationError",
+            "usage": {
+                "options": {
+                    "project_root": (
+                        "/absolute/path/to/project/implementation (required: "
+                        "agents write code here and the smoke gate runs here)"
+                    )
+                }
+            },
+        }
+
+    if provider != "sqlite":
+        if not raw_root:
+            logger.warning(
+                f"[create_project] '{project_name}' on provider {provider!r} has "
+                "no options.project_root; the smoke gate and design artifacts "
+                "need one (#588)."
+            )
+        return None
+    if not raw_root or not isinstance(raw_root, str) or not raw_root.strip():
+        return _reject("options.project_root is missing.")
+    root = Path(raw_root)
+    if not root.is_absolute():
+        return _reject(f"options.project_root {raw_root!r} is not an absolute path.")
+    if root.exists() and not root.is_dir():
+        return _reject(
+            f"options.project_root {raw_root!r} exists but is not a directory."
+        )
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        return _reject(f"options.project_root {raw_root!r} cannot be created: {error}.")
+    return None
+
+
 async def create_project(
     description: str, project_name: str, options: Optional[Dict[str, Any]], state: Any
 ) -> Dict[str, Any]:
@@ -557,6 +640,9 @@ async def _create_project_inner(
           where implementation files will be created
           Example: "/Users/username/experiments/myproject/implementation"
           This is critical for the validation system to locate source files.
+          Validated up front for the sqlite provider (#588): missing,
+          relative, or not-a-directory values are rejected before any
+          state changes; an absolute path that does not exist is created.
         - complexity (str): "prototype", "standard" (default), "enterprise"
         - deployment (str): "none" (default), "internal", "production"
         - team_size (int): Team size 1-20 for estimation (default: 1)
@@ -859,6 +945,12 @@ async def _create_project_inner(
     try:
         # Create project using natural language processing
         from src.integrations.nlp_tools import NaturalLanguageProjectCreator
+
+        # Issue #588: project_root is validated before anything is touched.
+        _root_rejection = _validate_project_root_option(options, project_name)
+        if _root_rejection is not None:
+            _recent_create_project_calls.pop(dedup_key, None)
+            return _root_rejection
 
         # Log before calling the function
         state.log_event("create_project_calling", {"project_name": project_name})
