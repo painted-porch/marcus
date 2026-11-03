@@ -212,7 +212,7 @@ experiments/
 - **Usage**: Called by `run_experiment.py`
 - **What It Does**:
   - Initialises the implementation repository on `main`
-  - Writes the session contract into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`
+  - Writes the one worker contract (`prompts/Agent_prompt.md`) into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`
   - Calls `create_project` over MCP (no project-creator agent) and commits the scaffold
   - Starts one session per identity in `worktrees/<agent_id>`, one chore per harness invocation
   - Waits for every session to exit on `BOARD_DRAINED`, prints the board counts, tears down tmux
@@ -748,13 +748,12 @@ experiments/
 ### `session_prompt.md`
 - **Type**: Markdown template
 - **Status**: ✅ Functional
-- **Purpose**: **The session contract handed to every worker on every chore**
+- **Purpose**: **The per-chore session header handed to every worker; the contract itself is `prompts/Agent_prompt.md`**
 - **Contents**:
-  - Session identity and worktree
-  - One chore per invocation: register, take one task, do it, report it, exit
-  - The `BOARD_DRAINED` stop rule and the retry rule
-  - Commit and progress reporting format
-- **Used By**: `session_launcher.py` (rendered per session; also written to `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`)
+  - Session identity and worktree, and a pointer to the contract in `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`
+  - One chore per invocation and the two harness markers
+  - The exit rules for this invocation (`BOARD_DRAINED`, retry, chore done)
+- **Used By**: `session_launcher.py` (rendered per session and piped to the harness)
 - **Variables Replaced**: `{agent_id}`, `{agent_name}`, `{agent_role}`, `{agent_skills}`, `{workspace}`, `{branch}`
 - **Last Modified**: 2026-11-03
 

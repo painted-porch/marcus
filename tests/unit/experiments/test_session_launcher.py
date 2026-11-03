@@ -133,10 +133,11 @@ class TestSessionPrompt:
         assert "BOARD_DRAINED" in prompt
         assert SESSION_DONE_MARKER in prompt
         assert "retry_after_seconds" in prompt
-        assert "lease_epoch" in prompt
-        assert "smoke_gate_unavailable" in prompt
         assert CHORE_DONE_MARKER in prompt
         assert "ALREADY have a task" in prompt
+        # The header points at the contract instead of restating it.
+        assert "CLAUDE.md" in prompt
+        assert "ADVISORY" not in prompt
 
     def test_prompt_never_asks_the_worker_to_loop_or_self_declare_completion(
         self, tmp_path: Path
@@ -556,21 +557,39 @@ class TestLauncherRun:
         # chore command is the single-shot form
         assert host.build_agent_command.call_args.kwargs["print_mode"] is True
 
-    def test_instruction_files_carry_the_session_contract(self, tmp_path: Path) -> None:
-        """CLAUDE.md (and the other harness files) say what the prompt says."""
-        launcher, _, _ = self._launcher(
+    def test_instruction_files_carry_the_canonical_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """CLAUDE.md, AGENTS.md and GEMINI.md are the one worker contract.
+
+        The per-chore prompt is only a header that points at these files, so
+        what a worker reads in its cwd is exactly ``prompts/Agent_prompt.md``.
+        """
+        contract = tmp_path / "Agent_prompt.md"
+        contract.write_text("WORKER_SYSTEM_PROMPT: |\n  the one contract\n")
+        launcher, host, mcp = self._launcher(
             tmp_path,
             {"success": True, "project_id": "p1", "tasks_created": 3},
-            wait=False,
+            contract_path=contract,
         )
+        host.count_live_panes = Mock(return_value=0)
+        host.harness_impl.workflow_files = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
+
         written = launcher.write_instruction_files()
 
-        names = {p.name for p in written}
-        assert {"CLAUDE.md", "AGENTS.md", "GEMINI.md"} <= names
-        assert (
-            "ONE CHORE"
-            in (launcher.config.implementation_dir / "AGENTS.md").read_text()
-        )
+        names = sorted(p.name for p in written)
+        assert names == ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+        for path in written:
+            assert path.read_text() == contract.read_text()
+
+    def test_default_contract_is_the_repo_prompt(self, tmp_path: Path) -> None:
+        """Without an override the launcher writes prompts/Agent_prompt.md."""
+        from runners.session_launcher import CANONICAL_PROMPT
+
+        launcher, _, _ = self._launcher(tmp_path, {"success": True})
+        assert launcher.contract_path == CANONICAL_PROMPT
+        assert CANONICAL_PROMPT.name == "Agent_prompt.md"
+        assert CANONICAL_PROMPT.is_file()
 
     def test_waits_for_all_sessions_then_tears_down(self, tmp_path: Path) -> None:
         """No restarts: the launcher polls liveness until zero, then kills tmux."""

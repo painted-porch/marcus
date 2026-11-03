@@ -179,3 +179,84 @@ class TestGateUnavailableContract:
         text = " ".join(CANONICAL_PROMPT.read_text().lower().split())
         assert "never file a blocker" in text
         assert "re-report" in text
+
+
+SESSION_HEADER = (
+    REPO_ROOT / "dev-tools" / "experiments" / "templates" / "session_prompt.md"
+)
+
+
+class TestLoopContract:
+    """Epic #706: the canonical sheet is the one worker contract.
+
+    The deleted runner copy carried clauses the canonical sheet lacked; a
+    worker started by the documented setup never saw them. They live here
+    now, and the launcher's header only points at this file.
+    """
+
+    def test_registration_is_idempotent_and_repeated(self) -> None:
+        """Re-registering with the same agent_id is expected on every fresh start."""
+        text = " ".join(CANONICAL_PROMPT.read_text().lower().split())
+        assert (
+            "registering again with the same agent_id is expected and harmless" in text
+        )
+
+    def test_already_assigned_task_is_resumed(self) -> None:
+        """A worker that stopped mid-task continues it instead of asking anew."""
+        text = CANONICAL_PROMPT.read_text()
+        assert "ALREADY have a task assigned" in text
+
+    def test_redo_tool_is_on_the_allowlist(self) -> None:
+        """request_task_redo is a tool every worker may use."""
+        text = CANONICAL_PROMPT.read_text()
+        allow = text[text.index("You can only use these Marcus tools") :]
+        allow = allow[: allow.index("- You CANNOT")]
+        assert "request_task_redo" in allow
+
+    def test_redo_guidance_draws_the_glue_line(self) -> None:
+        """Redo is for another agent's wrong DONE task; glue is your own work."""
+        text = CANONICAL_PROMPT.read_text()
+        assert "REDO VS BLOCKER VS FIX-IN-PLACE" in text
+        assert "request_task_redo(agent_id, task_id, reason)" in text
+        assert "composition work, not a redo" in text
+        assert "fix it in place" in text
+
+    def test_tdd_is_a_project_standard_not_a_how(self) -> None:
+        """Tests first, watched to fail, framework left to the agent."""
+        text = CANONICAL_PROMPT.read_text()
+        assert "PROJECT STANDARD: TDD" in text
+        assert "Write the tests FIRST" in text
+        assert "WATCH THEM FAIL" in text
+        assert "you pick the framework" in text
+
+    def test_both_harness_modes_are_named(self) -> None:
+        """The sheet works for a self-looping worker and a one-chore harness."""
+        text = CANONICAL_PROMPT.read_text()
+        assert "HARNESS MODES" in text
+        assert "ONE CHORE" in text
+        assert "request next task (go to a)" in text
+
+
+class TestSessionHeaderDefersToContract:
+    """The launcher's sheet is a header, not a second contract."""
+
+    def test_header_points_at_the_contract_files(self) -> None:
+        """Workers are told the contract is the instruction file in their cwd."""
+        text = SESSION_HEADER.read_text()
+        assert "CLAUDE.md" in text and "AGENTS.md" in text and "GEMINI.md" in text
+        assert "YOUR CONTRACT" in text
+
+    def test_header_does_not_restate_the_blocker_contract(self) -> None:
+        """Severity semantics live in one place; a copy here would drift again."""
+        text = SESSION_HEADER.read_text()
+        assert "ADVISORY" not in text
+        assert "TERMINAL" not in text
+        assert "fresh agent" not in text.lower()
+
+    def test_header_keeps_only_the_chore_mechanics(self) -> None:
+        """Identity, one chore, the two markers, and the exit rules."""
+        text = SESSION_HEADER.read_text()
+        assert "ONE CHORE" in text
+        assert ".marcus_session_done" in text
+        assert ".marcus_chore_done" in text
+        assert "{agent_id}" in text and "{workspace}" in text
