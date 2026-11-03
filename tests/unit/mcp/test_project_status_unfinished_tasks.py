@@ -72,7 +72,7 @@ def _state(tasks: List[Task], *, fetched: Optional[List[Task]] = None) -> MagicM
     kanban.get_all_tasks = AsyncMock(return_value=tasks if fetched is None else fetched)
     kanban.get_task_blockers = AsyncMock(return_value=[])
     state.persistence = MagicMock()
-    state.persistence.query = AsyncMock(return_value=[])
+    state.persistence.retrieve = AsyncMock(return_value=None)
     state.kanban_client = kanban
     state.project_manager = MagicMock()
     state.project_manager.get_kanban_client = AsyncMock(return_value=kanban)
@@ -294,25 +294,25 @@ class TestEpochCollisionsReported:
         assert result["project"]["epoch_collisions"] == 0
 
     @pytest.mark.asyncio
-    async def test_this_projects_observations_are_counted(self) -> None:
-        """Only records for tasks on this board are counted, stamp or no stamp."""
-        state = _state([_task("t1", "A", TaskStatus.DONE)])
-        state.persistence.query = AsyncMock(
-            return_value=[
-                {"project_id": None, "task_id": "t1"},
-                {"project_id": "elsewhere", "task_id": "t9"},
-            ]
+    async def test_this_boards_observations_are_counted(self) -> None:
+        """The count sums the roll-up rows of this board's tasks only."""
+        state = _state(
+            [_task("t1", "A", TaskStatus.DONE), _task("t2", "B", TaskStatus.TODO)]
+        )
+        rows = {"t1": {"count": 2}, "t9": {"count": 7}}
+        state.persistence.retrieve = AsyncMock(
+            side_effect=lambda collection, key: rows.get(key)
         )
 
         result = await get_project_status(state)
 
-        assert result["project"]["epoch_collisions"] == 1
+        assert result["project"]["epoch_collisions"] == 2
 
     @pytest.mark.asyncio
     async def test_a_store_failure_does_not_break_the_status(self) -> None:
         """The count degrades to zero; the rest of the payload is intact."""
         state = _state([_task("t1", "A", TaskStatus.DONE)])
-        state.persistence.query = AsyncMock(side_effect=RuntimeError("locked"))
+        state.persistence.retrieve = AsyncMock(side_effect=RuntimeError("locked"))
 
         result = await get_project_status(state)
 

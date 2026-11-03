@@ -198,6 +198,7 @@ Marcus is process-blind, so a worker whose lease was recovered can still report 
 That completion is allowed: the fence belongs to Milestone B, and D3's liveness dials were the prerequisite for it.
 What Marcus does now is count it.
 Every completion that arrives carrying a superseded `lease_epoch` is logged and written to the `epoch_collisions` persistence collection, keyed by task and epoch pair so a re-report counts once.
+Each task carries a roll-up row with its running count, so the figure is read by key per task rather than by scanning the detail rows.
 `get_project_status` returns the project's total as `project.epoch_collisions`, and the session launcher prints a `[Collisions] N ...` line at the end of a run when it is not zero.
 The number is the input that sizes the fence: "rare" is a measurement, not an impression.
 
