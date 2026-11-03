@@ -162,6 +162,16 @@ _blocker_repair_requeues: Dict[str, int] = {}
 # real give-up (Codex P2 on PR #770).
 _blocker_repair_consumed_epoch: Dict[str, int] = {}
 
+# Tasks whose completed report is currently inside the validation gate.
+# The MCP transport can re-send a slow report_task_progress(completed)
+# call after a reconnect, so two reports for the same task reach the gate
+# concurrently -- before the first marks the task DONE. The DONE guard in
+# the completed branch only catches duplicates that arrive AFTER
+# completion; this set catches the ones that OVERLAP an in-progress
+# validation. asyncio is single-threaded, so the check-and-add in
+# report_task_progress is atomic as long as no await separates them.
+_completion_in_flight: Set[str] = set()
+
 
 def _record_repair_attempt(task_id: str, agent_id: str) -> int:
     """Record that ``agent_id`` gave up on ``task_id``; return distinct count.
@@ -4909,6 +4919,11 @@ async def report_task_progress(
     # the function reads this flag and releases under ``asyncio`` safely.
     _release_locks_on_exit: bool = False
 
+    # True once THIS call has registered the task in _completion_in_flight,
+    # so the finally releases the marker only for the call that acquired it
+    # (a rejected duplicate must not clear the in-progress call's marker).
+    _completion_inflight_acquired: bool = False
+
     try:
         # Initialize kanban if needed
         await state.initialize_kanban()
@@ -5176,6 +5191,33 @@ async def report_task_progress(
                         "report it again. Request your next task."
                     ),
                 }
+
+            # In-flight guard (transport-retry dedupe). The MCP transport
+            # can re-send this slow completed call after a reconnect, so a
+            # second report for the same task can reach the gate while the
+            # first is still validating -- before the first marks the task
+            # DONE, so the DONE guard above does not catch it. Reject the
+            # overlapping duplicate here. asyncio is single-threaded, so
+            # this check-and-add is atomic (no await between them): only
+            # one of two overlapping calls can pass. The marker is released
+            # in the finally, on every exit path.
+            if task_id in _completion_in_flight:
+                logger.warning(
+                    f"report_task_progress(completed) rejected: a completion "
+                    f"for task {task_id} is already inside the validation "
+                    f"gate (agent {agent_id}). Duplicate from a transport "
+                    "retry; returning already-complete."
+                )
+                return {
+                    "success": False,
+                    "status": "task_already_complete",
+                    "message": (
+                        f"Task {task_id} is already being completed. "
+                        "Request your next task."
+                    ),
+                }
+            _completion_in_flight.add(task_id)
+            _completion_inflight_acquired = True
 
             # TYPED-EVIDENCE GATE (issue #737, step 4). A find, verify,
             # or synthesize task cannot close without the evidence its
@@ -6028,6 +6070,12 @@ async def report_task_progress(
             return _build_escalation_error_response(e, escalation_payload)
         return {"success": False, "error": str(e)}
     finally:
+        # Release the transport-dedupe marker for the completed report
+        # this call acquired (see _completion_in_flight). Runs on every
+        # exit -- success, early return, or exception -- so a failed
+        # completion never leaves the task permanently un-completable.
+        if _completion_inflight_acquired:
+            _completion_in_flight.discard(task_id)
         # #206 MVP Phase 4 (Kaia review fix): single release site for
         # ALL exits — normal success, early returns at terminal-state
         # points, and the outer except. ``_release_locks_on_exit`` is

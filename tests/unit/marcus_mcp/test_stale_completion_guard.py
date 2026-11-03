@@ -14,15 +14,25 @@ Dashboard-v70 Epictetus audit: 341 lines of ghost source + 506
 lines of ghost tests were produced by exactly this race.
 """
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from src.core.models import Priority, Task, TaskAssignment, TaskStatus
+from src.marcus_mcp.tools import task as task_module
 from src.marcus_mcp.tools.task import report_task_progress
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _clear_completion_in_flight() -> "object":
+    """Keep the module-level in-flight set clean between tests."""
+    task_module._completion_in_flight.clear()
+    yield
+    task_module._completion_in_flight.clear()
 
 
 def _make_assignment(task_id: str, agent_id: str = "agent-001") -> TaskAssignment:
@@ -616,3 +626,106 @@ class TestAlreadyDoneCompletionGuard:
         assert "task-343" in result["message"]
         # The validation / completion pipeline never ran: no DONE write.
         state.kanban_client.update_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_completion_when_already_in_flight(self) -> None:
+        """A second completed report for a task already inside the gate is
+        refused immediately, even though the task is not yet DONE.
+
+        The MCP transport re-sends a slow completed call after a reconnect.
+        The DONE guard cannot catch this duplicate because the first call
+        has not finished writing DONE yet; the in-flight guard does.
+        """
+        state = _make_state_with_assignment("agent-001", task_id="task-343")
+        # Simulate a first completion already inside the validation gate.
+        task_module._completion_in_flight.add("task-343")
+
+        result = await report_task_progress(
+            agent_id="agent-001",
+            task_id="task-343",
+            status="completed",
+            progress=100,
+            message="duplicate from a transport retry",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "task_already_complete"
+        # The duplicate never ran the pipeline: no DONE write.
+        state.kanban_client.update_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_overlapping_completions_only_one_runs_the_pipeline(
+        self,
+    ) -> None:
+        """Two concurrent completed reports (a transport re-send): exactly
+        one runs the completion pipeline, the other is refused at once.
+
+        The first call is held inside the pipeline at the kanban DONE
+        write while the second arrives. The in-flight guard rejects the
+        second, so update_task is awaited exactly once.
+        """
+        now = datetime.now(timezone.utc)
+        inprogress = Task(
+            id="task-343",
+            name="Half done",
+            description="",
+            status=TaskStatus.IN_PROGRESS,
+            priority=Priority.MEDIUM,
+            assigned_to="agent-001",
+            created_at=now,
+            updated_at=now,
+            due_date=None,
+            estimated_hours=1.0,
+            dependencies=[],
+            # design never triggers validation, so the first call reaches
+            # the DONE write deterministically with minimal mocking.
+            task_type="design",
+        )
+        state = _make_state_with_assignment("agent-001", task_id="task-343")
+        state.kanban_client.get_all_tasks = AsyncMock(return_value=[inprogress])
+
+        inside_gate = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocking_update(*_args: object, **_kwargs: object) -> dict:
+            # The first call reaches the DONE write; hold it here so the
+            # second call overlaps while the first still owns the marker.
+            inside_gate.set()
+            await release.wait()
+            return {}
+
+        state.kanban_client.update_task = AsyncMock(side_effect=blocking_update)
+
+        first = asyncio.create_task(
+            report_task_progress(
+                agent_id="agent-001",
+                task_id="task-343",
+                status="completed",
+                progress=100,
+                message="first",
+                state=state,
+            )
+        )
+        try:
+            await asyncio.wait_for(inside_gate.wait(), timeout=2.0)
+
+            # Second report arrives while the first is still in the gate.
+            second = await report_task_progress(
+                agent_id="agent-001",
+                task_id="task-343",
+                status="completed",
+                progress=100,
+                message="duplicate",
+                state=state,
+            )
+
+            assert second["success"] is False
+            assert second["status"] == "task_already_complete"
+        finally:
+            release.set()
+            first_result = await asyncio.wait_for(first, timeout=2.0)
+
+        assert first_result["success"] is True
+        # Only the first call ran the pipeline: exactly one DONE write.
+        assert state.kanban_client.update_task.await_count == 1
