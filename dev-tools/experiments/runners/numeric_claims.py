@@ -28,7 +28,7 @@ import operator
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 VERDICT_VERIFIED = "verified"
 VERDICT_FAILED = "failed"
@@ -370,6 +370,99 @@ def extract_numbers(text: str) -> List[str]:
     return [m.group(1) for m in _NUMBER_RE.finditer(cleaned)]
 
 
+def _words_in(text: str) -> Set[str]:
+    """Lowercase word tokens of a label, for contradiction checks.
+
+    Parameters
+    ----------
+    text : str
+        The claim's label.
+
+    Returns
+    -------
+    set
+        Lowercased alphanumeric tokens.
+    """
+    return set(re.findall(r"[a-z0-9/]+", (text or "").lower()))
+
+
+def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
+    """Report a label that contradicts the row the claim reads.
+
+    The label is the writer's own words, so nothing in the numbers
+    stops it naming a different crop or a different unit from the row
+    the claim addresses. A correct value under the wrong heading is
+    still wrong, and it would pass every later check, because the deck
+    is checked against the claim's label rather than against the
+    source.
+
+    The rule detects contradiction, not absence. A label naming a
+    sibling row of the same table is a contradiction. A label naming
+    nothing the table recognizes is left alone, because report prose
+    uses synonyms the data does not: a report says corn where the data
+    says maize, and failing that would punish ordinary writing.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim to inspect.
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the contradiction, or ``None``.
+    """
+    if claim.kind != "lookup" or not claim.source or not claim.key:
+        return None
+    rows = sources.get(claim.source)
+    if not isinstance(rows, list) or not rows:
+        return None
+    parts = claim.key.split(":")
+    if len(parts) < 2 or "=" not in parts[0]:
+        return None
+    sel_col, sel_val = parts[0].split("=", 1)
+    label_words = _words_in(claim.label)
+
+    # A sibling row's selector value appearing in the label.
+    siblings = {
+        str(row.get(sel_col, "")).strip()
+        for row in rows
+        if str(row.get(sel_col, "")).strip() != sel_val
+    }
+    for other in siblings:
+        if other and other.lower() in label_words:
+            return f"label says {other!r} but the claim reads " f"{sel_col}={sel_val!r}"
+
+    # A different unit appearing in the label. Units are compared as
+    # token sets so spacing around the slash does not matter.
+    unit_cols = [c for c in rows[0] if c.lower() in ("unit", "units")]
+    if not unit_cols:
+        return None
+    column = unit_cols[0]
+    own = ""
+    for row in rows:
+        if str(row.get(sel_col, "")).strip() == sel_val:
+            own = str(row.get(column, "")).strip()
+            break
+    if not own:
+        return None
+    own_words = _words_in(own)
+    others = {
+        str(row.get(column, "")).strip()
+        for row in rows
+        if str(row.get(column, "")).strip()
+    }
+    for other in others:
+        other_words = _words_in(other)
+        if other_words == own_words:
+            continue
+        if other_words and other_words <= label_words:
+            return f"label states unit {other!r} but the row is reported " f"in {own!r}"
+    return None
+
+
 def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
     """Resolve and judge a single claim.
 
@@ -393,16 +486,26 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         except KeyError as exc:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
         ok = _within_tolerance(claim.value, truth, claim.tolerance)
-        return CheckResult(
-            verdict=VERDICT_VERIFIED if ok else VERDICT_FAILED,
-            expected=truth,
-            detail=(
-                ""
-                if ok
-                else f"{claim.label}: stated {claim.value}, " f"source says {truth}"
-            ),
-            **base,
-        )
+        if not ok:
+            # A wrong number is the more useful message of the two,
+            # so it is reported before any label problem.
+            return CheckResult(
+                verdict=VERDICT_FAILED,
+                expected=truth,
+                detail=(
+                    f"{claim.label}: stated {claim.value}, " f"source says {truth}"
+                ),
+                **base,
+            )
+        contradiction = label_contradiction(claim, sources)
+        if contradiction:
+            return CheckResult(
+                verdict=VERDICT_FAILED,
+                expected=truth,
+                detail=f"{claim.label}: {contradiction}",
+                **base,
+            )
+        return CheckResult(verdict=VERDICT_VERIFIED, expected=truth, **base)
 
     if claim.kind in ("derived", "consistency"):
         names: Dict[str, Any] = {}

@@ -41,8 +41,8 @@ def staged(tmp_path):
     )
     (d / "per_crop.csv").write_text(
         "crop,n_records,r2,median_ape,unit\n"
-        "maize,817,0.886,3.6,kg/ha\n"
-        "cotton,37,0.585,6.5,kg/ha\n"
+        "maize,817,0.886,3.6,BU / ACRE\n"
+        "cotton,37,0.585,6.5,LB / ACRE\n"
     )
     (d / "tiers.csv").write_text(
         "tier,n_records,rate_pct\n"
@@ -405,3 +405,116 @@ class TestSlideMapping:
             ]
         }
         assert check_slide_spec(spec, accepted, {"c1": "maize R2"})
+
+
+class TestLabelConsistency:
+    """A claim's label must not contradict the data it reads.
+
+    The label is the writer's own words, so nothing stops it naming a
+    different crop or a different unit from the row the claim reads.
+    A correct number under the wrong heading is still wrong, and a
+    mislabelled claim passes every later check because the deck is
+    checked against the label rather than against the source.
+
+    The rule detects contradiction, not absence. A label that names a
+    sibling row is caught; a label that names nothing recognizable is
+    left alone, because report prose uses synonyms the data does not
+    (a report says corn where the data says maize).
+    """
+
+    @pytest.mark.unit
+    def test_label_naming_a_sibling_row_fails(self, sources):
+        """Maize's value labelled as cotton is a wrong-row error."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="cotton R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert "cotton" in res.detail.lower()
+
+    @pytest.mark.unit
+    def test_label_naming_its_own_row_passes(self, sources):
+        """The matching label is accepted."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_label_using_a_synonym_is_not_failed(self, sources):
+        """A report may say corn where the data says maize."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="corn R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_wrong_unit_in_label_fails(self, sources):
+        """Cotton is reported in pounds, so bushels is a contradiction."""
+        c = Claim(
+            id="c1",
+            value=0.585,
+            label="cotton R2 in BU / ACRE",
+            source="per_crop.csv",
+            key="crop=cotton:r2",
+            kind="lookup",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert "unit" in res.detail.lower()
+
+    @pytest.mark.unit
+    def test_right_unit_in_label_passes(self, sources):
+        """The row's own unit is accepted."""
+        c = Claim(
+            id="c1",
+            value=0.585,
+            label="cotton R2 in LB / ACRE",
+            source="per_crop.csv",
+            key="crop=cotton:r2",
+            kind="lookup",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_source_without_a_unit_column_is_not_checked(self, sources):
+        """A JSON metric has no unit to contradict."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2 in BU / ACRE",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_wrong_value_is_reported_before_the_label(self, sources):
+        """A wrong number is the more useful message of the two."""
+        c = Claim(
+            id="c1",
+            value=0.99,
+            label="cotton R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert "0.886" in res.detail
