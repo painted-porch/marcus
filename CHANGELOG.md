@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The ADR-0012 D11 fence, enforced at the resource (epic #706 Milestone B).
+A completion whose lease epoch has been superseded is now refused before the board's DONE write and before the merge into `main`, deciding from the durable per-task epoch high-water mark rather than from in-memory ownership, which has disagreed with itself before (#485).
+This closes the two-live-completions path the session model opened: Marcus can take a session's task away but not its process, so a session that goes quiet during a long build is still alive and will report 100% after its task has been handed to someone else.
+Nothing is discarded. A fenced completion is recorded on the task, and a board-visible reconciliation card at URGENT priority with no dependencies names every refused attempt and its branch alongside what is on `main`, leaving three outcomes open: keep what is on `main`, take a refused branch's work, or combine them.
+The card asks for a `log_decision` recording what was kept and why, which is the point of it.
+It opens when the fence fires on an already-finished task, and otherwise at the moment a completion for that task is accepted: opened while the replacement is still working it would send an agent to reconcile against an implementation that is not on `main` yet, and the replacement could then land and overwrite that decision.
+A task recovered more than once displaces several sessions, and each refusal updates the card rather than being swallowed by the first one; a board write that fails still refuses the completion rather than merging work Marcus had decided to refuse.
+The refusal is stamped on both the board's task and the cached one, because a provider like sqlite hydrates fresh objects and the acceptance hook reads the cache, and the hook falls back to the board when the cache is stale.
+The hook runs before every success return, so a replacement completion that escalates validation or carries stub warnings cannot leave a displaced session's work without a card, it runs after a successful automatic merge recovery too, and the fence re-reads the task's state after recording a refusal in case the replacement finished while that was in flight.
+The card carries only a `reconciliation` label and the commit gate skips it: its deliverable is a recorded decision, and keeping the work already on `main` is a permitted outcome that changes no files.
+A report carrying no epoch cannot be fenced by token and falls through to the ownership guard unchanged.
+Obligation O3 (a falsely-recovered live session having its work discarded) is closed by this, and the merge half is closed from the other end by #730.
 - The checkpoint duty is part of the task contract (ADR-0012 D8, epic #706 Milestone B).
 Every task's instructions now state, in Marcus's own configured numbers, that the agent should commit at least every `task_lease.checkpoint_cadence_minutes` (default 20) and that `task_lease.silence_timeout_minutes` of quiet (default 45) is read as a dead worker whose task is handed to someone else.
 The reason is stated with it: the recovery handoff can pass on commits and nothing else, so uncommitted work dies with the agent and the next one starts from nothing.

@@ -352,6 +352,44 @@ def clear_blocker_attempts(task_id: str) -> None:
     _advisory_blocker_attempts.pop(task_id, None)
 
 
+# Stamped into a reconciliation card's description so the fence can find
+# the card it already opened for a task (ADR-0012 D11).
+_RECONCILIATION_MARKER = "<!-- marcus:reconciles task {task_id} -->"
+
+#: Label that identifies a reconciliation card. Its deliverable is a
+#: recorded decision rather than code, so the commit gate skips it.
+_RECONCILIATION_LABEL = "reconciliation"
+
+#: One lock per contested task around "find a card, else create one".
+#: Two overlapping refusals, or a refusal overlapping the replacement's
+#: acceptance hook, would otherwise both find nothing and both create a
+#: card, leaving two claimable cards deciding the same thing (Codex P2 on
+#: PR #794).
+_RECONCILIATION_LOCKS: Dict[str, asyncio.Lock] = {}
+_RECONCILIATION_LOCKS_GUARD = threading.Lock()
+
+
+def _reconciliation_lock(task_id: str) -> asyncio.Lock:
+    """Return the lock that serialises card creation for one task.
+
+    Parameters
+    ----------
+    task_id : str
+        The contested task.
+
+    Returns
+    -------
+    asyncio.Lock
+        A lock unique to this task for the life of the process.
+    """
+    with _RECONCILIATION_LOCKS_GUARD:
+        lock = _RECONCILIATION_LOCKS.get(task_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _RECONCILIATION_LOCKS[task_id] = lock
+        return lock
+
+
 def _worktree_path_for_branch(repo_root: str, branch: str) -> Optional[str]:
     """Find the worktree that currently has ``branch`` checked out.
 
@@ -4747,6 +4785,11 @@ async def _attempt_merge_recovery(
         task.id,
         branch,
     )
+    # ADR-0012 D11: this path marks the task DONE without going through
+    # ``report_task_progress``, so a displaced session's refusal recorded
+    # while this replacement was conflicted would never get its card
+    # (Codex P2 on PR #794). Both implementations exist now.
+    await maybe_open_reconciliation_card(state, task, task.id)
     return {
         "success": True,
         "task_id": task.id,
@@ -5920,6 +5963,584 @@ async def count_epoch_collisions(state: Any, task_ids: Set[str]) -> int:
     return total
 
 
+async def _board_tasks_for_fence(state: Any) -> List[Task]:
+    """Read the board's tasks for the fence, tolerating a board failure.
+
+    The fence needs the task only to name it on the reconciliation card,
+    so a board read that fails must not turn into a failed completion.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+
+    Returns
+    -------
+    List[Task]
+        The board's tasks, or an empty list.
+    """
+    kanban_client = getattr(state, "kanban_client", None)
+    if kanban_client is None:
+        return []
+    try:
+        tasks = await kanban_client.get_all_tasks()
+    except Exception as exc:  # noqa: BLE001 - naming the card is optional
+        logger.debug("[fence] could not read the board: %s", exc)
+        return []
+    return list(tasks or [])
+
+
+async def _record_refused_attempt(
+    state: Any,
+    task_id: str,
+    task: Optional[Task],
+    agent_id: str,
+    lease_epoch: Optional[int],
+) -> List[Dict[str, Any]]:
+    """Stamp a refused completion on the task and return every one so far.
+
+    The refusal itself is not the whole of D11 part 2: the work has to
+    stay findable. A fenced session's commits are on its branch, and this
+    record is what tells a later reader the branch exists and why it was
+    refused — including when the task is recovered twice and several
+    sessions are displaced.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+    task_id : str
+        The contested task.
+    task : Optional[Task]
+        The task object, when resolvable; its ``source_context`` is read
+        so existing records are preserved.
+    agent_id : str
+        The session whose completion was refused.
+    lease_epoch : Optional[int]
+        The epoch it reported under.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Every refused attempt recorded for this task, oldest first.
+    """
+    attempt = {
+        "agent_id": agent_id,
+        "branch": f"marcus/{agent_id}",
+        "lease_epoch": lease_epoch,
+        "refused_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Marcus's own store is authoritative. Only the sqlite provider
+    # round-trips ``source_context``, and a board refresh replaces cached
+    # task objects, so a board-only record is lost on Planka, GitHub and
+    # Linear — and the card may be opened much later, when the
+    # replacement finally completes (Codex P2 on PR #794).
+    attempts: List[Dict[str, Any]] = []
+    persistence = getattr(state, "assignment_persistence", None)
+    recorder = getattr(persistence, "record_refused_attempt", None)
+    if recorder is not None:
+        try:
+            attempts = list(await recorder(task_id, attempt))
+        except Exception as exc:  # noqa: BLE001 - fall back to the board stamp
+            logger.error(
+                "[fence] Could not persist the refused attempt for task %s: "
+                "%s. Falling back to the board record, which some providers "
+                "do not keep.",
+                task_id,
+                exc,
+            )
+
+    context = dict(getattr(task, "source_context", None) or {})
+    if not attempts:
+        attempts = [dict(a) for a in (context.get("refused_attempts") or [])]
+        if not any(
+            a.get("agent_id") == agent_id and a.get("lease_epoch") == lease_epoch
+            for a in attempts
+        ):
+            attempts.append(attempt)
+    context["refused_attempts"] = attempts
+    if task is not None:
+        task.source_context = context
+    # And on the cached object, which can be a different instance: a
+    # provider like sqlite hydrates fresh Task objects in
+    # ``get_all_tasks()``, so stamping the board's copy never reaches
+    # ``state.project_tasks`` — and that is the copy the acceptance hook
+    # reads (Codex P2 on PR #794).
+    for cached in getattr(state, "project_tasks", None) or []:
+        if str(getattr(cached, "id", "")) == task_id and cached is not task:
+            cached.source_context = context
+    kanban_client = getattr(state, "kanban_client", None)
+    if kanban_client is not None:
+        try:
+            await kanban_client.update_task(task_id, {"source_context": context})
+        except Exception as exc:  # noqa: BLE001 - the in-memory stamp still holds
+            logger.warning(
+                "[fence] Could not persist the refused attempt for task %s: %s",
+                task_id,
+                exc,
+            )
+    return attempts
+
+
+def _task_is_terminal(task: Optional[Task]) -> bool:
+    """Report whether the replacement attempt has finished.
+
+    The reconciliation card asks an agent to compare two implementations.
+    While the replacement is still working there is only one, and `main`
+    holds nothing for the task — a card opened then would send an agent to
+    reconcile against an implementation that does not exist yet, and the
+    replacement could land afterwards and overwrite the decision (Codex P1
+    on PR #794). So the card waits for the task to reach a terminal state.
+
+    Parameters
+    ----------
+    task : Optional[Task]
+        The contested task.
+
+    Returns
+    -------
+    bool
+        True when the task is DONE.
+    """
+    return getattr(task, "status", None) == TaskStatus.DONE
+
+
+async def _find_reconciliation_card(state: Any, task_id: str) -> Optional[str]:
+    """Return the id of an open reconciliation card for ``task_id``, if any.
+
+    Keeps the fence idempotent: a displaced session can report the same
+    completion repeatedly, and each report must not add another card.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+    task_id : str
+        The contested task.
+
+    Returns
+    -------
+    Optional[str]
+        The existing card's id, or None when there is none.
+    """
+    marker = _RECONCILIATION_MARKER.format(task_id=task_id)
+    for candidate in getattr(state, "project_tasks", None) or []:
+        if marker in (getattr(candidate, "description", "") or ""):
+            if getattr(candidate, "status", None) != TaskStatus.DONE:
+                return str(getattr(candidate, "id", "")) or None
+    return None
+
+
+async def _open_reconciliation_card(
+    state: Any,
+    task: Optional[Task],
+    task_id: str,
+    attempts: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Put the contested completions on the board instead of discarding them.
+
+    ADR-0012 D11 part 2: a refused completion is **preserved and
+    reconciled**, never thrown away. Two or more sessions have now built
+    the same task, each on its own branch. Deciding which implementation
+    survives is a judgement call, so it belongs to an agent on a board
+    card, not to Marcus (Invariant #2).
+
+    The card states what to compare and what to record, never how to
+    decide. It is created at URGENT priority with no dependencies so it is
+    claimable at once: until it is resolved, ``main`` holds one of several
+    implementations and nobody has looked at the others.
+
+    When a card already exists for this task — a task can be recovered
+    more than once, displacing several sessions — it is **updated** to
+    name the newly refused attempt rather than left as it was, or the
+    reconciling agent would never hear about that branch (Codex P2 on PR
+    #794).
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+    task : Optional[Task]
+        The contested task, when it could be resolved. Used for its name
+        and the accepted agent's id.
+    task_id : str
+        The contested task's id.
+    attempts : List[Dict[str, Any]]
+        Every refused attempt recorded for this task, oldest first.
+
+    Returns
+    -------
+    Optional[str]
+        The card's id, or None when the board write failed.
+    """
+    task_name = getattr(task, "name", None) or task_id
+    accepted_agent = getattr(task, "assigned_to", None) or "another session"
+    marker = _RECONCILIATION_MARKER.format(task_id=task_id)
+    refused_lines = "\n".join(
+        f"- `{a.get('branch')}` (agent {a.get('agent_id')}, "
+        f"epoch {a.get('lease_epoch')}), refused {a.get('refused_at')}"
+        for a in attempts
+    )
+    first_branch = (attempts[0].get("branch") if attempts else None) or "the branch"
+    description = (
+        f"More than one session completed this task. Decide which work "
+        f"survives.\n\n"
+        f"{marker}\n\n"
+        f"**The task:** {task_name} (`{task_id}`)\n"
+        f"**Accepted:** {accepted_agent}, whose work is already on `main`.\n"
+        f"**Refused, and NOT merged:**\n{refused_lines}\n\n"
+        f"**What to do:**\n"
+        f"1. Read what is on `main` for this task, then read each refused "
+        f"branch: `git log main..<branch>` and `git diff main..<branch>`.\n"
+        f"2. Decide what the task should end up with: keep what is on "
+        f"`main`, take a refused branch's work instead, or combine them.\n"
+        f"3. Leave `main` holding that result, with the tests passing.\n"
+        f"4. Call `log_decision` with what you kept, what you dropped, and "
+        f"why. That record is the point of this card.\n\n"
+        f"Nothing has been deleted. Every branch above is intact "
+        f"(start with `{first_branch}`)."
+    )
+
+    kanban_client = getattr(state, "kanban_client", None)
+    if kanban_client is None:
+        return None
+
+    # Nothing left to decide: every attempt in hand is already covered by
+    # a card. A displaced session repeating its report after that card was
+    # completed must not re-open a settled decision, while a genuinely new
+    # refusal is uncovered and still gets one (Codex P2 on PR #794).
+    pending = [a for a in attempts if not a.get("reconciled_by")]
+    if not pending:
+        previous = next(
+            (
+                a.get("reconciled_by")
+                for a in reversed(attempts)
+                if a.get("reconciled_by")
+            ),
+            None,
+        )
+        logger.info(
+            "[fence] Every refused attempt on task %s is already covered by "
+            "reconciliation card %s; not opening another",
+            task_id,
+            previous,
+        )
+        return str(previous) if previous else None
+
+    async def _mark(card: str) -> None:
+        """Record which attempts this card now covers."""
+        persistence = getattr(state, "assignment_persistence", None)
+        marker = getattr(persistence, "mark_refused_attempts_reconciled", None)
+        if marker is None:
+            return
+        try:
+            await marker(task_id, card, pending)
+        except Exception as exc:  # noqa: BLE001 - the card still exists
+            logger.warning(
+                "[fence] Could not note that card %s covers task %s's "
+                "refused attempts: %s",
+                card,
+                task_id,
+                exc,
+            )
+
+    # One card per contested task: two overlapping refusals, or a refusal
+    # overlapping the replacement's acceptance hook, would otherwise both
+    # find nothing here and both create one.
+    async with _reconciliation_lock(task_id):
+        existing = await _find_reconciliation_card(state, task_id)
+        if existing:
+            try:
+                await kanban_client.update_task(existing, {"description": description})
+            except Exception as exc:  # noqa: BLE001 - never fail a report
+                logger.warning(
+                    "[fence] Could not update reconciliation card %s for "
+                    "task %s: %s",
+                    existing,
+                    task_id,
+                    exc,
+                )
+                return existing
+            for candidate in getattr(state, "project_tasks", None) or []:
+                if str(getattr(candidate, "id", "")) == existing:
+                    candidate.description = description
+            logger.info(
+                "[fence] Updated reconciliation card %s for task %s: %d "
+                "refused attempt(s) now named",
+                existing,
+                task_id,
+                len(attempts),
+            )
+            await _mark(existing)
+            return existing
+
+        try:
+            card = await kanban_client.create_task(
+                {
+                    "name": f"Reconcile two completions of: {task_name}",
+                    "description": description,
+                    "status": "todo",
+                    "priority": "urgent",
+                    # No implementation label: the deliverable is a
+                    # decision, and one permitted outcome is "keep what is
+                    # on main", which changes no files. Labelling it
+                    # implementation would put it in front of the commit
+                    # gate and the validation gate, neither of which it can
+                    # satisfy (Codex P2 on PR #794).
+                    "labels": [_RECONCILIATION_LABEL],
+                    "dependencies": [],
+                    "estimated_hours": 1.0,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - never fail a report
+            logger.error(
+                "[fence] Could not open a reconciliation card for task %s: "
+                "%s. The refused work is still on its branch.",
+                task_id,
+                exc,
+            )
+            return None
+
+        card_id = str(getattr(card, "id", "") or "")
+        # Make it claimable without waiting for the next board refresh.
+        if card_id and isinstance(getattr(state, "project_tasks", None), list):
+            state.project_tasks.append(card)
+        logger.info(
+            "[fence] Opened reconciliation card %s for task %s (%d refused "
+            "attempt(s))",
+            card_id,
+            task_id,
+            len(attempts),
+        )
+        if card_id:
+            await _mark(card_id)
+        return card_id or None
+
+
+async def maybe_open_reconciliation_card(
+    state: Any,
+    task: Optional[Task],
+    task_id: str,
+) -> Optional[str]:
+    """Open the reconciliation card once a completion has been accepted.
+
+    The other half of the fence's timing: a card opened while the
+    replacement was still working would ask an agent to compare against
+    an implementation that was not on ``main`` yet. So when a session is
+    displaced mid-flight the refusal is recorded on the task, and the
+    card is opened here — at the moment a completion for that task is
+    accepted and both implementations exist.
+
+    Does nothing when no attempt was refused, which is every ordinary
+    completion.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+    task : Optional[Task]
+        The task whose completion was just accepted.
+    task_id : str
+        Its id.
+
+    Returns
+    -------
+    Optional[str]
+        The card's id when one was opened or updated, else None.
+    """
+    attempts = [
+        dict(a)
+        for a in (
+            (getattr(task, "source_context", None) or {}).get("refused_attempts") or []
+        )
+    ]
+    if not attempts:
+        # Marcus's own store, which every provider shares.
+        persistence = getattr(state, "assignment_persistence", None)
+        reader = getattr(persistence, "get_refused_attempts", None)
+        if reader is not None:
+            try:
+                attempts = [dict(a) for a in await reader(task_id)]
+            except Exception as exc:  # noqa: BLE001 - try the board next
+                logger.debug(
+                    "[fence] Could not read refused attempts for task %s: %s",
+                    task_id,
+                    exc,
+                )
+    if not attempts:
+        # The cached task can be a different object from the one the
+        # refusal stamped: a provider like sqlite hydrates fresh Task
+        # objects in ``get_all_tasks()``, and the record is persisted on
+        # the board. Look there before concluding there was no contest
+        # (Codex P2 on PR #794).
+        board_task = next(
+            (
+                candidate
+                for candidate in await _board_tasks_for_fence(state)
+                if str(getattr(candidate, "id", "")) == task_id
+            ),
+            None,
+        )
+        attempts = [
+            dict(a)
+            for a in (
+                (getattr(board_task, "source_context", None) or {}).get(
+                    "refused_attempts"
+                )
+                or []
+            )
+        ]
+        if attempts and board_task is not None:
+            task = board_task
+    if not attempts:
+        return None
+    logger.info(
+        "[fence] Task %s was completed with %d refused attempt(s) on "
+        "record; opening the reconciliation card now",
+        task_id,
+        len(attempts),
+    )
+    return await _open_reconciliation_card(state, task, task_id, attempts)
+
+
+async def _fence_stale_epoch(
+    state: Any,
+    task: Optional[Task],
+    task_id: str,
+    agent_id: str,
+    lease_epoch: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """Refuse a completion whose claim has been superseded (ADR-0012 D11).
+
+    The fence sits where the resources are: this runs before the board's
+    DONE write and before the merge into ``main``, and it decides from the
+    **durable epoch high-water mark** rather than from in-memory ownership.
+    Marcus's three in-memory ownership buckets have disagreed before
+    (issue #485); the epoch sequence survives release and restart
+    precisely so it can arbitrate.
+
+    A report carrying no epoch cannot be fenced by token — it falls
+    through to the ownership guard, which is the pre-D11 behaviour.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+    task : Optional[Task]
+        The completing task, when resolvable; used for the card.
+    task_id : str
+        The task being reported complete.
+    agent_id : str
+        The reporting session.
+    lease_epoch : Optional[int]
+        The epoch that session was issued at claim. ``None`` or 0 means
+        the report carried no token.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        None when the report may proceed. Otherwise the refusal to
+        return to the caller, naming the reconciliation card.
+    """
+    if not lease_epoch:
+        return None
+    lease_manager = getattr(state, "lease_manager", None)
+    if lease_manager is None:
+        return None
+    try:
+        highest = await lease_manager.get_highest_epoch(task_id)
+    except Exception as exc:  # noqa: BLE001 - never fail a report over this
+        logger.warning(
+            "[fence] Could not read the epoch high-water mark for task %s: "
+            "%s. Falling through to the ownership guard.",
+            task_id,
+            exc,
+        )
+        return None
+    if not highest or lease_epoch >= highest:
+        return None
+
+    logger.warning(
+        "[fence] Refusing completion of task %s from %s: epoch %s is "
+        "superseded by %s (ADR-0012 D11). The work stays on branch "
+        "marcus/%s.",
+        task_id,
+        agent_id,
+        lease_epoch,
+        highest,
+        agent_id,
+    )
+    attempts = await _record_refused_attempt(
+        state, task_id, task, agent_id, lease_epoch
+    )
+    # The status in hand was read before the epoch lookup was awaited, so
+    # the replacement may have finished in between — and its own
+    # acceptance hook may have run before this refusal was recorded,
+    # finding nothing. Re-read the board, or both reports finish with the
+    # refusal stored and no card scheduled (Codex P2 on PR #794).
+    if not _task_is_terminal(task):
+        fresh = next(
+            (
+                candidate
+                for candidate in await _board_tasks_for_fence(state)
+                if str(getattr(candidate, "id", "")) == task_id
+            ),
+            None,
+        )
+        if fresh is not None and _task_is_terminal(fresh):
+            logger.info(
+                "[fence] Task %s finished while this refusal was being "
+                "recorded; opening the reconciliation card now",
+                task_id,
+            )
+            task = fresh
+    # The card waits for the replacement attempt to finish. Opened while
+    # that session is still working, it would send an agent to reconcile
+    # against an implementation that is not on main yet, and the
+    # replacement could land afterwards and overwrite the decision (Codex
+    # P1 on PR #794). The refused attempt is on record either way, and
+    # ``maybe_open_reconciliation_card`` opens the card at the moment a
+    # completion for this task is accepted.
+    card_id: Optional[str] = None
+    if _task_is_terminal(task):
+        card_id = await _open_reconciliation_card(state, task, task_id, attempts)
+    else:
+        logger.info(
+            "[fence] Task %s is not finished yet (%s); the refused attempt "
+            "from %s is recorded and the reconciliation card opens when a "
+            "completion is accepted.",
+            task_id,
+            getattr(task, "status", None),
+            agent_id,
+        )
+    return {
+        "success": False,
+        "status": "fenced_stale_epoch",
+        "error": "superseded_claim",
+        "task_id": task_id,
+        "agent_id": agent_id,
+        "lease_epoch": lease_epoch,
+        "current_lease_epoch": highest,
+        "reconciliation_task_id": card_id,
+        "message": (
+            f"Cannot complete task {task_id}: your claim (epoch "
+            f"{lease_epoch}) was superseded by a later one (epoch "
+            f"{highest}), so another session has been working this task. "
+            f"Nothing of yours was deleted — your commits are on branch "
+            f"marcus/{agent_id}"
+            + (
+                f", and reconciliation card {card_id} now asks an agent to "
+                f"compare the attempts and keep the better work"
+                if card_id
+                else ", and it is recorded on the task so a reconciliation "
+                "card names it once this task is finished"
+            )
+            + ". Request your next task to continue."
+        ),
+    }
+
+
 async def _observe_epoch_collision(
     state: Any, task_id: str, agent_id: str, lease_epoch: Optional[int]
 ) -> bool:
@@ -5986,13 +6607,12 @@ async def _observe_epoch_collision(
     state.epoch_collision_count = (_seen if isinstance(_seen, int) else 0) + 1
     await _record_epoch_collision(state, task_id, agent_id, lease_epoch, highest)
     logger.warning(
-        f"D11 epoch collision (OBSERVED, NOT FENCED): agent {agent_id} "
-        f"completed task {task_id} carrying epoch {lease_epoch} while the "
-        f"newest claim is epoch {highest}. Under spawn-per-task this "
-        f"should be impossible — recovery kills the agent — so this "
-        f"indicates either a session-model deployment or a recovery that "
-        f"did not terminate its agent. The completion was ALLOWED; "
-        f"fencing is deferred to D3 (see ADR-0012 D11)."
+        f"D11 epoch collision: agent {agent_id} completed task {task_id} "
+        f"carrying epoch {lease_epoch} while the newest claim is epoch "
+        f"{highest}. Two workers held this task at once — under "
+        f"spawn-per-task that was impossible, because recovery killed the "
+        f"agent. Recorded here; the fence decides what happens to the "
+        f"completion (ADR-0012 D11)."
     )
     return True
 
@@ -6237,14 +6857,32 @@ async def report_task_progress(
         # write DONE to kanban and trigger branch merges that cannot
         # be undone cleanly, so they get the stricter check here.
         if status == "completed":
-            # ADR-0012 D11 epoch: RECORDED, NOT ENFORCED.
+            # ADR-0012 D11: the epoch is recorded, and then enforced.
             #
-            # D3 deleted the re-grant compensation that used to contradict
-            # a fence. The fence itself is Milestone B work, enforced at
-            # the resource (the DONE write and the merge) and sized to the
-            # collision rate recorded here; until then the collision is
-            # logged so the real rate is measurable instead of assumed.
+            # Recording stays: it is how the collision rate is measured
+            # rather than assumed. The fence then refuses a report whose
+            # claim is provably superseded, before either resource this
+            # function touches — the board's DONE write and the merge into
+            # main. It decides from the durable epoch high-water mark, not
+            # from in-memory ownership, because Marcus's in-memory buckets
+            # have disagreed with each other before (issue #485).
+            #
+            # A refused completion is preserved and reconciled on the
+            # board, never discarded (D11 part 2).
             await _observe_epoch_collision(state, task_id, agent_id, lease_epoch)
+            _fenced = await _fence_stale_epoch(
+                state,
+                _resolve_completed_task(
+                    task_id,
+                    await _board_tasks_for_fence(state),
+                    getattr(state, "project_tasks", None) or [],
+                ),
+                task_id,
+                agent_id,
+                lease_epoch,
+            )
+            if _fenced is not None:
+                return _fenced
 
             current_assignment = state.agent_tasks.get(agent_id)
             assignment_task_id = (
@@ -6884,7 +7522,18 @@ async def report_task_progress(
             if hasattr(state, "kanban_client") and state.kanban_client:
                 _ws_state = state.kanban_client._load_workspace_state()
             _project_root = _ws_state.get("project_root") if _ws_state else None
-            if _project_root:
+            _is_reconciliation = _RECONCILIATION_LABEL in (
+                getattr(task, "labels", None) or []
+            )
+            if _is_reconciliation:
+                logger.info(
+                    "[commit_gate] Task %s is a reconciliation card; its "
+                    "deliverable is a recorded decision, and keeping the "
+                    "work already on main is a permitted outcome, so the "
+                    "commit check does not apply (ADR-0012 D11).",
+                    task_id,
+                )
+            if _project_root and not _is_reconciliation:
                 _commit_ok = _verify_agent_has_commits(
                     agent_id, _project_root, baseline_commit=_card_baseline
                 )
@@ -7255,6 +7904,26 @@ async def report_task_progress(
         # to revert to TODO. Let refresh happen on next request_next_task
         # instead. NOTE: This may affect README documentation task visibility -
         # monitor for that
+
+        # ADR-0012 D11: if a displaced session's completion was refused
+        # while this one was still working, both implementations exist
+        # only now, so this is when the reconciliation card can honestly
+        # ask for a comparison. It runs here, after the completion is
+        # finalized and before every success return, because validation
+        # escalation and stub warnings return early — and the refused
+        # session has been told to request its next task, so no later
+        # report of its own would open the card for it (Codex P2 on PR
+        # #794). A no-op for every ordinary completion.
+        if status == "completed" and _deferred_merge_failure is None:
+            _task_for_card = next(
+                (
+                    candidate
+                    for candidate in (getattr(state, "project_tasks", None) or [])
+                    if getattr(candidate, "id", None) == task_id
+                ),
+                None,
+            )
+            await maybe_open_reconciliation_card(state, _task_for_card, task_id)
 
         # Return deferred merge conflict now that kanban is finalized (P1 fix).
         # All state updates (kanban DONE, lease cleared, memory recorded) have

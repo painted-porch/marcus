@@ -303,3 +303,53 @@ class TestReportProgressRejectsNoCommits:
             )
 
         mock_verify.assert_not_called()
+
+
+@pytest.mark.unit
+class TestReconciliationCardSkipsTheGate:
+    """A reconciliation card's deliverable is a decision, not a commit."""
+
+    @pytest.mark.asyncio
+    async def test_a_reconciliation_card_completes_without_commits(self) -> None:
+        """Keeping the work already on main changes no files.
+
+        That outcome is explicitly permitted by the card, so the commit
+        gate must not stand in its way (Codex P2 on PR #794).
+        """
+        from src.core.models import Task, TaskStatus
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        agent_id = "reconciler"
+        task_id = "recon_card"
+        state = _make_state(agent_id=agent_id, task_id=task_id)
+        now = datetime.now(timezone.utc)
+        card = Task(
+            id=task_id,
+            name="Reconcile two completions of: something",
+            description="<!-- marcus:reconciles task contested -->",
+            status=TaskStatus.IN_PROGRESS,
+            priority=Priority.HIGH,
+            assigned_to=agent_id,
+            created_at=now,
+            updated_at=now,
+            due_date=None,
+            estimated_hours=1.0,
+            labels=["reconciliation"],
+            dependencies=[],
+        )
+        state.project_tasks = [card]
+        state.kanban_client.get_all_tasks = AsyncMock(return_value=[card])
+
+        with patch("src.marcus_mcp.tools.task._verify_agent_has_commits") as gate:
+            gate.return_value = False
+            result = await report_task_progress(
+                agent_id=agent_id,
+                task_id=task_id,
+                status="completed",
+                progress=100,
+                message="kept what was on main; decision logged",
+                state=state,
+            )
+
+        assert result.get("status") != "no_commits"
+        gate.assert_not_called()
