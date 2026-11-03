@@ -90,6 +90,8 @@ ROLE_TOOLS = {
         "get_task_context",  # Full task context
         "log_decision",  # Document choices
         "log_artifact",  # Store outputs
+        "get_project_status",  # Read-only board status (worker contract)
+        "get_agent_status",  # Read-only own status (worker contract)
         # Project creation
         "create_project",  # NLP project creation
         # Scheduling and resource planning
