@@ -9,6 +9,7 @@ file-based storage and ready for database backends.
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ import aiofiles
 from src.core.context import Decision
 from src.core.event_loop_utils import EventLoopLockManager
 from src.core.events import Event
+from src.core.paths import DATA_DIR_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +55,26 @@ class FilePersistence(PersistenceBackend):
     """File-based persistence using JSON files."""
 
     def __init__(self, storage_dir: Optional[Path] = None) -> None:
-        """Initialize file persistence."""
+        """
+        Initialize file-based persistence.
+
+        Parameters
+        ----------
+        storage_dir : Optional[Path]
+            Directory for the JSON collections. When omitted,
+            ``$MARCUS_DATA_DIR/marcus_state`` if the override is set (issue
+            #766: an isolated data directory must isolate the project
+            registry too, as it already isolates the subtask store),
+            otherwise the historical repo-root ``data/marcus_state``.
+        """
         if storage_dir is None:
-            # Use absolute path to ensure it works regardless of working directory
-            marcus_root = Path(__file__).parent.parent.parent
-            storage_dir = marcus_root / "data" / "marcus_state"
+            override = os.environ.get(DATA_DIR_ENV)
+            if override:
+                storage_dir = Path(override) / "marcus_state"
+            else:
+                # Use absolute path to ensure it works regardless of cwd
+                marcus_root = Path(__file__).parent.parent.parent
+                storage_dir = marcus_root / "data" / "marcus_state"
         self.storage_dir = storage_dir
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._lock_managers: Dict[str, EventLoopLockManager] = {}

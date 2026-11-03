@@ -42,7 +42,7 @@ Marcus searches for `config_marcus.json` in the following order (highest priorit
 | `project_name` | string | - | - | Project name (legacy) |
 | `board_name` | string | - | - | Board name (legacy) |
 | `auto_find_board` | boolean | false | - | Auto-discover board by name |
-| `single_project_mode` | boolean | true | - | Legacy single-project mode |
+| `single_project_mode` | boolean | true | - | Do not auto-discover or auto-create projects. The registry's active project is still the board served; the provider default is used only when the registry has no active project (#766) |
 
 ---
 
