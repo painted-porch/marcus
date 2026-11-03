@@ -271,6 +271,173 @@ def _mcp(create_result: Any) -> Mock:
     return mcp
 
 
+class TestGitSetup:
+    """Worktrees need a commit to branch from; the launcher guarantees one."""
+
+    def _launcher(self, tmp_path: Path) -> SessionLauncher:
+        return SessionLauncher(
+            _config(tmp_path),
+            TEMPLATE.parent,
+            sessions=1,
+            spawner=_spawner(tmp_path),
+            mcp_factory=lambda t: Mock(),
+            sleep=lambda s: None,
+        )
+
+    def test_init_git_commits_when_init_left_an_unborn_head(
+        self, tmp_path: Path
+    ) -> None:
+        """--init ran git init with no commit; worktree add would fail with 'not a valid object name'."""
+        import subprocess as sp
+
+        launcher = self._launcher(tmp_path)
+        repo = launcher.config.implementation_dir
+        sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        assert (
+            sp.run(
+                ["git", "rev-parse", "--verify", "HEAD"], cwd=repo, capture_output=True
+            ).returncode
+            != 0
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            },
+        ):
+            launcher.init_git()
+
+        assert (
+            sp.run(
+                ["git", "rev-parse", "--verify", "HEAD"], cwd=repo, capture_output=True
+            ).returncode
+            == 0
+        )
+
+    def test_init_git_leaves_an_existing_history_alone(self, tmp_path: Path) -> None:
+        """A repo with commits is not touched."""
+        import subprocess as sp
+
+        launcher = self._launcher(tmp_path)
+        repo = launcher.config.implementation_dir
+        sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        sp.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        before = sp.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+        ).stdout
+
+        launcher.init_git()
+
+        after = sp.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True
+        ).stdout
+        assert before == after
+
+    def test_commit_scaffold_puts_created_files_on_main(self, tmp_path: Path) -> None:
+        """What create_project wrote is committed so the first worktree starts from it."""
+        import subprocess as sp
+
+        launcher = self._launcher(tmp_path)
+        repo = launcher.config.implementation_dir
+        sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        sp.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        (repo / "docs").mkdir()
+        (repo / "docs" / "design.md").write_text("design")
+
+        with patch.dict(
+            "os.environ",
+            {
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+            },
+        ):
+            launcher.commit_scaffold()
+            launcher.commit_scaffold()  # nothing new: must not raise
+
+        tracked = sp.run(
+            ["git", "ls-files"], cwd=repo, capture_output=True, text=True
+        ).stdout.split()
+        assert "docs/design.md" in tracked
+
+    def test_wait_for_scaffold_settles_once_status_is_stable(
+        self, tmp_path: Path
+    ) -> None:
+        """Marcus writes and commits the scaffold in the background; the launcher waits for quiet."""
+        import subprocess as sp
+
+        launcher = self._launcher(tmp_path)
+        repo = launcher.config.implementation_dir
+        sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        sp.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+            cwd=repo,
+            check=True,
+        )
+
+        assert launcher.wait_for_scaffold(timeout_seconds=30) is True
+
+    def test_wait_for_scaffold_gives_up_on_an_unborn_repo(self, tmp_path: Path) -> None:
+        """No commit ever arrives: the wait ends at the timeout instead of hanging."""
+        import subprocess as sp
+
+        launcher = self._launcher(tmp_path)
+        repo = launcher.config.implementation_dir
+        sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        clock = iter(range(0, 100000, 1))
+        with patch(
+            "runners.session_launcher.time.monotonic",
+            side_effect=lambda: float(next(clock)) * 10,
+        ):
+            assert launcher.wait_for_scaffold(timeout_seconds=30) is False
+
+
 class TestLauncherRun:
     """The run: preflight, git, contract files, project, sessions, wait, teardown."""
 
@@ -303,7 +470,10 @@ class TestLauncherRun:
                 "runners.session_launcher.shutil.which", return_value="/usr/bin/claude"
             ),
             patch("runners.session_launcher.check_mcp_health", return_value=True),
-            patch("runners.session_launcher.subprocess.run"),
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ),
         ):
             assert launcher.run() is True
 
@@ -329,7 +499,10 @@ class TestLauncherRun:
         with (
             patch("runners.session_launcher.shutil.which", return_value="/x"),
             patch("runners.session_launcher.check_mcp_health", return_value=True),
-            patch("runners.session_launcher.subprocess.run"),
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ),
         ):
             launcher.run()
 
@@ -347,7 +520,10 @@ class TestLauncherRun:
         with (
             patch("runners.session_launcher.shutil.which", return_value="/x"),
             patch("runners.session_launcher.check_mcp_health", return_value=True),
-            patch("runners.session_launcher.subprocess.run"),
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ),
         ):
             launcher.run()
 
@@ -394,7 +570,10 @@ class TestLauncherRun:
         with (
             patch("runners.session_launcher.shutil.which", return_value="/x"),
             patch("runners.session_launcher.check_mcp_health", return_value=True),
-            patch("runners.session_launcher.subprocess.run") as run,
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ) as run,
         ):
             assert launcher.run() is True
 
@@ -418,7 +597,10 @@ class TestLauncherRun:
         with (
             patch("runners.session_launcher.shutil.which", return_value="/x"),
             patch("runners.session_launcher.check_mcp_health", return_value=True),
-            patch("runners.session_launcher.subprocess.run") as run,
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ) as run,
         ):
             launcher.run()
         assert not [
@@ -436,7 +618,10 @@ class TestLauncherRun:
         with (
             patch("runners.session_launcher.shutil.which", return_value="/x"),
             patch("runners.session_launcher.check_mcp_health", return_value=True),
-            patch("runners.session_launcher.subprocess.run"),
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ),
         ):
             assert launcher.run() is False
         spawner.run_worker_in_new_window.assert_not_called()

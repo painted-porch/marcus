@@ -357,19 +357,110 @@ class SessionLauncher:
         return True
 
     def init_git(self) -> None:
-        """Initialise the implementation repository on ``main`` if absent."""
+        """Initialise the implementation repository on ``main`` with a commit.
+
+        ``--init`` runs ``git init`` but commits nothing, and ``git worktree
+        add -b`` needs a commit to branch from. The old flow got one from
+        the project-creator agent; the launcher makes it itself.
+        """
         repo = self.config.implementation_dir
-        if (repo / ".git").exists():
+        if not (repo / ".git").exists():
+            print("[Setup] Initializing git repository...")
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "checkout", "-b", "main"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if head.returncode != 0:
+            subprocess.run(
+                ["git", "commit", "--allow-empty", "-m", "Initial commit"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+            )
+            print("  Git repository initialized on main with an initial commit")
+        else:
             print("[Setup] Git repository already initialized")
-            return
-        print("[Setup] Initializing git repository...")
-        for cmd in (
-            ["git", "init"],
-            ["git", "checkout", "-b", "main"],
-            ["git", "commit", "--allow-empty", "-m", "Initial commit"],
-        ):
-            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
-        print("  Git repository initialized on main branch")
+
+    def wait_for_scaffold(self, timeout_seconds: float = 180.0) -> bool:
+        """Wait until Marcus's background scaffold generation has settled.
+
+        ``create_project`` returns before the design artifacts and the
+        scaffold are written; Marcus generates them in the background and
+        commits them to ``main`` itself. Cutting worktrees before that
+        lands gives sessions an empty tree (or fails on an unborn HEAD).
+        The repository counts as settled when it has a commit, no
+        ``index.lock``, and an unchanged ``git status`` across two polls.
+
+        Parameters
+        ----------
+        timeout_seconds : float
+            Give up waiting after this long; the run proceeds regardless.
+
+        Returns
+        -------
+        bool
+            True when the repository settled before the timeout.
+        """
+        repo = Path(self.config.implementation_dir)
+        deadline = time.monotonic() + timeout_seconds
+        previous: Optional[str] = None
+        print("[Project] waiting for Marcus to finish writing the scaffold...")
+        while time.monotonic() < deadline:
+            head_ok = (
+                subprocess.run(
+                    ["git", "rev-parse", "--verify", "HEAD"],
+                    cwd=repo,
+                    capture_output=True,
+                    check=False,
+                ).returncode
+                == 0
+            )
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout
+            locked = (repo / ".git" / "index.lock").exists()
+            if head_ok and not locked and previous is not None and status == previous:
+                print("  Scaffold settled on main")
+                return True
+            previous = status
+            self.sleep(2)
+        print("  Scaffold wait timed out; continuing with what is on main")
+        return False
+
+    def commit_scaffold(self) -> None:
+        """Commit whatever ``create_project`` wrote (design docs, scaffold, contract).
+
+        Sessions branch from ``main`` and merge it before every chore, so the
+        project's starting files must be on ``main`` before the first
+        worktree is cut. The creator agent used to make this commit.
+        """
+        repo = self.config.implementation_dir
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        committed = subprocess.run(
+            ["git", "commit", "-q", "-m", "Initial commit: Marcus project created"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if committed.returncode == 0:
+            print("  Project scaffold committed on main")
+        else:
+            print("  Nothing new to commit on main")
 
     def write_instruction_files(self) -> List[Path]:
         """Write the session contract into every harness's instruction file.
@@ -547,6 +638,8 @@ class SessionLauncher:
             Path(self.config.project_info_file).unlink()
         if not self.create_project():
             return False
+        self.wait_for_scaffold()
+        self.commit_scaffold()
         self.spawner.create_tmux_session()
         if self.spawner.harness_impl.needs_pretrust_directory:
             self.spawner._pretrust_directory(Path(self.config.implementation_dir))
