@@ -234,6 +234,9 @@ class TestSessionScript:
         cleanup = script[script.index("cleanup() {") : script.index("on_signal() {")]
         assert 'git worktree remove --force "$WORKSPACE"' in cleanup
         assert "git branch -D" not in cleanup
+        # every chore's process group is reaped, not only on a kill
+        assert "reap_chore() {" in script
+        assert script.count("    reap_chore\n") >= 2
 
     def test_script_sets_git_identity_and_clears_a_stale_marker(
         self, tmp_path: Path
@@ -1053,3 +1056,34 @@ wait
             time.sleep(0.1)
         with pytest.raises(ProcessLookupError):
             os.kill(sleeper, 0)
+
+    def test_children_a_harness_left_behind_die_when_the_chore_ends(
+        self, tmp_path: Path
+    ) -> None:
+        """A harness that exits normally but leaves a dev server running must not
+        outlive its chore: the chore's process group is reaped before the next
+        chore or the teardown (second Codex P2 on PR #784)."""
+        import os
+        import subprocess as sp
+
+        repo = _repo_with_main(tmp_path)
+        pidfile = tmp_path / "orphan.pid"
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+sleep 60 &
+echo $! > {pidfile}
+touch .marcus_session_done
+exit 0
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        orphan = int(pidfile.read_text().strip())
+        with pytest.raises(ProcessLookupError):
+            os.kill(orphan, 0)
+        assert not workspace.exists()

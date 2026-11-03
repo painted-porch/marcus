@@ -262,15 +262,22 @@ BRANCH="{branch}"
 # dev servers) before the workspace is removed from under them.
 set -m
 CHORE_PID=""
+# Stop everything left in the chore's process group: the harness itself on
+# a kill, or children it started and did not stop (a dev server, a test
+# watcher) after it exited normally. Waiting on the harness PID never waits
+# for its descendants (Codex P2 x2 on PR #784).
+reap_chore() {{
+    [ -n "$CHORE_PID" ] || return 0
+    kill -TERM -- "-$CHORE_PID" >/dev/null 2>&1 \
+        || kill -TERM "$CHORE_PID" >/dev/null 2>&1 || true
+    sleep 1
+    kill -KILL -- "-$CHORE_PID" >/dev/null 2>&1 || true
+    wait "$CHORE_PID" 2>/dev/null
+    CHORE_PID=""
+}}
 cleanup() {{
     trap - EXIT HUP TERM INT
-    if [ -n "$CHORE_PID" ]; then
-        kill -TERM -- "-$CHORE_PID" >/dev/null 2>&1 \
-            || kill -TERM "$CHORE_PID" >/dev/null 2>&1 || true
-        sleep 1
-        kill -KILL -- "-$CHORE_PID" >/dev/null 2>&1 || true
-        wait "$CHORE_PID" 2>/dev/null
-    fi
+    reap_chore
     cd "$REPO" 2>/dev/null || exit 0
     git worktree remove --force "$WORKSPACE" >/dev/null 2>&1 || true
     git worktree prune >/dev/null 2>&1 || true
@@ -328,7 +335,7 @@ while true; do
     CHORE_PID=$!
     wait "$CHORE_PID"
     rc=$?
-    CHORE_PID=""
+    reap_chore
     echo "[session {sid}] chore $chore ended rc=$rc"
     if [ -f {marker} ]; then
         echo "[session {sid}] board drained, going home"
