@@ -18,11 +18,27 @@ import pytest
 
 from src.core.models import Priority, Task, TaskStatus
 from src.marcus_mcp.coordinator.drain import DrainVerdict, compute_board_drain
+from src.marcus_mcp.tools.task import RETRY_AFTER_SECONDS, RETRY_JITTER_FRACTION
 
 pytestmark = pytest.mark.unit
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
 PROJECT = "proj-1"
+
+
+def _in_retry_band(seconds: int) -> bool:
+    """True when ``seconds`` is the jittered retry cadence (epic #706).
+
+    The wait is ``RETRY_AFTER_SECONDS`` with a symmetric spread so workers
+    do not poll in lockstep; it is never ETA-derived. See
+    ``tests/unit/marcus_mcp/test_retry_jitter.py``.
+    """
+    spread = RETRY_AFTER_SECONDS * RETRY_JITTER_FRACTION
+    return (
+        round(RETRY_AFTER_SECONDS - spread)
+        <= seconds
+        <= round(RETRY_AFTER_SECONDS + spread)
+    )
 
 
 def _task(
@@ -523,7 +539,7 @@ class TestRequestNextTaskDrain:
 
         assert result["success"] is False
         assert "should_exit" not in result
-        assert result["retry_after_seconds"] == 30
+        assert _in_retry_band(result["retry_after_seconds"])
         assert result["drain"]["reason"] == "in_flight"
 
     async def test_unregistered_agent_never_gets_drained(self) -> None:
@@ -537,7 +553,7 @@ class TestRequestNextTaskDrain:
             result = await request_next_task(agent_id="agent-1", state=state)
 
         assert "should_exit" not in result
-        assert result["retry_after_seconds"] == 30
+        assert _in_retry_band(result["retry_after_seconds"])
 
     @pytest.mark.asyncio
     async def test_drain_computation_failure_falls_back_to_retry(self) -> None:
@@ -556,7 +572,7 @@ class TestRequestNextTaskDrain:
             result = await request_next_task(agent_id="agent-1", state=state)
 
         assert "should_exit" not in result
-        assert result["retry_after_seconds"] == 30
+        assert _in_retry_band(result["retry_after_seconds"])
 
 
 class TestDrainClosesTheRun:
