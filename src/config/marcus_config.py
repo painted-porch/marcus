@@ -467,7 +467,9 @@ class MarcusConfig:
     auto_find_board : bool
         Automatically find board by name
     single_project_mode : bool
-        Run in single project mode
+        Do not auto-discover or auto-create projects. The registry's active
+        project is still the board served (issue #766); only when the
+        registry has no active project is the provider default used.
     log_level : str
         Global logging level
     data_dir : str

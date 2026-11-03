@@ -37,6 +37,7 @@ def _fake_server(kanban_client: object) -> Mock:
     fake.initialize_kanban = AsyncMock(side_effect=_initialize_kanban)
     fake._migrate_to_multi_project = AsyncMock()
     fake._initialize_monitoring_systems = AsyncMock()
+    fake._warn_if_board_mismatch = AsyncMock()
     fake.event_visualizer = None
     return fake
 

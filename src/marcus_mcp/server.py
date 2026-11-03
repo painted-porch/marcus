@@ -661,8 +661,25 @@ class MarcusServer:
                 # Initialize monitors and lease system even in multi-project mode
                 await self._initialize_monitoring_systems()
         else:
-            # Legacy mode - create kanban client directly
+            # Issue #766: the registry switch above built a correctly scoped
+            # client inside the project manager. This branch used to ignore
+            # it and build a bare provider default (for sqlite: the shared
+            # kanban.db with project_id=None, every task Marcus ever made),
+            # so the log said one board and agents were served another.
+            # single_project_mode means "do not auto-discover or auto-create
+            # projects"; it never meant "ignore the registry's active project".
+            registry_client = await self.project_manager.get_kanban_client()
+            if registry_client is not None:
+                self.kanban_client = registry_client
+                logger.info(
+                    "Serving the registry's active project: "
+                    f"project_id={getattr(registry_client, 'project_id', None)} "
+                    f"db={getattr(registry_client, 'db_path', None)}"
+                )
+            # Legacy fallback: with no registry project, build the provider
+            # default. initialize_kanban() is a no-op when a client is set.
             await self.initialize_kanban()
+            await self._warn_if_board_mismatch()
 
             # Migrate to multi-project if needed
             await self._migrate_to_multi_project()
@@ -698,6 +715,44 @@ class MarcusServer:
 
         # Pattern learning components removed (API infrastructure cleanup)
         # Don't print during initialization - it interferes with MCP stdio
+
+    async def _warn_if_board_mismatch(self) -> None:
+        """Log loudly when the served client is not the registry's active board.
+
+        Issue #766: the override that served the wrong board was silent,
+        because the log reported the registry switch and nothing reported
+        the replacement. Whatever path produced ``self.kanban_client``, a
+        scope that differs from the registry's active project is logged at
+        WARNING with both sides named, so it can never again go unnoticed.
+        """
+        try:
+            active_project = await self.project_manager.registry.get_active_project()
+        except Exception as error:  # noqa: BLE001 - a diagnostic must not fail startup
+            logger.debug(f"Board-mismatch check skipped: {error}")
+            return
+        if active_project is None or self.kanban_client is None:
+            return
+        # The scope to compare is the PROVIDER's project id, kept in
+        # provider_config; the registry row's own id is a Marcus-generated
+        # UUID for projects added through add_project or discovery (Codex
+        # P2 on PR #774). Clients that do not expose a project_id (Planka,
+        # GitHub scope by board or repo) are not checked.
+        missing = object()
+        served = getattr(self.kanban_client, "project_id", missing)
+        if served is missing:
+            return
+        provider_config = getattr(active_project, "provider_config", None) or {}
+        expected = provider_config.get("project_id") or active_project.id
+        if str(served) != str(expected):
+            logger.warning(
+                "BOARD MISMATCH: the registry's active project is "
+                f"'{active_project.name}' (registry id {active_project.id}, "
+                f"provider project_id {expected}) but the served kanban client "
+                f"is scoped to project_id={served} "
+                f"(db={getattr(self.kanban_client, 'db_path', None)}). Agents "
+                "will see that board, not the registry's. Fix the registry or "
+                "the provider config; see issue #766."
+            )
 
     async def _migrate_to_multi_project(self) -> None:
         """

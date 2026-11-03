@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Worker registrations survive a Marcus restart (ADR-0012 obligation O1). Every accepted `register_agent` is written to `registrations.json` beside the assignment store and rehydrated on the first tool call after a restart, on both transports; a rehydrated worker gets its live task back from the lease store. Registrations silent for `registration.ttl_hours` (default 24) are evicted, never while they hold a live lease. Re-registration is idempotent and keeps the held task and completion count.
 
 ### Fixed
+- In the default `single_project_mode`, Marcus now serves the project registry's active board instead of silently replacing it with the provider's unscoped default at startup (#766); a scope mismatch between the registry and the served client is logged at WARNING with both sides named. `MARCUS_DATA_DIR` now isolates the project registry as well as the subtask store.
 - A given-up task is re-offered at most three times in total after give-ups (#769), whoever gave up, so a lone persistent agent is no longer handed the same impossible task forever; lane death now reaches memory, the subtask store, the card and the provider's blocked column, and duplicate or no-lease give-ups count nothing.
 - Moving a GitHub issue to the blocked or in-progress column no longer wipes its other labels.
 
