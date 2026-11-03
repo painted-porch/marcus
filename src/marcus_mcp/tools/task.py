@@ -2904,10 +2904,14 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                             optimal_task.id, previous_implementations
                         )
 
-                    # Analyze dependencies for this project
+                    # Analyze dependencies for THIS project only. Dependencies
+                    # never cross projects, and on a shared board the whole
+                    # file was 834 tasks where the project had 10 (Simon
+                    # 25f0bcc3); the cache key is the task list, so scoping
+                    # also keeps the cache stable per project.
                     if state.project_tasks:
                         dep_map = await state.context.analyze_dependencies(
-                            state.project_tasks
+                            _tasks_for_dependency_analysis(state, agent_id)
                         )
                         if optimal_task.id in dep_map:
                             # Add dependent tasks to context
@@ -6793,6 +6797,34 @@ async def report_blocker(
 
 
 # Helper functions for task assignment
+
+
+def _tasks_for_dependency_analysis(state: Any, agent_id: str) -> List[Task]:
+    """Return the tasks dependency analysis should see for ``agent_id``.
+
+    The agent's registered project plus legacy tasks with no project
+    (the same scoping the assignment filter applies). An unregistered
+    agent, which has no project to scope by, gets the whole list, as
+    before.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state (``project_tasks``, ``agent_project_map``).
+    agent_id : str
+        The requesting agent.
+
+    Returns
+    -------
+    List[Task]
+        The scoped task list.
+    """
+    tasks: List[Task] = list(getattr(state, "project_tasks", None) or [])
+    project_map = getattr(state, "agent_project_map", None) or {}
+    project_id = project_map.get(agent_id, "") if isinstance(project_map, dict) else ""
+    if not project_id:
+        return tasks
+    return [t for t in tasks if t.project_id is None or t.project_id == project_id]
 
 
 async def _record_task_completion(state: Any, agent_id: str) -> None:

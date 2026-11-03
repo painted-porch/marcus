@@ -5,6 +5,7 @@ Combines pattern-based rules with AI intelligence for robust and flexible
 dependency detection. Uses patterns for common cases and AI for complex scenarios.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -88,15 +89,47 @@ class HybridDependencyInferer(DependencyInferer):
         """
         logger.info(f"Starting hybrid dependency inference for {len(tasks)} tasks")
 
-        # Step 1: Pattern-based inference (from parent class)
-        pattern_dependencies = await self._get_pattern_dependencies(tasks)
+        # Simon 25f0bcc3: the pattern and ambiguity phases are pure CPU
+        # (pairwise regex over every task pair). They used to run on the
+        # event loop; over 834 tasks that froze the server for minutes.
+        # Three guards: a cap on the task count, both phases in a worker
+        # thread, and a wall-clock budget. Past the cap or the budget the
+        # result is explicit dependencies only, which the caller merges in.
+        if len(tasks) > self.config.max_tasks_for_inference:
+            logger.warning(
+                f"Dependency inference skipped: {len(tasks)} tasks exceed the "
+                f"cap of {self.config.max_tasks_for_inference} "
+                "(hybrid_inference.max_tasks_for_inference); using explicit "
+                "dependencies only."
+            )
+            return self._build_dependency_graph(tasks, [])
 
-        # Step 2: Identify cases needing AI analysis
-        ambiguous_pairs = await self._identify_ambiguous_pairs(
-            tasks, pattern_dependencies
-        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.config.inference_time_budget_seconds
 
-        # Step 3: AI inference for complex cases
+        def _remaining() -> float:
+            return max(0.0, deadline - loop.time())
+
+        try:
+            pattern_dependencies = await asyncio.wait_for(
+                asyncio.to_thread(self._pattern_dependencies_sync, tasks),
+                timeout=_remaining(),
+            )
+            ambiguous_pairs = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._ambiguous_pairs_sync, tasks, pattern_dependencies
+                ),
+                timeout=_remaining(),
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Dependency inference abandoned after the "
+                f"{self.config.inference_time_budget_seconds:g}s budget "
+                f"(hybrid_inference.inference_time_budget_seconds) over "
+                f"{len(tasks)} tasks; using explicit dependencies only."
+            )
+            return self._build_dependency_graph(tasks, [])
+
         ai_dependencies = {}
         if self.ai_enabled and ambiguous_pairs:
             ai_dependencies = await self._get_ai_dependencies(tasks, ambiguous_pairs)
@@ -119,7 +152,13 @@ class HybridDependencyInferer(DependencyInferer):
     async def _get_pattern_dependencies(
         self, tasks: List[Task]
     ) -> Dict[Tuple[str, str], HybridDependency]:
-        """Get dependencies using pattern matching."""
+        """Get dependencies using pattern matching (kept for callers; see sync)."""
+        return await asyncio.to_thread(self._pattern_dependencies_sync, tasks)
+
+    def _pattern_dependencies_sync(
+        self, tasks: List[Task]
+    ) -> Dict[Tuple[str, str], HybridDependency]:
+        """Pattern matching over every task pair. Pure CPU; runs in a thread."""
         dependencies: Dict[Tuple[str, str], HybridDependency] = {}
 
         for dependent_task in tasks:
@@ -159,8 +198,18 @@ class HybridDependencyInferer(DependencyInferer):
         tasks: List[Task],
         pattern_dependencies: Dict[Tuple[str, str], HybridDependency],
     ) -> List[Tuple[Task, Task]]:
+        """Identify pairs needing AI (kept for callers; see the sync version)."""
+        return await asyncio.to_thread(
+            self._ambiguous_pairs_sync, tasks, pattern_dependencies
+        )
+
+    def _ambiguous_pairs_sync(
+        self,
+        tasks: List[Task],
+        pattern_dependencies: Dict[Tuple[str, str], HybridDependency],
+    ) -> List[Tuple[Task, Task]]:
         """
-        Identify task pairs that need AI analysis.
+        Identify task pairs that need AI analysis. Pure CPU; runs in a thread.
 
         Cases needing AI:
         1. No pattern match but similar components

@@ -396,6 +396,12 @@ class HybridInferenceSettings:
         Require component match for dependencies
     max_dependency_chain_length : int
         Maximum allowed dependency chain length
+    max_tasks_for_inference : int
+        Largest task list implicit inference runs on; above it only
+        explicit dependencies are used (default 200)
+    inference_time_budget_seconds : float
+        Wall-clock budget for the CPU phases of inference, after which
+        explicit dependencies only are used (default 20)
     """
 
     pattern_confidence_threshold: float = 0.8
@@ -407,6 +413,8 @@ class HybridInferenceSettings:
     cache_ttl_hours: int = 24
     require_component_match: bool = True
     max_dependency_chain_length: int = 10
+    max_tasks_for_inference: int = 200
+    inference_time_budget_seconds: float = 20.0
 
 
 @dataclass

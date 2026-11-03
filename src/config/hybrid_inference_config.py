@@ -72,6 +72,19 @@ class HybridInferenceConfig:
     Lower = Simpler, flatter task structures
     Default: 10"""
 
+    # Event-loop protection (Simon 25f0bcc3)
+    max_tasks_for_inference: int = 200
+    """Largest task list implicit inference will run on
+    Above it, only explicit dependencies are used and a warning is logged.
+    The pairwise phases are quadratic; 834 tasks froze the server for minutes.
+    Default: 200 tasks"""
+
+    inference_time_budget_seconds: float = 20.0
+    """Wall-clock budget for the pattern and ambiguity phases together
+    When exceeded, inference falls back to explicit dependencies only.
+    The phases run in a worker thread, so the loop keeps serving meanwhile.
+    Default: 20 seconds"""
+
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "HybridInferenceConfig":
         """Create config from dictionary."""
@@ -89,6 +102,8 @@ class HybridInferenceConfig:
             "cache_ttl_hours": self.cache_ttl_hours,
             "require_component_match": self.require_component_match,
             "max_dependency_chain_length": self.max_dependency_chain_length,
+            "max_tasks_for_inference": self.max_tasks_for_inference,
+            "inference_time_budget_seconds": self.inference_time_budget_seconds,
         }
 
     def validate(self) -> None:
@@ -110,6 +125,12 @@ class HybridInferenceConfig:
 
         if self.cache_ttl_hours < 0:
             raise ValueError("cache_ttl_hours must be non-negative")
+
+        if self.max_tasks_for_inference < 1:
+            raise ValueError("max_tasks_for_inference must be at least 1")
+
+        if self.inference_time_budget_seconds <= 0:
+            raise ValueError("inference_time_budget_seconds must be positive")
 
 
 # Preset configurations for different use cases
