@@ -120,7 +120,7 @@ python runners/run_experiment.py <experiment_dir> --sessions 3
 **What it does**:
 - Initialises the implementation repository on `main` and writes the one worker contract (`prompts/Agent_prompt.md`) into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md`; each chore is handed a short session header (`templates/session_prompt.md`) that points at it
 - Calls `create_project` over MCP with `project_root` set and commits the scaffold
-- Gives each session a worktree at `worktrees/<agent_id>` and a script that runs the harness one chore at a time, fresh context each chore
+- Gives each session a worktree at `worktrees/<agent_id>` and a script that runs the harness one chore at a time, fresh context each chore; a chore that follows a finished or handed-back one gets a fresh worktree and branch cut from `main` at the same path, and the script removes the worktree when the session goes home or is killed (#628)
 - Never restarts a dead session and has no watchdog; sessions go home when `request_next_task` returns `BOARD_DRAINED`
 - Mirrors its progress to `<experiment_dir>/logs/runner.log`
 

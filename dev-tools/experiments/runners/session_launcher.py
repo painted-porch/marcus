@@ -17,6 +17,9 @@ machinery. The launcher deletes it instead of fixing it:
   the worker registers (idempotently), takes one task, does it, reports it,
   exits, and the script invokes it again with a fresh context. That loop is
   the per-chore context reset the design calls O5 at minimum.
+- each chore gets a fresh worktree and branch cut from ``main`` (same path,
+  so cost attribution keeps working), and the session script removes its
+  worktree when the session goes home or is killed (#628),
 - it never restarts a dead worker and has no watchdog; it waits for every
   session to go home, which a worker does when ``request_next_task``
   returns ``BOARD_DRAINED`` and it writes ``.marcus_session_done``,
@@ -46,6 +49,13 @@ SESSION_DONE_MARKER = ".marcus_session_done"
 # the next chore, so a handed-back task's commits never ride into main with
 # the next task's merge (Codex P1 on PR #779; the #730 hazard).
 CHORE_DONE_MARKER = ".marcus_chore_done"
+# Written by the worker when request_next_task returned no task: it holds
+# the retry_after_seconds. The script sleeps that long before the next
+# chore. The wait lives here because a harness may refuse a bare ``sleep``
+# in the model's shell (Claude Code blocks standalone sleeps), which turned
+# the retry into a two-second poll in a live run.
+RETRY_MARKER = ".marcus_retry_after"
+MAX_RETRY_WAIT_SECONDS = 300
 DEFAULT_SESSION_ROLE = "full-stack"
 DEFAULT_SESSION_SKILLS = [
     "python",
@@ -180,6 +190,7 @@ def build_session_script(
     agent: Dict[str, Any],
     workspace: Path,
     branch: str,
+    repo: Path,
     project_info_file: Path,
     marcus_mcp_url: str,
     register_snippet: str,
@@ -188,14 +199,22 @@ def build_session_script(
 ) -> str:
     """Return the bash script that runs one session until it goes home.
 
-    Each loop iteration is one chore: if the previous chore ended with the
-    worker no longer holding a task (it wrote ``CHORE_DONE_MARKER``), reset
-    the branch to ``main`` so no stale commits can ride into the next
-    task's merge; sync the worktree with ``main``; run the harness once on
-    the session prompt; stop if the worker left the drained marker. A chore
-    that ended mid-task (no marker) keeps its branch so the worker resumes.
-    There is no restart of a crashed harness beyond the next iteration, no
-    watchdog, and a chore cap so a misbehaving prompt cannot loop forever.
+    Each loop iteration is one chore. A chore gets a workspace of its own:
+    when the previous chore ended with the worker no longer holding a task
+    (it wrote ``CHORE_DONE_MARKER``), the worktree is removed and created
+    again from ``main`` on a fresh branch of the same name, so a branch holds
+    exactly one chore's commits and nothing from a handed-back task can ride
+    into ``main`` with the next one (#730). A chore that ended mid-task (no
+    marker) keeps its workspace so the worker resumes. The workspace path
+    (``worktrees/<agent_id>``) never changes, because cost attribution reads
+    it.
+
+    The script owns teardown (#628): an exit trap removes the worktree when
+    the session goes home, hits the chore cap, or is killed, so no run leaves
+    orphaned worktrees behind. The branch is kept: Marcus's recovery path
+    reads a dead worker's branch so the next agent can inherit its commits.
+    There is no restart of a crashed harness beyond the next iteration and
+    no watchdog.
 
     Parameters
     ----------
@@ -205,6 +224,8 @@ def build_session_script(
         The session's worktree (``worktrees/<agent_id>``).
     branch : str
         The session's branch.
+    repo : Path
+        The implementation repository the worktree hangs off.
     project_info_file : Path
         The experiment's ``project_info.json``, copied into the workspace.
     marcus_mcp_url : str
@@ -223,6 +244,8 @@ def build_session_script(
     """
     marker = workspace / SESSION_DONE_MARKER
     chore_marker = workspace / CHORE_DONE_MARKER
+    retry_marker = workspace / RETRY_MARKER
+    sid = agent["id"]
     return f"""#!/bin/bash
 [ -f ~/.zshrc ] && source ~/.zshrc
 [ -f ~/.bashrc ] && source ~/.bashrc
@@ -231,14 +254,83 @@ if [ "$TERM" = "dumb" ] || [ -z "$TERM" ]; then
     export TERM=xterm-256color
 fi
 export GIT_AUTHOR_NAME="{agent["name"]}"
-export GIT_AUTHOR_EMAIL="{agent["id"]}@marcus.ai"
+export GIT_AUTHOR_EMAIL="{sid}@marcus.ai"
 export GIT_COMMITTER_NAME="{agent["name"]}"
-export GIT_COMMITTER_EMAIL="{agent["id"]}@marcus.ai"
-cd {workspace} || exit 1
-rm -f {marker} {chore_marker}
+export GIT_COMMITTER_EMAIL="{sid}@marcus.ai"
+REPO="{repo}"
+WORKSPACE="{workspace}"
+BRANCH="{branch}"
+
+# Teardown is the harness's job, not Marcus's (#628): remove this session's
+# worktree when the session goes home, hits the chore cap, or is killed.
+# The branch stays so a dead worker's commits remain reachable for the next
+# agent (Marcus's recovery path reads it).
+# Job control gives each chore its own process group, so a kill of this
+# session can stop the harness AND everything it started (test runners,
+# dev servers) before the workspace is removed from under them.
+set -m
+CHORE_PID=""
+WAIT_PID=""
+# A sleep the signal handler can interrupt: bash defers traps while a
+# foreground command runs, so a bare ``sleep`` would hold a killed session
+# (and its worktree) for the whole wait (Codex P2 on PR #784).
+pause() {{
+    sleep "$1" &
+    WAIT_PID=$!
+    wait "$WAIT_PID" 2>/dev/null
+    WAIT_PID=""
+}}
+# Stop everything left in the chore's process group: the harness itself on
+# a kill, or children it started and did not stop (a dev server, a test
+# watcher) after it exited normally. Waiting on the harness PID never waits
+# for its descendants (Codex P2 x2 on PR #784).
+reap_chore() {{
+    [ -n "$CHORE_PID" ] || return 0
+    kill -TERM -- "-$CHORE_PID" >/dev/null 2>&1 \
+        || kill -TERM "$CHORE_PID" >/dev/null 2>&1 || true
+    sleep 1
+    kill -KILL -- "-$CHORE_PID" >/dev/null 2>&1 || true
+    wait "$CHORE_PID" 2>/dev/null
+    CHORE_PID=""
+}}
+cleanup() {{
+    trap - EXIT HUP TERM INT
+    # Every direct child first (a pause's sleep whose pid was not yet
+    # recorded when the signal landed, or the harness itself), then the
+    # chore's whole process group.
+    pkill -TERM -P $$ >/dev/null 2>&1
+    [ -n "$WAIT_PID" ] && kill "$WAIT_PID" >/dev/null 2>&1
+    reap_chore
+    cd "$REPO" 2>/dev/null || exit 0
+    git worktree remove --force "$WORKSPACE" >/dev/null 2>&1 || true
+    git worktree prune >/dev/null 2>&1 || true
+    echo "[session {sid}] worktree removed: $WORKSPACE"
+}}
+on_signal() {{
+    echo "[session {sid}] killed, tearing down"
+    cleanup
+    exit 143
+}}
+trap cleanup EXIT
+trap on_signal HUP TERM INT
+
+# A fresh workspace for a fresh chore: the same path, a new worktree, and a
+# new branch of the same name cut from main.
+fresh_workspace() {{
+    cd "$REPO" || exit 1
+    git worktree remove --force "$WORKSPACE" >/dev/null 2>&1 || true
+    git worktree prune >/dev/null 2>&1 || true
+    git branch -D "$BRANCH" >/dev/null 2>&1 || true
+    git worktree add "$WORKSPACE" -b "$BRANCH" main >/dev/null 2>&1 || exit 1
+    cd "$WORKSPACE" || exit 1
+    cp {project_info_file} ./project_info.json
+}}
+
+cd "$WORKSPACE" || exit 1
+rm -f {marker} {chore_marker} {retry_marker}
 echo "=========================================="
 echo "SESSION {agent["name"].upper()}"
-echo "ID: {agent["id"]}"
+echo "ID: {sid}"
 echo "Branch: {branch} (isolated worktree)"
 echo "Working Directory: $(pwd)"
 echo "=========================================="
@@ -249,27 +341,45 @@ chore=0
 while true; do
     chore=$((chore + 1))
     echo ""
-    echo "[session {agent["id"]}] chore $chore"
+    echo "[session {sid}] chore $chore"
     if [ -f {chore_marker} ]; then
         # The previous chore's task was accepted (already merged) or handed
-        # back (must not ride into main): start this chore from main.
-        rm -f {chore_marker}
-        git checkout -q -B {branch} main
-        echo "[session {agent["id"]}] branch reset to main for a fresh chore"
+        # back (must not ride into main): this chore gets a fresh workspace.
+        fresh_workspace
+        echo "[session {sid}] fresh worktree from main for a new chore"
     fi
     git merge main --no-edit 2>/dev/null || true
-    {chore_command}
+    # The harness runs as a background job we wait on: a kill of this
+    # session is handled at once (bash defers traps while a foreground
+    # command runs), and with job control on the job is its own process
+    # group, so the trap can stop the harness and its children before
+    # removing the worktree.
+    {chore_command} &
+    CHORE_PID=$!
+    wait "$CHORE_PID"
     rc=$?
-    echo "[session {agent["id"]}] chore $chore ended rc=$rc"
+    reap_chore
+    echo "[session {sid}] chore $chore ended rc=$rc"
     if [ -f {marker} ]; then
-        echo "[session {agent["id"]}] board drained, going home"
+        echo "[session {sid}] board drained, going home"
         break
     fi
     if [ $chore -ge {max_chores} ]; then
-        echo "[session {agent["id"]}] chore cap {max_chores} reached, stopping"
+        echo "[session {sid}] chore cap {max_chores} reached, stopping"
         break
     fi
-    sleep 2
+    # No task this chore: the worker left the server's retry_after_seconds
+    # in the retry marker and exited; wait here, outside the model.
+    if [ -f {retry_marker} ]; then
+        wait_s=$(tr -dc '0-9' < {retry_marker} | head -c 6)
+        rm -f {retry_marker}
+        [ -z "$wait_s" ] && wait_s=30
+        [ "$wait_s" -gt {MAX_RETRY_WAIT_SECONDS} ] && wait_s={MAX_RETRY_WAIT_SECONDS}
+        echo "[session {sid}] no task; waiting ${{wait_s}}s before the next chore"
+        pause "$wait_s"
+        continue
+    fi
+    pause 2
 done
 echo "=========================================="
 echo "{agent["name"]} - session over"
@@ -657,6 +767,7 @@ class SessionLauncher:
             agent=agent,
             workspace=workspace,
             branch=branch,
+            repo=Path(self.config.implementation_dir),
             project_info_file=Path(self.config.project_info_file),
             marcus_mcp_url=self.host.marcus_mcp_url,
             register_snippet=self.host.build_mcp_register_snippet(),

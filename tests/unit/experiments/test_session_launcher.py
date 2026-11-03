@@ -17,6 +17,7 @@ import pytest
 from runners.session_launcher import (
     CHORE_DONE_MARKER,
     DEFAULT_SESSION_ROLE,
+    RETRY_MARKER,
     SESSION_DONE_MARKER,
     SessionLauncher,
     build_create_project_options,
@@ -165,6 +166,7 @@ class TestSessionScript:
             agent=agent,
             workspace=tmp_path / "worktrees" / "agent_unicorn_1",
             branch="marcus/agent_unicorn_1",
+            repo=tmp_path / "implementation",
             project_info_file=tmp_path / "project_info.json",
             marcus_mcp_url="http://127.0.0.1:4298/mcp",
             register_snippet="claude mcp add --transport http marcus $MARCUS_MCP_URL || true",
@@ -177,7 +179,8 @@ class TestSessionScript:
     def test_script_keeps_the_worktree_path_shape(self, tmp_path: Path) -> None:
         """Cato reads worktrees/<agent_id>; the script works in exactly that directory."""
         script = self._script(tmp_path)
-        assert f"cd {tmp_path / 'worktrees' / 'agent_unicorn_1'}" in script
+        assert f'WORKSPACE="{tmp_path / "worktrees" / "agent_unicorn_1"}"' in script
+        assert 'cd "$WORKSPACE" || exit 1' in script
 
     def test_script_loops_one_chore_at_a_time_until_the_marker(
         self, tmp_path: Path
@@ -199,24 +202,42 @@ class TestSessionScript:
         assert "-ge 7" in script
         assert "relaunch" not in script.lower()
 
-    def test_script_resets_the_branch_only_after_a_finished_or_handed_back_chore(
+    def test_script_gives_a_finished_or_handed_back_chore_a_fresh_worktree(
         self, tmp_path: Path
     ) -> None:
         """The #730 hazard: a handed-back task's commits must not ride into main.
 
-        When the worker left the chore-done marker, the next chore starts
-        from main; when it did not (the chore ended mid-task), the branch is
-        kept so the worker resumes (Codex P1 on PR #779).
+        When the worker left the chore-done marker, the next chore gets a new
+        worktree and branch cut from main at the same path; when it did not
+        (the chore ended mid-task), the workspace is kept so the worker
+        resumes.
         """
         script = self._script(tmp_path)
         wt = tmp_path / "worktrees" / "agent_unicorn_1"
         assert f"if [ -f {wt / CHORE_DONE_MARKER} ]; then" in script
-        assert "git checkout -q -B marcus/agent_unicorn_1 main" in script
-        reset_at = script.index("git checkout -q -B marcus/agent_unicorn_1 main")
+        assert "fresh_workspace()" in script
+        assert 'git worktree add "$WORKSPACE" -b "$BRANCH" main' in script
+        assert 'git branch -D "$BRANCH"' in script
+        assert "git checkout -q -B" not in script
         check_at = script.index(f"if [ -f {wt / CHORE_DONE_MARKER} ]; then")
+        fresh_at = script.index("        fresh_workspace\n")
         chore_at = script.index("claude --add-dir /x")
-        assert check_at < reset_at < chore_at
+        assert check_at < fresh_at < chore_at
         assert f"rm -f {wt / SESSION_DONE_MARKER} {wt / CHORE_DONE_MARKER}" in script
+
+    def test_script_tears_its_worktree_down_on_exit_and_signals(
+        self, tmp_path: Path
+    ) -> None:
+        """#628: the harness owns teardown; the branch is kept for recovery."""
+        script = self._script(tmp_path)
+        assert "trap cleanup EXIT" in script
+        assert "trap on_signal HUP TERM INT" in script
+        cleanup = script[script.index("cleanup() {") : script.index("on_signal() {")]
+        assert 'git worktree remove --force "$WORKSPACE"' in cleanup
+        assert "git branch -D" not in cleanup
+        # every chore's process group is reaped, not only on a kill
+        assert "reap_chore() {" in script
+        assert script.count("    reap_chore\n") >= 2
 
     def test_script_sets_git_identity_and_clears_a_stale_marker(
         self, tmp_path: Path
@@ -883,3 +904,298 @@ class TestFinalReport:
         log = self._run(tmp_path, {"total_tasks": 3, "completed": 3})
         assert "could not verify" in log.lower()
         assert "RESULT: all" not in log
+
+
+def _git(repo: Path, *args: str) -> str:
+    import subprocess as sp
+
+    return sp.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _repo_with_main(tmp_path: Path) -> Path:
+    """A real implementation repo with one commit on main."""
+    import subprocess as sp
+
+    repo = tmp_path / "implementation"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True)
+    sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    (repo / "README.md").write_text("scaffold\n")
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    sp.run(["git", "commit", "-q", "-m", "scaffold"], cwd=repo, check=True)
+    return repo
+
+
+def _session_script(
+    tmp_path: Path, repo: Path, chore_command: str, max_chores: int = 5
+) -> tuple[Path, Path]:
+    """Write a session script around ``chore_command``; return (script, workspace)."""
+    import subprocess as sp
+
+    agent = plan_sessions(_agents(1), 1)[0]
+    workspace = tmp_path / "worktrees" / "agent_unicorn_1"
+    workspace.parent.mkdir(exist_ok=True)
+    sp.run(
+        ["git", "worktree", "add", str(workspace), "-b", "marcus/agent_unicorn_1"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    info = tmp_path / "project_info.json"
+    info.write_text('{"project_id": "p1"}')
+    script = build_session_script(
+        agent=agent,
+        workspace=workspace,
+        branch="marcus/agent_unicorn_1",
+        repo=repo,
+        project_info_file=info,
+        marcus_mcp_url="http://127.0.0.1:1/mcp",
+        register_snippet="true",
+        chore_command=chore_command,
+        max_chores=max_chores,
+    )
+    path = tmp_path / "session.sh"
+    path.write_text(script)
+    path.chmod(0o755)
+    return path, workspace
+
+
+def _process_is_gone(pid: int) -> bool:
+    """True when ``pid`` no longer runs: absent, or a zombie nobody reaped.
+
+    In containers whose PID 1 does not reap orphans, a terminated child
+    stays a zombie, so ``os.kill(pid, 0)`` keeps succeeding although
+    cleanup stopped it (Codex P2 on PR #784). A zombie counts as gone.
+    """
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return True
+    try:
+        return proc.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+class TestSessionScriptRunsForReal:
+    """The generated bash, run against a real repo with a stub harness."""
+
+    def test_each_chore_gets_a_fresh_branch_and_the_worktree_is_removed_at_the_end(
+        self, tmp_path: Path
+    ) -> None:
+        """Chore 1 commits and hands off; chore 2 starts from main; teardown follows.
+
+        The stub harness commits a file and writes the chore-done marker on its
+        first run, then writes the session-done marker on its second run.
+        """
+        import subprocess as sp
+
+        repo = _repo_with_main(tmp_path)
+        counter = tmp_path / "count"
+        counter.write_text("0")
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+n=$(cat {counter}); n=$((n+1)); echo $n > {counter}
+if [ "$n" = "1" ]; then
+  echo work > chore1.txt && git add -A && git commit -q -m "chore 1"
+  git rev-parse --abbrev-ref HEAD > {tmp_path}/branch1
+  git log --oneline | wc -l | tr -d ' ' > {tmp_path}/depth1
+  touch .marcus_chore_done
+else
+  git log --oneline | wc -l | tr -d ' ' > {tmp_path}/depth2
+  ls chore1.txt >/dev/null 2>&1 && echo present > {tmp_path}/leak || echo clean > {tmp_path}/leak
+  touch .marcus_session_done
+fi
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "branch1").read_text().strip() == "marcus/agent_unicorn_1"
+        # chore 1 was on top of the scaffold (2 commits); chore 2 started fresh
+        # from main (1 commit): the un-merged chore-1 commit did not ride along.
+        assert (tmp_path / "depth1").read_text().strip() == "2"
+        assert (tmp_path / "depth2").read_text().strip() == "1"
+        assert (tmp_path / "leak").read_text().strip() == "clean"
+        # teardown: the worktree is gone, the branch remains for recovery
+        assert not workspace.exists()
+        assert "worktrees/agent_unicorn_1" not in _git(repo, "worktree", "list")
+        assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
+
+    def test_a_killed_session_leaves_no_worktree_behind(self, tmp_path: Path) -> None:
+        """Kill the session mid-chore: the trap stops the chore's whole process
+        tree, removes the worktree, and keeps the branch (Codex P2 on PR #784:
+        signalling only the harness PID left its children running in a
+        directory that was then deleted from under them)."""
+        import os
+        import signal
+        import subprocess as sp
+        import time
+
+        repo = _repo_with_main(tmp_path)
+        grandchild_pid = tmp_path / "grandchild.pid"
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+sleep 60 &
+echo $! > {grandchild_pid}
+wait
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        proc = sp.Popen(
+            ["bash", str(script)], stdout=sp.PIPE, stderr=sp.PIPE, text=True
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not grandchild_pid.exists():
+            time.sleep(0.1)
+        time.sleep(0.2)
+        sleeper = int(grandchild_pid.read_text().strip())
+        os.kill(proc.pid, signal.SIGTERM)
+        out, _ = proc.communicate(timeout=20)
+
+        assert "worktree removed" in out
+        assert not workspace.exists()
+        assert "marcus/agent_unicorn_1" in _git(repo, "branch", "--list")
+        # the harness's own child (a test runner, a dev server) is gone too
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not _process_is_gone(sleeper):
+            time.sleep(0.1)
+        assert _process_is_gone(sleeper)
+
+    def test_children_a_harness_left_behind_die_when_the_chore_ends(
+        self, tmp_path: Path
+    ) -> None:
+        """A harness that exits normally but leaves a dev server running must not
+        outlive its chore: the chore's process group is reaped before the next
+        chore or the teardown (second Codex P2 on PR #784)."""
+        import os
+        import subprocess as sp
+
+        repo = _repo_with_main(tmp_path)
+        pidfile = tmp_path / "orphan.pid"
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+sleep 60 &
+echo $! > {pidfile}
+touch .marcus_session_done
+exit 0
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        orphan = int(pidfile.read_text().strip())
+        assert _process_is_gone(orphan)
+        assert not workspace.exists()
+
+
+class TestRetryWaitLivesInTheScript:
+    """The retry wait is the harness's job: a model's shell may refuse ``sleep``."""
+
+    def test_header_tells_the_worker_to_write_the_retry_marker(self) -> None:
+        """The worker writes retry_after_seconds to the marker and exits."""
+        text = TEMPLATE.read_text()
+        assert RETRY_MARKER in text
+        assert "Do NOT sleep or poll inside this" in text
+        assert "run `sleep" not in text
+
+    def test_script_waits_the_marker_seconds_between_chores(
+        self, tmp_path: Path
+    ) -> None:
+        """Run the real script: chore 1 leaves a 2-second marker, chore 2 ends the session.
+
+        The gap between the two chores must be at least the marker's value,
+        and the marker must be consumed.
+        """
+        import subprocess as sp
+        import time
+
+        repo = _repo_with_main(tmp_path)
+        count = tmp_path / "count"
+        count.write_text("0")
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"""#!/bin/bash
+n=$(cat {count}); n=$((n+1)); echo $n > {count}
+date +%s.%N >> {tmp_path}/times
+if [ "$n" = "1" ]; then echo 2 > {RETRY_MARKER}; else touch .marcus_session_done; fi
+""")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        result = sp.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+        assert result.returncode == 0, result.stderr
+        t1, t2 = [float(x) for x in (tmp_path / "times").read_text().split()[:2]]
+        assert t2 - t1 >= 2.0
+        assert "waiting 2s before the next chore" in result.stdout
+        assert not (workspace / RETRY_MARKER).exists() or not workspace.exists()
+
+    def test_script_caps_an_absurd_wait(self, tmp_path: Path) -> None:
+        """A marker asking for an hour is capped at the script's maximum."""
+        script = self._script_text(tmp_path)
+        assert "-gt 300" in script
+        assert "wait_s=300" in script
+
+    def _script_text(self, tmp_path: Path) -> str:
+        agent = plan_sessions(_agents(1), 1)[0]
+        return build_session_script(
+            agent=agent,
+            workspace=tmp_path / "worktrees" / "agent_unicorn_1",
+            branch="marcus/agent_unicorn_1",
+            repo=tmp_path / "implementation",
+            project_info_file=tmp_path / "project_info.json",
+            marcus_mcp_url="u",
+            register_snippet="true",
+            chore_command="true",
+        )
+
+    def test_a_kill_during_the_retry_wait_is_handled_at_once(
+        self, tmp_path: Path
+    ) -> None:
+        """SIGTERM mid-wait ends the session promptly (Codex P2 on PR #784).
+
+        The stub leaves a 60-second retry marker; the session is killed while
+        it waits. A foreground sleep would defer the trap for the full minute.
+        """
+        import os
+        import signal
+        import subprocess as sp
+        import time
+
+        repo = _repo_with_main(tmp_path)
+        stub = tmp_path / "stub.sh"
+        stub.write_text(f"#!/bin/bash\necho 60 > {RETRY_MARKER}\n")
+        stub.chmod(0o755)
+        script, workspace = _session_script(tmp_path, repo, f"bash {stub}")
+
+        proc = sp.Popen(
+            ["bash", str(script)], stdout=sp.PIPE, stderr=sp.PIPE, text=True
+        )
+        # read until the waiting line appears (bounded)
+        deadline = time.monotonic() + 15
+        seen = ""
+        assert proc.stdout is not None
+        while time.monotonic() < deadline and "waiting 60s" not in seen:
+            seen += proc.stdout.readline()
+        assert "waiting 60s" in seen
+        started = time.monotonic()
+        os.kill(proc.pid, signal.SIGTERM)
+        proc.communicate(timeout=20)
+        assert time.monotonic() - started < 10
+        assert not workspace.exists()

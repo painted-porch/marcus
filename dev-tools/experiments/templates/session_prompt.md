@@ -31,8 +31,10 @@ STEPS FOR THIS CHORE
      create an empty file named .marcus_session_done in your workspace, print
      "SESSION DONE: board drained", and EXIT. Do NOT request another task.
    - If you receive no task and the response has "retry_after_seconds":
-     run `sleep <retry_after_seconds>` in your shell, then EXIT. The harness
-     re-invokes you and you will ask again. Do NOT poll inside this chore.
+     write that number to a file named .marcus_retry_after in your workspace
+     (for example `echo 30 > .marcus_retry_after`), then EXIT. The harness
+     waits that long and re-invokes you. Do NOT sleep or poll inside this
+     chore.
    - If the response says you ALREADY have a task assigned, continue that
      task as the contract says.
    - If you receive a task: do it as the contract says, in this workspace.
@@ -40,8 +42,9 @@ STEPS FOR THIS CHORE
 4. When your completion is accepted, OR you handed the task back with a
    high-severity blocker: create an empty file named .marcus_chore_done in
    your workspace. It tells the harness you no longer hold a task, so your
-   branch is reset to main before the next chore (accepted work is already
-   merged; handed-back work must not ride into main with your next task).
+   next chore starts in a fresh worktree cut from main (accepted work is
+   already merged; handed-back work must not ride into main with your next
+   task).
    Then print a one-line summary and EXIT. Do NOT create that file while you
    still hold the task: if Marcus asks you to fix issues, or answers
    "smoke_gate_unavailable", stay in this chore and re-report as the contract
