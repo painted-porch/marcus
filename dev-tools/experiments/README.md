@@ -118,7 +118,7 @@ python runners/run_experiment.py <experiment_dir> --sessions 3
 **Note**: Run through `run_experiment.py`.
 
 **What it does**:
-- Initialises the implementation repository on `main` and writes the session contract (`templates/session_prompt.md`) into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md`
+- Initialises the implementation repository on `main` and writes the one worker contract (`prompts/Agent_prompt.md`) into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md`; each chore is handed a short session header (`templates/session_prompt.md`) that points at it
 - Calls `create_project` over MCP with `project_root` set and commits the scaffold
 - Gives each session a worktree at `worktrees/<agent_id>` and a script that runs the harness one chore at a time, fresh context each chore
 - Never restarts a dead session and has no watchdog; sessions go home when `request_next_task` returns `BOARD_DRAINED`
@@ -552,11 +552,10 @@ Full-featured multi-agent configuration template with:
 Configuration template for single-agent experiments.
 
 #### `session_prompt.md`
-The session contract every worker is handed on every chore. Defines:
+The per-chore session header every worker is handed. It is not a second contract: the contract is `prompts/Agent_prompt.md`, written into the workspace as `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`. The header adds only:
 - The session identity and its worktree
-- One chore per invocation: register, take one task, do it, report it, exit
-- The `BOARD_DRAINED` stop rule and the retry rule
-- Commit and progress reporting
+- One chore per invocation, and the two markers (`.marcus_session_done`, `.marcus_chore_done`) that tell the harness what happened
+- The exit rules for this invocation (`BOARD_DRAINED`, retry, chore done)
 
 #### `single_agent_prompt.template.md`
 Single-agent prompt template (deprecated, now generated dynamically).

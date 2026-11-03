@@ -191,7 +191,7 @@ cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <c
 This will:
 - Create `prompts/`, `logs/`, `implementation/`, `worktrees/` directories
 - Initialize a git repo in `implementation/` on `main`
-- Write the session contract to CLAUDE.md, AGENTS.md, and GEMINI.md in `implementation/`
+- Write the worker contract (`prompts/Agent_prompt.md`) to CLAUDE.md, AGENTS.md, and GEMINI.md in `implementation/`
 - Pre-flight `which gemini` (or `which claude` / `which codex` depending on `--harness`)
 - Call `create_project` over MCP itself (no project-creator agent) and commit the scaffold
 - Create a tmux session: `marcus_<project_name_lowercase>`

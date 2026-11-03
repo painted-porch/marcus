@@ -8,6 +8,9 @@ machinery. The launcher deletes it instead of fixing it:
 
 - it creates the project itself over MCP (no project-creator agent, no
   ``start_experiment``; "a run" is the launcher's business, ADR-0012 D10),
+- it writes the one worker contract (``prompts/Agent_prompt.md``) into every
+  workspace's instruction files and hands each chore a short session header
+  that points at it,
 - it starts N **sessions**, each a persistent identity in its own worktree
   (``worktrees/<agent_id>``, the path shape Cato's cost ingestion reads),
 - each session's shell script loops **one chore per harness invocation**:
@@ -54,6 +57,11 @@ DEFAULT_SESSION_SKILLS = [
 DEFAULT_MAX_CHORES = 200
 CREATE_PROJECT_TIMEOUT_SECONDS = 900.0
 RUNNER_LOG_NAME = "runner.log"
+# The one worker contract. The session header (templates/session_prompt.md)
+# adds only what is specific to a chore and points workers at this file,
+# which the launcher writes into every workspace as CLAUDE.md / AGENTS.md /
+# GEMINI.md (epic #706, "one instruction sheet").
+CANONICAL_PROMPT = Path(__file__).resolve().parents[3] / "prompts" / "Agent_prompt.md"
 RUN_PATH_LABEL = "marcus"
 
 
@@ -357,6 +365,9 @@ class SessionLauncher:
         Returns an MCP client for a timeout; injected for tests.
     sleep : Callable[[float], None]
         Injected for tests.
+    contract_path : Optional[Path]
+        The worker contract written into the instruction files; defaults to
+        ``prompts/Agent_prompt.md`` in the Marcus checkout.
     """
 
     def __init__(
@@ -374,6 +385,7 @@ class SessionLauncher:
         host: Optional[Any] = None,
         mcp_factory: Optional[Callable[[float], Any]] = None,
         sleep: Callable[[float], None] = time.sleep,
+        contract_path: Optional[Path] = None,
     ) -> None:
         self.config = config
         self.templates_dir = Path(templates_dir)
@@ -385,6 +397,7 @@ class SessionLauncher:
         self.sleep = sleep
         self.host = host or WorkerHost(config, agent_model=agent_model, harness=harness)
         self.session_template = self.templates_dir / "session_prompt.md"
+        self.contract_path = Path(contract_path) if contract_path else CANONICAL_PROMPT
         self._mcp_factory = mcp_factory or (
             lambda timeout: MarcusMCPClient(self.host.marcus_mcp_url, timeout=timeout)
         )
@@ -533,15 +546,18 @@ class SessionLauncher:
             print("  Nothing new to commit on main")
 
     def write_instruction_files(self) -> List[Path]:
-        """Write the session contract into every harness's instruction file.
+        """Write the worker contract into every harness's instruction file.
 
         The launcher keeps this one job of the old runner: Codex and Gemini
         workers read ``AGENTS.md`` / ``GEMINI.md`` from the directory they
-        run in, and a worker that finds no instructions silently does
-        nothing. The contract is the session template, so the file a
-        worker reads and the prompt it is given say the same thing.
+        run in (Claude reads ``CLAUDE.md``), and a worker that finds no
+        instructions silently does nothing. The file is the canonical
+        ``prompts/Agent_prompt.md``, exactly what the README tells operators
+        to copy; the per-chore prompt is only a header that points at it.
+        The files are committed with the scaffold, so every worktree has
+        them.
         """
-        contract = self.session_template.read_text()
+        contract = self.contract_path.read_text()
         filenames: set[str] = set()
         for impl in HARNESSES.values():
             filenames.update(impl.workflow_files)
