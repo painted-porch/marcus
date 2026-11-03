@@ -5165,18 +5165,33 @@ async def report_task_progress(
                 f"found task object: {task is not None}"
             )
 
-            # Guard: an already-DONE task is refused before the
+            # Guard: an already-DONE *parent* task is refused before the
             # validation gate. A re-sent completion -- a duplicate report,
             # or a second agent on a task that already closed -- must not
             # re-run the typed-evidence, approval, LLM or smoke pipeline
             # on work that was already accepted. Mirrors the ``blocked``
             # branch below and report_blocker, which short-circuit a DONE
             # task the same way.
-            if task is not None and task.status in {
-                TaskStatus.DONE,
-                "done",
-                "completed",
-            }:
+            #
+            # Subtasks are excluded: a subtask's status is set to DONE by
+            # update_subtask_status() BEFORE the commit-verification gate
+            # accepts the completion, so a subtask can be DONE in memory
+            # while its completion was rejected (e.g. ``no_commits``).
+            # Refusing here would permanently block the legitimate retry
+            # after the agent commits (Codex P1 on PR #780). The in-flight
+            # guard below still dedupes overlapping subtask retries; making
+            # the subtask DONE mutation reflect acceptance is the deeper
+            # fix, owned by the subtask-completion lifecycle.
+            if (
+                task is not None
+                and not getattr(task, "is_subtask", False)
+                and task.status
+                in {
+                    TaskStatus.DONE,
+                    "done",
+                    "completed",
+                }
+            ):
                 logger.warning(
                     f"report_task_progress(completed) rejected: agent "
                     f"{agent_id} reported completion on task {task_id} "

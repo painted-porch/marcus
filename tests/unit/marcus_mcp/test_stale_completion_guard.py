@@ -729,3 +729,48 @@ class TestAlreadyDoneCompletionGuard:
         assert first_result["success"] is True
         # Only the first call ran the pipeline: exactly one DONE write.
         assert state.kanban_client.update_task.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_done_subtask_is_not_refused_by_done_guard(self) -> None:
+        """A DONE subtask must NOT be refused by the DONE guard.
+
+        A subtask's status is set to DONE (update_subtask_status) before
+        the commit-verification gate accepts the completion, so a subtask
+        can be DONE in memory while its completion was rejected (e.g.
+        no_commits). The guard must let a subtask through so the agent's
+        retry after committing can still complete (Codex P1 on PR #780).
+        """
+        now = datetime.now(timezone.utc)
+        subtask = Task(
+            id="sub-1",
+            name="A subtask",
+            description="",
+            status=TaskStatus.DONE,
+            priority=Priority.MEDIUM,
+            assigned_to="agent-001",
+            created_at=now,
+            updated_at=now,
+            due_date=None,
+            estimated_hours=1.0,
+            dependencies=[],
+            task_type="design",
+            is_subtask=True,
+        )
+        state = _make_state_with_assignment("agent-001", task_id="sub-1")
+        # Subtasks are resolved from project_tasks, not the board.
+        state.project_tasks = [subtask]
+        state.kanban_client.get_all_tasks = AsyncMock(return_value=[])
+
+        result = await report_task_progress(
+            agent_id="agent-001",
+            task_id="sub-1",
+            status="completed",
+            progress=100,
+            message="retry after committing",
+            state=state,
+        )
+
+        # The guard must not short-circuit a subtask; the completion
+        # proceeds into the pipeline instead of being refused.
+        assert result.get("status") != "task_already_complete"
+        state.kanban_client.update_task.assert_called()
