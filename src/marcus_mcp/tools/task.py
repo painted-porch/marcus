@@ -348,26 +348,176 @@ def clear_blocker_attempts(task_id: str) -> None:
     _advisory_blocker_attempts.pop(task_id, None)
 
 
-def _capture_baseline_commit(assignment: "TaskAssignment", project_root: str) -> None:
-    """Snapshot the current git HEAD into the assignment for validation scoping.
+def _worktree_path_for_branch(repo_root: str, branch: str) -> Optional[str]:
+    """Find the worktree that currently has ``branch`` checked out.
 
-    Stored on TaskAssignment.baseline_commit so that WorkAnalyzer can later
-    run ``git diff <baseline>..HEAD --name-only`` to collect only the files
-    this agent changed, rather than the entire merged worktree (issue #696).
+    The session's worktree path is a launcher convention, so asking git
+    is more reliable than rebuilding the path. ``git worktree list
+    --porcelain`` prints one block per worktree, with a ``branch
+    refs/heads/<name>`` line for any worktree that is not detached.
+
+    Parameters
+    ----------
+    repo_root : str
+        Any directory inside the repository.
+    branch : str
+        Branch name without the ``refs/heads/`` prefix.
+
+    Returns
+    -------
+    Optional[str]
+        Filesystem path of the worktree holding ``branch``, or None when
+        no worktree has it checked out (or git is unavailable).
+    """
+    try:
+        listing = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+            timeout=5,
+        )
+        if listing.returncode != 0:
+            return None
+        current: Optional[str] = None
+        for line in listing.stdout.splitlines():
+            if line.startswith("worktree "):
+                current = line[len("worktree ") :].strip()
+            elif line.startswith("branch "):
+                ref = line[len("branch ") :].strip()
+                if ref == f"refs/heads/{branch}" and current:
+                    return current
+        return None
+    except Exception as exc:  # noqa: BLE001 - never fail a claim over this
+        logger.debug(f"Could not list worktrees in {repo_root}: {exc}")
+        return None
+
+
+def _commit_exists(repo: Any, rev: str) -> bool:
+    """Report whether ``rev`` resolves to a commit in ``repo``.
+
+    Used before scoping anything to a baseline: a sha that git cannot
+    resolve (a stale record, a rewritten branch) must degrade to
+    branch-level behaviour rather than silently matching nothing.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path) to run git in.
+    rev : str
+        Revision to resolve.
+
+    Returns
+    -------
+    bool
+        True when ``rev`` names a commit object in this repository.
+    """
+    try:
+        probe = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return probe.returncode == 0 and bool(probe.stdout.strip())
+    except Exception:  # noqa: BLE001 - treat git trouble as "unknown"
+        return False
+
+
+def _card_commit_range(
+    repo: Any, branch: str, baseline_commit: str
+) -> Optional[List[str]]:
+    """List the commits this card added to ``branch``, oldest first.
+
+    The range is "reachable from the branch, but from neither the
+    baseline nor ``main``". Excluding ``main`` keeps already-merged work
+    out of the replay; excluding the baseline keeps every card the
+    session worked on **before** this one out of it, which is the whole
+    point of issue #730.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path) to run git in.
+    branch : str
+        The session's branch, ``marcus/{agent_id}``.
+    baseline_commit : str
+        Branch tip captured when the card was claimed.
+
+    Returns
+    -------
+    Optional[List[str]]
+        Commit shas in apply order, possibly empty. None means the range
+        could not be computed (unresolvable baseline or a git failure),
+        so the caller should fall back to a branch-level merge.
+    """
+    if not _commit_exists(repo, baseline_commit):
+        return None
+    try:
+        listing = subprocess.run(
+            [
+                "git",
+                "rev-list",
+                "--reverse",
+                "--topo-order",
+                branch,
+                "--not",
+                baseline_commit,
+                "main",
+            ],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if listing.returncode != 0:
+            return None
+        return listing.stdout.split()
+    except Exception:  # noqa: BLE001 - caller falls back
+        return None
+
+
+def _capture_baseline_commit(
+    assignment: "TaskAssignment",
+    project_root: str,
+    agent_id: Optional[str] = None,
+) -> None:
+    """Snapshot the session's branch tip into the assignment.
+
+    The baseline marks where this card's work starts. It scopes two
+    things: the ``git diff <baseline>..HEAD`` delta ``WorkAnalyzer``
+    validates (issue #696) and, since issue #730, the commit range
+    Marcus merges into ``main`` on completion.
+
+    The snapshot is taken **in the agent's own worktree** when one
+    exists. ``main`` moves whenever another session's card merges, so a
+    baseline read from the main repo can point at a commit that is not
+    on this agent's branch at all — which would make the card's merge
+    range include other sessions' work or nothing at all.
 
     Parameters
     ----------
     assignment : TaskAssignment
-        The assignment object to update in-place
+        The assignment object to update in-place.
     project_root : str
-        Any directory inside the git repo to run git commands from
+        Any directory inside the git repo to run git commands from.
+    agent_id : Optional[str]
+        Agent claiming the task. Its branch is ``marcus/{agent_id}``;
+        when that branch is checked out in a worktree, HEAD is read
+        there instead of in ``project_root``.
     """
+    baseline_cwd = project_root
+    if agent_id:
+        worktree = _worktree_path_for_branch(project_root, f"marcus/{agent_id}")
+        if worktree:
+            baseline_cwd = worktree
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
-            cwd=project_root,
+            cwd=baseline_cwd,
             timeout=5,
         )
         if result.returncode == 0:
@@ -385,6 +535,58 @@ def _capture_baseline_commit(assignment: "TaskAssignment", project_root: str) ->
         logger.warning(
             f"Could not capture baseline commit for task {assignment.task_id}: {exc}"
         )
+
+
+async def _baseline_commit_for_task(
+    state: Any,
+    agent_id: str,
+    task_id: str,
+) -> Optional[str]:
+    """Recover the baseline commit captured when this card was claimed.
+
+    The in-memory assignment is authoritative while it exists. After a
+    Marcus restart it does not, so the persisted assignment row is the
+    fallback — the baseline is written there at claim time precisely so
+    that a restart mid-card does not silently widen the merge back to
+    the whole branch.
+
+    A record pointing at a different task is ignored: a baseline from
+    another card would merge the wrong range.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state.
+    agent_id : str
+        Agent reporting completion.
+    task_id : str
+        The card being completed.
+
+    Returns
+    -------
+    Optional[str]
+        The baseline commit sha, or None when it cannot be recovered —
+        in which case callers fall back to branch-level behaviour.
+    """
+    assignment = getattr(state, "agent_tasks", {}).get(agent_id)
+    if assignment is not None and getattr(assignment, "task_id", None) == task_id:
+        baseline = getattr(assignment, "baseline_commit", None)
+        if baseline:
+            return str(baseline)
+
+    persistence = getattr(state, "assignment_persistence", None)
+    if persistence is None:
+        return None
+    try:
+        record = await persistence.get_assignment(agent_id)
+    except Exception as exc:  # noqa: BLE001 - never fail a completion
+        logger.debug(f"Could not read persisted assignment for {agent_id}: {exc}")
+        return None
+    if not record or record.get("task_id") != task_id:
+        return None
+    task_data = record.get("task_data") or {}
+    baseline = task_data.get("baseline_commit")
+    return str(baseline) if baseline else None
 
 
 def _record_missing_verification_attempt(task_id: str) -> int:
@@ -3367,12 +3569,20 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         or None
                     )
                 if _project_root_for_baseline:
-                    _capture_baseline_commit(assignment, _project_root_for_baseline)
+                    _capture_baseline_commit(
+                        assignment, _project_root_for_baseline, agent_id=agent_id
+                    )
 
                 agent = state.agent_status[agent_id]
                 agent.current_tasks = [optimal_task]
 
-                # Persist assignment
+                # Persist assignment. ``baseline_commit`` rides along
+                # (issue #730) because the completion path merges only
+                # ``baseline..HEAD`` for this card. A Marcus restart
+                # mid-card clears ``state.agent_tasks``, and without the
+                # persisted copy the merge would silently widen back to
+                # the whole session branch — carrying any card this
+                # session had refused into ``main``.
                 await state.assignment_persistence.save_assignment(
                     agent_id,
                     optimal_task.id,
@@ -3380,6 +3590,7 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         "name": optimal_task.name,
                         "priority": optimal_task.priority.value,
                         "estimated_hours": optimal_task.estimated_hours,
+                        "baseline_commit": assignment.baseline_commit,
                     },
                 )
 
@@ -3979,14 +4190,25 @@ def _format_blocker_description(validation_result: Any) -> str:
 def _verify_agent_has_commits(
     agent_id: str,
     project_root: str,
+    baseline_commit: Optional[str] = None,
 ) -> Optional[bool]:
     """
-    Check whether the agent's worktree branch has commits ahead of main.
+    Check whether the agent committed code for the card it is completing.
 
     Used to detect false task completions where an agent calls
     report_task_progress(status='completed') without having committed
     any implementation code (dashboard-v88 post-mortem: agent_unicorn_3
     reported two tasks done with zero commits; UD2 had to rescue both).
+
+    With a ``baseline_commit`` the question is per card: did the branch
+    gain commits since this card was claimed? Without one it falls back
+    to the branch-level question, "is the branch ahead of main".
+
+    That fallback goes vacuous under ADR-0012 D1 (issue #730): one
+    session branch spans many cards, so once any earlier commit is left
+    unmerged the branch stays ahead of main and every later card passes
+    the gate without the agent writing a line. Always pass the baseline
+    when it is known.
 
     Parameters
     ----------
@@ -3994,12 +4216,16 @@ def _verify_agent_has_commits(
         Agent identifier. Branch name is ``marcus/{agent_id}``.
     project_root : str
         Absolute path to the implementation git repository.
+    baseline_commit : Optional[str]
+        The branch tip captured when this card was claimed. When set and
+        resolvable, the check counts commits in ``baseline..branch``.
 
     Returns
     -------
     Optional[bool]
-        True  — branch exists and has commits ahead of main.
-        False — branch exists but has NO commits ahead of main.
+        True  — the agent has commits for this card (or, without a
+                baseline, the branch is ahead of main).
+        False — the branch exists but holds no commits for this card.
         None  — branch does not exist (agent worked on main directly)
                 or git is unavailable; caller should skip the check.
     """
@@ -4030,13 +4256,28 @@ def _verify_agent_has_commits(
         if not branch_check.stdout.strip():
             return None  # no worktree branch — skip check
 
-        # Count commits on branch not yet on main
+        # Count commits for this card when the baseline is known,
+        # otherwise fall back to the branch-level comparison.
+        range_spec = f"main..{branch}"
+        if baseline_commit and _commit_exists(repo, baseline_commit):
+            range_spec = f"{baseline_commit}..{branch}"
+        elif baseline_commit:
+            logger.warning(
+                "[commit_gate] baseline %s for %s is not a commit in %s; "
+                "falling back to the branch-level check (issue #730)",
+                baseline_commit[:8],
+                branch,
+                repo,
+            )
+
         log_result = _sp.run(
-            ["git", "log", f"main..{branch}", "--oneline"],
+            ["git", "log", range_spec, "--oneline"],
             cwd=repo,
             capture_output=True,
             text=True,
         )
+        if log_result.returncode != 0:
+            return None
         has_commits = bool(log_result.stdout.strip())
         return has_commits
 
@@ -4475,24 +4716,383 @@ async def _sweep_blocked_merge_conflicts(state: Any) -> int:
     return recovered
 
 
+def _commit_parents(repo: Any, sha: str) -> List[str]:
+    """Return the parent shas of ``sha``, newest-first as git lists them.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path) to run git in.
+    sha : str
+        Commit to inspect.
+
+    Returns
+    -------
+    List[str]
+        Parent shas, or an empty list when the commit cannot be read.
+    """
+    try:
+        listing = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", sha],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:  # noqa: BLE001 - treat as no parents
+        logger.debug(f"Could not read parents of {sha[:8]} in {repo}: {exc}")
+        return []
+    if listing.returncode != 0:
+        logger.debug(
+            f"git rev-list --parents failed for {sha[:8]}: " f"{listing.stderr.strip()}"
+        )
+        return []
+    return listing.stdout.split()[1:]
+
+
+def _is_ancestor(repo: Any, candidate: str, descendant: str) -> bool:
+    """Report whether ``candidate`` is an ancestor of ``descendant``.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path) to run git in.
+    candidate : str
+        The possible ancestor.
+    descendant : str
+        The ref it may be an ancestor of.
+
+    Returns
+    -------
+    bool
+        True only when git confirms the ancestry. A git failure answers
+        False, which keeps a merge base out of the set rather than
+        adding one Marcus cannot justify.
+    """
+    try:
+        ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", candidate, descendant],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:  # noqa: BLE001 - answer "not an ancestor"
+        logger.debug(
+            f"Could not test ancestry of {candidate[:8]} against "
+            f"{descendant} in {repo}: {exc}"
+        )
+        return False
+    return ancestry.returncode == 0
+
+
+def _effective_merge_bases(
+    repo: Any,
+    baseline_commit: str,
+    card_commits: List[str],
+) -> List[str]:
+    """Build the base set for a per-card three-way merge.
+
+    The claim-time baseline is the first base: everything the session
+    had committed before this card starts there, so earlier cards —
+    including any whose completion Marcus refused — sit in the base and
+    are therefore **not** treated as new work to bring into ``main``.
+
+    Any commit of ``main`` the agent already integrated into this card
+    joins the base set. Agents resolve a conflict by merging ``main``
+    into their branch, and that integration point has to be in the base
+    or git reads the agent's resolved file and ``main``'s own version as
+    two unrelated creations and reports a conflict the agent has in fact
+    already settled. ``git merge-recursive`` accepts several bases and
+    merges them into a virtual base, which is exactly the shape needed.
+
+    Parameters
+    ----------
+    repo : Any
+        Repository path (str or Path) to run git in.
+    baseline_commit : str
+        Branch tip captured when the card was claimed.
+    card_commits : List[str]
+        The card's commit range, oldest first.
+
+    Returns
+    -------
+    List[str]
+        Merge bases, starting with ``baseline_commit``.
+    """
+    bases = [baseline_commit]
+    for sha in card_commits:
+        parents = _commit_parents(repo, sha)
+        if len(parents) < 2:
+            continue
+        for parent in parents:
+            if parent not in bases and _is_ancestor(repo, parent, "main"):
+                bases.append(parent)
+    return bases
+
+
+def _merge_card_range(
+    *,
+    repo: Any,
+    branch: str,
+    agent_id: str,
+    task_id: str,
+    baseline_commit: str,
+    card_commits: List[str],
+    pre_merge_sha: str,
+) -> Dict[str, Any]:
+    """Land one card's changes on ``main``, all or nothing.
+
+    Performs a three-way merge whose base set is the card's starting
+    point (see :func:`_effective_merge_bases`), whose "ours" side is
+    ``main`` and whose "theirs" side is the session branch tip. The
+    result is the card's net change integrated into ``main`` as a single
+    commit; the agent's individual commits stay on the session branch,
+    and the landing commit's message names the range so any line on
+    ``main`` can be traced back to them.
+
+    A single commit per card — rather than a replay of each commit — is
+    deliberate. Replaying commits one by one reapplies intermediate
+    states that a later commit in the same range already fixed, so a
+    card the agent had finished resolving would conflict on its own
+    history.
+
+    Marcus never resolves a conflict on the agent's behalf (ADR-0012 D2:
+    the mechanical path never resolves, rebases, or recovers). A
+    conflicted merge therefore rolls ``main`` back to exactly where it
+    was and reports failure.
+
+    Parameters
+    ----------
+    repo : Any
+        Main repository path, already checked out on ``main`` with a
+        clean working tree.
+    branch : str
+        The session branch, ``marcus/{agent_id}``.
+    agent_id : str
+        Completing agent, named in the landing commit and the failure.
+    task_id : str
+        The card being completed.
+    baseline_commit : str
+        Branch tip captured when the card was claimed.
+    card_commits : List[str]
+        The card's commits, oldest first. May be empty.
+    pre_merge_sha : str
+        Where ``main`` stood before the merge, used to roll back.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``{"success": True, "commits_merged": n}`` when the card landed,
+        otherwise a failure dict carrying ``error`` and ``message`` with
+        ``main`` restored to ``pre_merge_sha``.
+    """
+    if not card_commits:
+        logger.info(
+            "[worktree] Task %s added no commits to %s; nothing to merge",
+            task_id,
+            branch,
+        )
+        return {"success": True, "commits_merged": 0}
+
+    bases = _effective_merge_bases(repo, baseline_commit, card_commits)
+    logger.info(
+        "[worktree] Merging %d commit(s) for task %s from %s onto main " "(base%s %s)",
+        len(card_commits),
+        task_id,
+        branch,
+        "s" if len(bases) > 1 else "",
+        ", ".join(base[:8] for base in bases),
+    )
+
+    merge = subprocess.run(
+        ["git", "merge-recursive", *bases, "--", "HEAD", branch],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    def _rollback() -> None:
+        """Restore ``main`` to where it stood before the merge."""
+        subprocess.run(
+            ["git", "reset", "--hard", pre_merge_sha],
+            cwd=repo,
+            capture_output=True,
+        )
+
+    if merge.returncode not in (0, 1):
+        # git merge-recursive itself failed (missing command, corrupt
+        # object). Never widen to a whole-branch merge here: that is the
+        # defect issue #730 exists to close.
+        detail = (merge.stderr or merge.stdout).strip()
+        logger.error(
+            "[worktree] Range merge failed for task %s on %s: %s",
+            task_id,
+            branch,
+            detail,
+        )
+        _rollback()
+        return {
+            "success": False,
+            "error": "range_merge_failed",
+            "commits_merged": 0,
+            "message": (
+                f"Your task passed validation but Marcus could not merge "
+                f"its commits onto main: {detail}. Main was left "
+                f"unchanged. This needs an operator, not another attempt."
+            ),
+        }
+
+    if merge.returncode == 1:
+        detail = (merge.stdout or merge.stderr).strip()
+        logger.warning(
+            "[worktree] Conflict merging task %s from %s: %s",
+            task_id,
+            branch,
+            detail,
+        )
+        _rollback()
+        return {
+            "success": False,
+            "error": "merge_conflict",
+            "commits_merged": 0,
+            "message": (
+                f"Your task passed validation but its commits conflict "
+                f"with main:\n{detail}\nMain was left unchanged. Please "
+                f"resolve:\n"
+                f"  git merge main\n"
+                f"  (resolve conflicts in your editor)\n"
+                f"  git add . && git commit\n"
+                f"Then report completion again."
+            ),
+        }
+
+    tip = subprocess.run(
+        ["git", "rev-parse", branch],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subjects = []
+    for sha in card_commits:
+        subject = subprocess.run(
+            ["git", "log", "-1", "--format=%s", sha],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subjects.append(f"- {sha[:8]} {subject}")
+    body = (
+        f"Range {baseline_commit[:8]}..{tip[:8]} on {branch} "
+        f"({len(card_commits)} commit(s)):\n" + "\n".join(subjects)
+    )
+
+    commit = subprocess.run(
+        [
+            "git",
+            "commit",
+            "-m",
+            f"Land task {task_id} from {branch} (agent {agent_id})",
+            "-m",
+            body,
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if commit.returncode != 0:
+        combined = f"{commit.stdout}\n{commit.stderr}"
+        if "nothing to commit" in combined or "no changes added" in combined:
+            # The card's net change is already present on main (another
+            # session landed identical content, or the work was a no-op).
+            logger.info(
+                "[worktree] Task %s brought no net change to main",
+                task_id,
+            )
+            _rollback()
+            return {
+                "success": True,
+                "commits_merged": len(card_commits),
+                "net_change": False,
+            }
+        logger.error(
+            "[worktree] Could not commit the merge for task %s: %s",
+            task_id,
+            combined.strip(),
+        )
+        _rollback()
+        return {
+            "success": False,
+            "error": "range_merge_failed",
+            "commits_merged": 0,
+            "message": (
+                f"Your task passed validation but Marcus could not commit "
+                f"its merge onto main: {combined.strip()}. Main was left "
+                f"unchanged."
+            ),
+        }
+
+    logger.info(
+        "[worktree] Landed %d commit(s) for task %s (agent %s) on main",
+        len(card_commits),
+        task_id,
+        agent_id,
+    )
+    return {"success": True, "commits_merged": len(card_commits)}
+
+
 async def _merge_agent_branch_to_main(
     agent_id: str,
     task_id: str,
     state: Any,
+    baseline_commit: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Merge agent's worktree branch to main after task completion.
+    Land the completing card's commits on main.
 
-    Convention: if branch marcus/{agent_id} exists, the agent used
-    a worktree. Merge it to main so dependent tasks can see the code.
+    Convention: if branch marcus/{agent_id} exists, the agent used a
+    worktree, and its work has to reach ``main`` for dependent tasks to
+    build on it.
 
-    If merge conflicts, abort and return failure — the agent must
-    resolve conflicts and report completion again.
+    **What gets merged (issue #730).** With a ``baseline_commit`` —
+    the branch tip captured when this card was claimed — only the
+    changes this card added are merged, as one commit on ``main``.
+    Without a baseline the whole branch is merged, which is the
+    pre-#730 behaviour.
 
-    Returns None if no merge needed, success dict if merged,
-    or failure dict if conflicts.
+    The difference matters once a branch outlives a single card
+    (ADR-0012 D1). A card whose completion Marcus **refused** leaves
+    its commits on the session branch; a whole-branch merge on the next
+    accepted card would carry that refused work into ``main``, which
+    nobody decided. Merging per card keeps Marcus's accept/reject
+    decision and the contents of ``main`` in agreement.
 
-    See: https://github.com/lwgray/marcus/issues/250
+    If the replay conflicts, ``main`` is restored to exactly where it
+    was and a failure is returned — the agent resolves the conflict and
+    reports completion again.
+
+    Parameters
+    ----------
+    agent_id : str
+        Completing agent. Its branch is ``marcus/{agent_id}``.
+    task_id : str
+        The card being completed, used in the log and commit trailers.
+    state : Any
+        Marcus server state, read for the workspace's ``project_root``.
+    baseline_commit : Optional[str]
+        Branch tip captured at claim time. When absent or unresolvable,
+        the merge falls back to the whole branch.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        None when no merge is needed (no branch, no repo, git
+        unavailable). ``{"success": True, ...}`` when the work landed.
+        ``{"success": False, "error": "merge_conflict", ...}`` when it
+        did not, with ``main`` untouched.
+
+    See: https://github.com/lwgray/marcus/issues/250,
+    https://github.com/lwgray/marcus/issues/730
     """
     import subprocess as _sp
     from pathlib import Path
@@ -4606,7 +5206,50 @@ async def _merge_agent_branch_to_main(
                 reset_err.stderr,
             )
 
-        # Attempt merge
+        # Where main stands before anything is applied. A failed replay
+        # resets here, so a conflict can never leave main half-merged.
+        main_before = _sp.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        pre_merge_sha = (
+            main_before.stdout.strip() if main_before.returncode == 0 else None
+        )
+
+        # Per-card range (issue #730), when the baseline is known.
+        card_commits: Optional[List[str]] = None
+        if baseline_commit:
+            card_commits = _card_commit_range(repo, branch, baseline_commit)
+            if card_commits is None:
+                logger.warning(
+                    "[worktree] Could not scope task %s to baseline %s on %s; "
+                    "merging the whole branch instead (issue #730)",
+                    task_id,
+                    baseline_commit[:8],
+                    branch,
+                )
+
+        if card_commits is not None and pre_merge_sha and baseline_commit:
+            return _merge_card_range(
+                repo=repo,
+                branch=branch,
+                agent_id=agent_id,
+                task_id=task_id,
+                baseline_commit=baseline_commit,
+                card_commits=card_commits,
+                pre_merge_sha=pre_merge_sha,
+            )
+
+        # Fall back: merge the whole branch. Correct while a branch holds
+        # exactly one card's commits; see #730 for why that stops being
+        # true under session-scoped branches.
+        logger.info(
+            "[worktree] No baseline for task %s; merging all of %s",
+            task_id,
+            branch,
+        )
         merge = _sp.run(
             [
                 "git",
@@ -5854,18 +6497,32 @@ async def report_task_progress(
             # agent reported done without implementing anything.
             # Only fires when a worktree branch exists (returns None
             # when no branch → agent worked on main → skip check).
+            #
+            # Both the gate and the merge below are scoped to this
+            # card's commit range (issue #730), so the baseline is
+            # resolved once here. It survives a Marcus restart because
+            # the claim persists it with the assignment.
+            _card_baseline = await _baseline_commit_for_task(state, agent_id, task_id)
             _ws_state = None
             if hasattr(state, "kanban_client") and state.kanban_client:
                 _ws_state = state.kanban_client._load_workspace_state()
             _project_root = _ws_state.get("project_root") if _ws_state else None
             if _project_root:
-                _commit_ok = _verify_agent_has_commits(agent_id, _project_root)
+                _commit_ok = _verify_agent_has_commits(
+                    agent_id, _project_root, baseline_commit=_card_baseline
+                )
                 if _commit_ok is False:
+                    _scope = (
+                        f"since this task was claimed "
+                        f"(baseline {_card_baseline[:8]})"
+                        if _card_baseline
+                        else "ahead of main"
+                    )
                     logger.warning(
                         f"[commit_gate] {agent_id} reported task "
                         f"{task_id} complete but branch "
-                        f"marcus/{agent_id} has no commits ahead of "
-                        f"main. Rejecting false completion."
+                        f"marcus/{agent_id} has no commits {_scope}. "
+                        f"Rejecting false completion."
                     )
                     return {
                         "success": False,
@@ -5873,7 +6530,7 @@ async def report_task_progress(
                         "message": (
                             f"Task {task_id} completion rejected: "
                             f"branch marcus/{agent_id} has no commits "
-                            f"ahead of main. Commit your implementation "
+                            f"{_scope}. Commit your implementation "
                             f"before reporting task complete."
                         ),
                     }
@@ -5925,7 +6582,9 @@ async def report_task_progress(
             # response is still returned to the caller at the end
             # of the function so the runner sees the merge_conflict
             # error explicitly.
-            merge_result = await _merge_agent_branch_to_main(agent_id, task_id, state)
+            merge_result = await _merge_agent_branch_to_main(
+                agent_id, task_id, state, baseline_commit=_card_baseline
+            )
             if merge_result and not merge_result.get("success"):
                 # Bug #651: don't mark the kanban DONE on merge fail.
                 # Helper flips update_data["status"] from DONE to
@@ -6521,6 +7180,21 @@ async def request_task_redo(
     )
     previous_branch = f"marcus/{previous_agent}" if previous_agent else None
 
+    # Issue #730: the previous attempt's commits are a range on that
+    # branch, not the whole branch. The baseline recorded at claim time
+    # is usually gone by now (completion removes the assignment row), in
+    # which case the branch alone is the best reference available.
+    previous_range: Optional[str] = None
+    if previous_agent and previous_branch:
+        previous_baseline = await _baseline_commit_for_task(
+            state, previous_agent, task_id
+        )
+        previous_range = (
+            f"{previous_baseline[:12]}..{previous_branch}"
+            if previous_baseline
+            else previous_branch
+        )
+
     # Best-effort worktree resolution via the session launcher's convention
     # ``<project_root>/../worktrees/<agent_id>``. The worktree may already
     # be cleaned up — the branch (merged work) is the durable handle.
@@ -6561,10 +7235,17 @@ async def request_task_redo(
             f"{agent_id} (redo {redo_count}/{MAX_TASK_REDO_COUNT}).\n\n"
             f"**What is wrong (from the requesting agent):**\n{reason}\n\n"
             "**Start from the previous attempt, don't restart:**\n"
+            # The previous attempt completed, so Marcus already landed
+            # its commits on main — the work is in this worktree
+            # already. Issue #730: do NOT tell the claimant to merge
+            # the previous branch. Under ADR-0012 D1 that branch is
+            # scoped to the session and carries its other cards.
+            + "- The previous attempt is already on main; Marcus landed "
+            "it when the task completed. Read it before changing it.\n"
             + (
-                f"- Merge the previous work first: "
-                f"`git merge {previous_branch} --no-edit`\n"
-                if previous_branch
+                f"- Previous attempt's commits, for reference: "
+                f"`git log {previous_range}`\n"
+                if previous_range
                 else ""
             )
             + (

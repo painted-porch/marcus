@@ -989,8 +989,52 @@ class TestRecoveryHandoffDualWrite:
             # Should include key guidance for worktree recovery
             assert "agent-001" in instructions
             assert "marcus/agent-001" in instructions  # Branch name
-            assert "git merge" in instructions  # Merge dead agent's branch
+            assert "git log marcus/agent-001" in instructions
             assert "30%" in instructions
+            # Issue #730: with no recorded baseline Marcus cannot say
+            # which commits belong to this card, so it must not tell the
+            # claimant to swallow the whole branch — under ADR-0012 D1
+            # that branch carries the session's other cards.
+            assert "git merge marcus/agent-001" not in instructions
+
+    @pytest.mark.asyncio
+    async def test_recovery_handoff_scopes_pickup_to_this_cards_range(
+        self, lease_manager, mock_persistence, mock_task
+    ):
+        """Test that a recorded baseline narrows the handoff to one card.
+
+        ADR-0012 D1 gives a session one branch for many cards, so the
+        handoff has to name the commit range this card produced rather
+        than the branch (issue #730). The baseline recorded at claim
+        time is what makes that range expressible.
+        """
+        # Arrange
+        baseline = "a" * 40
+        mock_persistence.get_assignment = AsyncMock(
+            return_value={
+                "task_id": "task-123",
+                "task_data": {"baseline_commit": baseline},
+            }
+        )
+        expired_lease = AssignmentLease(
+            task_id="task-123",
+            agent_id="agent-001",
+            assigned_at=datetime.now(timezone.utc) - timedelta(hours=2),
+            lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
+            last_renewed=datetime.now(timezone.utc) - timedelta(hours=2),
+            progress_percentage=30,
+        )
+
+        with patch.object(lease_manager, "_find_task", return_value=mock_task):
+            # Act
+            await lease_manager.recover_expired_lease(expired_lease)
+
+        # Assert
+        instructions = mock_task.recovery_info.instructions
+        expected_range = f"{baseline[:12]}..marcus/agent-001"
+        assert f"git cherry-pick {expected_range}" in instructions
+        assert "do not merge the whole branch" in instructions.lower()
+        assert "git merge marcus/agent-001" not in instructions
 
 
 class TestExpiredLeaseProgressCapture:

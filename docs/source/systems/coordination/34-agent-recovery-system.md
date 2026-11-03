@@ -262,13 +262,26 @@ agent dies, commits they made still live on that branch. The recovery
 instructions tell the **next** agent exactly how to pick them up:
 
 ```
-git merge marcus/<dead-agent> --no-edit
-git log marcus/<dead-agent>
+git cherry-pick <baseline>..marcus/<dead-agent>
+git log <baseline>..marcus/<dead-agent>
 ```
 
-The next agent merges committed work, reviews what was done, then continues
-from where the previous agent left off. This is the difference between
-"recovered" and "redone."
+`<baseline>` is the branch tip Marcus recorded when the dead agent claimed
+this task.
+The range between it and the branch tip is the work that belongs to **this**
+task.
+
+The handoff names that range rather than the branch (issue #730).
+A branch is scoped to a session, not to a task (ADR-0012 D1), so one branch
+can also carry other tasks the session had in flight.
+Merging the whole branch would pull that unrelated work into the new
+claimant's worktree, including any task whose completion Marcus refused.
+When no baseline was recorded, the handoff says so and asks the claimant to
+read the branch and take only this task's commits.
+
+The next agent picks up the committed work, reviews what was done, then
+continues from where the previous agent left off. This is the difference
+between "recovered" and "redone."
 
 ### 10. Recovery Handoff in Task Instructions
 
@@ -278,7 +291,7 @@ Task instructions are built in layers. A new **Layer 1.1: Recovery Handoff**
 sits just above the normal task body. When `task.recovery_info` is set and
 not expired (24h window), the layer is populated with the full handoff
 message: previous agent ID, previous progress, time spent, recovery reason,
-and the git merge instructions.
+and the instructions for picking up this task's commits.
 
 The next agent sees the handoff as soon as they receive the task — no
 separate notification, no risk of missing it.
@@ -366,7 +379,7 @@ T+46m   Lease expires past grace (45 min of silence + 1 min grace). LeaseMonitor
             │     time_spent_minutes=2.0,
             │     recovery_reason="lease_expired",
             │     previous_agent_branch="marcus/Agent-A",
-            │     instructions="git merge marcus/Agent-A ...",
+            │     instructions="git cherry-pick <baseline>..marcus/Agent-A ...",
             │     recovery_expires_at=now+24h
             │   )
             ├─ task.recovery_info = <info>
@@ -391,13 +404,13 @@ T+180s  Agent-B calls request_next_task.
         ├─ build_tiered_instructions(task, agent=Agent-B):
         │   └─ Layer 1.1: Recovery Handoff
         │       "⚠️ RECOVERY ADDENDUM — recovered from Agent-A
-        │        git merge marcus/Agent-A --no-edit
+        │        git cherry-pick <baseline>..marcus/Agent-A
         │        git log marcus/Agent-A
         │        Previous agent reached 15% ..."
         │
         └─ Lease created for Agent-B (fresh 45-minute silence window, fresh budget)
 
-T+181s  Agent-B runs git merge marcus/Agent-A, sees Agent-A's commits,
+T+181s  Agent-B cherry-picks Agent-A's range, sees their commits,
         continues the task from 15%.
 ```
 

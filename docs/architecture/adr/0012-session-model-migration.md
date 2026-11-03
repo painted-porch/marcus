@@ -62,6 +62,23 @@ spawns a board-visible integrator card** claimed by an intelligent session.
   need intelligence, it stops and escalates. Every merge is audited.
 - **Hard rule:** the mechanical path never resolves, rebases, or recovers. No
   intelligence in the dumb path, ever.
+- **Merge unit — one card, never one branch** *(added 2026-11-03, issue #730)*.
+D1 scopes the branch to the session, so "merge it" has to say what *it* is.
+The unit is the card: the changes between the branch tip captured when the card was claimed (its **baseline**) and the branch tip at completion.
+Marcus merges that range into `main` as a single commit and leaves the agent's individual commits on the session branch, named in the landing commit's message.
+- **Why the unit matters:** merging the whole branch would carry work Marcus
+  explicitly refused.
+A card whose completion the D11 fence rejects leaves its commits on the branch; the session's next accepted card would then land them in `main`, with nobody deciding that and the reconciliation card still open.
+Per-card merging keeps the accept/reject decision and the contents of `main` in agreement.
+- **Base set:** the baseline, plus any commit of `main` the agent had already merged into the card's range.
+Agents record a conflict resolution by merging `main` into their branch; without that commit in the base, git reads the agent's resolved file and `main`'s own version as two unrelated creations and reports a conflict the agent has already settled.
+- **Rollback:** a conflicted range merge restores `main` to exactly where it stood and reports the failure.
+Marcus still never resolves.
+- **Rejected:** branch-per-card (contradicts D1); replaying each commit
+  individually (reapplies intermediate states a later commit in the same range
+  already fixed, so a resolved card conflicts on its own history); quarantining
+  rejected commits (Marcus rewriting an agent's history is exactly the
+  intelligence this path forbids).
 - **Rejected:** launcher-executes-all (a dumb ops layer inherits conflict
   resolution → rebuilds #700 elsewhere); integrator-card-always (every trivial
   merge waits for a session and burns tokens).
@@ -141,11 +158,16 @@ documented fleet future.
 
 ### D8 — Partial-work recovery: resume-by-instruction + checkpoint duty
 
-Keep the existing recovery handoff (next claimant merges the dead session's branch,
-reads progress notes and decisions, continues) — it survives D1 cleanly. Add a
+Keep the existing recovery handoff (next claimant picks up the dead session's
+committed work, reads progress notes and decisions, continues). Add a
 **checkpoint obligation** to the session contract: commit + log a decision at each
 meaningful unit, at minimum **every 20 minutes** (default; paired with D3's
 45-min silence timeout to satisfy the D11 ≥ 2× invariant).
+
+**What is handed forward** *(corrected 2026-11-03, issue #730)*: the dead
+session's **commit range for this card**, not its branch.
+This decision originally said "merges the dead session's branch", which was true while one agent held one card and wrong under D1, where that branch also carries the session's other in-flight cards.
+The handoff names `<baseline>..marcus/<agent_id>` and tells the claimant to take that range; when no baseline was recorded it says so and asks the claimant to read the branch rather than swallow it.
 
 - **Why:** at coarse granularity, non-resumable death wastes hours. The checkpoint
   duty makes resumability a property of the work rather than luck — and it *is*
