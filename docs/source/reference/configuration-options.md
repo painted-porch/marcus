@@ -196,6 +196,8 @@ Features can be configured as boolean (simple) or object (advanced):
 | `hybrid_inference.cache_ttl_hours` | integer | 24 | ≥0 | Cache duration for AI results |
 | `hybrid_inference.require_component_match` | boolean | true | - | Require shared component for patterns |
 | `hybrid_inference.max_dependency_chain_length` | integer | 10 | ≥1 | Max dependency chain depth |
+| `hybrid_inference.max_tasks_for_inference` | integer | 200 | ≥1 | Largest task list implicit inference runs on; above it only explicit dependencies are used and a warning is logged |
+| `hybrid_inference.inference_time_budget_seconds` | float | 20.0 | >0 | Wall-clock budget for the CPU phases of inference (which run in a worker thread); when exceeded, explicit dependencies only |
 
 ### Presets
 
