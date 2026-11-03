@@ -3,7 +3,7 @@ Unit tests for ``_resolve_project_for_cost`` in marcus_mcp.handlers.
 
 The resolver is what makes the cost dashboard's project axis actually
 work. Marcus's identity is ``project_id`` (per CLAUDE.md GH-388 and
-spawn_agents.py), so every planner LLM call made while servicing an
+the session launcher), so every planner LLM call made while servicing an
 MCP request needs to land in the right project bucket.
 """
 

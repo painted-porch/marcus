@@ -539,7 +539,7 @@ class SingleAgentExperiment:
         bool
             True if successful, False otherwise
         """
-        # Create script to launch Claude (matching spawn_agents.py approach)
+        # Create script to launch Claude (same shape as the session launcher)
         launch_script = f"""#!/bin/bash
 # Source shell profiles to get nvm, claude, etc.
 [ -f ~/.zshrc ] && source ~/.zshrc
@@ -555,7 +555,7 @@ echo "Working Directory: $(pwd)"
 echo "=========================================="
 echo ""
 
-# Launch Claude with input redirection (same as spawn_agents.py)
+# Launch Claude with input redirection (same as the session launcher)
 claude --dangerously-skip-permissions < {prompt_file}
 
 echo ""

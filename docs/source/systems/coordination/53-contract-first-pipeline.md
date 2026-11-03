@@ -143,7 +143,7 @@ The `/marcus` skill accepts a `--decomposer contract_first` flag:
 
 - `skills/marcus/SKILL.md` documents the flag
 - `dev-tools/experiments/templates/config.yaml.template` includes a `decomposer` field
-- `spawn_agents.py` forwards `project_options` (including `decomposer`) via `json.dumps` to `create_project`
+- `session_launcher.py` forwards `project_options` (including `decomposer`) to `create_project`
 - No runner code changes were needed because the `project_options` forwarding path already existed
 
 ## Test-Mode Event Suppression

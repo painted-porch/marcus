@@ -4,8 +4,8 @@ Unit tests for the per-CLI harness registry.
 ``dev-tools/experiments/runners/harness.py`` defines the :class:`Harness`
 Protocol and one implementation per agent CLI (``ClaudeHarness``,
 ``CodexHarness``).  These tests pin the contract directly — the
-``test_spawn_agents.py`` suite continues to cover the integration with
-``AgentSpawner``.
+``test_worker_host.py`` suite continues to cover the integration with
+``WorkerHost``.
 """
 
 from pathlib import Path
@@ -139,12 +139,6 @@ class TestClaudeRenderedShell:
         )
         assert "--print" not in cmd
 
-    def test_wrap_worker_invocation_is_identity(self) -> None:
-        """Claude TUI stays alive — wrapper returns the inner command verbatim."""
-        impl = harness.get_harness("claude")
-        inner = "claude --add-dir /x < /p"
-        assert impl.wrap_worker_invocation(inner) == inner
-
     def test_marcus_pinned_via_strict_config_not_global_add(
         self, tmp_path: Path
     ) -> None:
@@ -216,23 +210,6 @@ class TestCodexRenderedShell:
         )
         assert with_print == without_print
         assert "--print" not in with_print
-
-    def test_wrap_worker_invocation_renders_bounded_loop(self) -> None:
-        """Wrapper is a bash for-loop bounded by MAX_RELAUNCHES."""
-        wrapped = harness.get_harness("codex").wrap_worker_invocation(
-            "codex exec --foo < prompt"
-        )
-        assert "MAX_RELAUNCHES=50" in wrapped
-        assert "for relaunch in $(seq 1 $MAX_RELAUNCHES)" in wrapped
-        assert "codex exec --foo < prompt" in wrapped
-        assert "hit MAX_RELAUNCHES" in wrapped
-
-    def test_wrap_worker_invocation_breaks_on_clean_exit(self) -> None:
-        """Codex wrapper breaks the loop on rc=0 — Codex review P1 on #554."""
-        wrapped = harness.get_harness("codex").wrap_worker_invocation("codex exec")
-        assert "rc=$?" in wrapped
-        assert "[ $rc -eq 0 ]" in wrapped
-        assert "break" in wrapped
 
     def test_mcp_register_snippet_uses_url_flag(self) -> None:
         """``codex mcp add ... --url`` + idempotent ``|| true``."""
@@ -347,49 +324,6 @@ class TestGeminiRenderedShell:
         )
         assert with_print == without_print
         assert "--print" not in with_print
-
-    def test_wrap_worker_invocation_renders_bounded_loop(self) -> None:
-        """Wrapper is a bash for-loop bounded by MAX_RELAUNCHES (same
-        shape as codex; gemini ``-p`` is also fire-and-exit)."""
-        wrapped = harness.get_harness("gemini").wrap_worker_invocation(
-            "gemini --skip-trust --yolo < prompt"
-        )
-        assert "MAX_RELAUNCHES=50" in wrapped
-        assert "for relaunch in $(seq 1 $MAX_RELAUNCHES)" in wrapped
-        assert "gemini --skip-trust --yolo < prompt" in wrapped
-        assert "hit MAX_RELAUNCHES" in wrapped
-        # Mentions gemini in the [worker] launch echo so pane history
-        # is harness-explicit when reading scrollback.
-        assert "[worker] gemini launch" in wrapped
-
-    def test_wrap_worker_invocation_does_not_break_on_clean_exit(self) -> None:
-        """Gemini wrapper relaunches unconditionally on rc=0.
-
-        Unlike codex (whose ``--enable goals`` makes ``rc=0``
-        genuinely mean "goal complete"), ``gemini -p`` exits ``rc=0``
-        after every single prompt cycle — gemini has no goals-
-        equivalent.  Breaking on ``rc=0`` would kill the worker
-        after one cycle, before it could finish a task or pick up
-        another.  Discovered live during PR #587 validation: a
-        gemini worker started a task, wrote a placeholder file,
-        exited 0, the wrapper broke, and the task sat
-        ``in_progress`` forever.
-
-        The wrapper must therefore relaunch unconditionally and
-        rely on ``MAX_RELAUNCHES`` + the monitor's
-        ``end_experiment`` tmux-kill to terminate.
-        """
-        wrapped = harness.get_harness("gemini").wrap_worker_invocation("gemini")
-        # rc is captured (still useful for the relaunch echo) but
-        # there is NO branch that breaks on rc=0.
-        assert "rc=$?" in wrapped
-        assert "[ $rc -eq 0 ]" not in wrapped, (
-            "Gemini wrapper must NOT short-circuit on clean exit — "
-            "gemini -p exits 0 every cycle"
-        )
-        assert "finished cleanly" not in wrapped
-        # Relaunch is unconditional — sleep + loop continues.
-        assert "sleep 3" in wrapped
 
     def test_mcp_register_snippet_uses_http_transport_at_user_scope(
         self,

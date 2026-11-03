@@ -1228,8 +1228,8 @@ class AssignmentLeaseManager:
         """
         Resolve the worktree path for an agent's lease.
 
-        Marcus's worktree convention (set by the experiment runner at
-        ``dev-tools/experiments/runners/spawn_agents.py``) places agent
+        Marcus's worktree convention (set by the session launcher at
+        ``dev-tools/experiments/runners/session_launcher.py``) places agent
         worktrees at ``<experiment_dir>/worktrees/<agent_id>``, where
         ``experiment_dir`` is the parent of the project ``implementation``
         directory. The kanban client exposes the project root via its

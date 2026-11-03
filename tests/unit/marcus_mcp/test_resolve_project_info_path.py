@@ -4,7 +4,7 @@ Unit tests for ``_resolve_project_info_path`` (project-creation handshake).
 The experiment runner waits for ``<experiment_dir>/project_info.json`` as its
 go-signal and instructs the project-creator agent to pass
 ``project_info_path`` in the ``create_project`` options
-(``spawn_agents.py`` injects it). A lower-fidelity agent (e.g. Haiku) can
+(the session launcher injects it). A lower-fidelity agent (e.g. Haiku) can
 drop that one field from a long options object, leaving Marcus with no path
 -- so it silently skips the write, the runner times out at 600s, and the run
 never spawns a work agent.

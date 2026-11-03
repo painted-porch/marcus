@@ -19,9 +19,9 @@ machinery. The launcher deletes it instead of fixing it:
   returns ``BOARD_DRAINED`` and it writes ``.marcus_session_done``,
 - it prints the board's final counts and tears the tmux session down.
 
-Everything tmux, git and harness-command related is reused from
-:class:`spawn_agents.AgentSpawner`; this module adds the session contract
-and the small loop around it.
+Everything tmux, git and harness-command related lives in
+:class:`runners.worker_host.WorkerHost`; this module adds the session
+contract and the small loop around it.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from runners.harness import HARNESSES
 from runners.marcus_client import MarcusMCPClient
-from runners.spawn_agents import AgentSpawner, check_mcp_health
+from runners.worker_host import WorkerHost, check_mcp_health
 
 SESSION_DONE_MARKER = ".marcus_session_done"
 # Written by the worker when it no longer holds a task (completion accepted
@@ -53,6 +53,8 @@ DEFAULT_SESSION_SKILLS = [
 ]
 DEFAULT_MAX_CHORES = 200
 CREATE_PROJECT_TIMEOUT_SECONDS = 900.0
+RUNNER_LOG_NAME = "runner.log"
+RUN_PATH_LABEL = "marcus"
 
 
 def plan_sessions(
@@ -107,8 +109,10 @@ def build_create_project_options(
     """Return the ``create_project`` options for a session run.
 
     ``project_root`` is the implementation directory (where the smoke gate
-    runs and where workers' branches merge), and ``project_info_path``
-    makes Marcus write ``project_info.json`` itself.
+    runs and where workers' branches merge), ``project_info_path`` makes
+    Marcus write ``project_info.json`` itself, and ``path`` labels the run's
+    entry point in the cost store (``runs.path``) unless the config already
+    says otherwise.
 
     Parameters
     ----------
@@ -126,6 +130,7 @@ def build_create_project_options(
     """
     options = dict(project_options or {})
     options.setdefault("provider", "sqlite")
+    options.setdefault("path", RUN_PATH_LABEL)
     options["project_root"] = str(implementation_dir)
     options["project_info_path"] = str(project_info_file)
     return options
@@ -290,7 +295,7 @@ class SessionLauncher:
         Wait for every session to exit before returning.
     poll_seconds : int
         How often to check on the sessions while waiting.
-    spawner : Optional[AgentSpawner]
+    host : Optional[WorkerHost]
         Injected for tests; built from ``config`` otherwise.
     mcp_factory : Optional[Callable[[float], Any]]
         Returns an MCP client for a timeout; injected for tests.
@@ -310,7 +315,7 @@ class SessionLauncher:
         max_chores: int = DEFAULT_MAX_CHORES,
         wait: bool = True,
         poll_seconds: int = 15,
-        spawner: Optional[Any] = None,
+        host: Optional[Any] = None,
         mcp_factory: Optional[Callable[[float], Any]] = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -322,37 +327,46 @@ class SessionLauncher:
         self.wait = wait
         self.poll_seconds = poll_seconds
         self.sleep = sleep
-        self.spawner = spawner or AgentSpawner(
-            config,
-            templates_dir,
-            epictetus=epictetus,
-            agent_model=agent_model,
-            harness=harness,
-        )
+        self.host = host or WorkerHost(config, agent_model=agent_model, harness=harness)
         self.session_template = self.templates_dir / "session_prompt.md"
         self._mcp_factory = mcp_factory or (
-            lambda timeout: MarcusMCPClient(
-                self.spawner.marcus_mcp_url, timeout=timeout
-            )
+            lambda timeout: MarcusMCPClient(self.host.marcus_mcp_url, timeout=timeout)
         )
         self.project_info: Dict[str, Any] = {}
+        self.runner_log = Path(self.config.experiment_dir) / "logs" / RUNNER_LOG_NAME
+
+    def say(self, message: str) -> None:
+        """Print a progress line and mirror it to ``logs/runner.log``.
+
+        The launcher is usually run in the background, so its stdout is not
+        in front of the operator; the log file is what ``tail -f`` follows.
+
+        Parameters
+        ----------
+        message : str
+            The line to emit.
+        """
+        line = f"[{time.strftime('%H:%M:%S')}] {message}"
+        print(line)
+        try:
+            self.runner_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.runner_log, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError as exc:  # the log is an aid, never the run
+            print(f"  (runner.log unavailable: {exc})")
 
     # ---------------------------------------------------------------- setup
 
     def preflight(self) -> bool:
         """Check the harness binary and the Marcus endpoint before anything starts."""
-        binary = getattr(self.spawner.harness_impl, "binary", self.spawner.harness)
+        binary = getattr(self.host.harness_impl, "binary", self.host.harness)
         if shutil.which(binary) is None:
             print(f"Error: harness CLI {binary!r} is not on PATH")
-            for line in self.spawner.harness_impl.install_hint(
-                self.spawner.marcus_mcp_url
-            ):
+            for line in self.host.harness_impl.install_hint(self.host.marcus_mcp_url):
                 print(line)
             return False
-        if not check_mcp_health(self.spawner.marcus_mcp_url):
-            print(
-                f"Error: Marcus MCP is not reachable at {self.spawner.marcus_mcp_url}"
-            )
+        if not check_mcp_health(self.host.marcus_mcp_url):
+            print(f"Error: Marcus MCP is not reachable at {self.host.marcus_mcp_url}")
             return False
         return True
 
@@ -493,7 +507,13 @@ class SessionLauncher:
         bool
             True when the project exists and its info file is on disk.
         """
-        mcp = self._mcp_factory(CREATE_PROJECT_TIMEOUT_SECONDS)
+        get_timeout = getattr(self.config, "get_timeout", None)
+        timeout = float(
+            get_timeout("project_creation", int(CREATE_PROJECT_TIMEOUT_SECONDS))
+            if callable(get_timeout)
+            else CREATE_PROJECT_TIMEOUT_SECONDS
+        )
+        mcp = self._mcp_factory(timeout)
         if not mcp.connect():
             print("Error: could not open an MCP session with Marcus")
             return False
@@ -553,11 +573,9 @@ class SessionLauncher:
         """
         branch = f"marcus/{agent['id']}"
         workspace = Path(self.config.experiment_dir) / "worktrees" / agent["id"]
-        self.spawner._create_agent_worktree(
-            agent["id"], agent["name"], branch, workspace
-        )
-        if self.spawner.harness_impl.needs_pretrust_directory:
-            self.spawner._pretrust_directory(workspace)
+        self.host.create_worktree(agent["id"], branch, workspace)
+        if self.host.harness_impl.needs_pretrust_directory:
+            self.host.pretrust_directory(workspace)
         prompt = render_session_prompt(
             agent, workspace, branch, self.session_template.read_text()
         )
@@ -568,9 +586,9 @@ class SessionLauncher:
             workspace=workspace,
             branch=branch,
             project_info_file=Path(self.config.project_info_file),
-            marcus_mcp_url=self.spawner.marcus_mcp_url,
-            register_snippet=self.spawner._build_mcp_register_snippet(),
-            chore_command=self.spawner._build_agent_command(
+            marcus_mcp_url=self.host.marcus_mcp_url,
+            register_snippet=self.host.build_mcp_register_snippet(),
+            chore_command=self.host.build_agent_command(
                 workspace, prompt_file, print_mode=True
             ),
             max_chores=self.max_chores,
@@ -578,8 +596,8 @@ class SessionLauncher:
         script_file = Path(self.config.prompts_dir) / f"{agent['id']}.sh"
         script_file.write_text(script)
         script_file.chmod(0o755)
-        pane_id = self.spawner.run_worker_in_new_window(script_file, agent["name"])
-        print(f"  Session {agent['id']} started in pane {pane_id}")
+        pane_id = self.host.start_window(script_file, agent["name"])
+        self.say(f"Session {agent['id']} started in pane {pane_id}")
         return pane_id
 
     def board_summary(self) -> Dict[str, Any]:
@@ -595,24 +613,22 @@ class SessionLauncher:
     def wait_for_sessions(self, pane_ids: List[str]) -> None:
         """Block until every session pane has exited, reporting now and then."""
         while True:
-            alive = self.spawner._count_live_worker_panes(pane_ids)
+            alive = self.host.count_live_panes(pane_ids)
             if alive == 0:
                 return
-            print(f"[Sessions] {alive} of {len(pane_ids)} still working")
+            self.say(f"[Sessions] {alive} of {len(pane_ids)} still working")
             self.sleep(self.poll_seconds)
 
     def teardown(self) -> None:
         """Kill the tmux session unless the run is kept for inspection."""
         if self.epictetus:
-            print(
+            self.say(
                 "Epictetus mode: tmux session kept alive: "
-                f"tmux attach -t {self.spawner.tmux_session}"
+                f"tmux attach -t {self.host.tmux_session}"
             )
             return
-        subprocess.run(
-            ["tmux", "kill-session", "-t", self.spawner.tmux_session], check=False
-        )
-        print(f"Tmux session '{self.spawner.tmux_session}' terminated.")
+        self.host.kill_session()
+        self.say(f"Tmux session '{self.host.tmux_session}' terminated.")
 
     # ------------------------------------------------------------------ run
 
@@ -629,7 +645,7 @@ class SessionLauncher:
         print("=" * 60)
         print(f"Experiment: {self.config.experiment_dir}")
         print(f"Project: {self.config.project_name}")
-        print(f"Sessions: {self.sessions}  Harness: {self.spawner.harness}")
+        print(f"Sessions: {self.sessions}  Harness: {self.host.harness}")
         if not self.preflight():
             return False
         self.init_git()
@@ -640,24 +656,25 @@ class SessionLauncher:
             return False
         self.wait_for_scaffold()
         self.commit_scaffold()
-        self.spawner.create_tmux_session()
-        if self.spawner.harness_impl.needs_pretrust_directory:
-            self.spawner._pretrust_directory(Path(self.config.implementation_dir))
+        self.host.create_tmux_session()
+        if self.host.harness_impl.needs_pretrust_directory:
+            self.host.pretrust_directory(Path(self.config.implementation_dir))
         pane_ids = [
             self.launch_session(agent)
             for agent in plan_sessions(self.config.agents, self.sessions)
         ]
-        print(
+        self.say(
             f"[Sessions] {len(pane_ids)} started; attach with: "
-            f"tmux attach -t {self.spawner.tmux_session}"
+            f"tmux attach -t {self.host.tmux_session}"
         )
+        self.say(f"[Sessions] follow this log with: tail -f {self.runner_log}")
         if not self.wait:
             return True
         self.wait_for_sessions(pane_ids)
         summary = self.board_summary()
         if summary:
             board = json.dumps(summary.get("project", summary), default=str)[:400]
-            print(f"[Board] {board}")
-        print("[Sessions] all sessions have gone home")
+            self.say(f"[Board] {board}")
+        self.say("[Sessions] all sessions have gone home")
         self.teardown()
         return True

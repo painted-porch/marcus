@@ -381,8 +381,8 @@ async def create_project(
     Reads ``options.get("path", "direct")`` to label which entry
     point produced this run. Allowed values: ``"direct"`` (a human
     MCP user — the default), ``"marcus"`` (``/marcus`` meta-runner),
-    ``"posidonius"`` (Posidonius automated trial). ``spawn_agents.py``
-    sets the value in its YAML-driven config; Direct MCP callers
+    ``"posidonius"`` (Posidonius automated trial). The session launcher
+    sends ``"marcus"`` unless the config names another; direct MCP callers
     don't need to do anything and get ``"direct"`` for free.
 
     Why the run_id is generated at entry rather than rebound later:

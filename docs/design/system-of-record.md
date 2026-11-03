@@ -230,7 +230,7 @@ Each row names where the behavior lives on `develop` at `a4236573`.
 | Cost | `CostStore` at `~/.marcus/costs.db` (`src/marcus_mcp/server.py:188`), ingested by worktree path shape | Keep; key rows by `agent_id` for non-git workers | Keep |
 | Audit bundle | `get_usage_report` in `src/marcus_mcp/tools/audit_tools.py` covers usage only | Add an export of a case: tasks, assignments, lease history, evidence, approvals, cost | Add |
 | Decomposition | `_analyze_prd_deeply`, `_generate_task_hierarchy`, `_generate_contracts_by_domain`, planner model via `ai.provider` | Optional plugin; cases can be seeded directly | Strip |
-| Git runtime | worktrees, branch merging (#730), `spawn_agents.py`, `run_experiment.py`, the web-app smoke gate | Move behind an extension boundary as the software adapter | Strip |
+| Git runtime | worktrees, branch merging (#730), `session_launcher.py`, `run_experiment.py`, the web-app smoke gate | Move behind an extension boundary as the software adapter | Strip |
 | Providers, telemetry, memory | Planka, Linear, GitHub providers; telemetry; memory system (import missing) | Not needed for the record; leave untouched, do not load | Strip |
 
 Two clarifications.

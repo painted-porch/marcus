@@ -86,11 +86,10 @@ experiments/
 - **What It Does**:
   - Creates experiment directory structure
   - Copies configuration templates
-  - Spawns project creator agent
-  - Launches multiple worker agents in tmux sessions
-  - Each agent registers with Marcus and requests tasks
-  - All work happens on `main` branch in `implementation/`
-  - Integrates with MLflow for experiment tracking
+  - Hands the run to `session_launcher.py`, which creates the project over MCP
+  - Starts N persistent worker sessions in tmux, one worktree each
+  - Each session registers with Marcus and does one chore per invocation
+  - Sessions go home on `BOARD_DRAINED`; nothing restarts them
 - **Key Features**:
   - Template-based setup
   - Multi-agent coordination
@@ -98,7 +97,7 @@ experiments/
   - Git repository initialization
   - Marcus MCP integration
 - **Dependencies**:
-  - `spawn_agents.py` (same directory)
+  - `session_launcher.py` and `worker_host.py` (same directory)
   - `templates/` directory (parent level)
   - Marcus MCP server (must be running)
   - Claude Code CLI
@@ -206,37 +205,39 @@ experiments/
 
 ---
 
-### `spawn_agents.py`
+### `session_launcher.py`
 - **Type**: Python module
 - **Status**: ✅ Functional
-- **Purpose**: **Core agent spawning and management utility**
-- **Lines**: ~700+ (estimated)
-- **Usage**: Called internally by `run_experiment.py` (not run directly)
+- **Purpose**: **Start N worker sessions and wait for them to go home**
+- **Usage**: Called by `run_experiment.py`
 - **What It Does**:
-  - Defines `ExperimentConfig` class (reads config.yaml)
-  - Defines `AgentSpawner` class (spawns agents)
-  - Creates project creator agent prompt
-  - Creates worker agent prompts
-  - Manages tmux sessions and windows
-  - Handles agent registration and task loops
-  - Saves project info for worker coordination
-- **Key Classes**:
-  - `ExperimentConfig`: Loads and validates experiment configuration
-  - `AgentSpawner`: Manages agent lifecycle and coordination
-- **Key Features**:
-  - Template-based prompt generation
-  - Tmux session orchestration
-  - Agent prompt customization by role
-  - Project info sharing between agents
-  - Marcus integration instructions
-- **Dependencies**:
-  - `templates/agent_prompt.md`
-  - tmux
-  - Claude Code CLI
-  - Marcus MCP server
-- **Last Modified**: 2026-03-17
+  - Initialises the implementation repository on `main`
+  - Writes the session contract into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`
+  - Calls `create_project` over MCP (no project-creator agent) and commits the scaffold
+  - Starts one session per identity in `worktrees/<agent_id>`, one chore per harness invocation
+  - Waits for every session to exit on `BOARD_DRAINED`, prints the board counts, tears down tmux
+  - Mirrors progress to `logs/runner.log`
+- **Key Classes**: `SessionLauncher`
+- **Dependencies**: `worker_host.py`, `harness.py`, `marcus_client.py`, `templates/session_prompt.md`, tmux, the Marcus MCP server
+- **Last Modified**: 2026-11-03
 
 ---
+
+### `worker_host.py`
+- **Type**: Python module
+- **Status**: ✅ Functional
+- **Purpose**: **Experiment config, tmux, worktrees, harness command**
+- **Usage**: Used by `session_launcher.py` (not run directly)
+- **What It Does**:
+  - Defines `ExperimentConfig` (reads `config.yaml`, resolves `sessions`, harness, and agent model)
+  - Defines `WorkerHost` (tmux session, one detached window per session, per-session worktree, harness command, Claude trust-file seeding)
+  - Starts nothing on its own; it has no loop, watchdog, or notion of a run
+- **Key Classes**: `ExperimentConfig`, `WorkerHost`
+- **Dependencies**: `harness.py`, tmux, git
+- **Last Modified**: 2026-11-03
+
+---
+
 
 ## 📊 ANALYSIS/ - Analysis and Visualization Tools
 
@@ -725,19 +726,6 @@ experiments/
 
 ---
 
-### `config.yaml.simple`
-- **Type**: YAML configuration template
-- **Status**: ✅ Functional
-- **Purpose**: **Minimal configuration template for simple projects**
-- **Size**: ~1KB
-- **Contents**:
-  - Single agent example
-  - Minimal options
-  - Simplified structure
-- **Use Case**: Quick starts, simple projects, learning
-- **Last Modified**: 2026-03-16
-
----
 
 ### `config_single_agent.yaml`
 - **Type**: YAML configuration template
@@ -757,28 +745,21 @@ experiments/
 
 ---
 
-### `agent_prompt.md`
+### `session_prompt.md`
 - **Type**: Markdown template
 - **Status**: ✅ Functional
-- **Purpose**: **Worker agent prompt template**
-- **Size**: ~15KB
+- **Purpose**: **The session contract handed to every worker on every chore**
 - **Contents**:
-  - Agent role and capabilities description
-  - Task request loop instructions
-  - Marcus integration guide
+  - Session identity and worktree
+  - One chore per invocation: register, take one task, do it, report it, exit
+  - The `BOARD_DRAINED` stop rule and the retry rule
   - Commit and progress reporting format
-  - Example workflows
-  - Error handling
-- **Used By**: `spawn_agents.py` (generates agent prompts)
-- **Variables Replaced**:
-  - `{{agent_name}}`
-  - `{{agent_role}}`
-  - `{{agent_skills}}`
-  - `{{project_name}}`
-  - `{{implementation_dir}}`
-- **Last Modified**: 2026-03-16
+- **Used By**: `session_launcher.py` (rendered per session; also written to `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`)
+- **Variables Replaced**: `{agent_id}`, `{agent_name}`, `{agent_role}`, `{agent_skills}`, `{workspace}`, `{branch}`
+- **Last Modified**: 2026-11-03
 
 ---
+
 
 ### `single_agent_prompt.template.md`
 - **Type**: Markdown template
@@ -1117,11 +1098,12 @@ experiments/
 
 All scripts are now **100% functional** after fixes applied on 2026-03-18.
 
-### Runners (4/4 working)
+### Runners (5/5 working)
 - ✅ `run_experiment.py`
+- ✅ `session_launcher.py`
+- ✅ `worker_host.py`
 - ✅ `run_single_agent_experiment.py`
 - ✅ `run_comparison_experiment.py`
-- ✅ `spawn_agents.py`
 
 ### Analysis (4/4 working)
 - ✅ `analyze_reliability_decay.py`

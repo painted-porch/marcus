@@ -1,5 +1,9 @@
 # Marcus Multi-Agent Experiment Configuration
-# Copy this template to your experiment directory and customize
+# Copy this template to your experiment directory and customize.
+#
+# A run starts N persistent worker SESSIONS (epic #706). Each session is one
+# identity in its own git worktree that does one chore per harness
+# invocation until the board drains. Marcus itself starts nothing.
 
 # Project name (will be created in Marcus/Planka)
 project_name: "Your Project Name"
@@ -7,12 +11,15 @@ project_name: "Your Project Name"
 # Project description/specification file (relative to experiment dir)
 project_spec_file: "project_spec.md"
 
-# Optional: model used for the spawned ``claude`` Agent processes
-# (project creator, workers, monitor).  When unset, falls back to
-# ``ai.model`` in ``config_marcus.json`` — so by default Planners and
-# Agents share the same model.  Override here for per-experiment
-# control, or pass ``--model X`` on the command line for per-run
-# override (which wins over this field).
+# How many worker sessions to start. When unset, one session per entry
+# in ``agents`` below. ``run_experiment.py --sessions N`` overrides this.
+# sessions: 2
+
+# Optional: model used by the worker sessions' agent CLI. When unset,
+# falls back to ``ai.model`` in ``config_marcus.json`` — so by default
+# the Planner and the workers share the same model.  Override here for
+# per-experiment control, or pass ``--model X`` on the command line for
+# a per-run override (which wins over this field).
 #
 # Accepts any value the ``claude --model`` CLI accepts: aliases
 # (``sonnet``, ``opus``, ``haiku``) or full ids
@@ -48,7 +55,9 @@ project_options:
   # "feature_based" if that is also unset.
   decomposer: "feature_based"
 
-# Agent definitions
+# Session identities
+# The first ``sessions`` entries are used as written; when ``sessions`` is
+# larger than this list, generated identities fill the rest.
 # NOTE: All agents are "unicorn" full-stack developers capable of any task
 # The skills list is a preference hint to Marcus, NOT a limitation
 # Agents MUST accept any task assigned regardless of their listed skills
@@ -70,7 +79,6 @@ agents:
       - "security"
       - "pytest"
       - "integration-testing"
-    subagents: 0
 
   - id: "agent_unicorn_2"
     name: "Unicorn Developer 2"
@@ -89,7 +97,6 @@ agents:
       - "security"
       - "pytest"
       - "integration-testing"
-    subagents: 0
 
   - id: "agent_unicorn_3"
     name: "Unicorn Developer 3"
@@ -108,7 +115,6 @@ agents:
       - "security"
       - "pytest"
       - "integration-testing"
-    subagents: 0
 
   - id: "agent_unicorn_4"
     name: "Unicorn Developer 4"
@@ -127,9 +133,7 @@ agents:
       - "security"
       - "pytest"
       - "integration-testing"
-    subagents: 0
 
 # Optional: Timeout settings (in seconds)
 timeouts:
-  project_creation: 300  # 5 minutes
-  agent_startup: 60      # 1 minute per agent
+  project_creation: 900  # create_project over MCP, including decomposition

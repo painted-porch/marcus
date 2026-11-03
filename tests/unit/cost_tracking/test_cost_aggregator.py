@@ -341,7 +341,7 @@ class TestListProjects:
     """list_projects derives project rollups from token_events.project_id.
 
     Project axis is Marcus's actual identity (per CLAUDE.md GH-388 +
-    spawn_agents.py); run_id is an MLflow tracking handle and is
+    the session launcher); run_id is an MLflow tracking handle and is
     intentionally not the join key here.
     """
 

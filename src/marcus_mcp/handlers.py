@@ -1158,7 +1158,7 @@ def _resolve_project_for_cost(
 ) -> Optional[str]:
     """Pick the most specific project_id available for cost attribution.
 
-    Marcus's identity (per CLAUDE.md GH-388 and spawn_agents.py) is
+    Marcus's identity (per CLAUDE.md GH-388 and the session launcher) is
     ``project_id``, so every planner LLM call made while servicing an
     MCP request should be tagged with the project that request belongs
     to. This helper checks, in order:

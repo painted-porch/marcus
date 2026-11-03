@@ -1,7 +1,7 @@
 """
 Batch ingester for Claude Code worker session JSONL logs.
 
-Spawned worker agents (see ``dev-tools/experiments/runners/spawn_agents.py``)
+Worker sessions (see ``dev-tools/experiments/runners/session_launcher.py``)
 each run a Claude Code CLI subprocess that writes a session log to
 ``~/.claude/projects/<dir>/<session-id>.jsonl``. Every assistant turn lands
 as a JSON record carrying a ``message.usage`` block with input / cache /
@@ -23,8 +23,8 @@ Design choices
   require a side table — added later if needed.
 - **Caller supplies binding.** The ingester does not know how to map a
   session/cwd to an ``agent_id``/``run_id``/``project_id``. Callers
-  provide a ``resolve_binding`` callable (typically wired from the spawn
-  registry written by ``spawn_agents.py``).
+  provide a ``resolve_binding`` callable (typically wired from the
+  ``project_info.json`` the launcher gives every session).
 """
 
 from __future__ import annotations
@@ -309,7 +309,7 @@ class WorkerJSONLIngester:
         tool_intent = classify_tool_intent(content)
 
         # Normalize project_id to the cost-data canonical form (dashless
-        # hex). Bindings come from spawn_agents.py via project_info.json,
+        # hex). Bindings come from the launcher via project_info.json,
         # which may carry either dashed or dashless UUIDs depending on
         # which Marcus code path created the project. Normalizing here
         # keeps every token_events row consistent regardless of source.

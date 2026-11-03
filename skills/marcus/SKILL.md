@@ -1,24 +1,27 @@
 ---
 name: marcus
 description: >
-  Launch Marcus multi-agent experiments with independent Claude agents in tmux panes.
+  Launch Marcus multi-agent experiments with independent agent CLI sessions in tmux.
   Use when the user says "build X with Marcus", "run a Marcus experiment",
-  "spawn N agents with Marcus", "/marcus", or references the Marcus multi-agent
-  framework. This skill handles experiment setup, config generation, and spawning
-  independent Claude CLI agents that coordinate via the Marcus MCP server. Each
-  agent runs in its own tmux pane with full autonomy. NOT for ClawTeam — this is
+  "start N sessions with Marcus", "spawn N agents with Marcus", "/marcus", or
+  references the Marcus multi-agent framework. This skill handles experiment
+  setup, config generation, and starting persistent worker sessions that
+  coordinate via the Marcus MCP server. Each session runs in its own tmux
+  window with full autonomy. NOT for ClawTeam — this is
   specifically for the Marcus MCP-based multi-agent system.
   NOTE: "Marcus" is also the name of the MCP server that agents use for coordination.
   The /marcus skill launches experiments that USE the Marcus MCP server — they are
   complementary, not competing. The MCP server must be running before invoking this skill.
 user-invocable: true
-argument-hint: "<project description> [--name \"Project Name\"] [--agents N] [--complexity prototype|standard|enterprise] [--stall-timeout N] [--decomposer contract_first|feature_based] [--epictetus] [--model <model>] [--harness claude|codex|gemini]"
+argument-hint: "<project description> [--name \"Project Name\"] [--sessions N | --agents N] [--complexity prototype|standard|enterprise] [--decomposer contract_first|feature_based] [--tech-stack X] [--epictetus] [--model <model>] [--harness claude|codex|gemini]"
 ---
 
 # Marcus Multi-Agent Experiment Launcher
 
 You are helping the user launch a Marcus multi-agent experiment. Marcus uses an MCP
-server to coordinate independent Claude CLI agents, each running in its own tmux pane.
+server to coordinate independent agent CLI sessions, each running in its own tmux
+window. A session is one persistent worker identity that does one task per
+invocation until the board drains; Marcus itself starts nothing (epic #706).
 
 ## EXECUTION RULES — READ FIRST, THESE OVERRIDE EVERYTHING BELOW
 
@@ -43,16 +46,17 @@ the experiment.
    and do NOT run the steps. The autonomy rule applies only to a plain `/marcus`
    invocation with no overriding instruction.
 
-Definition of done: a tmux session is spawned and you have reported its name to
-the user (Step 6). Anything short of that is an incomplete run.
+Definition of done: the worker sessions are started in tmux and you have reported
+the tmux session name to the user (Step 6). Anything short of that is an
+incomplete run.
 
 ## Overview of the Six Steps
 
 1. **Pre-flight checks** — verify MCP server, tmux, harness CLI. (Only stopping point.)
-2. **Parse arguments** — extract description, name, agent count, flags.
+2. **Parse arguments** — extract description, name, session count, flags.
 3. **Write `project_spec.md`** into the current working directory.
 4. **Write `config.yaml`** into the current working directory.
-5. **Run `run_experiment.py`** — launches the long-lived control loop (background).
+5. **Run `run_experiment.py`** — starts the session launcher (background).
 6. **Report** the tmux session name and attach instructions to the user.
 
 ## Discovering Paths
@@ -122,34 +126,34 @@ gemini mcp add --transport http --scope user marcus http://localhost:4298/mcp
 The user's input comes in as `$ARGUMENTS`. Extract:
 - **Project description**: Everything that describes what to build
 - **Project name**: Look for `--name "Some Name"` or `--name some_name`. If not provided, derive a short name from the description.
-- **Agent ceiling**: Look for "N agents", "--agents N", "with N workers". **Default: unset.** When the user does NOT pass `--agents`, omit `max_agents` from config.yaml entirely — Marcus then sizes the agent pool to each DAG layer's full width (peaks at the widest layer; full parallelism). Only when `--agents N` is explicitly given, write `max_agents: N` — a hard cap the pool never exceeds. Use `--agents N` to cap on a machine that cannot handle many concurrent agents.
+- **Session count**: Look for "N sessions", "--sessions N", "N agents", "--agents N", "with N workers". **Default: 2.** This is how many persistent worker sessions start; it is written as `sessions: N` in config.yaml. There is no pool sizing and no cap: exactly N sessions run for the whole project.
 - **Complexity**: Look for "--complexity prototype|standard|enterprise". Default: "prototype"
-- **Stall timeout**: Look for "--stall-timeout N" (minutes). Default: 20. Sets `stall_timeout_minutes` in config.yaml — the runner's control loop tears down the tmux session if task counts don't change for that long, so a stalled run does not hang. Pass `--stall-timeout 0` to disable the watchdog.
+- **Tech stack**: Look for `--tech-stack X`. Default: inferred (see the tech stack rule in Step 4).
 - **Decomposer**: Look for "--decomposer contract_first|feature_based". Default: "contract_first" (as of v0.3.4). This controls Marcus's task decomposition strategy (GH-320):
   - `contract_first` — default. Generates interface contracts before decomposition. Board is fully populated before any agent starts (no Phase A race). Each agent owns one side of a contract. Best for tightly-coupled projects (games, dashboards, state machines).
   - `feature_based` — legacy path, splits tasks by functional requirement. Fine for loosely-coupled projects where features don't share files.
-- **Epictetus mode**: Look for `--epictetus` flag. Default: not set (false). When present, the runner does NOT tear down the tmux session after the experiment completes — it stays alive for Epictetus post-experiment interrogation.
-- **Agent model**: Look for `--model <value>`. Default: not set — Marcus reads `ai.model` from `config_marcus.json` and uses that same value for the spawned Agent CLI processes (so by default Planners and Agents share one model). When `--model X` is provided, X overrides for THIS run only and applies to all spawned panes (project creator + workers). The same string is passed verbatim to whichever harness is active — accepts `claude --model` values (e.g. `sonnet`, `opus`, `haiku`, `claude-haiku-4-5-20251001`) or `codex --model` values (e.g. `gpt-5-codex`, `o3`). No client-side validation against per-harness namespaces — invalid model names surface as CLI errors inside the agent panes. Affects ONLY the spawned Agents — Marcus's Planner model continues to read from `config_marcus.json`.
-- **Agent harness**: Look for `--harness claude|codex|gemini`. Default: `claude`. `claude` spawns Anthropic's claude CLI with `--dangerously-skip-permissions`. `codex` spawns OpenAI's codex CLI with `exec --dangerously-bypass-approvals-and-sandbox` (the documented form of "YOLO mode" — sets `approval: never, sandbox: danger-full-access`). `gemini` spawns Google's gemini CLI with `--skip-trust --yolo` (bypass the trusted-directory dialog and auto-approve all tool calls). All agents in a single experiment use the same harness; mixed-harness teams are out of scope for v1. The runner pre-flights `which <cli>` and fails fast if the binary is missing.
+- **Epictetus mode**: Look for `--epictetus` flag. Default: not set (false). When present, the launcher does NOT tear down the tmux session after the sessions go home — it stays alive for Epictetus post-experiment interrogation.
+- **Agent model**: Look for `--model <value>`. Default: not set — Marcus reads `ai.model` from `config_marcus.json` and uses that same value for the worker sessions' agent CLI (so by default Planners and workers share one model). When `--model X` is provided, X overrides for THIS run only and applies to every session. The same string is passed verbatim to whichever harness is active; invalid names surface as CLI errors in the tmux windows.
+- **Agent harness**: Look for `--harness claude|codex|gemini`. Default: `claude`. `claude` runs Anthropic's claude CLI with `--dangerously-skip-permissions`; `codex` runs OpenAI's codex CLI with `exec --dangerously-bypass-approvals-and-sandbox`; `gemini` runs Google's gemini CLI with `--skip-trust --yolo`. All sessions in one run use the same harness.
 
 After extracting all values, print one line summarizing the parse (description,
-name, agents, complexity, decomposer, model, harness) so the user can see it —
+name, sessions, complexity, decomposer, tech stack, model, harness) so the user can see it —
 then **continue immediately to Step 3. Printing the parse is NOT a checkpoint.
 Do not wait for a reply.**
 
 Examples:
-- `/marcus Build a snake game with 3 agents` -> description="Build a snake game", name="snake_game", agents=3, complexity="prototype", decomposer="contract_first"
-- `/marcus Build a REST API for task management` -> description="Build a REST API for task management", name="task_management_api", agents=2, complexity="prototype", decomposer="contract_first"
-- `/marcus Build a chat app --name "ChatBuddy" with 4 agents` -> description="Build a chat app", name="ChatBuddy", agents=4, complexity="prototype", decomposer="contract_first"
-- `/marcus Use 2 agents to build a pomodoro timer --complexity standard --name "FocusTimer"` -> description="build a pomodoro timer", name="FocusTimer", agents=2, complexity="standard", decomposer="contract_first"
-- `/marcus Build a snake game with 2 agents --decomposer feature_based` -> description="Build a snake game", name="snake_game", agents=2, complexity="prototype", decomposer="feature_based"
-- `/marcus --decomposer feature_based Build a weather dashboard with 3 agents` -> description="Build a weather dashboard", name="weather_dashboard", agents=3, complexity="prototype", decomposer="feature_based"
-- `/marcus Build a snake game --model haiku` -> description="Build a snake game", name="snake_game", agents=2, complexity="prototype", decomposer="contract_first", model="haiku", harness="claude"
-- `/marcus Build a chat app with 3 agents --model claude-haiku-4-5-20251001` -> description="Build a chat app", name="chat_app", agents=3, complexity="prototype", decomposer="contract_first", model="claude-haiku-4-5-20251001", harness="claude"
-- `/marcus Build a TODO CLI with 2 agents --harness codex --model gpt-5-codex` -> description="Build a TODO CLI", name="todo_cli", agents=2, complexity="prototype", decomposer="contract_first", model="gpt-5-codex", harness="codex"
-- `/marcus Build a snake game --harness codex` -> description="Build a snake game", name="snake_game", agents=2, complexity="prototype", decomposer="contract_first", harness="codex" (model left unset; codex uses its global default)
-- `/marcus build a ping pong html game --harness gemini` -> description="build a ping pong html game", name="ping_pong_html_game", agents=2, complexity="prototype", decomposer="contract_first", harness="gemini" (model left unset; gemini uses its global default)
-- `/marcus Build a TODO CLI --harness gemini --model gemini-2.5-pro` -> description="Build a TODO CLI", name="todo_cli", agents=2, complexity="prototype", decomposer="contract_first", model="gemini-2.5-pro", harness="gemini"
+- `/marcus Build a snake game with 3 agents` -> description="Build a snake game", name="snake_game", sessions=3, complexity="prototype", decomposer="contract_first"
+- `/marcus Build a REST API for task management` -> description="Build a REST API for task management", name="task_management_api", sessions=2, complexity="prototype", decomposer="contract_first"
+- `/marcus Build a chat app --name "ChatBuddy" with 4 agents` -> description="Build a chat app", name="ChatBuddy", sessions=4, complexity="prototype", decomposer="contract_first"
+- `/marcus Use 2 agents to build a pomodoro timer --complexity standard --name "FocusTimer"` -> description="build a pomodoro timer", name="FocusTimer", sessions=2, complexity="standard", decomposer="contract_first"
+- `/marcus Build a snake game with 2 agents --decomposer feature_based` -> description="Build a snake game", name="snake_game", sessions=2, complexity="prototype", decomposer="feature_based"
+- `/marcus --decomposer feature_based Build a weather dashboard with 3 agents` -> description="Build a weather dashboard", name="weather_dashboard", sessions=3, complexity="prototype", decomposer="feature_based"
+- `/marcus Build a snake game --model haiku` -> description="Build a snake game", name="snake_game", sessions=2, complexity="prototype", decomposer="contract_first", model="haiku", harness="claude"
+- `/marcus Build a chat app with 3 agents --model claude-haiku-4-5-20251001` -> description="Build a chat app", name="chat_app", sessions=3, complexity="prototype", decomposer="contract_first", model="claude-haiku-4-5-20251001", harness="claude"
+- `/marcus Build a TODO CLI with 2 agents --harness codex --model gpt-5-codex` -> description="Build a TODO CLI", name="todo_cli", sessions=2, complexity="prototype", decomposer="contract_first", model="gpt-5-codex", harness="codex"
+- `/marcus Build a snake game --harness codex` -> description="Build a snake game", name="snake_game", sessions=2, complexity="prototype", decomposer="contract_first", harness="codex" (model left unset; codex uses its global default)
+- `/marcus build a ping pong html game --harness gemini` -> description="build a ping pong html game", name="ping_pong_html_game", sessions=2, complexity="prototype", decomposer="contract_first", harness="gemini" (model left unset; gemini uses its global default)
+- `/marcus Build a TODO CLI --harness gemini --model gemini-2.5-pro` -> description="Build a TODO CLI", name="todo_cli", sessions=2, complexity="prototype", decomposer="contract_first", model="gemini-2.5-pro", harness="gemini"
 
 ---
 
@@ -157,15 +161,16 @@ Examples:
 
 Write all files into the **current working directory**. Do NOT create or mkdir a
 new directory. `run_experiment.py` will create the subdirectories it needs
-(`prompts/`, `logs/`, `implementation/`).
+(`prompts/`, `logs/`, `implementation/`, `worktrees/`).
 
 ```
 <cwd>/
 ├── config.yaml       (you create this — Step 4)
 ├── project_spec.md   (you create this — Step 3)
-├── prompts/          (created by run_experiment.py)
-├── logs/             (created by run_experiment.py)
-└── implementation/   (created by run_experiment.py, git repo where agents write code)
+├── prompts/          (created by run_experiment.py: one prompt and one script per session)
+├── logs/             (created by run_experiment.py: runner.log)
+├── implementation/   (created by run_experiment.py, git repo on main where work merges)
+└── worktrees/        (one git worktree per session, worktrees/<agent_id>)
 ```
 
 Write the user's project description **as-is** to `project_spec.md`. Do NOT rewrite,
@@ -187,18 +192,15 @@ Use this exact format — field names are case-sensitive:
 project_name: "<--name value if provided, otherwise derived from description>"
 project_spec_file: "project_spec.md"
 
-# max_agents: ONLY include this line if the user passed --agents N.
-# When --agents N was given, write:  max_agents: N
-# When --agents was NOT given, omit the line entirely — Marcus sizes the
-# agent pool to each DAG layer's full width (full parallelism).
-
-stall_timeout_minutes: 20   # Runner tears down the tmux session if task counts don't change for this many minutes. 0 disables the watchdog.
+# How many persistent worker sessions to start (default 2).
+sessions: <parsed session count>
 
 project_options:
   complexity: "<parsed complexity>"  # "prototype" (default), "standard" for medium, "enterprise" for large
   provider: "sqlite"        # Uses local SQLite DB. Also supports: "planka", "github", "linear"
   mode: "new_project"       # Always new_project
   decomposer: "<parsed decomposer>"  # "contract_first" (default) or "feature_based" (GH-320)
+  tech_stack: <parsed tech stack>  # e.g. ["python"] — pins the language; never omit (see "Tech stack rule")
 
 agents:
   - id: "agent_unicorn_1"
@@ -218,12 +220,10 @@ agents:
       - "security"
       - "pytest"
       - "integration-testing"
-    subagents: 0
-  # Repeat for each agent...
+  # Repeat for each session identity...
 
 timeouts:
-  project_creation: 600
-  agent_startup: 60
+  project_creation: 900
 ```
 
 **Complexity heuristic:**
@@ -239,11 +239,21 @@ contain the same substring, and a substring match would pick the wrong
 strategy half the time. If the flag is absent, always set
 `decomposer: "contract_first"`.
 
-**Agent blocks:** Write **two** agent blocks — they are only the *template
-pool* the runner cycles through for agent names and skills. The pool's length
-does NOT set or cap the agent count: the runner sizes the pool to each DAG
-layer's width, bounded only by `max_agents` if `--agents N` was passed. Use
-IDs `agent_unicorn_1`, `agent_unicorn_2`.
+**Tech stack rule:** Always write a non-empty `tech_stack` list. Infer it
+from the description — if the user names a language or framework ("a
+Python CLI", "a React dashboard"), use it; if `--tech-stack X` is passed,
+use it verbatim; if the description implies no specific stack, pick a
+sensible default for the project type (CLI tool → `["python"]`; web app
+→ `["typescript", "react"]`). Never leave it empty. Reason: with no
+stack pinned, Marcus's decomposition picks the language independently in
+each pipeline step — test53 produced Python contracts and a TypeScript
+scaffold for one project (issue #604). `tech_stack` becomes a hard
+constraint binding every pipeline step.
+
+**Agent blocks:** Write one agent block per session (so `sessions: 3` gets
+three blocks), using IDs `agent_unicorn_1`, `agent_unicorn_2`, and so on. The
+launcher uses the first `sessions` entries as the session identities and
+generates `session_<i>` identities if the list is shorter.
 
 Then continue immediately to Step 5.
 
@@ -256,10 +266,11 @@ Discover the Marcus repo root:
 MARCUS_ROOT=$(python3 -c "from pathlib import Path; import marcus_mcp; print(Path(marcus_mcp.__file__).parent.parent.parent)")
 ```
 
-`run_experiment.py` is a **long-lived control loop**. It spawns the project
-creator, then polls Marcus and spawns ephemeral one-task worker agents layer by
-layer until the project finishes, then tears down the tmux session. It runs for
-the **entire experiment** — many minutes — so it MUST be launched as a
+`run_experiment.py` starts the **session launcher**: it creates the project
+over MCP, starts `sessions` persistent worker sessions in tmux (one git worktree
+each, one task per harness invocation, fresh context each time), waits for every
+session to go home when the board drains, then tears down the tmux session. It
+runs for the **entire experiment** — many minutes — so it MUST be launched as a
 **background process**: pass `run_in_background: true` to the Bash tool. Do NOT
 run it with a foreground timeout — a timeout would kill the runner mid-experiment.
 
@@ -273,7 +284,7 @@ cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <c
 # With Epictetus mode (tmux session kept alive for interrogation):
 cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <cwd> --epictetus
 
-# With agent model override (spawned panes run on this model):
+# With agent model override (every session runs on this model):
 cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <cwd> --model claude-haiku-4-5-20251001
 
 # With codex harness:
@@ -281,14 +292,23 @@ cd "${MARCUS_ROOT}/dev-tools/experiments" && python runners/run_experiment.py <c
 ```
 
 This will:
-- Create `prompts/`, `logs/`, `implementation/` directories
-- Initialize a git repo in `implementation/`
+- Create `prompts/`, `logs/`, `implementation/`, `worktrees/` directories
+- Initialize a git repo in `implementation/` on `main`
+- Call `create_project` over MCP itself (no project-creator agent) and commit the scaffold
 - Create a tmux session: `marcus_<project_name_lowercase>`
-- Spawn the project creator, then run the control loop: poll Marcus and spawn
-  ephemeral one-task agents to match the active task layer (agent count is
-  dynamic, capped by `max_agents`), then tear down the tmux session when the
-  project completes or stalls
+- Start `sessions` worker sessions, each in its own tmux window and worktree
+- Wait until every session exits on `BOARD_DRAINED`, print the board counts, tear down tmux
 - Mirror live progress to `<cwd>/logs/runner.log`
+
+**Do NOT verify the launch by tailing `logs/runner.log` right after launching.**
+The launcher creates `runner.log` only once the sessions start, after
+`create_project` finishes decomposing (~30–90s); `project_info.json` and
+`worktrees/` appear then too. A `tail`/`cat` immediately after launch prints a
+misleading `No such file or directory` (exit 1) even though the run is healthy —
+never present that as an error. If you want a quick liveness check, confirm only
+that the tmux session exists:
+`tmux has-session -t marcus_<project_name_lowercase> && echo live`. Then go to
+Step 6 and tell the user `runner.log` appears within ~90s.
 
 Then continue immediately to Step 6.
 
@@ -298,24 +318,23 @@ Then continue immediately to Step 6.
 
 The experiment is now running as a background process. Tell the user:
 - The tmux session name: `marcus_<project_name_lowercase_underscored>`
-- Watch the control loop live: `tail -f <cwd>/logs/runner.log`
-- Watch the agents: `tmux attach -t <session_name>` (click panes, Ctrl+b arrows, Ctrl+b n/p for windows)
+- Watch the launcher live: `tail -f <cwd>/logs/runner.log` (the file appears ~30–90s after launch, once project creation finishes)
+- Watch the sessions: `tmux attach -t <session_name>` (one window per session, Ctrl+b n/p to switch)
 - How to kill: `tmux kill-session -t <session_name>`
 - The experiment directory location
-- The runner spawns worker agents dynamically as the task graph opens up, and
-  tears down the tmux session itself when the project completes.
+- Exactly `sessions` workers run for the whole project; the launcher tears the
+  tmux session down itself when the board drains and every session has gone home.
 
 This completes the run.
 
 ## Important Notes
 
 - The Marcus MCP server must be running at `http://localhost:4298/mcp` before launching
-- Each agent is a fully independent harness CLI process: `claude --dangerously-skip-permissions` (default), `codex exec --dangerously-bypass-approvals-and-sandbox` when `--harness codex`, or `gemini --skip-trust --yolo` when `--harness gemini`
+- Each session is a fully independent harness CLI process, re-invoked once per task: `claude --dangerously-skip-permissions --print` (default), `codex exec --dangerously-bypass-approvals-and-sandbox` when `--harness codex`, or `gemini --skip-trust --yolo` when `--harness gemini`
 - Agents coordinate via MCP tools (register_agent, request_next_task, report_task_progress, etc.)
-- All agents work on the `main` branch in `implementation/`; Marcus prevents task conflicts
-- MLflow tracks experiment metrics in `<experiment_dir>/mlruns/`
-- The project creator agent calls `mcp__marcus__create_project` which uses AI to decompose the
-  spec into tasks — this takes 30-60 seconds
-- Workers wait for `project_info.json` before starting (written by project creator)
-- Each worker is ephemeral — it does exactly one task, then its process exits
-- The runner's control loop detects completion (Marcus flips `is_running`) and tears down the tmux session; there is no separate monitor agent
+- Each session works in its own worktree (`worktrees/<agent_id>`, branch `marcus/<agent_id>`); Marcus merges accepted work into `main` in `implementation/`
+- The launcher calls `mcp__marcus__create_project` itself, which uses AI to decompose the
+  spec into tasks — this takes 30-90 seconds; sessions start after that
+- A session keeps its identity for the whole run but gets a fresh context every task: it registers (idempotently), takes one task, does it, reports it, and exits; the session script invokes it again
+- A session exits for good when `request_next_task` returns `BOARD_DRAINED`; nothing restarts a dead session, and Marcus recovers its task for another session
+- There is no project-creator agent, no monitor agent, and no stall watchdog

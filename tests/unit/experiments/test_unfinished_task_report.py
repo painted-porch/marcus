@@ -7,9 +7,11 @@ A run could finish with work silently missing: the last line printed was
 watch the live progress line or go inspect the board to discover it, so
 a partially-failed run looked exactly like a successful one.
 
-``get_experiment_status`` now reports the unfinished tasks themselves —
-id, name, status and the blocker text — so the runner (and any other
-consumer) can state plainly what did not get built and why.
+``get_experiment_status`` reports the unfinished tasks themselves — id,
+name, status and the blocker text — so a consumer can state plainly what
+did not get built and why. (The spawn-per-task runner's renderer of that
+list went with the spawn loop; the session launcher's named report lands
+with the board-side read path that replaces the experiment monitor.)
 """
 
 from datetime import datetime, timezone
@@ -154,66 +156,6 @@ class TestUnfinishedTasksReported:
         assert "unfinished_tasks" not in status
 
 
-class TestRunnerReportRendering:
-    """The runner must state plainly what did not get built.
-
-    Counts in a scrolling progress line are not a report: a run could end
-    with a deliverable missing and the final output still read like
-    success. These pin the human-facing text.
-    """
-
-    def test_clean_run_says_all_complete(self) -> None:
-        from runners.spawn_agents import format_unfinished_report
-
-        lines = format_unfinished_report([], total=9)
-
-        assert len(lines) == 1
-        assert "9/9" in lines[0]
-        assert "complete" in lines[0].lower()
-
-    def test_unfinished_work_is_named_with_reasons(self) -> None:
-        from runners.spawn_agents import format_unfinished_report
-
-        lines = format_unfinished_report(
-            [
-                {
-                    "id": "abc123",
-                    "name": "Implement CLI Entry Point",
-                    "status": "blocked",
-                    "reason": "needs a paid API key",
-                },
-                {
-                    "id": "def456",
-                    "name": "Write README",
-                    "status": "todo",
-                    "reason": "never claimed by an agent",
-                },
-            ],
-            total=10,
-        )
-
-        text = "\n".join(lines)
-        assert "8/10" in text
-        assert "2 task(s) did NOT complete" in text
-        assert "Implement CLI Entry Point" in text
-        assert "needs a paid API key" in text
-        assert "Write README" in text
-        assert "never claimed by an agent" in text
-
-    def test_report_warns_deliverables_may_be_missing(self) -> None:
-        """The consequence must be stated, not left for the reader to infer."""
-        from runners.spawn_agents import format_unfinished_report
-
-        text = "\n".join(
-            format_unfinished_report(
-                [{"id": "a", "name": "X", "status": "blocked", "reason": "r"}],
-                total=2,
-            )
-        )
-
-        assert "missing" in text.lower()
-
-
 class TestBlockerTextComesFromTheStore:
     """Codex P1: the blocker text lives in the provider's blocker store.
 
@@ -330,26 +272,6 @@ class TestUntrustworthyFetchIsNotSuccess:
         status = await _monitor(tasks).get_status()
 
         assert len(status["unfinished_tasks"]) == 1
-
-
-class TestRunnerRefusesToClaimSuccessBlind:
-    """The runner must never imply success from missing data."""
-
-    def test_absent_report_says_it_could_not_verify(self) -> None:
-        from runners.spawn_agents import format_unfinished_report
-
-        lines = format_unfinished_report(None, total=9)
-
-        text = "\n".join(lines).lower()
-        assert "could not" in text or "unable" in text
-        assert "complete" not in text.split("could not")[0]
-
-    def test_zero_total_does_not_claim_all_complete(self) -> None:
-        from runners.spawn_agents import format_unfinished_report
-
-        text = "\n".join(format_unfinished_report([], total=0)).lower()
-
-        assert "all 0/0" not in text
 
 
 class TestSqliteProviderExposesBlockers:

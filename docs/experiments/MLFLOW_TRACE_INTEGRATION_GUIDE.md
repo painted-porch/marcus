@@ -195,31 +195,6 @@ def run_experiment(config):
         return results
 ```
 
-### experiments/spawn_agents.py
-
-Trace agent spawning and task assignment:
-
-```python
-from mlflow_tracing import trace_agent_task
-
-@trace_agent_task("spawn_agent")
-def spawn_agent(agent_config):
-    # Your agent spawning logic
-    agent = create_agent(agent_config)
-
-    # Track in MLflow
-    with mlflow.start_span(name="agent_initialization") as span:
-        span.set_attribute("agent_id", agent.id)
-        span.set_attribute("skills", agent_config["skills"])
-        span.set_attribute("role", agent_config["role"])
-
-    return agent
-```
-
----
-
-## Viewing Traces
-
 ### 1. Start MLflow UI
 
 ```bash

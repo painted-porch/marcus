@@ -101,6 +101,18 @@ class TestCreateProjectOptions:
             == "sqlite"
         )
 
+    def test_labels_the_run_path_as_marcus(self, tmp_path: Path) -> None:
+        """The cost store's runs.path says this run came from the launcher."""
+        options = build_create_project_options({}, tmp_path, tmp_path / "i.json")
+        assert options["path"] == "marcus"
+
+    def test_keeps_an_explicit_run_path(self, tmp_path: Path) -> None:
+        """A config that names its own entry point (posidonius) is not overridden."""
+        options = build_create_project_options(
+            {"path": "posidonius"}, tmp_path, tmp_path / "i.json"
+        )
+        assert options["path"] == "posidonius"
+
 
 class TestSessionPrompt:
     """The contract a worker is handed on every chore."""
@@ -235,25 +247,25 @@ def _config(tmp_path: Path, agents: int = 2) -> SimpleNamespace:
     )
 
 
-def _spawner(tmp_path: Path) -> Mock:
-    spawner = Mock()
-    spawner.harness = "claude"
-    spawner.harness_impl = Mock(
+def _host(tmp_path: Path) -> Mock:
+    host = Mock()
+    host.harness = "claude"
+    host.harness_impl = Mock(
         binary="claude", needs_pretrust_directory=False, workflow_files=("CLAUDE.md",)
     )
-    spawner.harness_impl.install_hint = Mock(return_value=[])
-    spawner.marcus_mcp_url = "http://127.0.0.1:4298/mcp"
-    spawner.tmux_session = "marcus_tiny"
-    spawner._build_mcp_register_snippet = Mock(return_value="register-snippet")
-    spawner._build_agent_command = Mock(return_value="claude --print < prompt")
+    host.harness_impl.install_hint = Mock(return_value=[])
+    host.marcus_mcp_url = "http://127.0.0.1:4298/mcp"
+    host.tmux_session = "marcus_tiny"
+    host.build_mcp_register_snippet = Mock(return_value="register-snippet")
+    host.build_agent_command = Mock(return_value="claude --print < prompt")
     counter = {"n": 0}
 
     def _window(script: Path, title: str) -> str:
         counter["n"] += 1
         return f"%{counter['n']}"
 
-    spawner.run_worker_in_new_window = Mock(side_effect=_window)
-    return spawner
+    host.start_window = Mock(side_effect=_window)
+    return host
 
 
 def _mcp(create_result: Any) -> Mock:
@@ -279,7 +291,7 @@ class TestGitSetup:
             _config(tmp_path),
             TEMPLATE.parent,
             sessions=1,
-            spawner=_spawner(tmp_path),
+            host=_host(tmp_path),
             mcp_factory=lambda t: Mock(),
             sleep=lambda s: None,
         )
@@ -445,25 +457,25 @@ class TestLauncherRun:
         self, tmp_path: Path, create_result: Any, **kwargs: Any
     ) -> tuple[SessionLauncher, Mock, Mock]:
         config = _config(tmp_path)
-        spawner = _spawner(tmp_path)
+        host = _host(tmp_path)
         mcp = _mcp(create_result)
         launcher = SessionLauncher(
             config,
             TEMPLATE.parent,
             sessions=kwargs.pop("sessions", 2),
-            spawner=spawner,
+            host=host,
             mcp_factory=lambda timeout: mcp,
             sleep=lambda s: None,
             **kwargs,
         )
-        return launcher, spawner, mcp
+        return launcher, host, mcp
 
     def test_creates_the_project_itself_with_project_root(self, tmp_path: Path) -> None:
         """No creator agent: create_project is called over MCP with the implementation dir as root."""
-        launcher, spawner, mcp = self._launcher(
+        launcher, host, mcp = self._launcher(
             tmp_path, {"success": True, "project_id": "p1", "tasks_created": 3}
         )
-        spawner._count_live_worker_panes = Mock(return_value=0)
+        host.count_live_panes = Mock(return_value=0)
 
         with (
             patch(
@@ -491,7 +503,7 @@ class TestLauncherRun:
 
     def test_writes_project_info_when_marcus_did_not(self, tmp_path: Path) -> None:
         """Workers wait on project_info.json; the launcher guarantees it exists."""
-        launcher, spawner, _ = self._launcher(
+        launcher, host, _ = self._launcher(
             tmp_path,
             {"success": True, "project_id": "p1", "tasks_created": 3},
             wait=False,
@@ -511,7 +523,7 @@ class TestLauncherRun:
 
     def test_starts_n_sessions_in_their_worktrees(self, tmp_path: Path) -> None:
         """N sessions, each with a worktree at worktrees/<agent_id>, a prompt and a script."""
-        launcher, spawner, _ = self._launcher(
+        launcher, host, _ = self._launcher(
             tmp_path,
             {"success": True, "project_id": "p1", "tasks_created": 3},
             sessions=3,
@@ -527,7 +539,7 @@ class TestLauncherRun:
         ):
             launcher.run()
 
-        worktrees = [c.args[3] for c in spawner._create_agent_worktree.call_args_list]
+        worktrees = [c.args[2] for c in host.create_worktree.call_args_list]
         assert [w.name for w in worktrees] == [
             "agent_unicorn_1",
             "agent_unicorn_2",
@@ -536,13 +548,13 @@ class TestLauncherRun:
         assert all(
             w.parent == launcher.config.experiment_dir / "worktrees" for w in worktrees
         )
-        assert spawner.run_worker_in_new_window.call_count == 3
+        assert host.start_window.call_count == 3
         assert (launcher.config.prompts_dir / "session_3.sh").exists()
         assert (
             "ONE CHORE" in (launcher.config.prompts_dir / "session_3.txt").read_text()
         )
         # chore command is the single-shot form
-        assert spawner._build_agent_command.call_args.kwargs["print_mode"] is True
+        assert host.build_agent_command.call_args.kwargs["print_mode"] is True
 
     def test_instruction_files_carry_the_session_contract(self, tmp_path: Path) -> None:
         """CLAUDE.md (and the other harness files) say what the prompt says."""
@@ -562,10 +574,10 @@ class TestLauncherRun:
 
     def test_waits_for_all_sessions_then_tears_down(self, tmp_path: Path) -> None:
         """No restarts: the launcher polls liveness until zero, then kills tmux."""
-        launcher, spawner, _ = self._launcher(
+        launcher, host, _ = self._launcher(
             tmp_path, {"success": True, "project_id": "p1", "tasks_created": 3}
         )
-        spawner._count_live_worker_panes = Mock(side_effect=[2, 1, 0])
+        host.count_live_panes = Mock(side_effect=[2, 1, 0])
 
         with (
             patch("runners.session_launcher.shutil.which", return_value="/x"),
@@ -577,23 +589,18 @@ class TestLauncherRun:
         ):
             assert launcher.run() is True
 
-        assert spawner._count_live_worker_panes.call_count == 3
-        assert spawner.run_worker_in_new_window.call_count == 2  # never more than N
-        kill = [
-            c
-            for c in run.call_args_list
-            if c.args and c.args[0][:2] == ["tmux", "kill-session"]
-        ]
-        assert len(kill) == 1
+        assert host.count_live_panes.call_count == 3
+        assert host.start_window.call_count == 2  # never more than N
+        host.kill_session.assert_called_once()
 
     def test_epictetus_keeps_tmux_alive(self, tmp_path: Path) -> None:
         """Inspection mode leaves the session for the operator."""
-        launcher, spawner, _ = self._launcher(
+        launcher, host, _ = self._launcher(
             tmp_path,
             {"success": True, "project_id": "p1", "tasks_created": 3},
             epictetus=True,
         )
-        spawner._count_live_worker_panes = Mock(return_value=0)
+        host.count_live_panes = Mock(return_value=0)
         with (
             patch("runners.session_launcher.shutil.which", return_value="/x"),
             patch("runners.session_launcher.check_mcp_health", return_value=True),
@@ -603,15 +610,11 @@ class TestLauncherRun:
             ) as run,
         ):
             launcher.run()
-        assert not [
-            c
-            for c in run.call_args_list
-            if c.args and c.args[0][:2] == ["tmux", "kill-session"]
-        ]
+        host.kill_session.assert_not_called()
 
     def test_failed_project_creation_starts_no_sessions(self, tmp_path: Path) -> None:
         """A rejected create_project (for example project_root_required) ends the run."""
-        launcher, spawner, _ = self._launcher(
+        launcher, host, _ = self._launcher(
             tmp_path,
             {"success": False, "error": "nope", "error_code": "project_root_required"},
         )
@@ -624,13 +627,13 @@ class TestLauncherRun:
             ),
         ):
             assert launcher.run() is False
-        spawner.run_worker_in_new_window.assert_not_called()
+        host.start_window.assert_not_called()
 
     def test_preflight_failures_stop_before_any_side_effect(
         self, tmp_path: Path
     ) -> None:
         """No harness binary or no Marcus: nothing is created."""
-        launcher, spawner, mcp = self._launcher(
+        launcher, host, mcp = self._launcher(
             tmp_path, {"success": True, "project_id": "p1", "tasks_created": 3}
         )
         with patch("runners.session_launcher.shutil.which", return_value=None):
@@ -641,4 +644,101 @@ class TestLauncherRun:
         ):
             assert launcher.run() is False
         mcp.call_tool.assert_not_called()
-        spawner.create_tmux_session.assert_not_called()
+        host.create_tmux_session.assert_not_called()
+
+
+class TestRunnerLog:
+    """The launcher mirrors its progress lines to ``logs/runner.log``."""
+
+    def test_say_prints_and_appends_to_runner_log(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A progress line reaches both stdout and the log file."""
+        launcher = SessionLauncher(
+            _config(tmp_path),
+            TEMPLATE.parent,
+            sessions=1,
+            host=_host(tmp_path),
+            mcp_factory=lambda t: Mock(),
+        )
+
+        launcher.say("hello operator")
+
+        assert "hello operator" in capsys.readouterr().out
+        log = Path(launcher.config.experiment_dir) / "logs" / "runner.log"
+        assert "hello operator" in log.read_text()
+
+    def test_run_writes_the_log_and_names_it(self, tmp_path: Path) -> None:
+        """A full run leaves a runner.log that says how to follow it."""
+        config = _config(tmp_path)
+        host = _host(tmp_path)
+        host.count_live_panes = Mock(return_value=0)
+        launcher = SessionLauncher(
+            config,
+            TEMPLATE.parent,
+            sessions=1,
+            host=host,
+            mcp_factory=lambda t: _mcp(
+                {"success": True, "project_id": "p1", "tasks_created": 1}
+            ),
+            sleep=lambda s: None,
+        )
+        with (
+            patch("runners.session_launcher.shutil.which", return_value="/x"),
+            patch("runners.session_launcher.check_mcp_health", return_value=True),
+            patch(
+                "runners.session_launcher.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ),
+        ):
+            assert launcher.run() is True
+        text = (Path(config.experiment_dir) / "logs" / "runner.log").read_text()
+        assert "started" in text
+        assert "tail -f" in text
+        assert "gone home" in text
+
+
+class TestCreateProjectTimeout:
+    """The MCP timeout for create_project honours the config's timeouts block."""
+
+    def test_uses_config_timeout_when_present(self, tmp_path: Path) -> None:
+        """``timeouts.project_creation`` is the client timeout."""
+        config = _config(tmp_path)
+        config.get_timeout = lambda key, default: (
+            1234 if key == "project_creation" else default
+        )
+        seen: List[float] = []
+
+        def factory(timeout: float) -> Mock:
+            seen.append(timeout)
+            return _mcp({"success": True, "project_id": "p1", "tasks_created": 1})
+
+        launcher = SessionLauncher(
+            config,
+            TEMPLATE.parent,
+            sessions=1,
+            host=_host(tmp_path),
+            mcp_factory=factory,
+        )
+        assert launcher.create_project() is True
+        assert seen[0] == 1234.0
+
+    def test_falls_back_to_default_without_get_timeout(self, tmp_path: Path) -> None:
+        """A config stand-in without timeouts gets the built-in default."""
+        from runners.session_launcher import CREATE_PROJECT_TIMEOUT_SECONDS
+
+        seen: List[float] = []
+
+        def factory(timeout: float) -> Mock:
+            seen.append(timeout)
+            return _mcp({"success": True, "project_id": "p1", "tasks_created": 1})
+
+        launcher = SessionLauncher(
+            _config(tmp_path),
+            TEMPLATE.parent,
+            sessions=1,
+            host=_host(tmp_path),
+            mcp_factory=factory,
+        )
+        assert launcher.create_project() is True
+        assert seen[0] == CREATE_PROJECT_TIMEOUT_SECONDS

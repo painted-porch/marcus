@@ -85,7 +85,7 @@ python runners/run_experiment.py ~/my-experiments/podcast-generator
 Main experiment execution scripts.
 
 #### `run_experiment.py`
-**Purpose**: Multi-agent Marcus experiment launcher
+**Purpose**: Set up an experiment directory and start worker sessions
 **Usage**:
 ```bash
 # Initialize new experiment
@@ -94,24 +94,47 @@ python runners/run_experiment.py --init <experiment_dir>
 # Validate configuration
 python runners/run_experiment.py --validate <experiment_dir>
 
-# Run experiment
+# Run: sessions from config.yaml (one per listed agent unless `sessions:` is set)
 python runners/run_experiment.py <experiment_dir>
+
+# Run with three worker sessions
+python runners/run_experiment.py <experiment_dir> --sessions 3
 ```
 
 **What it does**:
-- Creates experiment directory structure
-- Spawns project creator agent
-- Launches multiple worker agents (configurable)
-- Each agent registers with Marcus and requests tasks
-- All agents work on `main` branch in implementation/
-- Full MLflow tracking integration
+- Creates the experiment directory structure from the templates
+- Hands the run to the session launcher (`session_launcher.py`), which creates the project over MCP, starts N persistent worker sessions, waits for them to go home, and tears down
+- Marcus itself starts nothing (epic #706, ADR-0012 D10)
 
 **Key Features**:
 - Portable (works outside Marcus repo)
-- Configurable agent roles and skills
-- Subagent support for parallel execution
-- Tmux session management
-- Automatic prompt generation
+- Configurable session identities and skills
+- `--model`, `--harness claude|codex|gemini`, `--epictetus`, `--max-chores`, `--no-wait`
+
+---
+
+#### `session_launcher.py`
+**Purpose**: Start N worker sessions and get out of the way
+**Note**: Run through `run_experiment.py`.
+
+**What it does**:
+- Initialises the implementation repository on `main` and writes the session contract (`templates/session_prompt.md`) into `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md`
+- Calls `create_project` over MCP with `project_root` set and commits the scaffold
+- Gives each session a worktree at `worktrees/<agent_id>` and a script that runs the harness one chore at a time, fresh context each chore
+- Never restarts a dead session and has no watchdog; sessions go home when `request_next_task` returns `BOARD_DRAINED`
+- Mirrors its progress to `<experiment_dir>/logs/runner.log`
+
+---
+
+#### `worker_host.py`
+**Purpose**: Experiment config, tmux, worktrees, and the harness command
+**Note**: Used by `session_launcher.py`, not run directly.
+
+**What it does**:
+- Reads `config.yaml` (`ExperimentConfig`)
+- Owns the tmux session and starts one detached window per session (`WorkerHost`)
+- Creates the per-session git worktree and renders the agent CLI command for the chosen harness
+- Seeds Claude's trust file so panes never block on a dialog
 
 ---
 
@@ -192,19 +215,6 @@ python runners/run_comparison_experiment.py --parallel --marcus-instances instan
   {"url": "http://localhost:4300", "board_id": "board_2"}
 ]
 ```
-
----
-
-#### `spawn_agents.py`
-**Purpose**: Core agent spawning utility (used by run_experiment.py)
-**Note**: This is typically called internally by `run_experiment.py`, not run directly.
-
-**What it does**:
-- Creates project creator agent prompt
-- Creates worker agent prompts
-- Manages tmux sessions and windows
-- Handles agent registration and task loops
-- Saves project info for worker coordination
 
 ---
 
@@ -538,17 +548,14 @@ Full-featured multi-agent configuration template with:
 - MLflow tracking options
 - Timeouts
 
-#### `config.yaml.simple`
-Minimal configuration template for simple projects.
-
 #### `config_single_agent.yaml`
 Configuration template for single-agent experiments.
 
-#### `agent_prompt.md`
-Worker agent prompt template. Defines:
-- Agent role and capabilities
-- Task request loop
-- Marcus integration instructions
+#### `session_prompt.md`
+The session contract every worker is handed on every chore. Defines:
+- The session identity and its worktree
+- One chore per invocation: register, take one task, do it, report it, exit
+- The `BOARD_DRAINED` stop rule and the retry rule
 - Commit and progress reporting
 
 #### `single_agent_prompt.template.md`
@@ -773,7 +780,7 @@ claude mcp add marcus -t http http://localhost:4298/mcp
 
 ### Import errors after reorganization
 
-If you see import errors like `ModuleNotFoundError: No module named 'spawn_agents'`:
+If you see import errors like `ModuleNotFoundError: No module named 'runners'`:
 
 ```bash
 # Make sure you're running scripts from the experiments directory
