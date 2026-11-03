@@ -13,12 +13,54 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
+from typing import Any, Dict, List
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from runners.session_launcher import SessionLauncher  # noqa: E402
 from runners.worker_host import ExperimentConfig  # noqa: E402
+
+
+def load_seed_tasks(path: Path) -> List[Dict[str, Any]]:
+    """Read a seed file: a YAML list of tasks, or a mapping with a ``tasks`` list.
+
+    Parameters
+    ----------
+    path : Path
+        The YAML file.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        The task specs, exactly as ``create_project`` expects in
+        ``options.tasks``. Marcus validates them (names, dependencies,
+        hours, priority) and refuses a malformed list before any state.
+
+    Raises
+    ------
+    ValueError
+        When the file is missing, unreadable, or not a list of mappings.
+    """
+    import yaml
+
+    if not path.is_file():
+        raise ValueError(f"seed file not found: {path}")
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as error:
+        raise ValueError(f"seed file is not valid YAML: {path}: {error}") from error
+    if isinstance(data, dict):
+        data = data.get("tasks")
+    if (
+        not isinstance(data, list)
+        or not data
+        or not all(isinstance(item, dict) for item in data)
+    ):
+        raise ValueError(
+            f"seed file must hold a non-empty list of task mappings: {path}"
+        )
+    return data
 
 
 def create_experiment_structure(experiment_dir: Path, templates_dir: Path) -> bool:
@@ -332,6 +374,18 @@ Examples:
         default=False,
         help="Return as soon as the sessions are started.",
     )
+    parser.add_argument(
+        "--seed",
+        type=str,
+        default=None,
+        metavar="TASKS_YAML",
+        help=(
+            "Seed the board with the exact tasks in this YAML file instead of "
+            "decomposing the spec: no LLM decomposition, no added integration "
+            "or README tasks, no subtask splitting. One to three tasks make a "
+            "live check take minutes. See templates/seed_tasks.example.yaml."
+        ),
+    )
     args = parser.parse_args()
 
     experiment_dir = Path(args.experiment_dir).resolve()
@@ -381,6 +435,13 @@ Examples:
 
     config_file = experiment_dir / "config.yaml"
     config = ExperimentConfig(config_file)
+    if args.seed:
+        try:
+            config.project_options["tasks"] = load_seed_tasks(Path(args.seed))
+        except ValueError as error:
+            print(f"Error: {error}")
+            sys.exit(1)
+        print(f"Seeding the board with {len(config.project_options['tasks'])} task(s)")
     sessions = args.sessions if args.sessions is not None else config.sessions
     launcher = SessionLauncher(
         config,

@@ -562,6 +562,49 @@ async def create_project(
     return result
 
 
+def _validate_tasks_option(
+    options: Optional[Dict[str, Any]], project_name: str
+) -> Optional[Dict[str, Any]]:
+    """Reject a malformed ``options.tasks`` (a seeded board) before any state.
+
+    ``tasks`` is the explicit task list of a seeded board. A malformed list
+    must fail here with every problem named, not inside the pipeline after
+    the registry entry and the workspace state already exist.
+
+    Parameters
+    ----------
+    options : Optional[Dict[str, Any]]
+        The ``create_project`` options.
+    project_name : str
+        For the log line.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A rejection response with ``error_code: "tasks_invalid"``, or None
+        when there is no ``tasks`` option or it is valid.
+    """
+    if not isinstance(options, dict) or "tasks" not in options:
+        return None
+    from src.integrations.seeded_tasks import validate_seed_specs
+
+    problems = validate_seed_specs(options.get("tasks"))
+    if not problems:
+        return None
+    logger.warning(
+        f"create_project for {project_name!r} rejected: invalid tasks option: "
+        + "; ".join(problems)
+    )
+    return {
+        "success": False,
+        "error": "options.tasks is not a valid seeded task list: "
+        + "; ".join(problems),
+        "error_code": "tasks_invalid",
+        "error_type": "InvalidConfigurationError",
+        "problems": problems,
+    }
+
+
 def _resolve_project_info_path(options: Dict[str, Any]) -> Optional[str]:
     """Resolve where Marcus writes ``project_info.json`` for the runner.
 
@@ -951,6 +994,12 @@ async def _create_project_inner(
         if _root_rejection is not None:
             _recent_create_project_calls.pop(dedup_key, None)
             return _root_rejection
+
+        # Seeded boards: a malformed explicit task list is refused here too.
+        _tasks_rejection = _validate_tasks_option(options, project_name)
+        if _tasks_rejection is not None:
+            _recent_create_project_calls.pop(dedup_key, None)
+            return _tasks_rejection
 
         # Log before calling the function
         state.log_event("create_project_calling", {"project_name": project_name})

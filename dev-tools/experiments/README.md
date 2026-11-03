@@ -99,7 +99,12 @@ python runners/run_experiment.py <experiment_dir>
 
 # Run with three worker sessions
 python runners/run_experiment.py <experiment_dir> --sessions 3
+
+# Seed the board with the exact tasks in a YAML file (no decomposition)
+python runners/run_experiment.py <experiment_dir> --seed templates/seed_tasks.example.yaml
 ```
+
+**Seeded boards (fast live checks).** `--seed tasks.yaml` hands `create_project` an explicit task list instead of a spec to decompose: no LLM decomposition, no added integration or README tasks, no subtask splitting. One to three tasks make a launcher run take minutes, which is how fixes to the coordination machinery (drain, teardown, recovery, merge) get live-checked. Each task has a `name` and optionally `description`, `labels`, `depends_on` (other seeded task names), `completion_criteria`, `estimated_hours`, and `priority`. Labels drive Marcus's gates (`implement` runs the validator and the TDD standard). Marcus validates the list and refuses a malformed one before any state is touched. Seeded runs do not exercise decomposition, contract generation, or the scaffold; keep real runs for those.
 
 **What it does**:
 - Creates the experiment directory structure from the templates
@@ -550,6 +555,9 @@ Full-featured multi-agent configuration template with:
 
 #### `config_single_agent.yaml`
 Configuration template for single-agent experiments.
+
+#### `seed_tasks.example.yaml`
+A two-task seed for `run_experiment.py --seed`: an implement task and a CLI task that depends on it. Copy and edit it for a live check.
 
 #### `session_prompt.md`
 The per-chore session header every worker is handed. It is not a second contract: the contract is `prompts/Agent_prompt.md`, written into the workspace as `CLAUDE.md` / `AGENTS.md` / `GEMINI.md`. The header adds only:

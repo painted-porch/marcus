@@ -1,0 +1,29 @@
+# A seeded board: the exact tasks run_experiment.py --seed puts on the board.
+# No LLM decomposition, no added integration or README tasks, no subtask
+# splitting. Use one to three tasks for a live check that takes minutes.
+#
+# Only `name` is required. `depends_on` names other tasks in this file.
+# Labels drive Marcus's gates: `implement` runs the validator and the TDD
+# standard; leave labels empty to skip both. Priorities: low, medium, high,
+# urgent.
+tasks:
+  - name: Implement add_one_plus_one
+    description: >
+      A Python module src/one_plus_one.py with a function add_one_plus_one()
+      that returns 1 + 1, plus a pytest unit test for it.
+    labels: [implement, python]
+    completion_criteria:
+      - add_one_plus_one() returns 2
+      - a unit test asserts it
+    estimated_hours: 0.5
+    priority: medium
+
+  - name: Implement the command-line entry point
+    description: >
+      A main() that prints the result of add_one_plus_one(), runnable with
+      python -m one_plus_one, with a test that runs it as a subprocess.
+    labels: [implement, python]
+    depends_on: [Implement add_one_plus_one]
+    completion_criteria:
+      - python -m one_plus_one prints 2
+    estimated_hours: 0.5
