@@ -71,6 +71,8 @@ def _state(tasks: List[Task], *, fetched: Optional[List[Task]] = None) -> MagicM
     )
     kanban.get_all_tasks = AsyncMock(return_value=tasks if fetched is None else fetched)
     kanban.get_task_blockers = AsyncMock(return_value=[])
+    state.persistence = MagicMock()
+    state.persistence.query = AsyncMock(return_value=[])
     state.kanban_client = kanban
     state.project_manager = MagicMock()
     state.project_manager.get_kanban_client = AsyncMock(return_value=kanban)
@@ -279,3 +281,40 @@ class TestProjectStatusEdges:
             await refresh_project_state(state)
 
         assert state.log_event.call_args.args[0] == "refresh_project_state_error"
+
+
+class TestEpochCollisionsReported:
+    """The status payload carries the record-only collision count (D11)."""
+
+    @pytest.mark.asyncio
+    async def test_a_clean_project_reports_zero(self) -> None:
+        """No observations means zero, present rather than absent."""
+        result = await get_project_status(_state([_task("t1", "A", TaskStatus.DONE)]))
+
+        assert result["project"]["epoch_collisions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_this_projects_observations_are_counted(self) -> None:
+        """Only records stamped with this project's id are counted."""
+        state = _state([_task("t1", "A", TaskStatus.DONE)])
+        state.persistence.query = AsyncMock(
+            return_value=[
+                {"project_id": "p1", "task_id": "t1"},
+                {"project_id": "elsewhere", "task_id": "t9"},
+            ]
+        )
+
+        result = await get_project_status(state)
+
+        assert result["project"]["epoch_collisions"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_store_failure_does_not_break_the_status(self) -> None:
+        """The count degrades to zero; the rest of the payload is intact."""
+        state = _state([_task("t1", "A", TaskStatus.DONE)])
+        state.persistence.query = AsyncMock(side_effect=RuntimeError("locked"))
+
+        result = await get_project_status(state)
+
+        assert result["success"] is True
+        assert result["project"]["epoch_collisions"] == 0

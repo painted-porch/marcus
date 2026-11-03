@@ -192,6 +192,15 @@ D3 makes recovery trustworthy, so the apology is deleted.
 An `in_progress` report from an agent with no live lease is refused before anything reaches the board, with `status: "lease_recovered"` and a message telling the agent to request its next task.
 A holder whose lease lapsed but is still inside the grace period may still renew; grace is exactly the window in which Marcus has not yet given up on it.
 
+### 6b. Collisions are counted, not fenced (ADR-0012 D11)
+
+Marcus is process-blind, so a worker whose lease was recovered can still report a completion afterwards.
+That completion is allowed: the fence belongs to Milestone B, and D3's liveness dials were the prerequisite for it.
+What Marcus does now is count it.
+Every completion that arrives carrying a superseded `lease_epoch` is logged and written to the `epoch_collisions` persistence collection, keyed by task and epoch pair so a re-report counts once.
+`get_project_status` returns the project's total as `project.epoch_collisions`, and the session launcher prints a `[Collisions] N ...` line at the end of a run when it is not zero.
+The number is the input that sizes the fence: "rare" is a measurement, not an impression.
+
 ### 7. Registration survives a restart (ADR-0012 O1)
 
 **Files**: `src/core/registration_persistence.py`, `src/marcus_mcp/server.py` (`ensure_registrations_loaded`), `src/marcus_mcp/heartbeat.py` (`rehydrate_on_tool_call`)

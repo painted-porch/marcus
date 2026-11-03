@@ -2,7 +2,8 @@
 
 This module contains tools for monitoring project progress and metrics:
 - get_project_status: Get comprehensive project metrics and status, including
-  the list of tasks that have not reached DONE and why
+  the list of tasks that have not reached DONE and why, and the count of
+  observed lease-epoch collisions (ADR-0012 D11, record-only)
 """
 
 import logging
@@ -242,6 +243,17 @@ async def get_project_status(state: Any) -> Any:
                 ]
             )
 
+            # D11 record-only collision counting (ADR-0012): how often a
+            # completion arrived under a superseded epoch during this
+            # project. With D3's liveness dials this should be rare, and the
+            # number is what sizes the fence in Milestone B, so it is
+            # reported here rather than left in the log.
+            from src.marcus_mcp.tools.task import count_epoch_collisions
+
+            epoch_collisions = await count_epoch_collisions(
+                state, active_project.id if active_project else None
+            )
+
             unfinished = None
             if hasattr(state, "kanban_client") and state.kanban_client:
                 unfinished = await list_unfinished_tasks(
@@ -267,6 +279,7 @@ async def get_project_status(state: Any) -> Any:
                     "completion_percentage": (
                         (completed / total_tasks * 100) if total_tasks > 0 else 0
                     ),
+                    "epoch_collisions": epoch_collisions,
                 },
                 "workers": {
                     "total": len(state.agent_status),
