@@ -27,6 +27,30 @@ from pathlib import Path
 DATA_DIR_ENV = "MARCUS_DATA_DIR"
 
 
+def cost_store_path() -> Path:
+    """Resolve the cost store's path.
+
+    Unlike the other stores, the cost store is deliberately **global** in
+    production: the cost dashboard reads one database across projects, so
+    moving it per project would orphan that history.
+
+    But an operator who sets ``MARCUS_DATA_DIR`` is asking for isolation,
+    and a scratch instance writing into the real spend history is exactly
+    what that request is meant to prevent (issue #792). So the override
+    redirects it and nothing else does.
+
+    Returns
+    -------
+    Path
+        ``$MARCUS_DATA_DIR/costs.db`` when the override is set, otherwise
+        ``~/.marcus/costs.db``.
+    """
+    override = os.environ.get(DATA_DIR_ENV)
+    if override:
+        return Path(override) / "costs.db"
+    return Path.home() / ".marcus" / "costs.db"
+
+
 def marcus_data_dir() -> Path:
     """Resolve the Marcus data directory for default paths.
 

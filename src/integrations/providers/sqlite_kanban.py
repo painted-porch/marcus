@@ -240,6 +240,42 @@ CREATE INDEX IF NOT EXISTS idx_blockers_task
 _SNAPSHOT_TAKEN: Set[str] = set()
 
 
+def _resolve_board_path(configured: Optional[str], default_name: str) -> Path:
+    """Resolve a board path against the data directory, never the cwd.
+
+    A configured path is honoured, and a **relative** one resolves
+    against ``MARCUS_DATA_DIR`` rather than the process's working
+    directory. The registry used to store ``./data/kanban.db``, so the
+    same stored config pointed at different files depending on where
+    Marcus was started: a project created at runtime became unreadable
+    the moment the client was rebuilt from the registry (issue #792).
+
+    Parameters
+    ----------
+    configured : Optional[str]
+        The path from the provider config, absolute or relative.
+    default_name : str
+        Name to use inside the data directory when nothing is configured.
+
+    Returns
+    -------
+    Path
+        An absolute path, or a relative one resolved against the data
+        directory.
+    """
+    if not configured:
+        return marcus_data_dir() / default_name
+    path = Path(configured).expanduser()
+    if path.is_absolute():
+        return path
+    # Strip a leading "data/" so the historical "./data/kanban.db" lands
+    # in the data directory itself rather than a nested copy of it.
+    parts = path.parts
+    if parts and parts[0] == "data":
+        path = Path(*parts[1:]) if len(parts) > 1 else Path(default_name)
+    return marcus_data_dir() / path
+
+
 class SQLiteKanban(KanbanInterface):
     """SQLite-backed kanban board — zero external dependencies.
 
@@ -262,16 +298,10 @@ class SQLiteKanban(KanbanInterface):
         self.provider = KanbanProvider.SQLITE
 
         db_path_cfg = config.get("db_path")
-        self.db_path = (
-            Path(db_path_cfg) if db_path_cfg else marcus_data_dir() / "kanban.db"
-        )
+        self.db_path = _resolve_board_path(db_path_cfg, "kanban.db")
         self.project_name: str = config.get("project_name", "Marcus Project")
         attachments_cfg = config.get("attachments_dir")
-        self.attachments_dir = (
-            Path(attachments_cfg)
-            if attachments_cfg
-            else marcus_data_dir() / "attachments"
-        )
+        self.attachments_dir = _resolve_board_path(attachments_cfg, "attachments")
         self.connected = False
 
         # Project/board scoping — each experiment gets its own IDs

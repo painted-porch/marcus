@@ -345,6 +345,41 @@ def _validate_project_root_option(
     return None
 
 
+def default_sqlite_provider_paths(
+    db_path: Optional[str] = None,
+    attachments_dir: Optional[str] = None,
+) -> Dict[str, str]:
+    """Build the sqlite provider's paths, absolute, for the registry.
+
+    The registry persists this config, so a relative path here is a path
+    that resolves against whatever directory the server happens to start
+    in next time. That is how a project created at runtime became
+    unreadable immediately afterwards: creation wrote through the
+    startup client, and the client rebuilt from the registry read a
+    different file (issue #792).
+
+    Parameters
+    ----------
+    db_path : Optional[str]
+        Configured board path, if any.
+    attachments_dir : Optional[str]
+        Configured attachments directory, if any.
+
+    Returns
+    -------
+    Dict[str, str]
+        ``db_path`` and ``attachments_dir``, both absolute.
+    """
+    from src.integrations.providers.sqlite_kanban import _resolve_board_path
+
+    return {
+        "db_path": str(_resolve_board_path(db_path, "kanban.db").resolve()),
+        "attachments_dir": str(
+            _resolve_board_path(attachments_dir, "attachments").resolve()
+        ),
+    }
+
+
 async def create_project(
     description: str, project_name: str, options: Optional[Dict[str, Any]], state: Any
 ) -> Dict[str, Any]:
@@ -1157,12 +1192,14 @@ async def _create_project_inner(
                 # Build provider_config based on provider type
                 if provider == "sqlite":
                     kanban_config = get_config().kanban
+                    paths = default_sqlite_provider_paths(
+                        db_path=kanban_config.sqlite_db_path,
+                        attachments_dir=kanban_config.sqlite_attachments_dir,
+                    )
                     prov_config: Dict[str, Any] = {
-                        "db_path": (kanban_config.sqlite_db_path or "./data/kanban.db"),
+                        "db_path": paths["db_path"],
                         "project_name": provider_project_name,
-                        "attachments_dir": (
-                            kanban_config.sqlite_attachments_dir or "./data/attachments"
-                        ),
+                        "attachments_dir": paths["attachments_dir"],
                     }
                     # Include project/board IDs and project_root from
                     # the client so project scoping and workspace state
