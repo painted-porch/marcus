@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Proposed — each decision below states a recommendation and its alternative; none is decided
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04**; the other nine remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -88,12 +88,16 @@ Vocabulary is doing policy.
 
 ### K4 — Check authorship: mechanism in the kernel, policy per task type
 
-**Recommendation.** The kernel guarantees that a verification extension can inject required checks the worker did not author.
+**Accepted 2026-11-04 (Lawrence Gray).**
+
+**Decision.** The kernel guarantees that a verification extension can inject required checks the worker did not author.
 Whether injection is required is a per-task-type policy the extension chooses.
 
 For tasks the kernel itself creates, Marcus authors the acceptance criteria and the verification, which is the Multi-Agency Proclamation's Invariant #2 v2.
 
-**Evidence.** The two consumers that own their checks do not have the bug class; the one that delegates authorship to the agent has #735, #677 and #647.
+**Evidence, and its limit.** The one consumer that delegates check authorship to the agent carries #735, #677 and #647; the two whose checks are owned by the harness carry none of that shape.
+That is a structural argument with one negative case, not an observed asymmetry across three consumers: the other two cannot have the bug, because their checks are fixed in code and no agent can decline one.
+It is weaker than an experiment and stronger than a preference, and it is accepted on that footing.
 A numerical writer passed clean, with full declared coverage and no dishonesty, against a case whose bucket table was eight records short of its own summary count, because no check was obliged to look.
 
 **Why policy and not a blanket rule.** The deliberation layer's emergence baseline deliberately records ground truth beside each opinion and never enforces it, in order to observe false consensus.
@@ -158,7 +162,9 @@ Two capabilities follow: a scorer-component registry with visible weights, and a
 
 ### K11 — Verification is the first cut
 
-**Recommendation.** Pull verification out first, then carve software-building off the remainder.
+**Accepted 2026-11-04 (Lawrence Gray).**
+
+**Decision.** Pull verification out first, then carve software-building off the remainder.
 
 **Evidence.** On the Record already proved verification detaches.
 The verification extension point now has two consumers with convergent requirements, K4 and K5 each having two independent witnesses.
