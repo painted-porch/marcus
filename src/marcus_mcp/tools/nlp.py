@@ -372,11 +372,13 @@ def default_sqlite_provider_paths(
     """
     from src.integrations.providers.sqlite_kanban import _resolve_board_path
 
+    # No .resolve() here: _resolve_board_path already returns an absolute
+    # path, and resolving again would rewrite symlinks, so the registry
+    # would record a different string from the one the startup client is
+    # already using for the same file.
     return {
-        "db_path": str(_resolve_board_path(db_path, "kanban.db").resolve()),
-        "attachments_dir": str(
-            _resolve_board_path(attachments_dir, "attachments").resolve()
-        ),
+        "db_path": str(_resolve_board_path(db_path, "kanban.db")),
+        "attachments_dir": str(_resolve_board_path(attachments_dir, "attachments")),
     }
 
 

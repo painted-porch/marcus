@@ -441,19 +441,15 @@ class ProjectContextManager:
                 {
                     # Issue #724 (Codex P1 on PR #725): explicit
                     # "./data/..." literals here bypassed the factory and
-                    # provider fallbacks — a test switching to a registered
+                    # provider fallbacks, so a test switching to a registered
                     # sqlite project connected straight to the production
-                    # board. Route the fallback through the shared resolver;
-                    # config-specified paths are still honored.
-                    "db_path": (
-                        self.config.kanban.sqlite_db_path
-                        or str(marcus_data_dir() / "kanban.db")
-                    ),
+                    # board. Codex P2 on PR #801: resolving the default here
+                    # instead double-prefixed a relative MARCUS_DATA_DIR.
+                    # Pass only what was configured and let SQLiteKanban
+                    # resolve the default exactly once.
+                    "db_path": self.config.kanban.sqlite_db_path,
                     "project_name": project.name,
-                    "attachments_dir": (
-                        self.config.kanban.sqlite_attachments_dir
-                        or str(marcus_data_dir() / "attachments")
-                    ),
+                    "attachments_dir": self.config.kanban.sqlite_attachments_dir,
                 }
             )
 

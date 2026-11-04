@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.core.memory import AgentProfile, TaskOutcome
+from src.core.paths import marcus_data_dir
 from src.core.project_history import (
     ArtifactMetadata,
     Decision,
@@ -248,14 +249,29 @@ class ProjectHistoryAggregator:
             Root directory of MARCUS installation. If None, auto-detects
             repository root to match ProjectHistoryPersistence.
         """
+        explicit_root = marcus_root is not None
         if marcus_root is None:
-            # Auto-detect Marcus root to match ProjectHistoryPersistence default
+            # Auto-detect Marcus root for the things that genuinely live
+            # beside the code: conversation logs.
             marcus_root = Path(__file__).parent.parent.parent
 
         self.marcus_root = marcus_root
-        self.history_persistence = ProjectHistoryPersistence(marcus_root)
+        # The history store is DATA, so it follows MARCUS_DATA_DIR unless a
+        # caller passed a root on purpose. Passing the auto-detected
+        # checkout here would hand ProjectHistoryPersistence an "explicit"
+        # root and send reads to <checkout>/data while the writers in
+        # tools/context.py and tools/attachment.py use the relocated
+        # store, so every history query would come back empty or stale
+        # (Codex P1 on PR #801).
+        self.history_persistence = ProjectHistoryPersistence(
+            marcus_root if explicit_root else None
+        )
         self.logs_dir = marcus_root / "logs"
-        self.state_dir = marcus_root / "data" / "marcus_state"
+        self.state_dir = (
+            marcus_root / "data" / "marcus_state"
+            if explicit_root
+            else marcus_data_dir() / "marcus_state"
+        )
 
         # Simple in-memory cache (60s TTL)
         self._cache: dict[str, tuple[ProjectHistory, datetime]] = {}

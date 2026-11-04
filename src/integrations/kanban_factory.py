@@ -8,7 +8,6 @@ import os
 from typing import Any, Dict, Optional
 
 from src.config.marcus_config import get_config
-from src.core.paths import marcus_data_dir
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 from src.integrations.providers import (
     GitHubKanban,
@@ -86,17 +85,18 @@ class KanbanFactory:
 
         elif provider_lower == KanbanProvider.SQLITE.value:
             if not config:
+                # Pass along only what was actually configured and let
+                # SQLiteKanban resolve the default. Issue #724: an explicit
+                # "./data/kanban.db" here bypassed the provider default and
+                # let test-built servers open the PRODUCTION board. Codex P2
+                # on PR #801: pre-resolving the default here instead meant a
+                # relative MARCUS_DATA_DIR got prefixed twice, once here and
+                # once in the provider. One resolver, applied once, avoids
+                # both. Config and env paths are still honored verbatim.
                 config = {
-                    # Issue #724: the fallback routes through the shared
-                    # resolver so tests land in the isolated temp dir (an
-                    # explicit "./data/kanban.db" here bypassed the provider
-                    # default and let test-built servers open the PRODUCTION
-                    # board). Config/env-specified paths are still honored —
-                    # production behavior is unchanged.
                     "db_path": (
                         marcus_config.kanban.sqlite_db_path
                         or os.getenv("SQLITE_KANBAN_DB_PATH")
-                        or str(marcus_data_dir() / "kanban.db")
                     ),
                     "project_name": (
                         marcus_config.kanban.board_name
@@ -107,10 +107,7 @@ class KanbanFactory:
                     ),
                     "attachments_dir": (
                         marcus_config.kanban.sqlite_attachments_dir
-                        or os.getenv(
-                            "SQLITE_KANBAN_ATTACHMENTS_DIR",
-                            "./data/attachments",
-                        )
+                        or os.getenv("SQLITE_KANBAN_ATTACHMENTS_DIR")
                     ),
                 }
             return SQLiteKanban(config)

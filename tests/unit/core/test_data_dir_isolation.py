@@ -188,3 +188,150 @@ class TestTheCostStoreHonoursTheDataDir:
         monkeypatch.delenv("MARCUS_DATA_DIR", raising=False)
 
         assert cost_store_path() == Path.home() / ".marcus" / "costs.db"
+
+
+class TestTheDataDirPrefixIsAppliedOnce:
+    """A relative ``MARCUS_DATA_DIR`` must not be prefixed twice.
+
+    Two call sites used to build the default board path themselves by
+    joining ``marcus_data_dir()``, and the provider's resolver then joined
+    it again because the result was still relative. With
+    ``MARCUS_DATA_DIR=scratch/state`` the startup client opened
+    ``scratch/state/scratch/state/kanban.db`` while the registry recorded
+    ``scratch/state/kanban.db``, which is the same split-brain the
+    resolver exists to prevent (Codex P2 on PR #801).
+    """
+
+    def test_a_relative_override_resolves_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The data directory is joined a single time."""
+        from src.integrations.providers.sqlite_kanban import SQLiteKanban
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MARCUS_DATA_DIR", "scratch/state")
+        board = SQLiteKanban({"db_path": None})
+
+        assert board.db_path == tmp_path / "scratch" / "state" / "kanban.db"
+
+    def test_the_startup_client_and_the_registry_agree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """What a created project records is what the client already uses.
+
+        This is the user-visible half: a project created against the
+        startup client has to stay readable when the client is rebuilt
+        from the registry.
+        """
+        from src.integrations.providers.sqlite_kanban import SQLiteKanban
+        from src.marcus_mcp.tools.nlp import default_sqlite_provider_paths
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MARCUS_DATA_DIR", "scratch/state")
+
+        registered = default_sqlite_provider_paths()
+        startup = SQLiteKanban({"db_path": None})
+
+        assert Path(registered["db_path"]) == startup.db_path
+
+    def test_an_absolute_override_is_returned_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Making the prefix absolute must not rewrite symlinks.
+
+        An earlier pass at this used ``resolve()``, which turned a macOS
+        ``/var/...`` data directory into ``/private/var/...``. Nothing
+        broke functionally, because both name one file, but a caller
+        comparing a resolved path against the configured value saw two
+        different strings, and the suite's isolation guard failed.
+        """
+        from src.integrations.providers.sqlite_kanban import _resolve_board_path
+
+        link = tmp_path / "link"
+        link.symlink_to(tmp_path / "real", target_is_directory=True)
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(link))
+
+        assert _resolve_board_path(None, "kanban.db") == link / "kanban.db"
+
+    def test_resolving_an_already_resolved_path_is_stable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The resolver is idempotent, so a second pass cannot nest.
+
+        Any future caller that pre-resolves is harmless, which is what
+        keeps this class of bug from coming back.
+        """
+        from src.integrations.providers.sqlite_kanban import _resolve_board_path
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MARCUS_DATA_DIR", "scratch/state")
+
+        once = _resolve_board_path(None, "kanban.db")
+        twice = _resolve_board_path(str(once), "kanban.db")
+
+        assert once == twice == tmp_path / "scratch" / "state" / "kanban.db"
+
+
+class TestHistoryIsReadFromWhereItIsWritten:
+    """The analysis read path must follow the relocated history store.
+
+    ``query_project_history`` builds a ``ProjectHistoryAggregator`` with no
+    root. The aggregator auto-detects the code checkout for conversation
+    logs, which genuinely live beside the code, and used to pass that
+    checkout straight through to ``ProjectHistoryPersistence``. Because an
+    explicit root wins over the data directory, reads went to
+    ``<checkout>/data`` while the writers used ``MARCUS_DATA_DIR``, so
+    decisions and artifacts an agent had just logged came back empty
+    (Codex P1 on PR #801).
+    """
+
+    def test_the_aggregator_reads_the_relocated_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reader and writer open the same file."""
+        from src.analysis.aggregator import ProjectHistoryAggregator
+        from src.core.project_history import ProjectHistoryPersistence
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+        writer = ProjectHistoryPersistence()
+        reader = ProjectHistoryAggregator()
+
+        assert reader.history_persistence.db_path == writer.db_path
+        assert reader.history_persistence.history_dir == writer.history_dir
+
+    def test_marcus_state_follows_the_data_dir_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``marcus_state`` is data, so it moves with the rest."""
+        from src.analysis.aggregator import ProjectHistoryAggregator
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+        reader = ProjectHistoryAggregator()
+
+        assert reader.state_dir == tmp_path / "state" / "marcus_state"
+
+    def test_conversation_logs_stay_beside_the_code(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Logs are not data; moving them would break decision loading."""
+        from src.analysis.aggregator import ProjectHistoryAggregator
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+        reader = ProjectHistoryAggregator()
+
+        assert reader.logs_dir == Path(__file__).parents[3] / "logs"
+
+    def test_an_explicit_root_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A caller that passes a root means that root, for everything."""
+        from src.analysis.aggregator import ProjectHistoryAggregator
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "ignored"))
+        reader = ProjectHistoryAggregator(marcus_root=tmp_path / "repo")
+
+        assert reader.state_dir == tmp_path / "repo" / "data" / "marcus_state"
+        assert (
+            reader.history_persistence.db_path
+            == tmp_path / "repo" / "data" / "marcus.db"
+        )
