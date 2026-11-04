@@ -23,6 +23,7 @@ This module is the single resolver for that default:
 
 import os
 from pathlib import Path
+from typing import Optional
 
 DATA_DIR_ENV = "MARCUS_DATA_DIR"
 
@@ -81,3 +82,129 @@ def marcus_data_dir() -> Path:
             "the default."
         )
     return Path("data")
+
+
+def _relative_to_data_dir(configured: str) -> Path:
+    """Resolve a relative configured path against the data directory.
+
+    Parameters
+    ----------
+    configured : str
+        A relative path, such as ``"data/kanban.db"`` or ``"./data"``.
+
+    Returns
+    -------
+    Path
+        The path inside the data directory. A leading ``data/`` segment
+        is stripped, so the historical ``"./data/kanban.db"`` and the
+        config default ``"./data"`` land in the data directory itself
+        rather than a nested copy of it.
+    """
+    # absolute(), not resolve(): an already-absolute data directory must
+    # come back byte-identical. resolve() rewrites symlinks, so a macOS
+    # /var/... directory became /private/var/..., and a caller comparing
+    # the result against the configured value saw two strings for one
+    # file.
+    base = marcus_data_dir().expanduser().absolute()
+    parts = [part for part in Path(configured).expanduser().parts if part != "."]
+    if parts and parts[0] == "data":
+        parts = parts[1:]
+    return base.joinpath(*parts) if parts else base
+
+
+def resolve_data_subdir(configured: str) -> Path:
+    """Resolve a configured **directory** against the data directory.
+
+    ``MarcusConfig.validate`` creates ``data_dir`` and ``cache_dir`` to
+    check they are writable, and both default to cwd-relative values. It
+    used them literally, so a server started outside the checkout left an
+    empty ``data/`` and ``cache/`` wherever it happened to start, even
+    once every writer had been redirected (issue #792).
+
+    Parameters
+    ----------
+    configured : str
+        A configured directory, absolute or relative.
+
+    Returns
+    -------
+    Path
+        The directory as given when absolute, otherwise resolved inside
+        the data directory. A value of ``"./data"`` is the data directory
+        itself rather than a nested copy of it.
+    """
+    if Path(configured).expanduser().is_absolute():
+        return Path(configured).expanduser()
+    return _relative_to_data_dir(configured)
+
+
+def resolve_data_path(configured: Optional[str], default_name: str) -> Path:
+    """Resolve one data path against the data directory, never the cwd.
+
+    This is the single rule every store follows. A configured path is
+    honoured, and a **relative** one resolves against the data directory
+    rather than the process's working directory, so the same config names
+    the same file wherever Marcus was started from.
+
+    Three separate notions of "the data directory" is what let issue #792
+    survive its first fix: the board resolver had this rule, the
+    project-creation path built ``<checkout>/data/marcus.db`` from the
+    module's own location, and ``config.data_dir`` defaulted to the
+    cwd-relative ``"./data"`` and never consulted the override at all. An
+    isolated instance therefore wrote its history into the production
+    database and left a stray ``data/`` wherever it was started.
+
+    Parameters
+    ----------
+    configured : Optional[str]
+        The configured path, absolute or relative. ``None`` or empty
+        means use ``default_name`` inside the data directory.
+    default_name : str
+        File or directory name to use when nothing is configured.
+
+    Returns
+    -------
+    Path
+        An absolute path whenever the data directory is absolute, which
+        it is whenever ``MARCUS_DATA_DIR`` is set.
+    """
+    if not configured:
+        return marcus_data_dir().expanduser().absolute() / default_name
+    path = Path(configured).expanduser()
+    if path.is_absolute():
+        return path
+    resolved = _relative_to_data_dir(configured)
+    # A value of exactly "data" names the directory, so the caller's
+    # default name still has to be applied.
+    if resolved == marcus_data_dir().expanduser().absolute():
+        return resolved / default_name
+    return resolved
+
+
+def marcus_db_path(configured: Optional[str] = None) -> Path:
+    """Resolve the Marcus history database (``marcus.db``).
+
+    Accepts either a path to the database or the directory it lives in,
+    because ``config.data_dir`` is a directory and several callers have
+    only that.
+
+    Parameters
+    ----------
+    configured : Optional[str]
+        A configured database path or data directory, if the caller has
+        one. ``None`` means use the data directory.
+
+    Returns
+    -------
+    Path
+        The history database's path, inside the data directory unless an
+        absolute path was configured.
+    """
+    if not configured:
+        return resolve_data_path(None, "marcus.db")
+    candidate = Path(configured).expanduser()
+    if candidate.suffix == ".db":
+        return resolve_data_path(configured, "marcus.db")
+    # A directory-style value ("./data", "/srv/marcus-data") names where
+    # the database lives, not the database itself.
+    return resolve_data_subdir(configured) / "marcus.db"

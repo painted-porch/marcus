@@ -26,6 +26,7 @@ from src.ai.advanced.prd.advanced_parser import (  # noqa: E402
 from src.config.decomposer_config import is_contract_first  # noqa: E402
 from src.core.events import EventTypes  # noqa: E402
 from src.core.models import Priority, Task, TaskStatus  # noqa: E402
+from src.core.paths import marcus_db_path  # noqa: E402
 from src.core.resilience import RetryConfig, with_retry  # noqa: E402
 from src.detection.board_analyzer import BoardAnalyzer  # noqa: E402
 from src.detection.context_detector import ContextDetector, MarcusMode  # noqa: E402
@@ -1775,12 +1776,11 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                 )
                 try:
                     import uuid as _uuid_mod
-                    from pathlib import Path
 
                     from src.core.persistence import SQLitePersistence
 
-                    _marcus_root = Path(__file__).parent.parent.parent
-                    _db_path = _marcus_root / "data" / "marcus.db"
+                    # Issue #792: the checkout, regardless of the override.
+                    _db_path = marcus_db_path()
                     _planning_persistence = SQLitePersistence(db_path=_db_path)
 
                     _planning_id = f"planning_{_uuid_mod.uuid4().hex[:12]}"
@@ -1873,12 +1873,12 @@ class NaturalLanguageProjectCreator(NaturalLanguageTaskCreator):
                 # Persist About task metadata and outcome to marcus.db
                 # so Cato can see it (same pattern as nlp_base.py)
                 try:
-                    from pathlib import Path
-
                     from src.core.persistence import SQLitePersistence
 
-                    marcus_root = Path(__file__).parent.parent.parent
-                    db_path = marcus_root / "data" / "marcus.db"
+                    # Issue #792: this used to be the code checkout, so
+                    # an instance running with its own MARCUS_DATA_DIR
+                    # wrote task metadata into the production history.
+                    db_path = marcus_db_path()
                     persistence = SQLitePersistence(db_path=db_path)
 
                     about_id = about_kanban_task.id

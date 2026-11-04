@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.core.memory import AgentProfile, TaskOutcome
-from src.core.paths import marcus_data_dir
+from src.core.paths import marcus_data_dir, marcus_db_path
 from src.core.project_history import (
     ArtifactMetadata,
     Decision,
@@ -267,6 +267,11 @@ class ProjectHistoryAggregator:
             marcus_root if explicit_root else None
         )
         self.logs_dir = marcus_root / "logs"
+        # Reads and writes of marcus.db go through one attribute, so they
+        # cannot drift apart from history_persistence above (#792).
+        self.db_path = (
+            marcus_root / "data" / "marcus.db" if explicit_root else marcus_db_path()
+        )
         self.state_dir = (
             marcus_root / "data" / "marcus_state"
             if explicit_root
@@ -493,7 +498,7 @@ class ProjectHistoryAggregator:
             from src.core.persistence import SQLitePersistence
 
             # Use absolute path to database (relative to marcus root)
-            db_path = self.marcus_root / "data" / "marcus.db"
+            db_path = self.db_path
             backend = SQLitePersistence(db_path=db_path)
 
             # Query all events from persistence
@@ -527,7 +532,7 @@ class ProjectHistoryAggregator:
             from src.core.persistence import SQLitePersistence
 
             # Use absolute path to database (relative to marcus root)
-            db_path = self.marcus_root / "data" / "marcus.db"
+            db_path = self.db_path
             backend = SQLitePersistence(db_path=db_path)
 
             # Query all task outcomes from persistence
@@ -590,7 +595,7 @@ class ProjectHistoryAggregator:
             from src.core.persistence import SQLitePersistence
 
             # Use absolute path to database (relative to marcus root)
-            db_path = self.marcus_root / "data" / "marcus.db"
+            db_path = self.db_path
             backend = SQLitePersistence(db_path=db_path)
 
             # Query all agent profiles from persistence
@@ -644,7 +649,7 @@ class ProjectHistoryAggregator:
             from src.core.persistence import SQLitePersistence
 
             # Use absolute path to database (relative to marcus root)
-            db_path = self.marcus_root / "data" / "marcus.db"
+            db_path = self.db_path
             backend = SQLitePersistence(db_path=db_path)
 
             # Query all task metadata from persistence

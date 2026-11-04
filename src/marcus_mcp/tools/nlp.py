@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.core.event_loop_utils import EventLoopLockManager
+from src.core.paths import marcus_db_path
 from src.integrations.nlp_tools import add_feature_natural_language
 
 logger = logging.getLogger(__name__)
@@ -204,7 +205,8 @@ async def _store_config_snapshot(
         from src.core.persistence import SQLitePersistence
 
         cfg = get_config()
-        snap_db = Path(cfg.data_dir).expanduser() / "marcus.db"
+        # Issue #792: see server.py — cfg.data_dir is cwd-relative.
+        snap_db = marcus_db_path(cfg.data_dir)
         snap_persistence = SQLitePersistence(db_path=snap_db)
 
         # Discover available AI providers
@@ -1290,7 +1292,7 @@ async def _create_project_inner(
                             from src.core.persistence import SQLitePersistence
 
                             cfg = get_config()
-                            db_path = Path(cfg.data_dir).expanduser() / "marcus.db"
+                            db_path = marcus_db_path(cfg.data_dir)
                             persistence = SQLitePersistence(db_path=db_path)
                             task_ids = result.get("task_ids", [])
                             if not task_ids:

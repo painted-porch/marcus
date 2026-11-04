@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, TypeVar, Union
 
 from src.core.models import Priority, Task, TaskStatus
-from src.core.paths import marcus_data_dir
+from src.core.paths import resolve_data_path
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 
 logger = logging.getLogger(__name__)
@@ -263,31 +263,11 @@ def _resolve_board_path(configured: Optional[str], default_name: str) -> Path:
         An absolute path, or a relative one resolved against the data
         directory.
     """
-    # Absolute, so prefixing a path that was already built from the data
-    # directory is impossible. With a RELATIVE ``MARCUS_DATA_DIR`` a
-    # caller that pre-prefixed its default would otherwise be prefixed
-    # again, turning ``scratch/state`` into
-    # ``scratch/state/scratch/state/kanban.db`` while the registry
-    # recorded the single-prefixed path, which is the very failure this
-    # resolver exists to stop (Codex P2 on PR #801).
-    #
-    # absolute(), not resolve(): an already-absolute data directory must
-    # come back byte-identical. resolve() rewrites symlinks, so on macOS
-    # a /var/... temp directory became /private/var/..., and a caller
-    # comparing the result against the configured value saw two strings
-    # for one file.
-    data_dir = marcus_data_dir().expanduser().absolute()
-    if not configured:
-        return data_dir / default_name
-    path = Path(configured).expanduser()
-    if path.is_absolute():
-        return path
-    # Strip a leading "data/" so the historical "./data/kanban.db" lands
-    # in the data directory itself rather than a nested copy of it.
-    parts = path.parts
-    if parts and parts[0] == "data":
-        path = Path(*parts[1:]) if len(parts) > 1 else Path(default_name)
-    return data_dir / path
+    # One implementation of the rule, in src/core/paths.py. Keeping a
+    # second copy here is how three different notions of "the data
+    # directory" came to coexist, which is what let #792 survive its
+    # first fix (Codex P2 on PR #801, then the live check).
+    return resolve_data_path(configured, default_name)
 
 
 class SQLiteKanban(KanbanInterface):

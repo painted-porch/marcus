@@ -54,7 +54,7 @@ from src.core.models import (  # noqa: E402
     TaskStatus,
     WorkerStatus,
 )
-from src.core.paths import cost_store_path  # noqa: E402
+from src.core.paths import cost_store_path, marcus_db_path  # noqa: E402
 from src.core.project_context_manager import ProjectContextManager  # noqa: E402
 from src.core.project_registry import ProjectRegistry  # noqa: E402
 from src.core.registration_persistence import (  # noqa: E402
@@ -306,7 +306,12 @@ class MarcusServer:
             from src.core.persistence import Persistence, SQLitePersistence
 
             # Use SQLite for better performance
-            persistence_path = Path(config_loader.data_dir).expanduser() / "marcus.db"
+            # Issue #792: config.data_dir defaults to the cwd-relative
+            # "./data", so a server started outside the checkout left a
+            # stray data/marcus.db there. The resolver honours an
+            # absolute configured value and routes a relative one into
+            # MARCUS_DATA_DIR.
+            persistence_path = marcus_db_path(config_loader.data_dir)
             self.persistence = Persistence(backend=SQLitePersistence(persistence_path))
 
         # Events system for loose coupling

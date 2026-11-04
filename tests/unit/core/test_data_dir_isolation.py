@@ -335,3 +335,186 @@ class TestHistoryIsReadFromWhereItIsWritten:
             reader.history_persistence.db_path
             == tmp_path / "repo" / "data" / "marcus.db"
         )
+
+
+class TestTheHistoryDatabaseFollowsTheDataDir:
+    """``marcus.db`` is Marcus's own state and must move with the rest.
+
+    The live check for this issue caught two leaks that the first pass
+    missed, because three different notions of "the data directory" were
+    in use at once:
+
+    * the project-creation path built ``<checkout>/data/marcus.db`` from
+      ``Path(__file__).parent.parent.parent``, so an isolated instance
+      wrote task metadata, planning records and the About task's outcome
+      straight into the 19 MB production history database.
+    * ``config.data_dir`` defaults to the cwd-relative ``"./data"`` and
+      never consulted the override at all, so a server started from a
+      home directory created a stray ``~/data/marcus.db``.
+
+    One resolver now answers the question for every caller.
+    """
+
+    def test_the_default_lands_in_the_data_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing is written to the code checkout."""
+        from src.core.paths import marcus_db_path
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        assert marcus_db_path() == tmp_path / "state" / "marcus.db"
+
+    def test_the_config_default_does_not_reach_the_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``./data`` means the data directory, not the working directory.
+
+        This is the stray ``~/data/marcus.db`` the live check found: the
+        config's default was honoured literally, relative to wherever the
+        server happened to start.
+        """
+        from src.core.paths import marcus_db_path
+
+        monkeypatch.chdir(tmp_path / "..")
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        assert marcus_db_path("./data") == tmp_path / "state" / "marcus.db"
+
+    def test_an_absolute_configured_path_is_honoured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator who gave a full path meant it."""
+        from src.core.paths import marcus_db_path
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+        configured = tmp_path / "elsewhere" / "history.db"
+
+        assert marcus_db_path(str(configured)) == configured
+
+    def test_the_shared_rule_is_one_implementation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The board and the history database resolve by the same rule.
+
+        Two copies of this logic is how the notions diverged in the first
+        place, so the board resolver delegates to the shared one.
+        """
+        from src.core.paths import resolve_data_path
+        from src.integrations.providers.sqlite_kanban import _resolve_board_path
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        assert _resolve_board_path("data/kanban.db", "kanban.db") == resolve_data_path(
+            "data/kanban.db", "kanban.db"
+        )
+
+
+class TestNoCallerInventsItsOwnHistoryPath:
+    """A source guard, because this bug class is a new call site.
+
+    Every leak found for this issue was a caller that built a data path
+    itself instead of asking the resolver. Unit tests on the resolver
+    cannot catch the next one, so the source is checked directly.
+    """
+
+    def test_nothing_builds_marcus_db_from_a_hardcoded_checkout(self) -> None:
+        """No ``<something>/"data"/"marcus.db"`` outside the read path."""
+        import re
+
+        src = Path(__file__).parents[3] / "src"
+        pattern = re.compile(r'/\s*"data"\s*/\s*"marcus\.db"')
+        # The analysis read path takes an explicit root from its caller
+        # and honours it, which is the documented behaviour; it reaches
+        # the relocated store through the resolver when no root is given.
+        allowed = {
+            "analysis/aggregator.py",
+            "analysis/storage/analysis_results.py",
+            "analysis/helpers/conversation_index.py",
+        }
+        offenders = sorted(
+            str(path.relative_to(src))
+            for path in src.rglob("*.py")
+            if pattern.search(path.read_text())
+            and str(path.relative_to(src)) not in allowed
+        )
+
+        assert not offenders, (
+            "these build marcus.db from a hardcoded root instead of "
+            f"src.core.paths.marcus_db_path(): {offenders}"
+        )
+
+    def test_nothing_joins_marcus_db_onto_the_config_data_dir(self) -> None:
+        """``config.data_dir`` is cwd-relative, so it must not be joined."""
+        import re
+
+        src = Path(__file__).parents[3] / "src"
+        pattern = re.compile(r"data_dir\s*\)\s*\.expanduser\(\)\s*/\s*\"marcus\.db\"")
+        offenders = sorted(
+            str(path.relative_to(src))
+            for path in src.rglob("*.py")
+            if pattern.search(path.read_text())
+        )
+
+        assert not offenders, (
+            "these resolve marcus.db against the cwd-relative config "
+            f"data_dir instead of src.core.paths.marcus_db_path(): {offenders}"
+        )
+
+
+class TestConfigValidationCreatesNoStrayDirectories:
+    """Validation must create the directory Marcus will actually use.
+
+    ``MarcusConfig.validate`` creates ``data_dir`` and ``cache_dir`` to
+    check they are writable, and it used the configured value literally.
+    Both default to cwd-relative values, so a server started from a home
+    directory left an empty ``~/data`` and ``~/cache`` behind even after
+    every writer had been redirected. The live check for #792 caught
+    this after the writers were fixed.
+    """
+
+    def test_the_configured_directories_resolve_against_the_data_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``./data`` is the data directory; ``./cache`` sits inside it."""
+        from src.core.paths import resolve_data_subdir
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        assert resolve_data_subdir("./data") == tmp_path / "state"
+        assert resolve_data_subdir("./cache") == tmp_path / "state" / "cache"
+
+    def test_an_absolute_configured_directory_is_honoured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator who gave a full path meant it."""
+        from src.core.paths import resolve_data_subdir
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        assert resolve_data_subdir(str(tmp_path / "elsewhere")) == (
+            tmp_path / "elsewhere"
+        )
+
+    def test_validation_leaves_nothing_in_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole point: no stray directory where the server started."""
+        from src.config.marcus_config import MarcusConfig
+
+        cwd = tmp_path / "somewhere-else"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        config = MarcusConfig()
+        config.data_dir = "./data"
+        config.cache_dir = "./cache"
+        config.ai.anthropic_api_key = "test-key"
+        config.validate()
+
+        assert not (cwd / "data").exists()
+        assert not (cwd / "cache").exists()
+        assert (tmp_path / "state").is_dir()
+        assert (tmp_path / "state" / "cache").is_dir()

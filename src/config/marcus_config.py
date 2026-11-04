@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from src.core.paths import resolve_data_subdir
+
 logger = logging.getLogger(__name__)
 
 
@@ -826,7 +828,11 @@ class MarcusConfig:
             ("cache_dir", self.cache_dir),
         ]:
             try:
-                path = Path(dir_path).expanduser()
+                # Issue #792: the configured value is cwd-relative by
+                # default, so creating it literally left an empty data/
+                # and cache/ wherever the server was started. Validate
+                # the directory Marcus will actually use.
+                path = resolve_data_subdir(dir_path)
                 path.mkdir(parents=True, exist_ok=True)
             except (PermissionError, OSError, FileNotFoundError) as e:
                 errors.append(f"Cannot create {dir_name} at {dir_path}: {e}")
