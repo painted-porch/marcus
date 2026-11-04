@@ -1079,16 +1079,74 @@ async def _handoff_evidence_to_dependents(
         for k, v in {**(task.inputs or {}), **evidence}.items()
         if k != RAW_EVIDENCE_FIELD
     }
+    persistence = getattr(state, "assignment_persistence", None)
     for dependent in getattr(state, "project_tasks", None) or []:
         if task.id not in (dependent.dependencies or []):
             continue
+        # SET REPLACEMENT, not a per-key merge (issue #803).
+        #
         # Existing keys win (Codex P1 on PR #739): a dependent's
         # board-seeded inputs must never be overwritten by a claim
-        # author's evidence, or a finder could ship its own excerpt
-        # and the verifier would check the attacker's text against
-        # the page. First write wins thereafter; legitimate chain
-        # keys never collide by construction.
-        dependent.inputs = {**payload, **(dependent.inputs or {})}
+        # author's evidence, or a finder could ship its own excerpt and
+        # the verifier would check the attacker's text against the page.
+        # That rule stands, and everything below preserves it.
+        #
+        # What it rested on does not: its comment said "legitimate chain
+        # keys never collide by construction", which holds only while a
+        # task closes once. ``request_task_redo`` re-opens a DONE task
+        # and clears nothing downstream, so a second close collides with
+        # the first by construction, first-write-wins keeps the
+        # superseded claim, and the verifier passes a value the author
+        # already corrected.
+        #
+        # So this close clears the keys THIS task contributed last time
+        # and writes its new set. Keys attributed to nobody (the
+        # board-seeded set) and keys another upstream task contributed
+        # are untouched, which is what keeps the security property
+        # exact. Replacing the set rather than overwriting key by key is
+        # what makes it correct when the evidence shape varies between
+        # rounds: a key present in the first close and absent from the
+        # second is removed rather than left standing, and the schema
+        # only pins the REQUIRED fields, so that case is reachable.
+        prior_keys: List[str] = []
+        if persistence is not None:
+            try:
+                prior_keys = await persistence.get_input_provenance(
+                    dependent.id, task.id
+                )
+            except Exception as prov_err:  # noqa: BLE001 - degrade to additive
+                logger.warning(
+                    "[#803] Handoff provenance unreadable for dependent %s "
+                    "(%s); this close adds keys and clears none, so a "
+                    "superseded value may survive.",
+                    dependent.id,
+                    prov_err,
+                )
+        kept = {
+            k: v for k, v in (dependent.inputs or {}).items() if k not in prior_keys
+        }
+        dependent.inputs = {**payload, **kept}
+        # Record what this close actually WROTE, not what it offered. A
+        # key the board seeded, or another upstream task contributed,
+        # beats this payload and stays in ``kept``; attributing it here
+        # would let the next close of this task clear a value it never
+        # owned, which would turn the #803 fix into a way around the
+        # very rule it preserves.
+        contributed = [k for k in payload if k not in kept]
+        if persistence is not None:
+            try:
+                await persistence.record_input_provenance(
+                    dependent.id, task.id, contributed
+                )
+            except Exception as prov_err:  # noqa: BLE001 - never fail a close
+                logger.warning(
+                    "[#803] Handoff provenance write failed for dependent "
+                    "%s (%s); a later re-close of %s may leave one of "
+                    "these keys standing.",
+                    dependent.id,
+                    prov_err,
+                    task.id,
+                )
         try:
             await state.kanban_client.update_task(
                 dependent.id, {"inputs": dependent.inputs}
