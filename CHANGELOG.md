@@ -8,11 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- The service registry entry now names the data directory the instance is serving (#792 follow-up).
-`~/.marcus/services` is how a tool finds the Marcus servers running on a machine, and since `MARCUS_DATA_DIR` began isolating everything Marcus writes, two servers can run side by side on wholly separate state.
-The entry did not say which state, so two sqlite instances started from one checkout were indistinguishable: a live check confirms their `provider`, `log_dir` and `mcp_command` are identical, leaving pid as the only difference, which says nothing about which board each was serving.
-`data_dir` is absolute with any tilde expanded, because it is read by a process that shares neither the writer's working directory nor necessarily its home, and with no override set it names the checkout's data directory so a single-instance deployment needs no special case.
-Also corrects a stale claim in `docs/source/systems/architecture/15-service-registry.md` that Cato calls `MarcusServiceRegistry.discover_services()`; Cato is pointed at Marcus by `marcus_data_path` in its own config and reads the data directory directly, and nothing in this repository reads the registry at all.
 - The ADR-0012 D11 fence, enforced at the resource (epic #706 Milestone B).
 A completion whose lease epoch has been superseded is now refused before the board's DONE write and before the merge into `main`, deciding from the durable per-task epoch high-water mark rather than from in-memory ownership, which has disagreed with itself before (#485).
 This closes the two-live-completions path the session model opened: Marcus can take a session's task away but not its process, so a session that goes quiet during a long build is still alive and will report 100% after its task has been handed to someone else.
@@ -39,6 +34,10 @@ Gating on self-reported virtue invites the compliance theatre that forced Invari
 - Worker registrations survive a Marcus restart (ADR-0012 obligation O1). Every accepted `register_agent` is written to `registrations.json` beside the assignment store and rehydrated on the first tool call after a restart, on both transports; a rehydrated worker gets its live task back from the lease store. Registrations silent for `registration.ttl_hours` (default 24) are evicted, never while they hold a live lease. Re-registration is idempotent and keeps the held task and completion count.
 
 ### Fixed
+- Corrected a stale claim in `docs/source/systems/architecture/15-service-registry.md` that Cato calls `MarcusServiceRegistry.discover_services()`.
+Cato does not: it is pointed at Marcus by `marcus_data_path` in its own `config.json`, reads the data directory directly, and already distinguishes parallel instances through `marcus_data_paths`.
+Nothing reads the service registry at `~/.marcus/services` at all. `discover_services()` has no caller in this repository, nor in Cato, Seneca, Posidonius or marcus-mini, so the registry is write-only across all of them even though `CLI.md` describes it as being there "for other tools to discover".
+Two tests in `tests/unit/core/test_service_registry_consumers.py` pin both facts, because acting on that doc line rather than on Cato's code produced a change whose stated benefit could not happen.
 - `MARCUS_DATA_DIR` now isolates everything Marcus writes, not just the board (#792).
 Four stores claim to be Marcus's state and only one honoured the setting, so a second instance on the same machine quietly shared the first one's data.
 The project registry stored the board as the relative string `./data/kanban.db`, which resolved against whatever directory the server happened to start in, so a project created at runtime became unreadable the moment it was created: creation wrote through the startup client and the client rebuilt from the registry read a different file.

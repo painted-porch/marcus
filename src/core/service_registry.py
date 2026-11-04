@@ -16,8 +16,6 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 
-from src.core.paths import marcus_state_dir
-
 
 class MarcusServiceRegistry:
     """
@@ -73,33 +71,18 @@ class MarcusServiceRegistry:
         provider : str, optional
             Kanban provider being used
         **kwargs
-            Additional service metadata. A ``data_dir`` given here wins
-            over the resolved one, for a caller that knows better.
+            Additional service metadata
 
         Returns
         -------
         Dict[str, Any]
             Service registration info
-
-        Notes
-        -----
-        ``data_dir`` names the state this instance is serving. Issue #792
-        made ``MARCUS_DATA_DIR`` isolate everything Marcus writes, so two
-        servers can run side by side on wholly separate state, and
-        without this field they were indistinguishable here: two sqlite
-        instances started from one checkout share a provider and a log
-        directory and differ only by pid, which says nothing about which
-        board each one is serving. It is resolved to an absolute path
-        with any tilde expanded, because the value is read by another
-        process that shares neither this one's working directory nor
-        necessarily its home.
         """
         service_info = {
             "instance_id": self.instance_id,
             "pid": os.getpid(),
             "mcp_command": mcp_command,
             "log_dir": str(Path(log_dir).absolute()),
-            "data_dir": str(marcus_state_dir()),
             "project_name": project_name,
             "provider": provider,
             "status": "running",
