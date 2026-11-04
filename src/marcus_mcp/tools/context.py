@@ -119,8 +119,26 @@ async def log_decision(
                 "decision_logged", agent_id, logged_decision.to_dict()
             )
 
-        # Persist to project history for post-project analysis
-        await _persist_decision_to_history(logged_decision, state)
+        # Persist to project history for post-project analysis, under
+        # the project the AGENT is registered to (#805). The server's
+        # active project is the wrong source for the reasons
+        # ``_project_for_agent`` records: it is None before any project
+        # is selected, and on a multi-project server it need not be the
+        # agent's, so a decision was filed under whichever project a
+        # human last switched to, or dropped entirely.
+        decision_project = _project_for_agent(agent_id, state)
+        if decision_project is None:
+            logger.warning(
+                "[#805] Decision %s by unregistered agent %s has no project "
+                "to be filed under; it is logged and cross-referenced but "
+                "not persisted to any project's history.",
+                logged_decision.decision_id,
+                agent_id,
+            )
+        else:
+            await _persist_decision_to_history(
+                logged_decision, state, project_id=decision_project
+            )
 
         return {
             "success": True,
@@ -331,9 +349,24 @@ async def give_opinion(
             await state.events.publish_nowait(
                 "opinion_logged", agent_id, logged_decision.to_dict()
             )
-        await _persist_decision_to_history(
-            logged_decision, state, project_id=project_id
-        )
+        if project_id is None:
+            # A task-scoped opinion from an unregistered agent: refused
+            # above when there is no task, allowed here, but there is no
+            # project to file it under. It stays on the task and in the
+            # event stream rather than being written somewhere a reader
+            # would never look (#805 removed the active-project default
+            # that used to absorb this case silently).
+            logger.warning(
+                "[#805] Opinion %s by unregistered agent %s has no project "
+                "to be filed under; it is recorded on its task but not in "
+                "any project's history.",
+                logged_decision.decision_id,
+                agent_id,
+            )
+        else:
+            await _persist_decision_to_history(
+                logged_decision, state, project_id=project_id
+            )
 
         # Keep the opinion visible to a human watching the board: on the
         # task when there is one, else on the project's About card, and
@@ -1424,7 +1457,7 @@ async def _collect_sibling_subtask_context(
 
 
 async def _persist_decision_to_history(
-    logged_decision: Any, state: Any, project_id: Optional[str] = None
+    logged_decision: Any, state: Any, project_id: str
 ) -> None:
     """
     Persist decision to project history for post-project analysis.
@@ -1438,9 +1471,9 @@ async def _persist_decision_to_history(
         The decision from the Context system
     state : Any
         Marcus server state
-    project_id : Optional[str]
-        The project to record under. Defaults to the server's active
-        project; ``give_opinion`` passes the agent's own project so a
+    project_id : str
+        The project to record under, resolved by the caller from the
+        agent's registration. There is deliberately no default; a
         task-less opinion is filed where its readers will look.
 
     Notes
@@ -1448,11 +1481,10 @@ async def _persist_decision_to_history(
     Fails gracefully - errors are logged but don't interrupt the main flow.
     """
     try:
-        # Get project info from state
-        project_id = project_id or getattr(state, "current_project_id", None)
-        if not project_id:
-            logger.debug("No active project - skipping project history persistence")
-            return
+        # No fallback to the server's active project (#805). Silently
+        # inheriting it is what filed decisions under the wrong project,
+        # and a missing project is a caller's mistake rather than a
+        # runtime condition, so callers name it or do not call.
 
         project_name = getattr(state, "current_project_name", project_id)
 
