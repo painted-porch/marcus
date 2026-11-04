@@ -600,6 +600,126 @@ def check_claims(
     return results
 
 
+#: Column holding a per-row record count in a breakdown table. Every
+#: such table must account for the same records the summary counts.
+COUNT_COLUMN = "n_records"
+
+#: Column holding a per-row share of the whole, in percent.
+RATE_COLUMN = "rate_pct"
+
+#: Where the summary record count lives.
+SUMMARY_SOURCE = "metrics.json"
+SUMMARY_COUNT_KEY = "n_records"
+
+#: A rate column is rounded per row, so its sum drifts from 100 by at
+#: most half a unit in the last place per row. The allowance scales
+#: with the row count rather than being a flat guess.
+RATE_ROUNDING_SLACK = 0.05
+
+
+def required_consistency_claims(sources: Dict[str, Any]) -> List[Claim]:
+    """Derive the cross-checks a report must satisfy, whatever it says.
+
+    Consistency claims are the ones nobody thinks to ask for, which
+    is exactly why a writer cannot be trusted to offer them. A report
+    that declares only correct look-ups and never mentions that its
+    bucket table is short of the record count would otherwise pass
+    with the contradiction sitting in the staged files.
+
+    So the harness reads the staged schema and writes these claims
+    itself. Two relations are derived. Every breakdown table carrying
+    a record count must account for the same records the summary
+    counts. Every column of shares must total one hundred, within the
+    drift its own rounding allows.
+
+    Parameters
+    ----------
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    List[Claim]
+        Claims the writer did not author and cannot remove.
+    """
+    derived: List[Claim] = []
+    summary = sources.get(SUMMARY_SOURCE)
+    has_total = isinstance(summary, dict) and SUMMARY_COUNT_KEY in summary
+
+    for name, data in sorted(sources.items()):
+        if not isinstance(data, list) or not data:
+            continue
+        columns = set(data[0])
+        stem = name.rsplit(".", 1)[0]
+
+        if COUNT_COLUMN in columns and has_total:
+            derived.append(
+                Claim(
+                    id=f"required:{stem}-total",
+                    value=True,
+                    label=f"{stem} accounts for every evaluated record",
+                    kind="consistency",
+                    expr="a == b",
+                    inputs={
+                        "a": f"{name}:sum:{COUNT_COLUMN}",
+                        "b": f"{SUMMARY_SOURCE}:{SUMMARY_COUNT_KEY}",
+                    },
+                )
+            )
+
+        if RATE_COLUMN in columns:
+            derived.append(
+                Claim(
+                    id=f"required:{stem}-pct",
+                    value=100,
+                    label=f"{stem} shares total one hundred percent",
+                    kind="consistency",
+                    expr="a",
+                    inputs={"a": f"{name}:sum:{RATE_COLUMN}"},
+                    tolerance={
+                        "type": "abs",
+                        "value": max(
+                            RATE_ROUNDING_SLACK,
+                            len(data) * RATE_ROUNDING_SLACK,
+                        ),
+                    },
+                )
+            )
+
+    return derived
+
+
+def check_report(
+    claims: Sequence[Claim],
+    sources: Dict[str, Any],
+    report_text: Optional[str] = None,
+) -> List[CheckResult]:
+    """Check a report: the harness's required claims, then the writer's.
+
+    This is the entry point a verifier uses. :func:`check_claims` is
+    the primitive underneath it and checks exactly what it is handed;
+    this adds the claims the writer is not allowed to omit.
+
+    Parameters
+    ----------
+    claims : Sequence[Claim]
+        The claims the writer declared.
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+    report_text : Optional[str]
+        The finished report, so every figure in it can be required to
+        carry a claim.
+
+    Returns
+    -------
+    List[CheckResult]
+        Required claims first, then the writer's, then any figure in
+        the text with no claim behind it.
+    """
+    required = required_consistency_claims(sources)
+    return check_claims(list(required) + list(claims), sources, report_text=report_text)
+
+
 def check_slide_spec(
     spec: Dict[str, Any],
     accepted: Dict[str, CheckResult],

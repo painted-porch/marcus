@@ -12,9 +12,11 @@ from runners.numeric_claims import (
     CheckResult,
     Claim,
     check_claims,
+    check_report,
     check_slide_spec,
     extract_numbers,
     load_sources,
+    required_consistency_claims,
 )
 
 
@@ -518,3 +520,124 @@ class TestLabelConsistency:
         res = check_claims([c], sources)[0]
         assert res.verdict == "failed"
         assert "0.886" in res.detail
+
+
+class TestRequiredConsistencyClaims:
+    """Cross-checks are derived from the data, not offered by the writer.
+
+    A writer that simply never declares a cross-check would pass with
+    the contradiction sitting in the staged files. The checks that
+    catch a table disagreeing with its own summary are exactly the
+    ones nobody thinks to ask for, so the harness derives them from
+    the staged schema and the writer cannot omit what it does not
+    author.
+    """
+
+    @pytest.mark.unit
+    def test_totals_are_required_for_every_counted_table(self, sources):
+        """Each table with a record count must total the summary."""
+        required = required_consistency_claims(sources)
+        sources_checked = {c.inputs["a"].split(":")[0] for c in required}
+        assert "tiers.csv" in sources_checked
+        assert "per_crop.csv" in sources_checked
+
+    @pytest.mark.unit
+    def test_percentage_columns_are_required_to_total_100(self, sources):
+        """A rate column that does not sum to 100 is a contradiction."""
+        required = required_consistency_claims(sources)
+        assert any(c.value == 100 for c in required)
+
+    @pytest.mark.unit
+    def test_required_claims_are_marked_as_the_harness_own(self, sources):
+        """Derived claims are distinguishable from the writer's."""
+        for claim in required_consistency_claims(sources):
+            assert claim.id.startswith("required:")
+            assert claim.kind == "consistency"
+
+    @pytest.mark.unit
+    def test_a_source_without_counts_yields_no_claim(self, tmp_path):
+        """Nothing is invented for a table that counts nothing."""
+        d = tmp_path / "eval"
+        d.mkdir()
+        (d / "metrics.json").write_text(json.dumps({"n_records": 10}))
+        (d / "notes.csv").write_text("crop,comment\nmaize,fine\n")
+        assert required_consistency_claims(load_sources(d)) == []
+
+    @pytest.mark.unit
+    def test_no_summary_count_means_no_total_check(self, tmp_path):
+        """Without a record count there is nothing to total against."""
+        d = tmp_path / "eval"
+        d.mkdir()
+        (d / "metrics.json").write_text(json.dumps({"r2_overall": 0.5}))
+        (d / "tiers.csv").write_text("tier,n_records\nA,5\nB,5\n")
+        derived = required_consistency_claims(load_sources(d))
+        assert all("n_records" not in (c.inputs.get("b") or "") for c in derived)
+
+
+class TestCheckReport:
+    """The report-level check merges the harness's claims with the writer's."""
+
+    @pytest.mark.unit
+    def test_omitted_cross_check_still_fails(self, staged):
+        """The whole point: a writer cannot skip the contradiction.
+
+        The tier table is short of the record count. The writer
+        declares only correct look-ups and never mentions it.
+        """
+        (staged / "tiers.csv").write_text(
+            "tier,n_records,rate_pct\n"
+            "Excellent,660,55.0\nGood,317,26.4\n"
+            "Average,170,14.2\nPoor,48,4.0\n"
+        )
+        srcs = load_sources(staged)
+        honest_lookup = Claim(
+            id="c1",
+            value=1200,
+            label="records evaluated",
+            source="metrics.json",
+            key="n_records",
+            kind="lookup",
+        )
+        results = check_report([honest_lookup], srcs, report_text="1200 records.")
+        failed = [r for r in results if r.verdict == "failed"]
+        assert failed, "the short tier table must be reported"
+        assert any("required:" in r.claim_id for r in failed)
+
+    @pytest.mark.unit
+    def test_clean_data_passes(self, sources):
+        """A consistent evaluation raises nothing on its own."""
+        results = check_report([], sources)
+        totals = [
+            r
+            for r in results
+            if r.claim_id.startswith("required:") and "total" in r.claim_id
+        ]
+        assert totals
+        assert all(r.verdict == "verified" for r in totals if "tiers" in r.claim_id)
+
+    @pytest.mark.unit
+    def test_writer_claims_are_kept(self, sources):
+        """The writer's own claims are checked alongside."""
+        c = Claim(
+            id="w1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        ids = {r.claim_id for r in check_report([c], sources)}
+        assert "w1" in ids
+
+    @pytest.mark.unit
+    def test_rounded_percentages_are_tolerated(self, tmp_path):
+        """Rates rounded to one decimal need not sum to exactly 100."""
+        d = tmp_path / "eval"
+        d.mkdir()
+        (d / "metrics.json").write_text(json.dumps({"n_records": 3}))
+        (d / "tiers.csv").write_text(
+            "tier,n_records,rate_pct\nA,1,33.3\nB,1,33.3\nC,1,33.3\n"
+        )
+        results = check_report([], load_sources(d))
+        pct = [r for r in results if "pct" in r.claim_id]
+        assert pct and all(r.verdict == "verified" for r in pct)
