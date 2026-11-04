@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from src.core.models import Task
+from src.core.paths import marcus_db_path
 from src.core.task_graph_validator import TaskGraphValidator
 from src.integrations.enhanced_task_classifier import EnhancedTaskClassifier
 from src.integrations.nlp_task_utils import (
@@ -159,13 +160,12 @@ class NaturalLanguageTaskCreator(ABC):
 
                 # Store task metadata for Phase 1 analysis
                 try:
-                    from pathlib import Path
-
                     from src.core.persistence import SQLitePersistence
 
-                    # Use absolute path to database (relative to marcus root)
-                    marcus_root = Path(__file__).parent.parent.parent
-                    db_path = marcus_root / "data" / "marcus.db"
+                    # Issue #792: this used to be the code checkout, so
+                    # an instance running with its own MARCUS_DATA_DIR
+                    # wrote task metadata into the production history.
+                    db_path = marcus_db_path()
                     persistence = SQLitePersistence(db_path=db_path)
 
                     # kanban_task is a Task object, not a dict
@@ -335,12 +335,10 @@ class NaturalLanguageTaskCreator(ABC):
         # setup proceeds to the per-task loop where errors are
         # isolated so one bad row doesn't block the rest.
         try:
-            from pathlib import Path
-
             from src.core.persistence import SQLitePersistence
 
-            marcus_root = Path(__file__).parent.parent.parent
-            db_path = marcus_root / "data" / "marcus.db"
+            # Issue #792: the checkout, regardless of MARCUS_DATA_DIR.
+            db_path = marcus_db_path()
             persistence = SQLitePersistence(db_path=db_path)
         except Exception as e:
             logger.warning(

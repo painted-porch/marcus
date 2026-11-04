@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import aiofiles
 
 from src.core.event_loop_utils import EventLoopLockManager
+from src.core.paths import marcus_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,15 @@ class AssignmentPersistence:
         ----------
             storage_dir
                 Directory for storing assignment data.
-                        Defaults to ./data/assignments/
+                        Defaults to ``$MARCUS_DATA_DIR/assignments``.
         """
         if storage_dir is None:
-            # Use absolute path to ensure it works regardless of working directory
-            marcus_root = Path(__file__).parent.parent.parent
-            storage_dir = marcus_root / "data" / "assignments"
+            # Beside the rest of Marcus's state, so two instances with
+            # different data directories do not share a worker roster.
+            # Resolving against the code checkout meant ADR-0012 O1's
+            # rehydration could hand one instance the other's
+            # registrations (issue #792).
+            storage_dir = marcus_state_dir() / "assignments"
         self.storage_dir = storage_dir
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 

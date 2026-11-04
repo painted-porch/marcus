@@ -25,6 +25,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
+from src.core.paths import marcus_db_path
 from src.core.persistence import SQLitePersistence
 
 logger = logging.getLogger(__name__)
@@ -58,13 +59,22 @@ class ConversationIndexer:
             Root directory containing logs/conversations/. If None, auto-detects
             repository root.
         """
+        # Issue #792: the auto-detected root is the code checkout, so
+        # passing it on sent marcus.db there even when MARCUS_DATA_DIR
+        # asked for isolation. A root the caller passed on purpose still
+        # wins, for everything.
+        explicit_root = marcus_root is not None
         if marcus_root is None:
             # Auto-detect Marcus root
             marcus_root = Path(__file__).parent.parent.parent.parent
 
         self.marcus_root = Path(marcus_root)
         self.conversations_dir = self.marcus_root / "logs" / "conversations"
-        self.db_path = self.marcus_root / "data" / "marcus.db"
+        self.db_path = (
+            self.marcus_root / "data" / "marcus.db"
+            if explicit_root
+            else marcus_db_path()
+        )
 
         # Initialize persistence backend
         self.persistence = SQLitePersistence(db_path=self.db_path)

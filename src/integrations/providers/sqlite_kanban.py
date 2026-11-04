@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, TypeVar, Union
 
 from src.core.models import Priority, Task, TaskStatus
-from src.core.paths import marcus_data_dir
+from src.core.paths import resolve_data_path
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 
 logger = logging.getLogger(__name__)
@@ -240,6 +240,36 @@ CREATE INDEX IF NOT EXISTS idx_blockers_task
 _SNAPSHOT_TAKEN: Set[str] = set()
 
 
+def _resolve_board_path(configured: Optional[str], default_name: str) -> Path:
+    """Resolve a board path against the data directory, never the cwd.
+
+    A configured path is honoured, and a **relative** one resolves
+    against ``MARCUS_DATA_DIR`` rather than the process's working
+    directory. The registry used to store ``./data/kanban.db``, so the
+    same stored config pointed at different files depending on where
+    Marcus was started: a project created at runtime became unreadable
+    the moment the client was rebuilt from the registry (issue #792).
+
+    Parameters
+    ----------
+    configured : Optional[str]
+        The path from the provider config, absolute or relative.
+    default_name : str
+        Name to use inside the data directory when nothing is configured.
+
+    Returns
+    -------
+    Path
+        An absolute path, or a relative one resolved against the data
+        directory.
+    """
+    # One implementation of the rule, in src/core/paths.py. Keeping a
+    # second copy here is how three different notions of "the data
+    # directory" came to coexist, which is what let #792 survive its
+    # first fix (Codex P2 on PR #801, then the live check).
+    return resolve_data_path(configured, default_name)
+
+
 class SQLiteKanban(KanbanInterface):
     """SQLite-backed kanban board — zero external dependencies.
 
@@ -262,16 +292,10 @@ class SQLiteKanban(KanbanInterface):
         self.provider = KanbanProvider.SQLITE
 
         db_path_cfg = config.get("db_path")
-        self.db_path = (
-            Path(db_path_cfg) if db_path_cfg else marcus_data_dir() / "kanban.db"
-        )
+        self.db_path = _resolve_board_path(db_path_cfg, "kanban.db")
         self.project_name: str = config.get("project_name", "Marcus Project")
         attachments_cfg = config.get("attachments_dir")
-        self.attachments_dir = (
-            Path(attachments_cfg)
-            if attachments_cfg
-            else marcus_data_dir() / "attachments"
-        )
+        self.attachments_dir = _resolve_board_path(attachments_cfg, "attachments")
         self.connected = False
 
         # Project/board scoping — each experiment gets its own IDs

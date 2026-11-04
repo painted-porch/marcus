@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from src.core.paths import marcus_state_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -392,16 +394,27 @@ class ProjectHistoryPersistence:
             Path to Marcus root directory. If None, auto-detects.
         """
         if marcus_root is None:
-            # Auto-detect Marcus root
+            # Beside the rest of Marcus's state. Resolving against the
+            # code checkout meant a live check with its own data
+            # directory accumulated marcus.db and project_history/ inside
+            # a git worktree (issue #792).
+            # ``marcus_root`` keeps its original meaning, the code
+            # checkout, because it is also where conversation logs are
+            # read from (``logs/conversations``) and those are not state
+            # that an isolated instance owns. Only the data moves.
             self.marcus_root = Path(__file__).parent.parent.parent
+            data_dir = marcus_state_dir()
         else:
+            # An explicit root keeps the historical layout, which the
+            # analysis tools pass directly.
             self.marcus_root = Path(marcus_root)
+            data_dir = self.marcus_root / "data"
 
-        self.history_dir = self.marcus_root / "data" / "project_history"
+        self.history_dir = data_dir / "project_history"
         self.history_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize SQLite backend for primary storage
-        self.db_path = self.marcus_root / "data" / "marcus.db"
+        self.db_path = data_dir / "marcus.db"
 
         # Create reusable backend instance for connection pooling
         from src.core.persistence import SQLitePersistence

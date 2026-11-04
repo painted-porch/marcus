@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.core.event_loop_utils import EventLoopLockManager
+from src.core.paths import marcus_db_path
 from src.integrations.nlp_tools import add_feature_natural_language
 
 logger = logging.getLogger(__name__)
@@ -204,7 +205,8 @@ async def _store_config_snapshot(
         from src.core.persistence import SQLitePersistence
 
         cfg = get_config()
-        snap_db = Path(cfg.data_dir).expanduser() / "marcus.db"
+        # Issue #792: see server.py — cfg.data_dir is cwd-relative.
+        snap_db = marcus_db_path(cfg.data_dir)
         snap_persistence = SQLitePersistence(db_path=snap_db)
 
         # Discover available AI providers
@@ -343,6 +345,43 @@ def _validate_project_root_option(
     except OSError as error:
         return _reject(f"options.project_root {raw_root!r} cannot be created: {error}.")
     return None
+
+
+def default_sqlite_provider_paths(
+    db_path: Optional[str] = None,
+    attachments_dir: Optional[str] = None,
+) -> Dict[str, str]:
+    """Build the sqlite provider's paths, absolute, for the registry.
+
+    The registry persists this config, so a relative path here is a path
+    that resolves against whatever directory the server happens to start
+    in next time. That is how a project created at runtime became
+    unreadable immediately afterwards: creation wrote through the
+    startup client, and the client rebuilt from the registry read a
+    different file (issue #792).
+
+    Parameters
+    ----------
+    db_path : Optional[str]
+        Configured board path, if any.
+    attachments_dir : Optional[str]
+        Configured attachments directory, if any.
+
+    Returns
+    -------
+    Dict[str, str]
+        ``db_path`` and ``attachments_dir``, both absolute.
+    """
+    from src.integrations.providers.sqlite_kanban import _resolve_board_path
+
+    # No .resolve() here: _resolve_board_path already returns an absolute
+    # path, and resolving again would rewrite symlinks, so the registry
+    # would record a different string from the one the startup client is
+    # already using for the same file.
+    return {
+        "db_path": str(_resolve_board_path(db_path, "kanban.db")),
+        "attachments_dir": str(_resolve_board_path(attachments_dir, "attachments")),
+    }
 
 
 async def create_project(
@@ -1157,12 +1196,14 @@ async def _create_project_inner(
                 # Build provider_config based on provider type
                 if provider == "sqlite":
                     kanban_config = get_config().kanban
+                    paths = default_sqlite_provider_paths(
+                        db_path=kanban_config.sqlite_db_path,
+                        attachments_dir=kanban_config.sqlite_attachments_dir,
+                    )
                     prov_config: Dict[str, Any] = {
-                        "db_path": (kanban_config.sqlite_db_path or "./data/kanban.db"),
+                        "db_path": paths["db_path"],
                         "project_name": provider_project_name,
-                        "attachments_dir": (
-                            kanban_config.sqlite_attachments_dir or "./data/attachments"
-                        ),
+                        "attachments_dir": paths["attachments_dir"],
                     }
                     # Include project/board IDs and project_root from
                     # the client so project scoping and workspace state
@@ -1251,7 +1292,7 @@ async def _create_project_inner(
                             from src.core.persistence import SQLitePersistence
 
                             cfg = get_config()
-                            db_path = Path(cfg.data_dir).expanduser() / "marcus.db"
+                            db_path = marcus_db_path(cfg.data_dir)
                             persistence = SQLitePersistence(db_path=db_path)
                             task_ids = result.get("task_ids", [])
                             if not task_ids:

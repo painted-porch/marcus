@@ -54,6 +54,7 @@ from src.core.models import (  # noqa: E402
     TaskStatus,
     WorkerStatus,
 )
+from src.core.paths import cost_store_path, marcus_db_path  # noqa: E402
 from src.core.project_context_manager import ProjectContextManager  # noqa: E402
 from src.core.project_registry import ProjectRegistry  # noqa: E402
 from src.core.registration_persistence import (  # noqa: E402
@@ -197,7 +198,10 @@ class MarcusServer:
         # for the cost dashboard (#409). Stored at ~/.marcus/costs.db.
         # Best-effort: any store failure is swallowed by the recorder so
         # the provider call path can never be broken by cost tracking.
-        self.cost_store = CostStore(db_path=Path.home() / ".marcus" / "costs.db")
+        # ``cost_store_path`` keeps ~/.marcus/costs.db in production, so the
+        # cost dashboard still reads one database, and redirects it when
+        # MARCUS_DATA_DIR asks for isolation (issue #792).
+        self.cost_store = CostStore(db_path=cost_store_path())
         self.cost_store.load_seed_prices()
         self.cost_recorder = CostRecorder(store=self.cost_store, enabled=True)
         set_recorder(self.cost_recorder)
@@ -302,7 +306,12 @@ class MarcusServer:
             from src.core.persistence import Persistence, SQLitePersistence
 
             # Use SQLite for better performance
-            persistence_path = Path(config_loader.data_dir).expanduser() / "marcus.db"
+            # Issue #792: config.data_dir defaults to the cwd-relative
+            # "./data", so a server started outside the checkout left a
+            # stray data/marcus.db there. The resolver honours an
+            # absolute configured value and routes a relative one into
+            # MARCUS_DATA_DIR.
+            persistence_path = marcus_db_path(config_loader.data_dir)
             self.persistence = Persistence(backend=SQLitePersistence(persistence_path))
 
         # Events system for loose coupling
