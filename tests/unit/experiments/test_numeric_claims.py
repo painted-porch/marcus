@@ -641,3 +641,53 @@ class TestCheckReport:
         results = check_report([], load_sources(d))
         pct = [r for r in results if "pct" in r.claim_id]
         assert pct and all(r.verdict == "verified" for r in pct)
+
+
+class TestLabelMentionsSiblingsAsContext:
+    """Naming its own row earns a label the right to mention others.
+
+    A rehearsal produced the label "Q2 area quartile record count (Q3
+    and Q4 also 381)". The value was Q2's and correct, and the
+    parenthetical was useful context, but the first contradiction
+    rule failed it for naming a sibling at all. That is a false
+    decline, and false declines are the cost side of strictness.
+    """
+
+    @pytest.mark.unit
+    def test_own_row_named_allows_a_parenthetical_sibling(self, sources):
+        """The real rehearsal label must pass."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2 (cotton is lower)",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_sibling_without_own_row_still_fails(self, sources):
+        """The wrong-row error is still caught."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="cotton R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        assert check_claims([c], sources)[0].verdict == "failed"
+
+    @pytest.mark.unit
+    def test_own_unit_named_allows_mentioning_another(self, sources):
+        """The same allowance applies to units."""
+        c = Claim(
+            id="c1",
+            value=0.585,
+            label="cotton R2 in LB / ACRE, unlike the BU / ACRE crops",
+            source="per_crop.csv",
+            key="crop=cotton:r2",
+            kind="lookup",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"

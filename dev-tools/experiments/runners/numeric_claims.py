@@ -425,13 +425,20 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     sel_col, sel_val = parts[0].split("=", 1)
     label_words = _words_in(claim.label)
 
+    # Naming its own row earns a label the right to mention others.
+    # A rehearsal produced "Q2 area quartile record count (Q3 and Q4
+    # also 381)", where the value was Q2's and correct and the
+    # parenthetical was useful context. Only a label that names a
+    # sibling *instead of* its own row is a wrong-row error.
+    names_own_row = sel_val.lower() in label_words
+
     # A sibling row's selector value appearing in the label.
     siblings = {
         str(row.get(sel_col, "")).strip()
         for row in rows
         if str(row.get(sel_col, "")).strip() != sel_val
     }
-    for other in siblings:
+    for other in siblings if not names_own_row else ():
         if other and other.lower() in label_words:
             return f"label says {other!r} but the claim reads " f"{sel_col}={sel_val!r}"
 
@@ -449,6 +456,10 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     if not own:
         return None
     own_words = _words_in(own)
+    # The same allowance: a label stating its own unit may mention
+    # another for contrast.
+    if own_words and own_words <= label_words:
+        return None
     others = {
         str(row.get(column, "")).strip()
         for row in rows
