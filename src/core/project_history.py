@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from src.core.paths import marcus_data_dir
+from src.core.paths import marcus_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +403,7 @@ class ProjectHistoryPersistence:
             # read from (``logs/conversations``) and those are not state
             # that an isolated instance owns. Only the data moves.
             self.marcus_root = Path(__file__).parent.parent.parent
-            data_dir = marcus_data_dir()
+            data_dir = marcus_state_dir()
         else:
             # An explicit root keeps the historical layout, which the
             # analysis tools pass directly.

@@ -518,3 +518,120 @@ class TestConfigValidationCreatesNoStrayDirectories:
         assert not (cwd / "cache").exists()
         assert (tmp_path / "state").is_dir()
         assert (tmp_path / "state" / "cache").is_dir()
+
+
+class TestStoresThatLivedInTheCheckoutStayThere:
+    """Without an override, a checkout-relative default must not move.
+
+    Codex found this on the third pass, and it was a regression this
+    branch introduced. Two kinds of historical default were conflated:
+
+    * the board and ``config.data_dir`` defaulted to the **cwd-relative**
+      ``./data``, so ``marcus_data_dir()`` is exact parity for them.
+    * the worker roster, the project history and the creation-path
+      writers built ``<checkout>/data`` from ``Path(__file__)``, on
+      purpose, with the comment "use absolute path to ensure it works
+      regardless of working directory".
+
+    Routing the second group through ``marcus_data_dir()`` moved them to
+    ``<cwd>/data`` whenever Marcus was started outside the checkout, so a
+    production deployment restarted from elsewhere would silently stop
+    rehydrating its registered workers (ADR-0012 O1) and abandon its
+    history. ``marcus_state_dir()`` keeps the checkout for them while
+    still honouring the override.
+    """
+
+    def test_the_checkout_is_kept_when_no_override_is_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The working directory does not decide where state lives."""
+        from src.core.paths import marcus_state_dir
+
+        monkeypatch.delenv("MARCUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        assert marcus_state_dir() == Path(__file__).parents[3] / "data"
+
+    def test_the_override_still_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Isolation is still isolation; that is the whole issue."""
+        from src.core.paths import marcus_state_dir
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        assert marcus_state_dir() == tmp_path / "state"
+
+    def test_the_pytest_guard_still_applies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Resolving the production directory under pytest is refused.
+
+        Issue #724: tests once destroyed the live board this way, so the
+        checkout-relative resolver has to refuse just as loudly as the
+        cwd-relative one.
+        """
+        from src.core.paths import marcus_state_dir
+
+        monkeypatch.delenv("MARCUS_DATA_DIR", raising=False)
+
+        with pytest.raises(RuntimeError, match="724"):
+            marcus_state_dir()
+
+    def test_the_roster_keeps_its_checkout_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact case Codex named: a restart from another directory."""
+        from src.core.assignment_persistence import AssignmentPersistence
+
+        monkeypatch.delenv("MARCUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.chdir(tmp_path)
+        store = AssignmentPersistence()
+
+        assert store.storage_dir == (Path(__file__).parents[3] / "data" / "assignments")
+
+    def test_the_history_keeps_its_checkout_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An existing deployment must not abandon its history."""
+        from src.core.project_history import ProjectHistoryPersistence
+
+        monkeypatch.delenv("MARCUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.chdir(tmp_path)
+        store = ProjectHistoryPersistence()
+
+        root = Path(__file__).parents[3]
+        assert store.db_path == root / "data" / "marcus.db"
+        assert store.history_dir == root / "data" / "project_history"
+
+    def test_the_history_database_keeps_its_checkout_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The creation-path writers resolved against the checkout too."""
+        from src.core.paths import marcus_db_path
+
+        monkeypatch.delenv("MARCUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        assert marcus_db_path() == Path(__file__).parents[3] / "data" / "marcus.db"
+
+    def test_a_configured_relative_path_is_still_cwd_relative(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``config.data_dir`` keeps its own historical meaning.
+
+        Its default really was cwd-relative, so parity for it is the
+        opposite of parity for the stores above. Conflating the two is
+        what caused the regression.
+        """
+        from src.core.paths import marcus_db_path
+
+        monkeypatch.delenv("MARCUS_DATA_DIR", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        assert marcus_db_path("./data") == tmp_path / "data" / "marcus.db"

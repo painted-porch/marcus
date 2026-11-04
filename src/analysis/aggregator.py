@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.core.memory import AgentProfile, TaskOutcome
-from src.core.paths import marcus_data_dir, marcus_db_path
+from src.core.paths import marcus_db_path, marcus_state_dir
 from src.core.project_history import (
     ArtifactMetadata,
     Decision,
@@ -275,7 +275,7 @@ class ProjectHistoryAggregator:
         self.state_dir = (
             marcus_root / "data" / "marcus_state"
             if explicit_root
-            else marcus_data_dir() / "marcus_state"
+            else marcus_state_dir() / "marcus_state"
         )
 
         # Simple in-memory cache (60s TTL)

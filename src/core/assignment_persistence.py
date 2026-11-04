@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import aiofiles
 
 from src.core.event_loop_utils import EventLoopLockManager
-from src.core.paths import marcus_data_dir
+from src.core.paths import marcus_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class AssignmentPersistence:
             # Resolving against the code checkout meant ADR-0012 O1's
             # rehydration could hand one instance the other's
             # registrations (issue #792).
-            storage_dir = marcus_data_dir() / "assignments"
+            storage_dir = marcus_state_dir() / "assignments"
         self.storage_dir = storage_dir
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 

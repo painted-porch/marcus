@@ -84,6 +84,64 @@ def marcus_data_dir() -> Path:
     return Path("data")
 
 
+def _repo_root() -> Path:
+    """Locate the Marcus checkout this module was loaded from.
+
+    Returns
+    -------
+    Path
+        The repository root, two levels above ``src/core``. Every store
+        that historically built a checkout-relative default computed
+        exactly this value from its own ``__file__``.
+    """
+    return Path(__file__).parent.parent.parent
+
+
+def marcus_state_dir() -> Path:
+    """Resolve the data directory for a **checkout-relative** store.
+
+    Two different historical defaults exist, and treating them alike is a
+    regression. The board and ``config.data_dir`` defaulted to the
+    cwd-relative ``./data``, so :func:`marcus_data_dir` is exact parity
+    for them. The worker roster, the project history and the
+    project-creation writers instead built ``<checkout>/data`` from
+    ``Path(__file__)`` on purpose, so that they worked regardless of the
+    working directory.
+
+    Routing the second group through :func:`marcus_data_dir` moved them to
+    ``<cwd>/data`` whenever Marcus was started outside the checkout. An
+    existing deployment restarted from another directory would silently
+    stop rehydrating its registered workers (ADR-0012 O1) and abandon its
+    history, which is a worse failure than the one #792 set out to fix.
+
+    Returns
+    -------
+    Path
+        ``$MARCUS_DATA_DIR`` when set, otherwise ``<checkout>/data``.
+
+    Raises
+    ------
+    RuntimeError
+        When called under pytest with no override, for the same reason
+        :func:`marcus_data_dir` refuses: resolving the production
+        directory inside a test is the #724 data-loss hazard.
+    """
+    override = os.environ.get(DATA_DIR_ENV)
+    if override:
+        return Path(override)
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        raise RuntimeError(
+            "Refusing to resolve the production Marcus data directory "
+            "('<checkout>/data') under pytest (issue #724): tests once "
+            "destroyed the live board this way. The isolation fixture in "
+            "tests/conftest.py should have set MARCUS_DATA_DIR to a temp "
+            "directory — if this component resolved its path before "
+            "fixtures ran, pass an explicit path instead of relying on "
+            "the default."
+        )
+    return _repo_root() / "data"
+
+
 def _relative_to_data_dir(configured: str) -> Path:
     """Resolve a relative configured path against the data directory.
 
@@ -201,7 +259,10 @@ def marcus_db_path(configured: Optional[str] = None) -> Path:
         absolute path was configured.
     """
     if not configured:
-        return resolve_data_path(None, "marcus.db")
+        # The creation-path writers and the analysis classes all built
+        # <checkout>/data/marcus.db from their own __file__, so parity
+        # for them is the checkout, not the working directory.
+        return marcus_state_dir() / "marcus.db"
     candidate = Path(configured).expanduser()
     if candidate.suffix == ".db":
         return resolve_data_path(configured, "marcus.db")
