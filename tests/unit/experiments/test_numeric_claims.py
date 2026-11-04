@@ -691,3 +691,94 @@ class TestLabelMentionsSiblingsAsContext:
             kind="lookup",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
+
+
+class TestPassingVerdictsShowTheirWorking:
+    """A verdict that passes must show what it looked at.
+
+    A bare pass cannot be argued with, and a wrong one is
+    indistinguishable from a right one. Explaining only rejections
+    leaves the half a report's author most wants to defend resting on
+    trust, which is the shape this whole design exists to remove.
+    """
+
+    @pytest.mark.unit
+    def test_passing_lookup_names_its_source(self, sources):
+        """The reader can see which cell was read."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "verified"
+        assert "per_crop.csv" in res.detail
+        assert "0.886" in res.detail
+
+    @pytest.mark.unit
+    def test_passing_derived_shows_its_inputs(self, sources):
+        """The arithmetic is reproducible from the message alone."""
+        c = Claim(
+            id="c1",
+            value=22.08,
+            label="maize to cotton ratio",
+            kind="derived",
+            expr="a / b",
+            inputs={
+                "a": "per_crop.csv:crop=maize:n_records",
+                "b": "per_crop.csv:crop=cotton:n_records",
+            },
+            tolerance={"type": "abs", "value": 0.01},
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "verified"
+        assert "817" in res.detail and "37" in res.detail
+
+    @pytest.mark.unit
+    def test_passing_consistency_shows_both_sides(self, sources):
+        """A cross-check that passes names the figures it compared."""
+        c = Claim(
+            id="c1",
+            value=True,
+            label="tier total equals records",
+            kind="consistency",
+            expr="a == b",
+            inputs={"a": "tiers.csv:sum:n_records", "b": "metrics.json:n_records"},
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "verified"
+        assert "1200" in res.detail
+
+    @pytest.mark.unit
+    def test_tolerance_used_is_stated_when_one_was_declared(self, sources):
+        """A pass that relied on tolerance says so."""
+        c = Claim(
+            id="c1",
+            value=0.89,
+            label="maize R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+            tolerance={"type": "abs", "value": 0.01},
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "verified"
+        assert "0.01" in res.detail
+
+    @pytest.mark.unit
+    def test_failure_messages_are_unchanged(self, sources):
+        """Rejections keep the wording the retry handoff relies on."""
+        c = Claim(
+            id="c1",
+            value=0.92,
+            label="maize R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert res.detail == "maize R2: stated 0.92, source says 0.886"

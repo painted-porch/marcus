@@ -474,6 +474,27 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
+    """Render the tolerance a pass relied on, for the verdict message.
+
+    Parameters
+    ----------
+    tolerance : Optional[Dict[str, Any]]
+        The claim's declared tolerance, if any.
+
+    Returns
+    -------
+    str
+        A trailing clause, or an empty string for an exact match.
+    """
+    if not tolerance:
+        return ""
+    kind = str(tolerance.get("type", "abs"))
+    amount = tolerance.get("value", 0)
+    unit = "relative" if kind == "rel" else "absolute"
+    return f", within a declared {unit} tolerance of {amount}"
+
+
 def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
     """Resolve and judge a single claim.
 
@@ -516,7 +537,15 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
                 detail=f"{claim.label}: {contradiction}",
                 **base,
             )
-        return CheckResult(verdict=VERDICT_VERIFIED, expected=truth, **base)
+        return CheckResult(
+            verdict=VERDICT_VERIFIED,
+            expected=truth,
+            detail=(
+                f"{claim.label}: {claim.value} matches {address}"
+                f"{_tolerance_note(claim.tolerance)}"
+            ),
+            **base,
+        )
 
     if claim.kind in ("derived", "consistency"):
         names: Dict[str, Any] = {}
@@ -534,16 +563,27 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
         ok = _within_tolerance(claim.value, truth, claim.tolerance)
         inputs_detail = ", ".join(f"{k}={v}" for k, v in names.items())
+        if ok:
+            # A pass shows its working too: a verdict nobody can
+            # inspect is the shape this design exists to remove, and
+            # explaining only rejections leaves the half a report's
+            # author most wants to defend resting on trust.
+            return CheckResult(
+                verdict=VERDICT_VERIFIED,
+                expected=truth,
+                detail=(
+                    f"{claim.label}: {claim.value} recomputed as {truth} "
+                    f"from {inputs_detail}"
+                    f"{_tolerance_note(claim.tolerance)}"
+                ),
+                **base,
+            )
         return CheckResult(
-            verdict=VERDICT_VERIFIED if ok else VERDICT_FAILED,
+            verdict=VERDICT_FAILED,
             expected=truth,
             detail=(
-                ""
-                if ok
-                else (
-                    f"{claim.label}: stated {claim.value}, recomputed {truth} "
-                    f"from {inputs_detail}"
-                )
+                f"{claim.label}: stated {claim.value}, recomputed {truth} "
+                f"from {inputs_detail}"
             ),
             **base,
         )
