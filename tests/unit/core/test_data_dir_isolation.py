@@ -392,6 +392,26 @@ class TestTheHistoryDatabaseFollowsTheDataDir:
 
         assert marcus_db_path(str(configured)) == configured
 
+    def test_a_bare_data_value_still_gets_the_default_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A configured ``"data"`` names the directory, not the file.
+
+        Stripping the leading ``data/`` segment leaves nothing, so the
+        caller's default name has to be applied after the strip or the
+        path would be the directory itself.
+        """
+        from src.core.paths import resolve_data_path
+
+        monkeypatch.setenv("MARCUS_DATA_DIR", str(tmp_path / "state"))
+
+        assert resolve_data_path("data", "kanban.db") == (
+            tmp_path / "state" / "kanban.db"
+        )
+        assert resolve_data_path("./data", "attachments") == (
+            tmp_path / "state" / "attachments"
+        )
+
     def test_the_shared_rule_is_one_implementation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
