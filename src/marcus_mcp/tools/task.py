@@ -369,6 +369,36 @@ _RECONCILIATION_LABEL = "reconciliation"
 _RECONCILIATION_LOCKS: Dict[str, asyncio.Lock] = {}
 _RECONCILIATION_LOCKS_GUARD = threading.Lock()
 
+#: One lock per DEPENDENT around the whole handoff sequence: read the
+#: provenance, replace the inputs, write the board or roll back, record
+#: the provenance. Without it the replacement is visible in shared
+#: memory while the board write is still in flight, so a second upstream
+#: closing concurrently can see a key the first has removed but not yet
+#: committed, claim it, and leave both owning it (Codex P2 on PR #807).
+_HANDOFF_LOCKS: Dict[str, asyncio.Lock] = {}
+_HANDOFF_LOCKS_GUARD = threading.Lock()
+
+
+def _handoff_lock(dependent_id: str) -> asyncio.Lock:
+    """Return the lock that serialises handoffs into one dependent.
+
+    Parameters
+    ----------
+    dependent_id : str
+        The task whose inputs are being written.
+
+    Returns
+    -------
+    asyncio.Lock
+        A lock unique to this dependent for the life of the process.
+    """
+    with _HANDOFF_LOCKS_GUARD:
+        lock = _HANDOFF_LOCKS.get(dependent_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _HANDOFF_LOCKS[dependent_id] = lock
+        return lock
+
 
 def _reconciliation_lock(task_id: str) -> asyncio.Lock:
     """Return the lock that serialises card creation for one task.
@@ -1108,80 +1138,115 @@ async def _handoff_evidence_to_dependents(
         # rounds: a key present in the first close and absent from the
         # second is removed rather than left standing, and the schema
         # only pins the REQUIRED fields, so that case is reachable.
-        prior_keys: List[str] = []
-        if persistence is not None:
-            try:
-                prior_keys = await persistence.get_input_provenance(
-                    dependent.id, task.id
-                )
-            except Exception as prov_err:  # noqa: BLE001 - degrade to additive
-                logger.warning(
-                    "[#803] Handoff provenance unreadable for dependent %s "
-                    "(%s); this close adds keys and clears none, so a "
-                    "superseded value may survive.",
-                    dependent.id,
-                    prov_err,
-                )
-        before = dict(dependent.inputs or {})
-        kept = {k: v for k, v in before.items() if k not in prior_keys}
-        dependent.inputs = {**payload, **kept}
-        # Record what this close actually WROTE, not what it offered. A
-        # key the board seeded, or another upstream task contributed,
-        # beats this payload and stays in ``kept``; attributing it here
-        # would let the next close of this task clear a value it never
-        # owned, which would turn the #803 fix into a way around the
-        # very rule it preserves.
-        contributed = [k for k in payload if k not in kept]
-        board_written = True
+        # Everything from here to the provenance write is one critical
+        # section per dependent (Codex P2 on PR #807). The steps are not
+        # individually unsafe; what is unsafe is another handoff
+        # observing the gap between the in-memory replacement and the
+        # board write that commits it.
+        async with _handoff_lock(dependent.id):
+            await _apply_handoff_to_dependent(
+                task, dependent, payload, persistence, state
+            )
+
+
+async def _apply_handoff_to_dependent(
+    task: Task,
+    dependent: Task,
+    payload: Dict[str, Any],
+    persistence: Any,
+    state: Any,
+) -> None:
+    """Replace one dependent's keys from a closing task's payload.
+
+    Held under that dependent's handoff lock by the only caller, so the
+    provenance read, the input replacement, the board write and the
+    provenance update cannot interleave with another upstream's.
+
+    Parameters
+    ----------
+    task : Task
+        The task that just closed.
+    dependent : Task
+        The task whose inputs are being written.
+    payload : Dict[str, Any]
+        The closing task's inputs and evidence, minus ``raw``.
+    persistence : Any
+        The provenance store, or ``None`` when the caller has none.
+    state : Any
+        Marcus server state, for the kanban client.
+    """
+    prior_keys: List[str] = []
+    if persistence is not None:
         try:
-            await state.kanban_client.update_task(
-                dependent.id, {"inputs": dependent.inputs}
-            )
-        except Exception as handoff_err:  # noqa: BLE001 - roll the copy back
-            board_written = False
-            # Roll the in-memory copy back to what the board still holds
-            # (Codex P2 on PR #807, second round). Keeping the new copy
-            # was the older behaviour and it is unsafe under set
-            # replacement: a removal that never reached the board made
-            # the key vanish from memory while the board kept it and its
-            # owner kept the record, so another upstream could
-            # contribute the same key and both records would claim it.
-            # The first owner's next close would then delete the second
-            # one's persisted value, which is exactly the guarantee this
-            # function is supposed to hold. Memory and board agreeing is
-            # worth more than a fresher copy the next refresh discards.
-            dependent.inputs = before
+            prior_keys = await persistence.get_input_provenance(dependent.id, task.id)
+        except Exception as prov_err:  # noqa: BLE001 - degrade to additive
             logger.warning(
-                "[#737] Claim handoff: kanban write failed for dependent "
-                "%s (%s); the in-memory copy was rolled back so it still "
-                "matches the board.",
+                "[#803] Handoff provenance unreadable for dependent %s "
+                "(%s); this close adds keys and clears none, so a "
+                "superseded value may survive.",
                 dependent.id,
-                handoff_err,
+                prov_err,
             )
-        # Provenance is narrowed only AFTER the board has the matching
-        # inputs (Codex P2 on PR #807). A re-close that drops an optional
-        # key and then fails to reach the board would otherwise record
-        # the narrower set while the board still held the dropped key:
-        # the next refresh resurrects it, no one is recorded as its
-        # author, and every later close treats it as board-seeded and can
-        # never clear it. Keeping the previous, wider record is the safe
-        # direction, because it can only over-clear keys this task
-        # legitimately owned, never a board-seeded one, which is never
-        # attributed to anybody in the first place.
-        if persistence is not None and board_written:
-            try:
-                await persistence.record_input_provenance(
-                    dependent.id, task.id, contributed
-                )
-            except Exception as prov_err:  # noqa: BLE001 - never fail a close
-                logger.warning(
-                    "[#803] Handoff provenance write failed for dependent "
-                    "%s (%s); a later re-close of %s may leave one of "
-                    "these keys standing.",
-                    dependent.id,
-                    prov_err,
-                    task.id,
-                )
+    before = dict(dependent.inputs or {})
+    kept = {k: v for k, v in before.items() if k not in prior_keys}
+    dependent.inputs = {**payload, **kept}
+    # Record what this close actually WROTE, not what it offered. A
+    # key the board seeded, or another upstream task contributed,
+    # beats this payload and stays in ``kept``; attributing it here
+    # would let the next close of this task clear a value it never
+    # owned, which would turn the #803 fix into a way around the
+    # very rule it preserves.
+    contributed = [k for k in payload if k not in kept]
+    board_written = True
+    try:
+        await state.kanban_client.update_task(
+            dependent.id, {"inputs": dependent.inputs}
+        )
+    except Exception as handoff_err:  # noqa: BLE001 - roll the copy back
+        board_written = False
+        # Roll the in-memory copy back to what the board still holds
+        # (Codex P2 on PR #807, second round). Keeping the new copy
+        # was the older behaviour and it is unsafe under set
+        # replacement: a removal that never reached the board made
+        # the key vanish from memory while the board kept it and its
+        # owner kept the record, so another upstream could
+        # contribute the same key and both records would claim it.
+        # The first owner's next close would then delete the second
+        # one's persisted value, which is exactly the guarantee this
+        # function is supposed to hold. Memory and board agreeing is
+        # worth more than a fresher copy the next refresh discards.
+        dependent.inputs = before
+        logger.warning(
+            "[#737] Claim handoff: kanban write failed for dependent "
+            "%s (%s); the in-memory copy was rolled back so it still "
+            "matches the board.",
+            dependent.id,
+            handoff_err,
+        )
+    # Provenance is narrowed only AFTER the board has the matching
+    # inputs (Codex P2 on PR #807). A re-close that drops an optional
+    # key and then fails to reach the board would otherwise record
+    # the narrower set while the board still held the dropped key:
+    # the next refresh resurrects it, no one is recorded as its
+    # author, and every later close treats it as board-seeded and can
+    # never clear it. Keeping the previous, wider record is the safe
+    # direction, because it can only over-clear keys this task
+    # legitimately owned, never a board-seeded one, which is never
+    # attributed to anybody in the first place.
+    if persistence is not None and board_written:
+        try:
+            await persistence.record_input_provenance(
+                dependent.id, task.id, contributed
+            )
+        except Exception as prov_err:  # noqa: BLE001 - never fail a close
+            logger.warning(
+                "[#803] Handoff provenance write failed for dependent "
+                "%s (%s); a later re-close of %s may leave one of "
+                "these keys standing.",
+                dependent.id,
+                prov_err,
+                task.id,
+            )
 
 
 async def _terminalize_escalated_smoke_task(

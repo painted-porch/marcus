@@ -441,6 +441,78 @@ class TestAFailedWriteDoesNotFreeAKeyForReassignment:
         assert verify.inputs == on_board
 
 
+class TestConcurrentHandoffsToOneDependent:
+    """Two upstreams closing at once must not both own a key.
+
+    Codex P2 on PR #807, third round, and the concurrent form of the
+    previous one. The rollback fixed the sequential case, but the
+    replacement is exposed in shared memory before the board write
+    finishes: while A awaits a write that will fail, B can see the
+    missing key, persist its own value and record ownership. A then
+    rolls back and keeps its record, so both own the key and A's next
+    close deletes B's value.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_pending_removal_is_not_visible_to_another_upstream(
+        self,
+    ) -> None:
+        """B must not observe A's uncommitted removal."""
+        import asyncio
+
+        from src.marcus_mcp.tools.task import _handoff_evidence_to_dependents
+
+        a_write_started = asyncio.Event()
+        release_a_write = asyncio.Event()
+
+        class _SlowBoard(_Kanban):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail_for: Optional[str] = None
+
+            async def update_task(self, task_id: str, data: Dict[str, Any]) -> None:
+                if self.fail_for == "a":
+                    self.fail_for = None
+                    a_write_started.set()
+                    await release_a_write.wait()
+                    raise RuntimeError("board unreachable")
+                await super().update_task(task_id, data)
+
+        persistence = _Persistence()
+        board = _SlowBoard()
+        a = _task("upstream-a")
+        b = _task("upstream-b")
+        dependent = _task("dependent-1", deps=["upstream-a", "upstream-b"])
+        state = SimpleNamespace(
+            project_tasks=[a, b, dependent],
+            kanban_client=board,
+            assignment_persistence=persistence,
+        )
+
+        await _handoff_evidence_to_dependents(a, {"note": "from-a"}, state)
+
+        # A removes its key; its board write stalls, then fails.
+        board.fail_for = "a"
+        a_task = asyncio.create_task(_handoff_evidence_to_dependents(a, {}, state))
+        await a_write_started.wait()
+
+        # B closes while A's removal is uncommitted.
+        b_task = asyncio.create_task(
+            _handoff_evidence_to_dependents(b, {"note": "from-b"}, state)
+        )
+        await asyncio.sleep(0)
+        release_a_write.set()
+        await asyncio.gather(a_task, b_task)
+
+        a_owns = "note" in await persistence.get_input_provenance(
+            "dependent-1", "upstream-a"
+        )
+        b_owns = "note" in await persistence.get_input_provenance(
+            "dependent-1", "upstream-b"
+        )
+        assert not (a_owns and b_owns), "two upstreams own one key"
+
+
 class TestItDegradesRatherThanFailing:
     """The handoff must never break a completion."""
 
