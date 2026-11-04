@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The service registry entry now names the data directory the instance is serving (#792 follow-up).
+`~/.marcus/services` is how a tool finds the Marcus servers running on a machine, and since `MARCUS_DATA_DIR` began isolating everything Marcus writes, two servers can run side by side on wholly separate state.
+The entry did not say which state, so two sqlite instances started from one checkout were indistinguishable: a live check confirms their `provider`, `log_dir` and `mcp_command` are identical, leaving pid as the only difference, which says nothing about which board each was serving.
+`data_dir` is absolute with any tilde expanded, because it is read by a process that shares neither the writer's working directory nor necessarily its home, and with no override set it names the checkout's data directory so a single-instance deployment needs no special case.
+Also corrects a stale claim in `docs/source/systems/architecture/15-service-registry.md` that Cato calls `MarcusServiceRegistry.discover_services()`; Cato is pointed at Marcus by `marcus_data_path` in its own config and reads the data directory directly, and nothing in this repository reads the registry at all.
 - The ADR-0012 D11 fence, enforced at the resource (epic #706 Milestone B).
 A completion whose lease epoch has been superseded is now refused before the board's DONE write and before the merge into `main`, deciding from the durable per-task epoch high-water mark rather than from in-memory ownership, which has disagreed with itself before (#485).
 This closes the two-live-completions path the session model opened: Marcus can take a session's task away but not its process, so a session that goes quiet during a long build is still alive and will report 100% after its task has been handed to someone else.
