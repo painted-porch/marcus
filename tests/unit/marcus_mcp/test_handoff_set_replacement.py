@@ -280,6 +280,63 @@ class TestTheProvenanceIsDurable:
         assert "note" not in verify_again.inputs
 
 
+class TestAFailedBoardWriteDoesNotStrandAKey:
+    """Provenance must not narrow before the board write succeeds.
+
+    Codex P2 on PR #807. The provenance write used to happen first, so a
+    re-close that dropped an optional key and then failed to reach the
+    board recorded the narrower set anyway. The board still held the
+    dropped key, ``refresh_project_state`` reloaded it, and because the
+    narrowed provenance no longer attributed it to anyone, every later
+    close treated the resurrected key as board-seeded and could never
+    clear it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_key_survives_an_outage_and_is_still_cleared(self) -> None:
+        """The exact sequence from the finding."""
+        from src.marcus_mcp.tools.task import _handoff_evidence_to_dependents
+
+        class _Flaky(_Kanban):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail_next = False
+
+            async def update_task(self, task_id: str, data: Dict[str, Any]) -> None:
+                if self.fail_next:
+                    self.fail_next = False
+                    raise RuntimeError("board unreachable")
+                await super().update_task(task_id, data)
+
+        persistence = _Persistence()
+        board = _Flaky()
+        find = _task("find-1")
+        verify = _task("verify-1", deps=["find-1"])
+        state = SimpleNamespace(
+            project_tasks=[find, verify],
+            kanban_client=board,
+            assignment_persistence=persistence,
+        )
+
+        await _handoff_evidence_to_dependents(
+            find, {"claim": "c1", "note": "n1"}, state
+        )
+        # Round two drops ``note`` and never reaches the board.
+        board.fail_next = True
+        await _handoff_evidence_to_dependents(find, {"claim": "c2"}, state)
+
+        # refresh_project_state reloads the board's copy, which still has
+        # the key round two meant to drop.
+        last_written = board.writes[-1][1]["inputs"]
+        verify.inputs = dict(last_written)
+        assert verify.inputs["note"] == "n1"
+
+        await _handoff_evidence_to_dependents(find, {"claim": "c3"}, state)
+
+        assert verify.inputs["claim"] == "c3"
+        assert "note" not in verify.inputs
+
+
 class TestItDegradesRatherThanFailing:
     """The handoff must never break a completion."""
 

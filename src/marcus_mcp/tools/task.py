@@ -1133,7 +1133,31 @@ async def _handoff_evidence_to_dependents(
         # owned, which would turn the #803 fix into a way around the
         # very rule it preserves.
         contributed = [k for k in payload if k not in kept]
-        if persistence is not None:
+        board_written = True
+        try:
+            await state.kanban_client.update_task(
+                dependent.id, {"inputs": dependent.inputs}
+            )
+        except Exception as handoff_err:  # noqa: BLE001 - keep memory copy
+            board_written = False
+            logger.warning(
+                "[#737] Claim handoff: kanban write failed for dependent "
+                "%s (%s); the in-memory copy is applied and the next "
+                "refresh may lose it.",
+                dependent.id,
+                handoff_err,
+            )
+        # Provenance is narrowed only AFTER the board has the matching
+        # inputs (Codex P2 on PR #807). A re-close that drops an optional
+        # key and then fails to reach the board would otherwise record
+        # the narrower set while the board still held the dropped key:
+        # the next refresh resurrects it, no one is recorded as its
+        # author, and every later close treats it as board-seeded and can
+        # never clear it. Keeping the previous, wider record is the safe
+        # direction, because it can only over-clear keys this task
+        # legitimately owned, never a board-seeded one, which is never
+        # attributed to anybody in the first place.
+        if persistence is not None and board_written:
             try:
                 await persistence.record_input_provenance(
                     dependent.id, task.id, contributed
@@ -1147,18 +1171,6 @@ async def _handoff_evidence_to_dependents(
                     prov_err,
                     task.id,
                 )
-        try:
-            await state.kanban_client.update_task(
-                dependent.id, {"inputs": dependent.inputs}
-            )
-        except Exception as handoff_err:  # noqa: BLE001 - keep memory copy
-            logger.warning(
-                "[#737] Claim handoff: kanban write failed for dependent "
-                "%s (%s); the in-memory copy is applied and the next "
-                "refresh may lose it.",
-                dependent.id,
-                handoff_err,
-            )
 
 
 async def _terminalize_escalated_smoke_task(
