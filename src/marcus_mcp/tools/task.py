@@ -1122,9 +1122,8 @@ async def _handoff_evidence_to_dependents(
                     dependent.id,
                     prov_err,
                 )
-        kept = {
-            k: v for k, v in (dependent.inputs or {}).items() if k not in prior_keys
-        }
+        before = dict(dependent.inputs or {})
+        kept = {k: v for k, v in before.items() if k not in prior_keys}
         dependent.inputs = {**payload, **kept}
         # Record what this close actually WROTE, not what it offered. A
         # key the board seeded, or another upstream task contributed,
@@ -1138,12 +1137,24 @@ async def _handoff_evidence_to_dependents(
             await state.kanban_client.update_task(
                 dependent.id, {"inputs": dependent.inputs}
             )
-        except Exception as handoff_err:  # noqa: BLE001 - keep memory copy
+        except Exception as handoff_err:  # noqa: BLE001 - roll the copy back
             board_written = False
+            # Roll the in-memory copy back to what the board still holds
+            # (Codex P2 on PR #807, second round). Keeping the new copy
+            # was the older behaviour and it is unsafe under set
+            # replacement: a removal that never reached the board made
+            # the key vanish from memory while the board kept it and its
+            # owner kept the record, so another upstream could
+            # contribute the same key and both records would claim it.
+            # The first owner's next close would then delete the second
+            # one's persisted value, which is exactly the guarantee this
+            # function is supposed to hold. Memory and board agreeing is
+            # worth more than a fresher copy the next refresh discards.
+            dependent.inputs = before
             logger.warning(
                 "[#737] Claim handoff: kanban write failed for dependent "
-                "%s (%s); the in-memory copy is applied and the next "
-                "refresh may lose it.",
+                "%s (%s); the in-memory copy was rolled back so it still "
+                "matches the board.",
                 dependent.id,
                 handoff_err,
             )

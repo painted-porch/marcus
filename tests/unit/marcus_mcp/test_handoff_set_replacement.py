@@ -294,7 +294,7 @@ class TestAFailedBoardWriteDoesNotStrandAKey:
 
     @pytest.mark.asyncio
     async def test_a_key_survives_an_outage_and_is_still_cleared(self) -> None:
-        """The exact sequence from the finding."""
+        """The exact sequence from the finding, asserting its invariant."""
         from src.marcus_mcp.tools.task import _handoff_evidence_to_dependents
 
         class _Flaky(_Kanban):
@@ -335,6 +335,110 @@ class TestAFailedBoardWriteDoesNotStrandAKey:
 
         assert verify.inputs["claim"] == "c3"
         assert "note" not in verify.inputs
+
+
+class TestAFailedWriteDoesNotFreeAKeyForReassignment:
+    """A failed board write must not let another upstream claim the key.
+
+    Codex P2 on PR #807, second round, and a consequence of the fix for
+    the first. The in-memory copy was still mutated when the board write
+    failed, so the key vanished from memory while the board kept it and
+    its owner kept the record. Another upstream then contributed the
+    same key, successfully, and both records claimed it. The first
+    upstream's next close deleted the second's persisted value, breaking
+    the guarantee that one upstream cannot clear another's contribution.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_failed_removal_does_not_hand_the_key_to_another_task(
+        self,
+    ) -> None:
+        """The exact sequence from the finding."""
+        from src.marcus_mcp.tools.task import _handoff_evidence_to_dependents
+
+        class _Flaky(_Kanban):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail_next = False
+
+            async def update_task(self, task_id: str, data: Dict[str, Any]) -> None:
+                if self.fail_next:
+                    self.fail_next = False
+                    raise RuntimeError("board unreachable")
+                await super().update_task(task_id, data)
+
+        persistence = _Persistence()
+        board = _Flaky()
+        a = _task("upstream-a")
+        b = _task("upstream-b")
+        dependent = _task("dependent-1", deps=["upstream-a", "upstream-b"])
+        state = SimpleNamespace(
+            project_tasks=[a, b, dependent],
+            kanban_client=board,
+            assignment_persistence=persistence,
+        )
+
+        await _handoff_evidence_to_dependents(a, {"note": "from-a"}, state)
+        assert dependent.inputs["note"] == "from-a"
+
+        # A re-closes without ``note`` and the board write fails.
+        board.fail_next = True
+        await _handoff_evidence_to_dependents(a, {}, state)
+
+        # B now contributes its own ``note``.
+        await _handoff_evidence_to_dependents(b, {"note": "from-b"}, state)
+
+        # The invariant: the key has ONE owner. A still holds it, because
+        # its removal never reached the board, so B's value does not land
+        # and B is not recorded as the author. Two records claiming one
+        # key is the state that let A delete B's value.
+        a_owns = "note" in await persistence.get_input_provenance(
+            "dependent-1", "upstream-a"
+        )
+        b_owns = "note" in await persistence.get_input_provenance(
+            "dependent-1", "upstream-b"
+        )
+        assert not (a_owns and b_owns)
+        assert dependent.inputs["note"] == "from-a"
+
+        # A closes again and clears the key it does own, which is correct:
+        # there is no second contribution to destroy.
+        await _handoff_evidence_to_dependents(a, {}, state)
+
+        assert "note" not in dependent.inputs
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_leaves_memory_matching_the_board(self) -> None:
+        """Memory and board must not diverge, which is what frees the key."""
+        from src.marcus_mcp.tools.task import _handoff_evidence_to_dependents
+
+        class _Flaky(_Kanban):
+            def __init__(self) -> None:
+                super().__init__()
+                self.fail_next = False
+
+            async def update_task(self, task_id: str, data: Dict[str, Any]) -> None:
+                if self.fail_next:
+                    self.fail_next = False
+                    raise RuntimeError("board unreachable")
+                await super().update_task(task_id, data)
+
+        board = _Flaky()
+        find = _task("find-1")
+        verify = _task("verify-1", deps=["find-1"])
+        state = SimpleNamespace(
+            project_tasks=[find, verify],
+            kanban_client=board,
+            assignment_persistence=_Persistence(),
+        )
+
+        await _handoff_evidence_to_dependents(find, {"claim": "c1"}, state)
+        on_board = dict(board.writes[-1][1]["inputs"])
+
+        board.fail_next = True
+        await _handoff_evidence_to_dependents(find, {"claim": "c2"}, state)
+
+        assert verify.inputs == on_board
 
 
 class TestItDegradesRatherThanFailing:
