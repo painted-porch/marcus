@@ -258,6 +258,25 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                         "description": "Progress message",
                         "default": "",
                     },
+                    "subject": {
+                        "type": "string",
+                        "description": (
+                            "Optional: a short slug naming something in "
+                            "this report that other agents should weigh "
+                            "(wood.scarce, mobs.north). Marcus records it "
+                            "as an opinion on the board and counts the "
+                            "agents who name the same subject, so a "
+                            "marker costs you no extra call."
+                        ),
+                    },
+                    "observation": {
+                        "type": "string",
+                        "description": (
+                            "Optional: the crew-relevant part, when the "
+                            "progress message says more than that. "
+                            "Defaults to the message."
+                        ),
+                    },
                     "start_command": {
                         "type": "string",
                         "description": (
@@ -1418,6 +1437,8 @@ async def handle_tool_call(
                     progress=arguments.get("progress", 0),
                     message=arguments.get("message", ""),
                     state=state,
+                    subject=arguments.get("subject"),
+                    observation=arguments.get("observation"),
                     start_command=arguments.get("start_command"),
                     readiness_probe=arguments.get("readiness_probe"),
                     # #735/#737: the stdio path must carry the same

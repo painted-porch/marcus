@@ -218,6 +218,7 @@ async def query_project_history(
                 subject=filters.get("subject"),
                 kind=filters.get("kind", "assessment"),
                 since=filters.get("since"),
+                window_minutes=filters.get("window_minutes"),
             )
             page = entries[offset : offset + limit]
             return {

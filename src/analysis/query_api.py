@@ -9,7 +9,7 @@ Provides convenient methods for filtering and searching project execution data:
 - Search conversations and events
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from src.analysis.aggregator import (
@@ -26,11 +26,18 @@ from src.core.project_history import ArtifactMetadata, Decision
 DECISION_PAGE_SIZE = 10000
 
 
+def _as_utc(moment: datetime) -> datetime:
+    """Read a stored timestamp as UTC when it carries no timezone."""
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
 def group_opinions_by_subject(
     decisions: list[Decision],
     subject: Optional[str] = None,
     kind: str = "assessment",
     since: Optional[str] = None,
+    window_minutes: Optional[int] = None,
+    now: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
     """
     Group opinions into one entry per subject (deliberation layer, B2).
@@ -50,6 +57,22 @@ def group_opinions_by_subject(
         ``"decision"``. Rows with no subject are never grouped.
     since : Optional[str]
         ISO-8601 timestamp; rows before it are ignored.
+    window_minutes : Optional[int]
+        When given and positive, each entry also reports how many
+        DISTINCT agents posted within the last ``window_minutes``, and
+        the read is ordered by that figure first.
+
+        A pheromone evaporates, and the reason is not tidiness: without
+        age, a hazard reported an hour ago weighs exactly as much as one
+        reported a minute ago, so a priority signal cannot tell "three
+        agents think this now" from "three agents thought it at different
+        times for different reasons". Nothing is deleted or hidden, since
+        a faded subject is still worth seeing; the kernel reports both
+        figures and holds no policy about which one matters, because how
+        fast a signal should fade belongs to the domain, not here.
+    now : Optional[datetime]
+        The instant the window is measured back from; defaults to the
+        current UTC time and exists so tests can fix it.
 
     Returns
     -------
@@ -58,13 +81,20 @@ def group_opinions_by_subject(
         ``subject``, ``kind``, ``count`` (distinct agents), ``opinion_count``,
         ``agents`` (sorted), ``first_seen``, ``last_seen``, ``task_ids``
         (sorted, project-level rows contribute none) and ``opinions``
-        (the rows themselves, newest first).
+        (the rows themselves, newest first). With a window, also
+        ``recent_count``, ``recent_agents`` and ``window_minutes``.
     """
     since_ts: Optional[datetime] = None
     if since:
-        since_ts = datetime.fromisoformat(since)
-        if since_ts.tzinfo is None:
-            since_ts = since_ts.replace(tzinfo=timezone.utc)
+        since_ts = _as_utc(datetime.fromisoformat(since))
+
+    windowed = bool(window_minutes and window_minutes > 0)
+    window_start: Optional[datetime] = None
+    if windowed:
+        measured_from = now or datetime.now(timezone.utc)
+        if measured_from.tzinfo is None:
+            measured_from = measured_from.replace(tzinfo=timezone.utc)
+        window_start = measured_from - timedelta(minutes=int(window_minutes or 0))
 
     groups: dict[str, list[Decision]] = {}
     for decision in decisions:
@@ -84,23 +114,32 @@ def group_opinions_by_subject(
         items.sort(key=lambda d: d.timestamp, reverse=True)
         agents = sorted({d.agent_id for d in items})
         task_ids = sorted({d.task_id for d in items if d.task_id})
-        entries.append(
-            {
-                "subject": group_subject,
-                "kind": kind,
-                "count": len(agents),
-                "opinion_count": len(items),
-                "agents": agents,
-                "first_seen": items[-1].timestamp.isoformat(),
-                "last_seen": items[0].timestamp.isoformat(),
-                "task_ids": task_ids,
-                "opinions": [d.to_dict() for d in items],
-            }
-        )
+        entry: dict[str, Any] = {
+            "subject": group_subject,
+            "kind": kind,
+            "count": len(agents),
+            "opinion_count": len(items),
+            "agents": agents,
+            "first_seen": items[-1].timestamp.isoformat(),
+            "last_seen": items[0].timestamp.isoformat(),
+            "task_ids": task_ids,
+            "opinions": [d.to_dict() for d in items],
+        }
+        if windowed and window_start is not None:
+            recent = sorted(
+                {d.agent_id for d in items if _as_utc(d.timestamp) >= window_start}
+            )
+            entry["recent_count"] = len(recent)
+            entry["recent_agents"] = recent
+            entry["window_minutes"] = int(window_minutes or 0)
+        entries.append(entry)
 
-    # Most recent first, then (stable) most corroborated first.
+    # Most recent first, then (stable) most corroborated first. With a
+    # window, who still thinks so outranks who ever did.
     entries.sort(key=lambda e: e["last_seen"], reverse=True)
     entries.sort(key=lambda e: e["count"], reverse=True)
+    if windowed:
+        entries.sort(key=lambda e: e.get("recent_count", 0), reverse=True)
     return entries
 
 
@@ -386,6 +425,7 @@ class ProjectHistoryQuery:
         subject: Optional[str] = None,
         kind: str = "assessment",
         since: Optional[str] = None,
+        window_minutes: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """
         Group the project's opinions by subject (deliberation layer, B2).
@@ -405,6 +445,10 @@ class ProjectHistoryQuery:
             ``"assessment"`` (default) or ``"decision"``
         since : Optional[str]
             ISO-8601 timestamp; earlier rows are ignored
+        window_minutes : Optional[int]
+            Also report how many distinct agents posted within this many
+            minutes, and order the read by that; see
+            ``group_opinions_by_subject``.
 
         Returns
         -------
@@ -428,7 +472,11 @@ class ProjectHistoryQuery:
             decisions.extend(page)
             offset += DECISION_PAGE_SIZE
         return group_opinions_by_subject(
-            decisions, subject=subject, kind=kind, since=since
+            decisions,
+            subject=subject,
+            kind=kind,
+            since=since,
+            window_minutes=window_minutes,
         )
 
     # Artifact Queries
