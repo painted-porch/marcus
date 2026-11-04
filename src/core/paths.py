@@ -28,6 +28,33 @@ from typing import Optional
 DATA_DIR_ENV = "MARCUS_DATA_DIR"
 
 
+def _override_data_dir() -> Optional[Path]:
+    """Read ``MARCUS_DATA_DIR``, normalized, or ``None`` when unset.
+
+    Every store has to agree on what the override means. A literal tilde
+    is plausible in a shell profile or a launchd plist, where nothing
+    expands it, and a relative value is legitimate. Expanding and
+    absolutizing in one place is what keeps one instance from opening two
+    history databases: before this, ``resolve_data_path`` expanded the
+    tilde while ``marcus_state_dir`` and ``cost_store_path`` did not, so
+    the roster and the creation-path writers used a directory literally
+    named ``~`` inside the working directory (Codex P2 on PR #801).
+
+    Returns
+    -------
+    Optional[Path]
+        The override as an absolute path, or ``None`` when it is unset or
+        empty.
+    """
+    override = os.environ.get(DATA_DIR_ENV)
+    if not override:
+        return None
+    # absolute(), not resolve(): an already-absolute value must come back
+    # byte-identical, because callers compare it against what they
+    # configured. resolve() would rewrite symlinks.
+    return Path(override).expanduser().absolute()
+
+
 def cost_store_path() -> Path:
     """Resolve the cost store's path.
 
@@ -46,9 +73,9 @@ def cost_store_path() -> Path:
         ``$MARCUS_DATA_DIR/costs.db`` when the override is set, otherwise
         ``~/.marcus/costs.db``.
     """
-    override = os.environ.get(DATA_DIR_ENV)
+    override = _override_data_dir()
     if override:
-        return Path(override) / "costs.db"
+        return override / "costs.db"
     return Path.home() / ".marcus" / "costs.db"
 
 
@@ -68,9 +95,9 @@ def marcus_data_dir() -> Path:
         resolving the production default inside a test is exactly the
         #724 data-loss hazard, so it is refused rather than honored.
     """
-    override = os.environ.get(DATA_DIR_ENV)
+    override = _override_data_dir()
     if override:
-        return Path(override)
+        return override
     if "PYTEST_CURRENT_TEST" in os.environ:
         raise RuntimeError(
             "Refusing to resolve the production Marcus data directory "
@@ -126,9 +153,9 @@ def marcus_state_dir() -> Path:
         :func:`marcus_data_dir` refuses: resolving the production
         directory inside a test is the #724 data-loss hazard.
     """
-    override = os.environ.get(DATA_DIR_ENV)
+    override = _override_data_dir()
     if override:
-        return Path(override)
+        return override
     if "PYTEST_CURRENT_TEST" in os.environ:
         raise RuntimeError(
             "Refusing to resolve the production Marcus data directory "

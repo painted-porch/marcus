@@ -559,10 +559,63 @@ class TestStoresThatLivedInTheCheckoutStayThere:
     rehydrating its registered workers (ADR-0012 O1) and abandon its
     history. ``marcus_state_dir()`` keeps the checkout for them while
     still honouring the override.
+
+    Every test here patches ``_repo_root`` to a temporary directory.
+    Exercising the no-override branch means deleting the variables the
+    #724 guard relies on, and the stores built below are real: both
+    ``mkdir`` their directories, and ``SQLitePersistence.__init__`` calls
+    ``_init_db()`` eagerly, which opens the database and executes schema
+    DDL. Without the patch that database is the live ``marcus.db`` in the
+    source tree, which is the exact hazard #724 exists to prevent (Codex
+    P2 on PR #801).
     """
 
+    @pytest.fixture
+    def fake_checkout(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Stand in for the Marcus checkout, with no override set.
+
+        Parameters
+        ----------
+        tmp_path : Path
+            Pytest's per-test temporary directory.
+        monkeypatch : pytest.MonkeyPatch
+            Used to clear the override and redirect ``_repo_root``.
+
+        Returns
+        -------
+        Path
+            The directory the resolvers will treat as the checkout.
+
+        Notes
+        -----
+        The override is cleared in each test body rather than here,
+        because pytest re-sets ``PYTEST_CURRENT_TEST`` for every phase
+        and a ``delenv`` during setup is undone before the call.
+        """
+        import src.core.paths as paths
+
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        monkeypatch.setattr(paths, "_repo_root", lambda: checkout)
+        return checkout
+
+    def test_the_checkout_is_the_one_this_module_was_loaded_from(self) -> None:
+        """``_repo_root`` finds the checkout, with no file system access.
+
+        Computing the path is harmless; it is *using* it as a data
+        directory that the #724 guard exists to stop. Every other test
+        here patches this function, so this is the one place its own
+        arithmetic is checked.
+        """
+        from src.core.paths import _repo_root
+
+        root = _repo_root()
+
+        assert (root / "src" / "core" / "paths.py").is_file()
+        assert root == Path(__file__).parents[3]
+
     def test_the_checkout_is_kept_when_no_override_is_set(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, fake_checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The working directory does not decide where state lives."""
         from src.core.paths import marcus_state_dir
@@ -571,7 +624,7 @@ class TestStoresThatLivedInTheCheckoutStayThere:
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.chdir(tmp_path)
 
-        assert marcus_state_dir() == Path(__file__).parents[3] / "data"
+        assert marcus_state_dir() == fake_checkout / "data"
 
     def test_the_override_still_wins(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -590,7 +643,8 @@ class TestStoresThatLivedInTheCheckoutStayThere:
 
         Issue #724: tests once destroyed the live board this way, so the
         checkout-relative resolver has to refuse just as loudly as the
-        cwd-relative one.
+        cwd-relative one. This is the guard the fixture above has to
+        disable, which is why the fixture redirects the checkout too.
         """
         from src.core.paths import marcus_state_dir
 
@@ -600,7 +654,7 @@ class TestStoresThatLivedInTheCheckoutStayThere:
             marcus_state_dir()
 
     def test_the_roster_keeps_its_checkout_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, fake_checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The exact case Codex named: a restart from another directory."""
         from src.core.assignment_persistence import AssignmentPersistence
@@ -610,10 +664,10 @@ class TestStoresThatLivedInTheCheckoutStayThere:
         monkeypatch.chdir(tmp_path)
         store = AssignmentPersistence()
 
-        assert store.storage_dir == (Path(__file__).parents[3] / "data" / "assignments")
+        assert store.storage_dir == fake_checkout / "data" / "assignments"
 
     def test_the_history_keeps_its_checkout_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, fake_checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An existing deployment must not abandon its history."""
         from src.core.project_history import ProjectHistoryPersistence
@@ -623,12 +677,11 @@ class TestStoresThatLivedInTheCheckoutStayThere:
         monkeypatch.chdir(tmp_path)
         store = ProjectHistoryPersistence()
 
-        root = Path(__file__).parents[3]
-        assert store.db_path == root / "data" / "marcus.db"
-        assert store.history_dir == root / "data" / "project_history"
+        assert store.db_path == fake_checkout / "data" / "marcus.db"
+        assert store.history_dir == fake_checkout / "data" / "project_history"
 
     def test_the_history_database_keeps_its_checkout_default(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, fake_checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The creation-path writers resolved against the checkout too."""
         from src.core.paths import marcus_db_path
@@ -637,10 +690,10 @@ class TestStoresThatLivedInTheCheckoutStayThere:
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         monkeypatch.chdir(tmp_path)
 
-        assert marcus_db_path() == Path(__file__).parents[3] / "data" / "marcus.db"
+        assert marcus_db_path() == fake_checkout / "data" / "marcus.db"
 
     def test_a_configured_relative_path_is_still_cwd_relative(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, fake_checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """``config.data_dir`` keeps its own historical meaning.
 
@@ -655,3 +708,74 @@ class TestStoresThatLivedInTheCheckoutStayThere:
         monkeypatch.chdir(tmp_path)
 
         assert marcus_db_path("./data") == tmp_path / "data" / "marcus.db"
+
+
+class TestTheOverrideIsNormalizedEverywhere:
+    """A literal tilde must mean the same thing to every store.
+
+    ``MARCUS_DATA_DIR='~/isolated-marcus'`` is a plausible thing to write
+    in a shell profile or a launchd plist, where no shell expands it.
+    ``resolve_data_path`` and ``resolve_data_subdir`` called
+    ``expanduser()``, so the server's configured history backend opened
+    ``$HOME/isolated-marcus/marcus.db``, while ``marcus_state_dir`` and
+    ``cost_store_path`` used the raw value and opened
+    ``<cwd>/~/isolated-marcus/...``, in a directory literally named
+    ``~``. One instance, two history databases (Codex P2 on PR #801).
+    """
+
+    def test_every_resolver_agrees_on_a_literal_tilde(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All four resolvers land in the same expanded directory."""
+        from src.core.paths import (
+            cost_store_path,
+            marcus_data_dir,
+            marcus_db_path,
+            marcus_state_dir,
+            resolve_data_path,
+            resolve_data_subdir,
+        )
+
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("MARCUS_DATA_DIR", "~/isolated-marcus")
+        expected = home / "isolated-marcus"
+
+        assert marcus_data_dir() == expected
+        assert marcus_state_dir() == expected
+        assert resolve_data_subdir("./data") == expected
+        assert resolve_data_path(None, "kanban.db") == expected / "kanban.db"
+        assert marcus_db_path() == expected / "marcus.db"
+        assert cost_store_path() == expected / "costs.db"
+
+    def test_no_directory_named_tilde_is_created(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The user-visible symptom: a literal ``~`` directory."""
+        from src.core.assignment_persistence import AssignmentPersistence
+
+        home = tmp_path / "home"
+        home.mkdir()
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("MARCUS_DATA_DIR", "~/isolated-marcus")
+
+        store = AssignmentPersistence()
+
+        assert store.storage_dir == home / "isolated-marcus" / "assignments"
+        assert not (cwd / "~").exists()
+
+    def test_a_relative_override_is_absolute_for_every_store(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A relative override resolves against the cwd exactly once."""
+        from src.core.paths import cost_store_path, marcus_state_dir
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("MARCUS_DATA_DIR", "scratch/state")
+
+        assert marcus_state_dir() == tmp_path / "scratch" / "state"
+        assert cost_store_path() == tmp_path / "scratch" / "state" / "costs.db"
