@@ -34,6 +34,10 @@ Gating on self-reported virtue invites the compliance theatre that forced Invari
 - Worker registrations survive a Marcus restart (ADR-0012 obligation O1). Every accepted `register_agent` is written to `registrations.json` beside the assignment store and rehydrated on the first tool call after a restart, on both transports; a rehydrated worker gets its live task back from the lease store. Registrations silent for `registration.ttl_hours` (default 24) are evicted, never while they hold a live lease. Re-registration is idempotent and keeps the held task and completion count.
 
 ### Fixed
+- Corrected a stale claim in `docs/source/systems/architecture/15-service-registry.md` that Cato calls `MarcusServiceRegistry.discover_services()`.
+Cato does not: it is pointed at Marcus by `marcus_data_path` in its own `config.json`, reads the data directory directly, and already distinguishes parallel instances through `marcus_data_paths`.
+Nothing reads the service registry at `~/.marcus/services` at all. `discover_services()` has no caller in this repository, nor in Cato, Seneca, Posidonius or marcus-mini, so the registry is write-only across all of them even though `CLI.md` describes it as being there "for other tools to discover".
+Two tests in `tests/unit/core/test_service_registry_consumers.py` pin both facts, because acting on that doc line rather than on Cato's code produced a change whose stated benefit could not happen.
 - `MARCUS_DATA_DIR` now isolates everything Marcus writes, not just the board (#792).
 Four stores claim to be Marcus's state and only one honoured the setting, so a second instance on the same machine quietly shared the first one's data.
 The project registry stored the board as the relative string `./data/kanban.db`, which resolved against whatever directory the server happened to start in, so a project created at runtime became unreadable the moment it was created: creation wrote through the startup client and the client rebuilt from the registry read a different file.
