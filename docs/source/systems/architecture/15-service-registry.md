@@ -291,7 +291,7 @@ def discover_services_by_provider(provider: str) -> List[Dict[str, Any]]:
 The Service Registry is **crucial for Cato's auto-connection capability**:
 
 ### Discovery Flow
-1. Cato calls `MarcusServiceRegistry.discover_services()`
+1. A discovery client calls `MarcusServiceRegistry.discover_services()`
 2. Gets list of available Marcus instances with connection details
 3. Uses `mcp_command` from service info to establish MCP connection
 4. Can present user with choice of multiple available instances
