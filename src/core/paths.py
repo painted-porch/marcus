@@ -19,6 +19,29 @@ This module is the single resolver for that default:
 * **Bypasses fail loudly.** If a default data path is resolved under
   pytest WITHOUT the override (fixture bypassed, env stripped), the
   resolver raises instead of silently touching production.
+
+Issue #792 then widened this from the board to every store Marcus
+writes, and the one thing to get right when adding a caller is **which
+of two historical defaults it had**:
+
+* :func:`marcus_data_dir` is for a store whose default was the
+  cwd-relative ``./data`` — the board, and ``config.data_dir``.
+* :func:`marcus_state_dir` is for a store whose default was
+  ``<checkout>/data``, built from ``Path(__file__)`` on purpose — the
+  worker roster, the project history, the project-creation writers and
+  the analysis classes.
+
+Treating the second group as the first moves it to ``<cwd>/data``
+whenever Marcus starts outside the checkout, with no override set and
+nothing asking for isolation, so an existing deployment silently stops
+rehydrating its registered workers and abandons its history. That is a
+worse failure than the one #792 set out to fix, and it is why the two
+resolvers are separate rather than one.
+
+Ask one of these functions rather than building a path. Every leak found
+for #792 was a call site that built its own, and two tests in
+``tests/unit/core/test_data_dir_isolation.py`` scan this source and fail
+if a new one appears.
 """
 
 import os
@@ -82,11 +105,16 @@ def cost_store_path() -> Path:
 def marcus_data_dir() -> Path:
     """Resolve the Marcus data directory for default paths.
 
+    Use this for a store whose historical default was the cwd-relative
+    ``./data``. A store that defaulted to ``<checkout>/data`` wants
+    :func:`marcus_state_dir` instead; see this module's docstring for why
+    the distinction matters.
+
     Returns
     -------
     Path
-        ``$MARCUS_DATA_DIR`` when set; otherwise the historical
-        cwd-relative ``Path("data")``.
+        ``$MARCUS_DATA_DIR``, expanded and absolute, when set; otherwise
+        the historical cwd-relative ``Path("data")``.
 
     Raises
     ------
