@@ -1485,8 +1485,31 @@ async def _persist_decision_to_history(
         # inheriting it is what filed decisions under the wrong project,
         # and a missing project is a caller's mistake rather than a
         # runtime condition, so callers name it or do not call.
-
-        project_name = getattr(state, "current_project_name", project_id)
+        #
+        # Codex P2 on PR #813: ``state.current_project_name`` is the
+        # SERVER's active project's name, not necessarily ``project_id``'s
+        # (the agent's own project, resolved by the caller) — on a
+        # multi-project server the two can differ. If ``project_id`` has
+        # no existing history file yet, ``append_decision`` initializes it
+        # with whatever name is passed here, so combining the agent's
+        # project id with the active project's name would permanently
+        # stamp the wrong name (or ``None``) onto that history snapshot.
+        # Resolve the name from the SAME project id instead.
+        project_name = project_id
+        registry = getattr(state, "project_registry", None)
+        if registry is not None:
+            try:
+                project_config = await registry.get_project(project_id)
+                if project_config is not None:
+                    project_name = project_config.name
+            except Exception as registry_err:  # noqa: BLE001 - degrade to the id
+                logger.warning(
+                    "[#813] Could not resolve project %s's name from the "
+                    "registry (%s); filing its history under the id "
+                    "itself rather than guessing another project's name.",
+                    project_id,
+                    registry_err,
+                )
 
         # Initialize project history persistence if not already done
         if not hasattr(state, "project_history_persistence"):

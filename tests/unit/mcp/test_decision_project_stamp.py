@@ -34,7 +34,7 @@ class _History:
     def __init__(self) -> None:
         self.rows: List[Dict[str, Any]] = []
 
-    async def record_decision(self, *args: Any, **kwargs: Any) -> None:
+    async def append_decision(self, *args: Any, **kwargs: Any) -> None:
         """Capture a decision write."""
         self.rows.append({"args": args, "kwargs": kwargs})
 
@@ -187,6 +187,120 @@ class TestLogDecisionFilesUnderTheAgentsProject:
             context._persist_decision_to_history = original  # type: ignore[assignment]
 
         assert captured.get("project_id") == "project-X"
+
+
+class TestPersistedHistoryUsesTheRightProjectsName:
+    """Codex P2 on PR #813.
+
+    ``project_id`` was already resolved from the agent's own project
+    (#805), but ``project_name`` was still read from the SERVER's
+    active project. On a multi-project server the two can differ; if
+    the agent's project has no existing history file yet,
+    ``append_decision`` initializes it with whatever name is passed,
+    so the active project's name (or ``None``) would be stamped onto
+    the agent's own project's history permanently.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_name_comes_from_the_same_project_as_the_id(self) -> None:
+        """Agent on X, server active on Y: history must get X's name."""
+        from src.marcus_mcp.tools.context import _persist_decision_to_history
+
+        history = _History()
+        registry = SimpleNamespace(
+            get_project=_make_project_lookup(
+                {"project-X": "Payments Rework", "project-Y": "Dashboard Rebuild"}
+            )
+        )
+        state = SimpleNamespace(
+            current_project_id="project-Y",
+            current_project_name="Dashboard Rebuild",
+            project_registry=registry,
+            project_history_persistence=history,
+            project_tasks=[],
+        )
+        logged = SimpleNamespace(
+            decision_id="dec-1",
+            task_id="task-1",
+            agent_id="alpha",
+            timestamp=None,
+            what="chose X",
+            why="because Y",
+            impact="Z",
+        )
+
+        await _persist_decision_to_history(logged, state, project_id="project-X")
+
+        assert history.rows[0]["args"][:2] == ("project-X", "Payments Rework")
+
+    @pytest.mark.asyncio
+    async def test_no_registry_degrades_to_the_id_not_a_guess(self) -> None:
+        """Without a registry, fall back to the id -- never the active
+        project's name, which could belong to someone else's history."""
+        from src.marcus_mcp.tools.context import _persist_decision_to_history
+
+        history = _History()
+        state = SimpleNamespace(
+            current_project_id="project-Y",
+            current_project_name="Dashboard Rebuild",
+            project_history_persistence=history,
+            project_tasks=[],
+        )
+        logged = SimpleNamespace(
+            decision_id="dec-1",
+            task_id="task-1",
+            agent_id="alpha",
+            timestamp=None,
+            what="chose X",
+            why="because Y",
+            impact="Z",
+        )
+
+        await _persist_decision_to_history(logged, state, project_id="project-X")
+
+        assert history.rows[0]["args"][:2] == ("project-X", "project-X")
+
+    @pytest.mark.asyncio
+    async def test_a_registry_lookup_failure_degrades_to_the_id(self) -> None:
+        """A registry error must not stamp the active project's name either."""
+        from src.marcus_mcp.tools.context import _persist_decision_to_history
+
+        history = _History()
+
+        async def _boom(_project_id: str) -> None:
+            raise RuntimeError("registry unavailable")
+
+        state = SimpleNamespace(
+            current_project_id="project-Y",
+            current_project_name="Dashboard Rebuild",
+            project_registry=SimpleNamespace(get_project=_boom),
+            project_history_persistence=history,
+            project_tasks=[],
+        )
+        logged = SimpleNamespace(
+            decision_id="dec-1",
+            task_id="task-1",
+            agent_id="alpha",
+            timestamp=None,
+            what="chose X",
+            why="because Y",
+            impact="Z",
+        )
+
+        await _persist_decision_to_history(logged, state, project_id="project-X")
+
+        assert history.rows[0]["args"][:2] == ("project-X", "project-X")
+
+
+def _make_project_lookup(names: Dict[str, str]) -> Any:
+    """Build a ``get_project`` stub returning a config with just a name."""
+
+    async def _get_project(project_id: str) -> Any:
+        if project_id not in names:
+            return None
+        return SimpleNamespace(id=project_id, name=names[project_id])
+
+    return _get_project
 
 
 def _make_log_decision() -> Any:
