@@ -530,3 +530,61 @@ FILE_MANAGEMENT:
     - Three Agent Invariants established as part of the Multi-Agency
       Proclamation.
     - Driven by: original Marcus design.
+
+PROGRAM_BOARD:
+  Work across all Marcus workstreams (modularization/kernel, Minecraft
+  deliberation layer, Minecraft plumbing, numerical-report verifier,
+  AI-citation verifier / system of record) is tracked on one GitHub
+  Project, not in ad-hoc messages between sessions:
+
+    https://github.com/orgs/painted-porch/projects/1  ("Marcus Program")
+
+  Read it at the start of any session touching Marcus.
+
+  WHY THIS EXISTS:
+  - On 2026-11-04 work was coordinated by cross-session messages and a
+    shared doc. Five of six "go" messages that day were held pending the
+    recipient's approval and never arrived; one expired outright.
+  - The Project fixes the actual failure: it is pull-based (`gh project
+    item-list`, a tool call, no delivery required) and keyed on the
+    workstream, not on an ephemeral session name. Session names and
+    processes are NOT durable here; they restart, rename, and vanish
+    mid-day. The Project, the issues/PRs it tracks, and
+    `~/marcus-experiments/<run>/RESULTS.md` live-check records ARE
+    durable. If your memory of what you did yesterday conflicts with
+    what the Project says, the Project is right.
+
+  WHEN YOU START OR RESUME WORK:
+  1. `gh project item-list 1 --owner painted-porch` (or browse the URL
+     above) to see every open item.
+  2. Filter to your workstream via the `Workstream` field. If you do not
+     know which workstream you own, check which issues/PRs you have
+     already touched, or ask the chief-of-staff session (below).
+  3. `State = Resume now` needs no decision from Larry — pick it up.
+  4. `State = Needs Larry` is waiting on a decision. Do not build on top
+     of one until it moves to `In progress` or `Resume now`.
+  5. `State = Blocked` is blocked on something external or sequenced
+     behind something else — read the issue/PR body for what.
+
+  WHEN YOU FINISH SOMETHING, FIND SOMETHING, OR GET BLOCKED:
+  Update the Project yourself (`gh project item-edit`, a comment on the
+  underlying issue/PR). This is a tool call, not a message to another
+  session, which is why it is the primary channel now.
+
+  LARRY ONLY INTERACTS WITH THE CHIEF-OF-STAFF SESSION:
+  Larry's standing instruction (2026-11-04): he talks to the
+  chief-of-staff session, and it talks to every other session for him.
+  Do not expect a message from Larry directly, and do not message him.
+  To request a decision from him, write a draft item onto the Project
+  (`gh project item-create`) in this shape, and the chief-of-staff
+  session brings it to him:
+    - Problem — what is actually wrong or undecided, in plain language
+    - Context — what you tried, what you found, cost, what it is
+      blocked on
+    - Recommendation — what you think should happen
+    - Why — the reasoning behind the recommendation
+
+  Cross-session messages to OTHER sessions (not Larry) remain available
+  via SendMessage but are unreliable — frequently held pending the
+  recipient's approval, sometimes expiring undelivered. Put anything
+  load-bearing on the Project, not only in a message.
