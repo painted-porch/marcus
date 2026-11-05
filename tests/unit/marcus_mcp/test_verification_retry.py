@@ -192,16 +192,23 @@ class TestRetry:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_stale_claim_is_cleared_from_the_verifier(self, case):
-        """A retry must not re-check the previous round's claim.
+    async def test_retry_leaves_board_seeded_keys_on_the_verify_task(self, case):
+        """A retry touches only status/assignee, not the verify task's inputs.
 
-        The handoff lets existing keys win, so a verify task that kept
-        its old inputs would check the superseded claim and pass.
+        Clearing the previous round's claim used to be this module's
+        job: #803/#807 moved that guarantee into the kernel's evidence
+        handoff itself (a close now replaces the whole set of keys the
+        closing task contributed, so a redo cannot leave a stale claim
+        on any dependent). Verified live against a real
+        request_task_redo round-trip: a key present in round 1 and
+        dropped in round 2 is gone from the dependent afterward. This
+        module no longer needs to, and does not, touch the verify
+        task's inputs on retry.
         """
         state, _, verify, _, _ = case
+        before = dict(verify.inputs)
         await apply_verification_outcome(verify, FAIL, state)
-        assert "claims_path" not in verify.inputs
-        assert verify.inputs["staged_dir"] == "case/eval_1"
+        assert verify.inputs == before
 
     @pytest.mark.unit
     @pytest.mark.asyncio

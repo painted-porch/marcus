@@ -47,7 +47,6 @@ MAX_VERIFICATION_ROUNDS = 3
 ROUND_KEY = "verification_round"
 FAILED_CLAIMS_KEY = "failed_claims"
 DECLINED_KEY = "verification_declined"
-RAW_FIELD = "raw"
 
 
 def verification_round(task: Task) -> int:
@@ -107,26 +106,6 @@ def _authors_of(verify_task: Task, tasks: List[Task]) -> List[Task]:
     """
     deps = set(verify_task.dependencies or [])
     return [t for t in tasks if t.id in deps and t.task_type == FIND_TASK_TYPE]
-
-
-def _handed_off_keys(author: Task) -> List[str]:
-    """List the input keys that reached the verifier from the author.
-
-    Parameters
-    ----------
-    author : Task
-        The claim author's task, carrying its accepted evidence.
-
-    Returns
-    -------
-    List[str]
-        Keys to clear before the check runs again.
-    """
-    context = author.source_context or {}
-    evidence = context.get("evidence") if isinstance(context, dict) else None
-    if not isinstance(evidence, dict):
-        return []
-    return [k for k in evidence if k != RAW_FIELD]
 
 
 def _dependents_of(task_ids: List[str], tasks: List[Task]) -> List[Task]:
@@ -251,14 +230,18 @@ async def apply_verification_outcome(
             },
         )
 
-    # Clear the previous round's claim so the check is a real second
-    # look rather than a re-read of superseded evidence.
-    stale = set()
-    for author in authors:
-        stale.update(_handed_off_keys(author))
-    verify_task.inputs = {
-        k: v for k, v in (verify_task.inputs or {}).items() if k not in stale
-    }
+    # The previous round's claim is cleared by the kernel itself, not
+    # here: #803/#807 made the evidence handoff replace the whole set
+    # of keys an upstream task contributed on its next close, rather
+    # than merging over it. So when the author redoes the find task
+    # and closes it again, its new evidence correctly supersedes the
+    # keys from this round on every dependent, including a key this
+    # round wrote that the next round omits. Verified live against a
+    # real request_task_redo round-trip (two rounds, a key present in
+    # round 1 and dropped in round 2 is gone from the dependent
+    # afterward). This module used to strip those keys itself before
+    # the fix existed; that workaround is removed now that the
+    # guarantee is the kernel's.
     verify_task.status = TaskStatus.TODO
     verify_task.assigned_to = None
     await _write(
