@@ -109,7 +109,9 @@ class TestSingleProjectModeServesTheRegistryBoard:
 
         await _run_initialize(fake)
 
-        assert fake.kanban_client is scoped
+        # == not is: K13 wraps the assigned client in TaskSyncingKanbanClient,
+        # whose __eq__ delegates to the wrapped client for exactly this reason.
+        assert fake.kanban_client == scoped
         fake._initialize_monitoring_systems.assert_awaited()
 
     @pytest.mark.asyncio
@@ -198,7 +200,7 @@ class TestSingleProjectModeServesTheRegistryBoard:
         with caplog.at_level(logging.WARNING, logger="src.marcus_mcp.server"):
             await _run_initialize(fake)
 
-        assert fake.kanban_client is client
+        assert fake.kanban_client == client
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
     @pytest.mark.asyncio
@@ -209,7 +211,7 @@ class TestSingleProjectModeServesTheRegistryBoard:
 
         await _run_initialize(fake, single=False)
 
-        assert fake.kanban_client is scoped
+        assert fake.kanban_client == scoped
         fake.initialize_kanban.assert_not_awaited()
 
 

@@ -14,7 +14,7 @@ import signal
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
 from src.telemetry import get_telemetry_client, print_first_run_notice_if_needed
 
@@ -81,6 +81,10 @@ from src.marcus_mcp.coordinator.eligibility import (  # noqa: E402
 )
 from src.marcus_mcp.handlers import handle_tool_call  # noqa: E402
 from src.marcus_mcp.heartbeat import HeartbeatFastMCP  # noqa: E402
+from src.marcus_mcp.kanban_task_sync import (  # noqa: E402
+    TaskSyncingKanbanClient,
+    sync_on_write,
+)
 from src.marcus_mcp.tool_groups import (  # noqa: E402
     ALL_TOOLS_ENDPOINT,
     get_tools_for_endpoint,
@@ -176,9 +180,12 @@ class MarcusServer:
         atexit.register(unregister_marcus_service)
 
         # Core components
-        self.kanban_client: Optional[KanbanInterface] = (
-            None  # Will be set by project manager
-        )
+        # K13: production assignments wrap in TaskSyncingKanbanClient,
+        # which delegates every KanbanInterface method but is not
+        # itself a KanbanInterface subclass.
+        self.kanban_client: Optional[
+            Union[KanbanInterface, TaskSyncingKanbanClient]
+        ] = None  # Will be set by project manager
         self.ai_engine = AIAnalysisEngine()
         # ProjectMonitor uses KanbanClient (Planka-only). Skip for other providers
         # so non-Planka startups are not blocked by kanban-mcp path detection.
@@ -679,7 +686,10 @@ class MarcusServer:
         # Check if we're in multi-project mode or legacy mode
         if not get_config().single_project_mode:
             # Get kanban client from project manager
-            self.kanban_client = await self.project_manager.get_kanban_client()
+            self.kanban_client = sync_on_write(
+                await self.project_manager.get_kanban_client(),
+                lambda: self.project_tasks,
+            )
             if self.kanban_client:
                 await self.project_registry.get_active_project()
                 # Initialize monitors and lease system even in multi-project mode
@@ -694,7 +704,9 @@ class MarcusServer:
             # projects"; it never meant "ignore the registry's active project".
             registry_client = await self.project_manager.get_kanban_client()
             if registry_client is not None:
-                self.kanban_client = registry_client
+                self.kanban_client = sync_on_write(
+                    registry_client, lambda: self.project_tasks
+                )
                 logger.info(
                     "Serving the registry's active project: "
                     f"project_id={getattr(registry_client, 'project_id', None)} "
@@ -721,7 +733,10 @@ class MarcusServer:
             if active_project:
                 # Switch to the active project
                 await self.project_manager.switch_project(active_project.id)
-                self.kanban_client = await self.project_manager.get_kanban_client()
+                self.kanban_client = sync_on_write(
+                    await self.project_manager.get_kanban_client(),
+                    lambda: self.project_tasks,
+                )
 
                 # Initialize monitoring systems for the synced project
                 if self.kanban_client:
@@ -806,13 +821,16 @@ class MarcusServer:
 
     async def _initialize_monitoring_systems(self) -> None:
         """Initialize assignment monitor and lease manager for current kanban client."""
-        if not self.kanban_client:
+        # K13's wrapper duck-types KanbanInterface in full (delegates every
+        # method via __getattr__); the cast reflects that, not a bypass.
+        kanban_client = cast(KanbanInterface, self.kanban_client)
+        if not kanban_client:
             return
 
         # Initialize assignment monitor
         if self.assignment_monitor is None:
             self.assignment_monitor = AssignmentMonitor(
-                self.assignment_persistence, self.kanban_client
+                self.assignment_persistence, kanban_client
             )
             await self.assignment_monitor.start()
 
@@ -840,7 +858,7 @@ class MarcusServer:
             # ADR-0012 D3: one mapping for both the dataclass and a
             # project's dict; unknown and pre-D3 keys are ignored.
             self.lease_manager = AssignmentLeaseManager.from_settings(
-                self.kanban_client,
+                kanban_client,
                 self.assignment_persistence,
                 lease_config,
                 task_list=self.project_tasks,
@@ -1181,7 +1199,9 @@ class MarcusServer:
                 self._ensure_environment_config()
 
                 # Create kanban client
-                self.kanban_client = KanbanFactory.create(self.provider)
+                self.kanban_client = sync_on_write(
+                    KanbanFactory.create(self.provider), lambda: self.project_tasks
+                )
 
                 # Validate the client supports task creation
                 if not hasattr(self.kanban_client, "create_task"):

@@ -4727,7 +4727,7 @@ async def _run_design_phase_body(
             try:
                 await kanban_client.update_task(
                     ct.id,
-                    {"status": "done"},
+                    {"status": TaskStatus.DONE},
                 )
                 logger.info(
                     f"[design_autocomplete] Marked '{orig.name}' " f"DONE on board"
