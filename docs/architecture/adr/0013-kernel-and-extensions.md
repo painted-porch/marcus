@@ -88,6 +88,10 @@ It resolves without a callable field, because "the kernel calls into extension c
 
 **One-time at creation is sufficient.** The owner confirmed directly: claim schema, tolerance rules and the retry bound are fixed before their writer runs; per-case variation is task data, not registration, and nothing in their workstream needs a mid-project policy change.
 
+**The ownership-plus-pull model, confirmed live for two of its three steps.** The owner live-checked reopen and bound against a real server: a verifier agent holding its claimed `verify` task calls the kernel's own `request_task_redo` on the `find` task, and a fourth attempt is correctly refused `max_redo_count_exceeded` — zero extension-to-kernel calls, exactly the pull model this section argues for. The third step, terminal decline, is not covered by anything that exists today; that gap is K5's evidence, not K2's, and K5 is sharpened accordingly below.
+
+**A third confirmation, from the same live check.** An agent registered with role `"approver"` was offered a `verify`-type task anyway — role strings are not enforced anywhere today, and nothing scopes which task types an agent, or an extension, actually owns. That is precisely the gap K2's registration field closes.
+
 **Remaining implementation question, not blocking acceptance.** Whether extensions keep constructing `ProjectConfig` in-process as both do today, or get an MCP write path onto the same field, is a detail of how the record gets written, not of where the record lives. Both are compatible with this decision; neither needs deciding before K2 itself is accepted.
 
 ### K3 — Evidence policy is declared, never inferred from labels
@@ -125,6 +129,17 @@ An opinion is a dated observation, not a claim about a deliverable.
 **Evidence.** Two consumers need it and neither can express it.
 The citation verifier has `unverifiable` with a `decline_reason`, which "counts as declined, never as correct", inside its own evidence vocabulary only.
 The numerical verifier sets dependents to BLOCKED, which reads as a worker reporting an obstruction when no worker did.
+
+**Confirmed live, and decisive.** The numerical-report verifier owner live-checked the reopen-and-decline path against a real server. Reopen and bound are already covered by existing kernel tools with zero extension-to-kernel calls: a verifier agent holding its claimed `verify` task calls `request_task_redo` on the `find` task, and a fourth attempt is correctly refused `max_redo_count_exceeded`. Decline is not. The only thing an agent can call to say "I cannot verify this" is `report_blocker`, and `report_blocker` does not mark the task terminally anything — it returns `requeued_for_repair: true` and sends the task back for up to `MAX_BLOCKER_REPAIR_ATTEMPTS` (2) more agents on a budget (`MAX_BLOCKER_REPAIR_REQUEUES`, 3) that is entirely separate from `request_task_redo`'s own `MAX_TASK_REDO_COUNT` (3). An agent that correctly concludes "this cannot be verified" has no way to say so; the kernel silently treats its decline as "try again," on a second counter the first one's own bound never sees, defeating it.
+
+**The implementation choice, with a recommendation.** Two ways to make a decline stick, and `task_claimability.py`'s own code decides between them:
+
+- **(a) A new terminal status** (e.g. `DECLINED`), reachable by the task's current holder, that `deps_allow_claim` treats as settled-but-not-done: an ordinary (strict-gate) dependent still requires every upstream `DONE` and so correctly stays unclaimable forever, exactly as "distinct from done" demands, while an integration task's best-effort gate (`SETTLED_FOR_BEST_EFFORT`, which already treats `BLOCKED` this way) treats it as settled, the same way a `BLOCKED` upstream already degrades an integration claim today.
+- **(b) Gate on evidence content** instead of status: a completed `verify` task whose evidence carries a declined verdict gates its dependents the same way a status would. Verified directly against the live code: `deps_allow_claim` reads only `task.status` today, never evidence content, so this is new kernel capability, not a missing case in an existing one.
+
+**Recommend (a).** Reading evidence content to decide claimability puts the kernel's gate in the business of understanding an extension's evidence vocabulary — the identical mistake K3 names for labels, one layer down: vocabulary, this time an evidence shape instead of a string, doing policy. A status is already the kernel's own vocabulary, already has a settled/unsettled gate built for it, and already treats one terminal non-done status (`BLOCKED`) as settled for best-effort claims. `DECLINED` extends a mechanism that exists; evidence-content gating invents one.
+
+**The same live check also confirms K2's own evidence a third way.** An agent registered with role `"approver"` was offered the requeued `verify` task — role strings are not enforced anywhere, and there is no task-type ownership scoping at all today. That is exactly the gap K2's registration field closes.
 
 ### K6 — Every board write is stamped from the agent's registration
 
@@ -260,6 +275,7 @@ K1's test, that no kernel change is justified by one consumer alone, is the guar
 - #807, #816, #814, the three independent recurrences of the same stale-in-memory shape K13's evidence rests on
 - #818, which K2 gates and which gathers a worked example from K2's own resolution once it ships
 - The numerical-report verifier owner's direct account of `apply_verification_outcome`, `~/dev/marcus-worktrees/numeric-verifier` (unpushed), K2's evidence
+- The same owner's live check of the reopen/bound/decline model against a real server (`~/marcus-experiments/numeric-verifier/k2-livecheck/RESULT.md`), K2 and K5's evidence
 - #735, #677, #647, the software-building verification bugs that K4's evidence rests on
 - #299, domain-agnostic coordination, which K1 and K3 retire
 - #792, merged as `dc996a6f`, which placed all kernel state under one root
