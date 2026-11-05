@@ -82,7 +82,11 @@ Run the free rehearsal in [REPRODUCING.md, "The free rehearsal"](../../REPRODUCI
 
 ## Known gaps
 
-Refusals are written through the persistence layer (collection `eligibility_refusals` in `data/marcus.db`) as they happen and read back by `export_case`, so they survive a server restart (issue #740); the October 2026 full-200 bundles predate that fix and carry empty refusal lists.
+Refusals are written through the persistence layer (collection `eligibility_refusals` in `data/marcus.db`) as they happen and read back by `export_case`, so they survive a server restart (issue #740).
+The October 2026 full-200 bundles predate that fix, so their refusal coverage is partial and uneven rather than empty: it tracks how many times each board's server restarted during the run.
+Working copies: Gemini 100 of 200 bundles carry at least one refusal, Claude Haiku 20 of 200, Perplexity 1 of 200, OpenAI 0 of 200.
+Published release (redacted) copies: Claude Haiku 50 of 50, Claude 50 of 50, Perplexity 5 of 50, OpenAI 0 of 200.
+A re-export cannot recover the missing refusals: the surviving kanban boards have no refusal table, and any refusal that occurred before a restart lived only in server memory and was never written anywhere a re-export could read it back from.
 Full board citizenship for experiment workers is tracked in issue #741.
 
 ## Related
