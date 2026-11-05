@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K12 accepted 2026-11-05**; the other nine remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K12 and K13 accepted 2026-11-05**; the other nine remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -196,7 +196,9 @@ This is the same point arXiv 2609.12039 makes generally, cited here as supportin
 
 ### K13 — `update_task` leaves the caller's in-memory view consistent with what it just wrote
 
-**Recommendation.** `update_task` mutates the matching `Task` object in `state.project_tasks`, when one exists, with exactly the fields the caller passed, as part of the same call that writes the board. A caller that reads `state.project_tasks` immediately afterward sees its own write; nothing waits for `refresh_project_state`, which runs on a schedule this call does not control.
+**Accepted 2026-11-05 (Lawrence Gray).**
+
+**Decision.** `update_task` mutates the matching `Task` object in `state.project_tasks`, when one exists, with exactly the fields the caller passed, as part of the same call that writes the board. A caller that reads `state.project_tasks` immediately afterward sees its own write; nothing waits for `refresh_project_state`, which runs on a schedule this call does not control.
 
 **Evidence.** The same defect, found three times in one day, at three unrelated call sites, each independently: #807 (a dependent's handoff merge basis), #816 (`request_task_redo`'s own completion check), #814 (the phase gate a same-reply frontier count depends on). In every case, something wrote the board, and something else in the *same request* read `state.project_tasks` expecting the write to already be visible there. It was not, because nothing besides the next scheduled `refresh_project_state` ever made it visible.
 
