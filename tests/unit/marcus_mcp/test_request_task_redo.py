@@ -453,6 +453,106 @@ class TestRedoReadsTheBoardNotAStaleInMemoryStatus:
         assert result["success"] is True
 
 
+class TestRedoDefectTypeTagging:
+    """#809: a rejection can be tagged with which of three defect kinds
+    it was (arXiv 2609.12039), without changing what this tool does.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unspecified_defect_type_defaults_to_implementation_gap(
+        self,
+    ) -> None:
+        """Omitting defect_type keeps today's only-repair semantics."""
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="wrong shape",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert result["recovery_info"]["defect_type"] == "implementation_gap"
+        assert task.recovery_info.defect_type == "implementation_gap"
+
+    @pytest.mark.asyncio
+    async def test_a_requirement_gap_can_be_tagged_explicitly(self) -> None:
+        """A caller that diagnosed a requirement gap can say so."""
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="the spec never asked for this",
+                state=state,
+                defect_type="requirement_gap",
+            )
+
+        assert result["success"] is True
+        assert result["recovery_info"]["defect_type"] == "requirement_gap"
+
+    @pytest.mark.asyncio
+    async def test_a_model_gap_can_be_tagged_explicitly(self) -> None:
+        """A caller that diagnosed a model gap can say so."""
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="the check assumed a library version we don't have",
+                state=state,
+                defect_type="model_gap",
+            )
+
+        assert result["success"] is True
+        assert result["recovery_info"]["defect_type"] == "model_gap"
+
+    @pytest.mark.asyncio
+    async def test_an_unrecognized_defect_type_is_rejected(self) -> None:
+        """A typo or made-up value is refused, not silently stored."""
+        task = _make_task()
+        state = _make_state(task)
+
+        result = await request_task_redo(
+            agent_id="agent_integration",
+            task_id="task-impl-1",
+            reason="wrong shape",
+            state=state,
+            defect_type="the_vibes_were_off",
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "invalid_defect_type"
+        assert task.status == TaskStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_defect_type_is_included_in_the_redo_requested_event(
+        self,
+    ) -> None:
+        """The tag reaches observability, not just RecoveryInfo."""
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event") as mock_event:
+            await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="wrong shape",
+                state=state,
+                defect_type="model_gap",
+            )
+
+        _, payload = mock_event.call_args[0]
+        assert payload["defect_type"] == "model_gap"
+
+
 class TestRedoEndpointExposure:
     """Tier-1 regression (PR #712 review): the tool must reach agents.
 

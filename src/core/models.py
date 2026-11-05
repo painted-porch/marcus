@@ -33,6 +33,41 @@ class TaskStatus(Enum):
     BLOCKED = "blocked"
 
 
+class DefectType(Enum):
+    """
+    Which of three defect kinds a rejected completion actually had.
+
+    Issue #809, drawn from arXiv 2609.12039 ("Reality Is the Final
+    Verifier"), which names three distinct repairs a rejected piece of
+    work can need and observes that a repair loop covering only the
+    first cannot fix the other two no matter how many times it retries.
+    Tagging which kind a rejection was is the first step toward routing
+    it to the right repair later; this enum and the ``defect_type``
+    field it backs on :class:`RecoveryInfo` capture that classification.
+    They do not yet change what ``request_task_redo`` does with it —
+    the criteria-revision and environment-model-revision repair paths
+    are a separate, later decision (ADR-0013).
+
+    Attributes
+    ----------
+    IMPLEMENTATION_GAP : str
+        The code does not do what correct acceptance criteria already
+        ask for. The existing (and only) repair: revise the
+        implementation, re-run the same check.
+    REQUIREMENT_GAP : str
+        The acceptance criteria themselves missed something the
+        stakeholder actually wanted. No repair path exists yet.
+    MODEL_GAP : str
+        The check passed, or failed, based on an assumption about the
+        deployment environment that does not match reality. No repair
+        path exists yet.
+    """
+
+    IMPLEMENTATION_GAP = "implementation_gap"
+    REQUIREMENT_GAP = "requirement_gap"
+    MODEL_GAP = "model_gap"
+
+
 class RiskLevel(Enum):
     """
     Enumeration of risk severity levels.
@@ -119,6 +154,14 @@ class RecoveryInfo:
         How many times this task has been sent back via
         ``request_task_redo``. Capped by the tool (3); 0 for
         lease-expiry recovery.
+    defect_type : Optional[str]
+        Which of the three defect kinds (issue #809,
+        :class:`DefectType`) this recovery was for, as a plain string
+        value for serialization. None for lease-expiry recovery, which
+        is not a defect classification at all; set explicitly by
+        ``request_task_redo`` otherwise, defaulting to
+        ``DefectType.IMPLEMENTATION_GAP`` when the caller does not
+        specify one.
 
     Notes
     -----
@@ -138,6 +181,7 @@ class RecoveryInfo:
     requested_by: Optional[str] = None
     previous_worktree_path: Optional[str] = None
     redo_count: int = 0
+    defect_type: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -165,6 +209,7 @@ class RecoveryInfo:
             "requested_by": self.requested_by,
             "previous_worktree_path": self.previous_worktree_path,
             "redo_count": self.redo_count,
+            "defect_type": self.defect_type,
         }
 
     @classmethod
@@ -201,6 +246,7 @@ class RecoveryInfo:
             requested_by=data.get("requested_by"),
             previous_worktree_path=data.get("previous_worktree_path"),
             redo_count=data.get("redo_count", 0),
+            defect_type=data.get("defect_type"),
         )
 
 

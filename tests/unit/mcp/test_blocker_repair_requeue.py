@@ -208,6 +208,24 @@ class TestFirstTerminalBlockerRequeues:
         assert "cannot resolve the packaging layout" in instructions
         assert "agent-1" in instructions
 
+    @pytest.mark.asyncio
+    async def test_the_repair_requeue_is_tagged_implementation_gap(self) -> None:
+        """#809: a blocker-repair requeue is always the agent giving up
+        on execution, never a verifier disputing the requirement or the
+        environment model -- so it is tagged accordingly, consistent
+        with request_task_redo's default for the one repair this tool
+        actually performs.
+        """
+        from src.marcus_mcp.tools.task import clear_repair_attempts
+
+        clear_repair_attempts("task-1")
+        state = _make_state("agent-1", "task-1", all_agents=["agent-1", "agent-2"])
+
+        await _terminal_blocker(state, "agent-1", "task-1")
+
+        task = state.project_tasks[0]
+        assert task.recovery_info.defect_type == "implementation_gap"
+
 
 class TestRepairCeiling:
     """Independent agents agreeing is what makes a lane genuinely dead."""
