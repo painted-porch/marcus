@@ -644,6 +644,144 @@ def _validate_tasks_option(
     }
 
 
+#: The subject slug every project's objective primer is filed under.
+OBJECTIVE_SUBJECT = "project.objective"
+#: The ``Decision.kind`` of the primer; distinct from ``"assessment"`` so the
+#: opinions read never counts it as agent corroboration.
+OBJECTIVE_KIND = "objective"
+#: Who the relayed primer is attributed to on the board. The text is the
+#: project author's; Marcus only carries it.
+OBJECTIVE_AUTHOR = "marcus"
+_OBJECTIVE_MAX_CHARS = 4000
+
+
+def _validate_objective_option(
+    options: Optional[Dict[str, Any]], project_name: str
+) -> Optional[Dict[str, Any]]:
+    """Reject a malformed ``options.objective`` before any state is touched.
+
+    The objective is the stigmergy primer (Simon 390438ee): the project
+    author's statement of what the crew is building and why, relayed to
+    the board at creation so every agent can read it before its first
+    pick. It must be a non-blank string; Marcus never fills one in.
+
+    Parameters
+    ----------
+    options : Optional[Dict[str, Any]]
+        The ``create_project`` options.
+    project_name : str
+        For the log line.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A rejection response with ``error_code: "objective_invalid"``, or
+        None when there is no ``objective`` option or it is valid.
+    """
+    if not isinstance(options, dict) or "objective" not in options:
+        return None
+    objective = options.get("objective")
+    problem: Optional[str] = None
+    if not isinstance(objective, str):
+        problem = f"objective must be a string, got {type(objective).__name__}"
+    elif not objective.strip():
+        problem = "objective must not be blank"
+    elif len(objective) > _OBJECTIVE_MAX_CHARS:
+        problem = f"objective is longer than {_OBJECTIVE_MAX_CHARS} characters"
+    if problem is None:
+        return None
+    logger.warning(
+        f"create_project for {project_name!r} rejected: invalid objective option: "
+        f"{problem}"
+    )
+    return {
+        "success": False,
+        "error": f"options.objective is not a valid project objective: {problem}",
+        "error_code": "objective_invalid",
+        "error_type": "InvalidConfigurationError",
+        "problems": [problem],
+    }
+
+
+async def _record_project_objective(
+    state: Any, project_id: str, project_name: str, objective: str
+) -> bool:
+    """Relay the author's objective to the board as the project's primer.
+
+    Writes one project-level ``Decision`` (``task_id=None``,
+    ``kind="objective"``, subject ``project.objective``) stamped with
+    ``project_id``, persists it to project history so
+    ``query_project_history(project_id, "opinions", kind="objective")``
+    returns it, and leaves a comment on the board's About card for a human
+    watching. The text is recorded verbatim (stripped), never rewritten:
+    Marcus says what and why only when the author did (Invariant 2 v2).
+
+    Best-effort by design: a failure here is logged and reported as
+    ``False``; it never fails ``create_project``.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state, after the new project is registered and active.
+    project_id : str
+        The Marcus project id the primer belongs to.
+    project_name : str
+        Used to find the About card for the board comment.
+    objective : str
+        The author's objective, as given in ``options.objective``.
+
+    Returns
+    -------
+    bool
+        True when the Decision was recorded, else False.
+    """
+    from src.marcus_mcp.tools.context import (
+        _about_card_id,
+        _persist_decision_to_history,
+    )
+
+    context = getattr(state, "context", None)
+    if not context:
+        logger.warning(
+            f"[create_project] Context system not enabled; objective for "
+            f"{project_name!r} not recorded"
+        )
+        return False
+    try:
+        decision = await context.log_decision(
+            agent_id=OBJECTIVE_AUTHOR,
+            task_id=None,
+            what=objective.strip(),
+            why="stated by the project's author at create_project",
+            impact="Not specified",
+            subject=OBJECTIVE_SUBJECT,
+            kind=OBJECTIVE_KIND,
+            project_id=project_id,
+        )
+        await _persist_decision_to_history(decision, state, project_id=project_id)
+    except Exception as e:  # noqa: BLE001 - the primer never blocks project creation
+        logger.warning(
+            f"[create_project] Could not record objective for {project_name!r}: {e}"
+        )
+        return False
+
+    board_client = getattr(state, "kanban_client", None)
+    target_id = _about_card_id(
+        list(getattr(state, "project_tasks", None) or []), project_name
+    )
+    if board_client and target_id:
+        try:
+            await board_client.add_comment(
+                target_id,
+                f"🎯 OBJECTIVE (stated by the project's author)\n{objective.strip()}",
+            )
+        except (
+            Exception
+        ) as e:  # noqa: BLE001 - the comment is a courtesy, the record is the primer
+            logger.warning(f"Failed to add kanban comment for objective: {e}")
+    return True
+
+
 def _resolve_project_info_path(options: Dict[str, Any]) -> Optional[str]:
     """Resolve where Marcus writes ``project_info.json`` for the runner.
 
@@ -743,6 +881,15 @@ async def _create_project_inner(
               ``contract_first`` is selected but ``project_root`` is
               absent or contract generation fails.
           Overrides the ``MARCUS_DECOMPOSER`` environment variable.
+
+        Stigmergy primer:
+        - objective (str): The project author's statement of what the crew
+          is building and why. Relayed verbatim to the board at creation as
+          a project-level Decision (``task_id=None``, ``kind="objective"``,
+          subject ``project.objective``) so every agent can read it before
+          its first pick via ``query_project_history(project_id,
+          "opinions", kind="objective")``. Marcus never writes one itself.
+          The result carries ``objective_recorded`` (bool).
 
         Runner Integration:
         - project_info_path (str): Absolute path where Marcus should write
@@ -1039,6 +1186,12 @@ async def _create_project_inner(
         if _tasks_rejection is not None:
             _recent_create_project_calls.pop(dedup_key, None)
             return _tasks_rejection
+
+        # The stigmergy primer: a malformed objective is refused here too.
+        _objective_rejection = _validate_objective_option(options, project_name)
+        if _objective_rejection is not None:
+            _recent_create_project_calls.pop(dedup_key, None)
+            return _objective_rejection
 
         # Log before calling the function
         state.log_event("create_project_calling", {"project_name": project_name})
@@ -1480,6 +1633,20 @@ async def _create_project_inner(
                         f"{_write_err}"
                     )
 
+        # The stigmergy primer: relay the author's objective to the board as
+        # a project-level Decision the agents read before their first pick.
+        # Recorded after the project exists and is active, so the Decision
+        # is stamped with the real project id; never fails the creation.
+        if (
+            result.get("success")
+            and isinstance(options, dict)
+            and isinstance(options.get("objective"), str)
+            and result.get("project_id")
+        ):
+            result["objective_recorded"] = await _record_project_objective(
+                state, str(result["project_id"]), project_name, options["objective"]
+            )
+
         # Record dedup entry AFTER successful creation so failed attempts
         # don't poison the cache and block legitimate retries.
         # Store the result so retries (e.g. from MCP timeouts) get the
@@ -1612,6 +1779,13 @@ async def create_tasks(
         }
 
     options = options or {}
+
+    # A seeded list (the runner-side curator's one task per corroborated
+    # subject) must reach the board as written or be refused whole, the
+    # same way create_project treats options.tasks.
+    _tasks_rejection = _validate_tasks_option(options, project_name or "active project")
+    if _tasks_rejection is not None:
+        return _tasks_rejection
 
     # create_tasks operates on an existing project — contract_first structural
     # scaffolding is not applicable.  Inject feature_based unless the caller
