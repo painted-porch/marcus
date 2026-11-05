@@ -369,6 +369,36 @@ _RECONCILIATION_LABEL = "reconciliation"
 _RECONCILIATION_LOCKS: Dict[str, asyncio.Lock] = {}
 _RECONCILIATION_LOCKS_GUARD = threading.Lock()
 
+#: One lock per DEPENDENT around the whole handoff sequence: read the
+#: provenance, replace the inputs, write the board or roll back, record
+#: the provenance. Without it the replacement is visible in shared
+#: memory while the board write is still in flight, so a second upstream
+#: closing concurrently can see a key the first has removed but not yet
+#: committed, claim it, and leave both owning it (Codex P2 on PR #807).
+_HANDOFF_LOCKS: Dict[str, asyncio.Lock] = {}
+_HANDOFF_LOCKS_GUARD = threading.Lock()
+
+
+def _handoff_lock(dependent_id: str) -> asyncio.Lock:
+    """Return the lock that serialises handoffs into one dependent.
+
+    Parameters
+    ----------
+    dependent_id : str
+        The task whose inputs are being written.
+
+    Returns
+    -------
+    asyncio.Lock
+        A lock unique to this dependent for the life of the process.
+    """
+    with _HANDOFF_LOCKS_GUARD:
+        lock = _HANDOFF_LOCKS.get(dependent_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _HANDOFF_LOCKS[dependent_id] = lock
+        return lock
+
 
 def _reconciliation_lock(task_id: str) -> asyncio.Lock:
     """Return the lock that serialises card creation for one task.
@@ -1079,27 +1109,217 @@ async def _handoff_evidence_to_dependents(
         for k, v in {**(task.inputs or {}), **evidence}.items()
         if k != RAW_EVIDENCE_FIELD
     }
+    persistence = getattr(state, "assignment_persistence", None)
     for dependent in getattr(state, "project_tasks", None) or []:
         if task.id not in (dependent.dependencies or []):
             continue
+        # SET REPLACEMENT, not a per-key merge (issue #803).
+        #
         # Existing keys win (Codex P1 on PR #739): a dependent's
         # board-seeded inputs must never be overwritten by a claim
-        # author's evidence, or a finder could ship its own excerpt
-        # and the verifier would check the attacker's text against
-        # the page. First write wins thereafter; legitimate chain
-        # keys never collide by construction.
-        dependent.inputs = {**payload, **(dependent.inputs or {})}
-        try:
-            await state.kanban_client.update_task(
-                dependent.id, {"inputs": dependent.inputs}
+        # author's evidence, or a finder could ship its own excerpt and
+        # the verifier would check the attacker's text against the page.
+        # That rule stands, and everything below preserves it.
+        #
+        # What it rested on does not: its comment said "legitimate chain
+        # keys never collide by construction", which holds only while a
+        # task closes once. ``request_task_redo`` re-opens a DONE task
+        # and clears nothing downstream, so a second close collides with
+        # the first by construction, first-write-wins keeps the
+        # superseded claim, and the verifier passes a value the author
+        # already corrected.
+        #
+        # So this close clears the keys THIS task contributed last time
+        # and writes its new set. Keys attributed to nobody (the
+        # board-seeded set) and keys another upstream task contributed
+        # are untouched, which is what keeps the security property
+        # exact. Replacing the set rather than overwriting key by key is
+        # what makes it correct when the evidence shape varies between
+        # rounds: a key present in the first close and absent from the
+        # second is removed rather than left standing, and the schema
+        # only pins the REQUIRED fields, so that case is reachable.
+        # Everything from here to the provenance write is one critical
+        # section per dependent (Codex P2 on PR #807). The steps are not
+        # individually unsafe; what is unsafe is another handoff
+        # observing the gap between the in-memory replacement and the
+        # board write that commits it.
+        async with _handoff_lock(dependent.id):
+            await _apply_handoff_to_dependent(
+                task, dependent, payload, persistence, state
             )
-        except Exception as handoff_err:  # noqa: BLE001 - keep memory copy
+
+
+async def _apply_handoff_to_dependent(
+    task: Task,
+    dependent: Task,
+    payload: Dict[str, Any],
+    persistence: Any,
+    state: Any,
+) -> None:
+    """Replace one dependent's keys from a closing task's payload.
+
+    Held under that dependent's handoff lock by the only caller.
+
+    REDESIGNED (Codex P2 on PR #807, fourth round). Three earlier rounds
+    kept the merge basis — the dependent's "before" inputs — on the
+    ``dependent`` object the caller passed in, which is captured from
+    ``state.project_tasks`` BEFORE this lock is ever acquired.
+    ``refresh_project_state`` (server.py, run on every
+    ``request_next_task`` poll) can swap that whole list with fresh
+    objects at any ``await`` point, including while this lock is held —
+    it has no idea the lock exists. A second handoff can then acquire
+    the very same lock, correctly, and still merge against a stale
+    pre-write snapshot of the dependent, because the object it was given
+    was fixed before the lock was ever requested. The lock serialised
+    *order*, not *data freshness*.
+
+    The fix is to never trust the in-memory object for the merge basis
+    at all. The dependent's current ``inputs`` are read fresh from the
+    kanban board itself, inside the lock, immediately before computing
+    and writing the replacement. ``refresh_project_state`` only ever
+    reads the board and never writes ``inputs``, so once the merge basis
+    is the board rather than an object a caller might be holding stale,
+    there is nothing left for a second, uncoordinated writer to race
+    against: the lock now owns the one thing both this function and a
+    concurrent refresh actually touch.
+
+    One consequence worth naming: there is no longer anything to roll
+    back on a failed write, because nothing is written to the in-memory
+    object speculatively before the board write succeeds. A failure
+    simply means the attempted change never reached the board; nothing
+    is mutated, and — matching every other handoff failure path in this
+    codebase (#737, #667 Fix 2) — it is logged and swallowed rather than
+    raised, so it can never strand or eject the agent whose completion
+    triggered it.
+
+    Codex P2, fifth round: treating the board as the ONLY merge basis
+    broke on Planka, GitHub and Linear, none of which round-trip
+    ``inputs`` at all — their converters drop the field on both create
+    and update, so ``get_task_by_id`` always comes back empty on those
+    providers. The merge basis is therefore the union of the board's
+    current row (authoritative on sqlite, and the only source of
+    board-seeded inputs anywhere) and Marcus's own durable
+    ``committed_inputs`` snapshot (authoritative regardless of provider,
+    since nothing else in the codebase ever writes a dependent's
+    ``inputs``). The snapshot wins on a key both sources have, since the
+    board's agreement with it is no guarantee on these three providers.
+
+    Parameters
+    ----------
+    task : Task
+        The task that just closed.
+    dependent : Task
+        The task whose inputs are being written. Used only for its
+        ``id``; its ``.inputs`` is never read, which is the point.
+    payload : Dict[str, Any]
+        The closing task's inputs and evidence, minus ``raw``.
+    persistence : Any
+        The provenance store, or ``None`` when the caller has none.
+    state : Any
+        Marcus server state, for the kanban client.
+    """
+    prior_keys: List[str] = []
+    if persistence is not None:
+        try:
+            prior_keys = await persistence.get_input_provenance(dependent.id, task.id)
+        except Exception as prov_err:  # noqa: BLE001 - degrade to additive
             logger.warning(
-                "[#737] Claim handoff: kanban write failed for dependent "
-                "%s (%s); the in-memory copy is applied and the next "
-                "refresh may lose it.",
+                "[#803] Handoff provenance unreadable for dependent %s "
+                "(%s); this close adds keys and clears none, so a "
+                "superseded value may survive.",
                 dependent.id,
-                handoff_err,
+                prov_err,
+            )
+
+    # The merge basis: the board's CURRENT row, fetched now, inside the
+    # lock — never the ``dependent`` object the caller captured before
+    # acquiring it. A missing board row degrades to "nothing to keep,"
+    # which is the behaviour an empty dependent would have given anyway.
+    try:
+        current = await state.kanban_client.get_task_by_id(dependent.id)
+        board_inputs = dict((current.inputs if current else {}) or {})
+    except Exception as read_err:  # noqa: BLE001 - never fail a close
+        logger.warning(
+            "[#807] Could not read dependent %s from the board (%s); "
+            "this close is skipped for it rather than risking a write "
+            "against an unknown prior state.",
+            dependent.id,
+            read_err,
+        )
+        return
+
+    # Codex P2, fifth round: the board alone is not authoritative on
+    # Planka, GitHub or Linear (see the docstring). Marcus's own durable
+    # snapshot of what it last committed fills that gap and wins ties,
+    # since those three providers can echo back nothing to disagree with.
+    committed_inputs: Dict[str, Any] = {}
+    if persistence is not None:
+        try:
+            committed_inputs = await persistence.get_committed_inputs(dependent.id)
+        except Exception as snap_err:  # noqa: BLE001 - degrade to board-only
+            logger.warning(
+                "[#807] Committed-inputs snapshot unreadable for "
+                "dependent %s (%s); falling back to the board alone, "
+                "which loses prior contributions on providers that "
+                "don't round-trip inputs.",
+                dependent.id,
+                snap_err,
+            )
+
+    before = {**board_inputs, **committed_inputs}
+    kept = {k: v for k, v in before.items() if k not in prior_keys}
+    new_inputs = {**payload, **kept}
+    # Record what this close actually WROTE, not what it offered. A
+    # key the board seeded, or another upstream task contributed,
+    # beats this payload and stays in ``kept``; attributing it here
+    # would let the next close of this task clear a value it never
+    # owned, which would turn the #803 fix into a way around the
+    # very rule it preserves.
+    contributed = [k for k in payload if k not in kept]
+
+    try:
+        await state.kanban_client.update_task(dependent.id, {"inputs": new_inputs})
+    except Exception as handoff_err:  # noqa: BLE001 - never fail a close
+        logger.warning(
+            "[#737] Claim handoff: kanban write failed for dependent "
+            "%s (%s); nothing was written, so the board and the "
+            "in-memory copy stay in agreement.",
+            dependent.id,
+            handoff_err,
+        )
+        return
+
+    # The in-memory copy is refreshed as a courtesy for anything in
+    # THIS request that reads it synchronously afterward. It is no
+    # longer load-bearing for correctness: the next handoff into this
+    # dependent re-reads the board under the lock regardless of what
+    # this object says by then.
+    dependent.inputs = new_inputs
+
+    if persistence is not None:
+        try:
+            await persistence.record_input_provenance(
+                dependent.id, task.id, contributed
+            )
+        except Exception as prov_err:  # noqa: BLE001 - never fail a close
+            logger.warning(
+                "[#803] Handoff provenance write failed for dependent "
+                "%s (%s); a later re-close of %s may leave one of "
+                "these keys standing.",
+                dependent.id,
+                prov_err,
+                task.id,
+            )
+        try:
+            await persistence.record_committed_inputs(dependent.id, new_inputs)
+        except Exception as snap_err:  # noqa: BLE001 - never fail a close
+            logger.warning(
+                "[#807] Committed-inputs snapshot write failed for "
+                "dependent %s (%s); a provider that doesn't round-trip "
+                "inputs may lose this close's contribution on the next "
+                "handoff into this dependent.",
+                dependent.id,
+                snap_err,
             )
 
 

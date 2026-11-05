@@ -60,6 +60,22 @@ class AssignmentPersistence:
         # replaces cached task objects, so a board-only record is lost
         # on Planka, GitHub and Linear (Codex P2 on PR #794).
         self.refused_attempts_file = self.storage_dir / "refused_attempts.json"
+        # Issue #803 handoff provenance: which keys each upstream task
+        # contributed to each dependent's inputs. Kept here rather than
+        # on the board for the same reason as the refused attempts: the
+        # board row holds the merged inputs and nothing about who wrote
+        # which key, and a refresh replaces the cached task objects.
+        self.input_provenance_file = self.storage_dir / "input_provenance.json"
+        # Codex P2 on PR #807: Planka, GitHub and Linear never round-trip
+        # a task's ``inputs`` at all (their converters drop the field on
+        # both create and update), so treating ``get_task_by_id`` as the
+        # merge basis for the handoff silently discards everything on
+        # those providers — board-seeded inputs and every prior
+        # contribution alike. Same shape as ``refused_attempts_file``
+        # above, same fix: Marcus keeps its own durable record of the
+        # last inputs it committed for each dependent, independent of
+        # whether the board can echo it back.
+        self.committed_inputs_file = self.storage_dir / "committed_inputs.json"
 
         # In-memory cache
         self._assignments_cache: Dict[str, Dict[str, Any]] = {}
@@ -73,6 +89,10 @@ class AssignmentPersistence:
         self._task_baselines_loaded: bool = False
         self._refused_attempts_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._refused_attempts_loaded: bool = False
+        self._input_provenance_cache: Dict[str, Dict[str, List[str]]] = {}
+        self._input_provenance_loaded: bool = False
+        self._committed_inputs_cache: Dict[str, Dict[str, Any]] = {}
+        self._committed_inputs_loaded: bool = False
         self._lock_manager = EventLoopLockManager()
 
     @property
@@ -404,6 +424,204 @@ class AssignmentPersistence:
         async with aiofiles.open(tmp_path, "w") as f:
             await f.write(json.dumps(self._task_baselines_cache, indent=2))
         tmp_path.replace(self.task_baselines_file)
+
+    async def record_input_provenance(
+        self, dependent_id: str, upstream_task_id: str, keys: List[str]
+    ) -> None:
+        """
+        Record which keys an upstream task contributed to a dependent.
+
+        Issue #803. The evidence handoff replaces the whole set of keys
+        attributed to the closing task, so a task closed twice cannot
+        leave a key from its first attempt standing in a dependent's
+        inputs. Which keys those are is the only part that needs
+        remembering, and the board cannot remember it: the row holds the
+        merged inputs and nothing about who wrote which key.
+
+        Keyed by dependent and then by upstream task, so two upstream
+        tasks feeding one dependent never clear each other's keys.
+
+        Parameters
+        ----------
+            dependent_id
+                The task whose inputs were written.
+            upstream_task_id
+                The task that closed and contributed the keys.
+            keys
+                The keys it contributed on this close.
+        """
+        async with self.lock:
+            self._ensure_input_provenance_loaded()
+            for_dependent = dict(self._input_provenance_cache.get(dependent_id) or {})
+            for_dependent[upstream_task_id] = sorted(set(keys))
+            self._input_provenance_cache[dependent_id] = for_dependent
+            await self._write_input_provenance()
+
+    async def get_input_provenance(
+        self, dependent_id: str, upstream_task_id: str
+    ) -> List[str]:
+        """
+        Read the keys an upstream task last contributed to a dependent.
+
+        Parameters
+        ----------
+            dependent_id
+                The task whose inputs to look up.
+            upstream_task_id
+                The upstream task whose contribution is wanted.
+
+        Returns
+        -------
+            The keys it contributed last time, or an empty list when
+            nothing was recorded. Empty makes the handoff behave exactly
+            as it did before issue #803, which is the right degradation:
+            it adds keys and clears nothing.
+        """
+        async with self.lock:
+            self._ensure_input_provenance_loaded()
+            recorded = (self._input_provenance_cache.get(dependent_id) or {}).get(
+                upstream_task_id
+            )
+            return [str(k) for k in recorded] if recorded else []
+
+    def _ensure_input_provenance_loaded(self) -> None:
+        """Read the provenance store into the cache once. Caller holds the lock.
+
+        A corrupt store degrades to "nothing recorded", which makes the
+        handoff additive again and lets a stale key survive a redo. That
+        is the #803 behaviour, so the failure is logged loudly rather
+        than passed over.
+        """
+        if self._input_provenance_loaded:
+            return
+        self._input_provenance_loaded = True
+        if not self.input_provenance_file.exists():
+            return
+        try:
+            content = self.input_provenance_file.read_text()
+            loaded = json.loads(content) if content else {}
+            if isinstance(loaded, dict):
+                merged: Dict[str, Dict[str, List[str]]] = {
+                    dependent: {
+                        upstream: [str(k) for k in keys]
+                        for upstream, keys in contributions.items()
+                        if isinstance(keys, list)
+                    }
+                    for dependent, contributions in loaded.items()
+                    if isinstance(contributions, dict)
+                }
+                for dependent, contributions in self._input_provenance_cache.items():
+                    merged.setdefault(dependent, {}).update(contributions)
+                self._input_provenance_cache = merged
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(
+                f"Failed to read handoff provenance from "
+                f"{self.input_provenance_file}: {e}. A task closed twice "
+                "may leave a key from its first attempt standing in a "
+                "dependent's inputs (issue #803)."
+            )
+
+    async def _write_input_provenance(self) -> None:
+        """Persist the provenance. Caller holds the lock.
+
+        Temp file plus atomic rename, matching the other three stores.
+        """
+        tmp_path = self.input_provenance_file.with_suffix(".json.tmp")
+        async with aiofiles.open(tmp_path, "w") as f:
+            await f.write(json.dumps(self._input_provenance_cache, indent=2))
+        tmp_path.replace(self.input_provenance_file)
+
+    async def record_committed_inputs(
+        self, dependent_id: str, inputs: Dict[str, Any]
+    ) -> None:
+        """
+        Record the full inputs a handoff just committed for a dependent.
+
+        Codex P2 on PR #807. Reading ``get_task_by_id`` as the handoff's
+        merge basis is correct on sqlite, which round-trips ``inputs``,
+        but Planka, GitHub and Linear never store the field at all — a
+        read always comes back empty on those providers, so using the
+        board alone would make every handoff after the first one
+        overwrite, rather than merge into, a dependent's inputs. This
+        durable snapshot is the provider-independent fallback: whatever
+        Marcus itself last wrote survives regardless of what the board
+        can echo back.
+
+        Parameters
+        ----------
+            dependent_id
+                The task whose inputs were written.
+            inputs
+                The complete merged inputs just written to that task.
+        """
+        async with self.lock:
+            self._ensure_committed_inputs_loaded()
+            self._committed_inputs_cache[dependent_id] = dict(inputs)
+            await self._write_committed_inputs()
+
+    async def get_committed_inputs(self, dependent_id: str) -> Dict[str, Any]:
+        """
+        Read the last inputs Marcus itself committed for a dependent.
+
+        Parameters
+        ----------
+            dependent_id
+                The task whose last committed inputs are wanted.
+
+        Returns
+        -------
+            The last full inputs dict a handoff wrote, or an empty dict
+            when nothing was recorded — the right degradation, since the
+            caller merges this with whatever the board returns and an
+            empty dict contributes nothing extra.
+        """
+        async with self.lock:
+            self._ensure_committed_inputs_loaded()
+            recorded = self._committed_inputs_cache.get(dependent_id)
+            return dict(recorded) if recorded else {}
+
+    def _ensure_committed_inputs_loaded(self) -> None:
+        """Read the committed-inputs store into the cache once.
+
+        Caller holds the lock. A corrupt store degrades to "nothing
+        committed," which falls back to the board alone — the #807
+        pre-fix behaviour for providers that round-trip ``inputs``, and
+        no worse than before this store existed for ones that don't.
+        """
+        if self._committed_inputs_loaded:
+            return
+        self._committed_inputs_loaded = True
+        if not self.committed_inputs_file.exists():
+            return
+        try:
+            content = self.committed_inputs_file.read_text()
+            loaded = json.loads(content) if content else {}
+            if isinstance(loaded, dict):
+                merged: Dict[str, Dict[str, Any]] = {
+                    dependent: dict(inputs)
+                    for dependent, inputs in loaded.items()
+                    if isinstance(inputs, dict)
+                }
+                for dependent, inputs in self._committed_inputs_cache.items():
+                    merged[dependent] = inputs
+                self._committed_inputs_cache = merged
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(
+                f"Failed to read committed handoff inputs from "
+                f"{self.committed_inputs_file}: {e}. On a provider that "
+                "does not round-trip 'inputs' (Planka, GitHub, Linear) "
+                "this may lose data this close contributed (issue #807)."
+            )
+
+    async def _write_committed_inputs(self) -> None:
+        """Persist the committed-inputs snapshot. Caller holds the lock.
+
+        Temp file plus atomic rename, matching the other stores.
+        """
+        tmp_path = self.committed_inputs_file.with_suffix(".json.tmp")
+        async with aiofiles.open(tmp_path, "w") as f:
+            await f.write(json.dumps(self._committed_inputs_cache, indent=2))
+        tmp_path.replace(self.committed_inputs_file)
 
     async def record_refused_attempt(
         self, task_id: str, attempt: Dict[str, Any]

@@ -245,6 +245,11 @@ class TestClaimHandoff:
         state.project_tasks = [find, verify, synthesize]
         state.kanban_client = Mock()
         state.kanban_client.update_task = AsyncMock()
+        state.kanban_client.get_task_by_id = AsyncMock(
+            side_effect=lambda task_id, _tasks=(find, verify, synthesize): next(
+                (t for t in _tasks if t.id == task_id), None
+            )
+        )
         return find, verify, synthesize, state
 
     @pytest.mark.asyncio
@@ -337,6 +342,11 @@ class TestGeneralizedHandoff:
         state.project_tasks = [verify, approve, synthesize]
         state.kanban_client = Mock()
         state.kanban_client.update_task = AsyncMock()
+        state.kanban_client.get_task_by_id = AsyncMock(
+            side_effect=lambda task_id, _tasks=(verify, approve, synthesize): next(
+                (t for t in _tasks if t.id == task_id), None
+            )
+        )
         return verify, approve, synthesize, state
 
     @pytest.mark.asyncio
