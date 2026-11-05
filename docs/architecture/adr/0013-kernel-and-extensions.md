@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04**; the other ten remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K12 accepted 2026-11-05**; the other nine remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -179,7 +179,9 @@ Each needs its own witness and neither substitutes for the other.
 
 ### K12 — Offer-time eligibility: the kernel never offers a verification task to the agent whose own work it would verify
 
-**Recommendation.** `request_next_task` excludes, for any task whose type is "verify this artifact," every agent registered as that artifact's producer or as that agent's vendor.
+**Accepted 2026-11-05 (Lawrence Gray).**
+
+**Decision.** `request_next_task` excludes, for any task whose type is "verify this artifact," every agent registered as that artifact's producer or as that agent's vendor.
 The exclusion happens where the kernel decides what to offer, and the refusal is silent, so the rule cannot be probed by a worker testing where its edge is.
 
 **Evidence.** The citation verifier already builds this (`src/marcus_mcp/coordinator/eligibility.py` → `filter_eligible_tasks`, #737) and names it as one of four board-enforced guarantees: "no one checks their own work."
