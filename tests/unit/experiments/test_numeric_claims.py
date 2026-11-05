@@ -1102,3 +1102,125 @@ class TestCodexFindingBooleanNumericConfusion:
         assert required
         res = check_claims(list(required), sources)
         assert [r for r in res if r.verdict == "failed"] == []
+
+
+class TestCodexFindingLeadingDecimalFigures:
+    """A figure written without a leading zero was invisible to extraction.
+
+    ".99" and "-.5" both require a digit before the decimal point in
+    the old regex, and the negative lookbehind blocked matching the
+    fractional digits as their own figure, so neither pattern matched
+    anything at all. A report could state such a figure with zero
+    claim coverage and the checker would never notice.
+    """
+
+    @pytest.mark.unit
+    def test_leading_decimal_without_a_zero_is_extracted(self):
+        """ ".99" yields the figure 0.99's own written form."""
+        assert extract_numbers("Accuracy is .99.") == [".99"]
+
+    @pytest.mark.unit
+    def test_negative_leading_decimal_is_extracted_with_its_sign(self):
+        """ "-.5" keeps its sign, matching the existing negative-sign fix."""
+        assert extract_numbers("The bias was -.5.") == ["-.5"]
+
+    @pytest.mark.unit
+    def test_an_uncovered_leading_decimal_figure_is_caught(self, sources):
+        """End to end: a bare ".99" with no claim is a coverage gap."""
+        res = check_claims([], sources, report_text="Accuracy is .99.")
+        assert [r for r in res if r.verdict == "uncovered"] != []
+
+
+class TestCodexFindingIllTypedExpressionCrashesTheRun:
+    """A type-mismatched derived expression crashed the whole checker.
+
+    ``a / "b"`` (a string resolved where a number was expected) raised
+    an uncaught TypeError from _safe_eval's arithmetic, escaping
+    _check_one entirely. One malformed claim could abort
+    verify_workspace and the whole load_condition_b grading pass
+    instead of producing an unresolvable verdict for that one claim.
+    """
+
+    @pytest.mark.unit
+    def test_ill_typed_expression_is_unresolvable_not_a_crash(self, staged):
+        """A string operand in arithmetic fails gracefully, not fatally."""
+        (staged / "labels.json").write_text('{"name": "maize"}')
+        sources_with_string = load_sources(staged)
+        c = Claim(
+            id="c1",
+            value=1,
+            label="broken derived claim",
+            kind="derived",
+            expr="a / b",
+            inputs={
+                "a": "metrics.json:n_records",
+                "b": "labels.json:name",
+            },
+        )
+        res = check_claims([c], sources_with_string)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+
+class TestCodexFindingSlideTitleFiguresAreChecked:
+    """A number in a slide's title was never checked against anything.
+
+    check_slide_spec only inspected ``cells``, so a slide titled
+    "Accuracy is 99%" with otherwise valid, claim-backed cells still
+    verified even though nothing anywhere claims 99. A figure outside
+    the claim-backed cells could reach the deck through the title.
+    """
+
+    @pytest.mark.unit
+    def test_title_figure_with_no_backing_claim_on_the_slide_fails(self):
+        """An invented number in the title is caught, not ignored."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.858, expected=0.858
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Accuracy is 99%",
+                    "cells": [{"value": "0.858", "claim": "c1", "label": "overall R2"}],
+                }
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "overall R2"})
+
+    @pytest.mark.unit
+    def test_title_figure_matching_a_backed_cell_passes(self):
+        """A title restating a figure already backed by a cell is fine."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.858, expected=0.858
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Overall R2 is 0.858",
+                    "cells": [{"value": "0.858", "claim": "c1", "label": "overall R2"}],
+                }
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "overall R2"}) == []
+
+    @pytest.mark.unit
+    def test_a_title_with_no_figures_at_all_is_unaffected(self):
+        """A purely descriptive title is not required to carry a claim."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.858, expected=0.858
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Model Performance Summary",
+                    "cells": [{"value": "0.858", "claim": "c1", "label": "overall R2"}],
+                }
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "overall R2"}) == []

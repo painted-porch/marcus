@@ -36,7 +36,9 @@ VERDICT_UNRESOLVABLE = "unresolvable"
 VERDICT_UNCOVERED = "uncovered"
 
 _NUMBER_RE = re.compile(
-    r"(?<![\w.])" r"(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)" r"[xX]?(?![\w])"
+    r"(?<![\w.])"
+    r"(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?|-?\.\d+)"
+    r"[xX]?(?![\w])"
 )
 _CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
 
@@ -592,7 +594,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         try:
             tree = ast.parse(claim.expr or "", mode="eval")
             truth = _safe_eval(tree, names)
-        except (SyntaxError, ValueError, ZeroDivisionError) as exc:
+        except (SyntaxError, ValueError, ZeroDivisionError, TypeError) as exc:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
         ok = _within_tolerance(claim.value, truth, claim.tolerance)
         inputs_detail = ", ".join(f"{k}={v}" for k, v in names.items())
@@ -856,6 +858,20 @@ def check_slide_spec(
     """
     problems: List[str] = []
     for index, slide in enumerate(spec.get("slides", []), start=1):
+        backed_values = [
+            result.value
+            for cell in slide.get("cells", [])
+            for result in [accepted.get(cell.get("claim", ""))]
+            if result is not None and result.verdict == VERDICT_VERIFIED
+        ]
+        for figure in extract_numbers(str(slide.get("title") or "")):
+            if not any(
+                _within_tolerance(figure, value, None) for value in backed_values
+            ):
+                problems.append(
+                    f"slide {index}: title states {figure}, which no "
+                    f"accepted cell on this slide backs"
+                )
         for cell in slide.get("cells", []):
             value = cell.get("value")
             claim_id = cell.get("claim")
