@@ -122,6 +122,38 @@ class TestReadSelfCheck:
         assert read_self_check(tmp_path)["verdict"] == "accept"
 
 
+class TestCodexFindingNonObjectPayloadDoesNotCrash:
+    """Valid JSON that isn't an object crashed read_self_check.
+
+    `self_check.json` containing `null`, `[]`, or a bare number is
+    valid JSON, so the JSONDecodeError guard never fires, but calling
+    `.get("verdict")` on it raises AttributeError and escapes
+    run_condition_a_case entirely instead of being treated as the
+    reject it obviously is.
+    """
+
+    @pytest.mark.unit
+    def test_json_null_is_a_reject_not_a_crash(self, tmp_path):
+        """A bare `null` payload does not crash the reader."""
+        (tmp_path / "self_check.json").write_text("null")
+        result = read_self_check(tmp_path)
+        assert result["verdict"] == "reject"
+
+    @pytest.mark.unit
+    def test_json_array_is_a_reject_not_a_crash(self, tmp_path):
+        """A bare array payload does not crash the reader."""
+        (tmp_path / "self_check.json").write_text("[]")
+        result = read_self_check(tmp_path)
+        assert result["verdict"] == "reject"
+
+    @pytest.mark.unit
+    def test_json_number_is_a_reject_not_a_crash(self, tmp_path):
+        """A bare number payload does not crash the reader."""
+        (tmp_path / "self_check.json").write_text("1")
+        result = read_self_check(tmp_path)
+        assert result["verdict"] == "reject"
+
+
 class TestRoundFlow:
     """The write-then-check loop's control flow."""
 

@@ -184,7 +184,7 @@ def read_self_check(workspace: Path) -> Dict[str, Any]:
             "verdict": "reject",
             "reasons": [f"self_check.json is not valid JSON: {exc}"],
         }
-    if data.get("verdict") not in ("accept", "reject"):
+    if not isinstance(data, dict) or data.get("verdict") not in ("accept", "reject"):
         return {
             "verdict": "reject",
             "reasons": [f"self_check.json has no valid verdict: {data!r}"],
