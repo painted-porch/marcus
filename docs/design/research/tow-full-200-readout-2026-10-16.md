@@ -79,7 +79,8 @@ The 17 break down as:
 - **3 have a valid republished source but a genuinely broken date field.**
   The Claude Haiku adapter emitted reasoning text such as "969 days ago from the search metadata ... approximately 2024" instead of a parseable date (tow-0037, tow-0138, tow-0164).
   The source is a real republication; the date is a real engine defect, and we count these as failures.
-- **3 are genuine near-misses:** a story 3.5 months off the original (likely a different article), a citation to an older article on the same topic, and a newsletter that quotes rather than republishes the source.
+- **3 are genuine near-misses:** a story 3.5 months off the original (tow-0060, likely a different article), a citation to an older article on the same topic (tow-0129), and a newsletter that quotes rather than republishes the source (tow-0179).
+  Addendum, 2026-11-05 (issue #745's analysis pass): tow-0129 is named here deliberately, not in the moved-URL bucket above, because its claimed and canonical URLs share one article's slug but differ in the date segment of the path -- the same site's own "this story is still being updated" pattern, not a move. The two moved-URL cases above are a different, cleaner pattern: identical slug, identical day, only the section path changed.
 
 ### The second, clearly-labeled number
 

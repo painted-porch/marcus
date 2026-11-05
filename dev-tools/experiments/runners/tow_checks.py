@@ -490,6 +490,159 @@ def _registrable_label(url: str) -> str:
     return labels[0] if labels else ""
 
 
+# Known republication networks (issue #745). Built from the full-200
+# run's 17 wrong-delivered cases (see
+# docs/design/research/tow-full-200-readout-2026-10-16.md): a
+# claimed publisher that is a documented, legitimate republication
+# partner of the ground-truth publisher should not be scored the
+# same as a fabrication.
+#
+# Confidence per entry, recorded honestly rather than claimed
+# uniformly:
+#   - "wsj_dow_jones_syndication": CONFIRMED by direct fetch
+#     (2026-11-05). kanebridgenews.com's article carries a "Copyright
+#     2020, Dow Jones & Company, Inc." notice and a WSJ logo badge on
+#     the page itself -- licensed WSJ syndication, not Kanebridge's
+#     own reporting.
+#   - "states_newsroom", "npr_affiliate_partnership",
+#     "mississippi_today_cc": publicly documented republication
+#     policy (States Newsroom's network-wide Creative Commons terms;
+#     Mississippi Today's CC license; KBIA/KCUR's statehouse content
+#     partnership with Missouri Independent, all University of
+#     Missouri System NPR member stations). NOT independently
+#     fetch-verified in this session: missouriindependent.com and
+#     mississippitoday.org both disallow all crawlers in robots.txt
+#     (``Disallow: /``), so this project's own robots-respecting
+#     fetcher cannot check their pages, including their policy pages.
+#
+# Deliberately excluded: Spokesman-Review/Seattle Times and
+# CityNews Halifax/The Examination are plausible (regional wire
+# pickup; a nonprofit investigative outlet's republication policy)
+# but unconfirmed -- spokesman.com disallows all crawlers
+# (``Disallow: /``) and no equivalent policy page was found on
+# theexamination.org. A table entry here is either a direct
+# observation or a cited public policy, never a guess.
+_REPUBLICATION_NETWORKS: Dict[frozenset[str], str] = {
+    frozenset({"southdakotasearchlight", "missouriindependent"}): "states_newsroom",
+    frozenset({"kbia", "missouriindependent"}): "npr_affiliate_partnership",
+    frozenset({"kcur", "missouriindependent"}): "npr_affiliate_partnership",
+    frozenset({"meridianstar", "mississippitoday"}): "mississippi_today_cc",
+    frozenset({"kanebridgenews", "thewallstreetjournal"}): "wsj_dow_jones_syndication",
+}
+
+
+def known_republication_network(
+    claimed_publisher: str, truth_publisher: str
+) -> Optional[str]:
+    """Look up a documented republication relationship between two outlets.
+
+    Issue #745. A static table, not a live check: covers the
+    publisher-name mismatch that a syndicated or republished citation
+    produces when compared against one canonical ground-truth
+    outlet. Order-independent; either argument may be the claimed or
+    the ground-truth side.
+
+    Parameters
+    ----------
+    claimed_publisher : str
+        The publisher name an answer claims.
+    truth_publisher : str
+        The dataset's canonical publisher name.
+
+    Returns
+    -------
+    Optional[str]
+        The network's name (e.g. ``"states_newsroom"``), or None when
+        no documented relationship is in the table.
+    """
+    a, b = _compact(claimed_publisher), _compact(truth_publisher)
+    if not a or not b:
+        return None
+    return _REPUBLICATION_NETWORKS.get(frozenset({a, b}))
+
+
+def _url_slug(url: str) -> str:
+    """Extract the final path segment that identifies an article.
+
+    Only the LAST segment, not the whole remaining path: a section
+    or category directory (``/bayarea/`` vs ``/health/``) is exactly
+    what a moved/re-sectioned article is allowed to change, so it
+    must not be part of the slug being compared. A leading numeric
+    year/month/day date prefix (``/2024/08/17/...``) is stripped
+    first so a date-prefixed URL still exposes its real final
+    segment.
+    """
+    path = urlsplit(url.strip().lower()).path.rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    while segments and segments[0].isdigit():
+        segments = segments[1:]
+    return segments[-1] if segments else ""
+
+
+def _url_date_prefix(url: str) -> str:
+    """Extract a leading numeric date prefix from a URL path, if any."""
+    path = urlsplit(url.strip().lower()).path.rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    prefix = []
+    for s in segments:
+        if s.isdigit():
+            prefix.append(s)
+        else:
+            break
+    return "/".join(prefix)
+
+
+def classify_slug_relationship(claimed_url: str, truth_url: str) -> str:
+    """Compare two URLs by slug, not just host (issue #745).
+
+    #745's own premise: many smaller and local outlets never set
+    ``rel=canonical``, so a host-only or exact-URL comparison misses
+    both a moved/re-sectioned copy of the same article and a citation
+    to an older dated snapshot of an updated story.
+
+    Parameters
+    ----------
+    claimed_url : str
+        The URL an answer claims.
+    truth_url : str
+        The dataset's canonical source URL.
+
+    Returns
+    -------
+    str
+        ``"identical"`` (byte-identical after normalization),
+        ``"moved"`` (same host, same slug, different section path --
+        the article moved or was re-sectioned),
+        ``"dated_snapshot"`` (same host, same slug, different date
+        prefix -- an older or newer dated version of the same running
+        story), or ``"different"`` (anything else, including a
+        matching slug on a different host, which is the known-network
+        lookup's job, not this function's).
+    """
+    if not claimed_url or not truth_url:
+        return "different"
+
+    claimed_parts = urlsplit(claimed_url.strip().lower())
+    truth_parts = urlsplit(truth_url.strip().lower())
+    claimed_host = claimed_parts.netloc.removeprefix("www.")
+    truth_host = truth_parts.netloc.removeprefix("www.")
+    claimed_path = claimed_parts.path.rstrip("/")
+    truth_path = truth_parts.path.rstrip("/")
+    if claimed_host == truth_host and claimed_path == truth_path:
+        return "identical"
+    if claimed_host != truth_host:
+        return "different"
+
+    claimed_slug = _url_slug(claimed_url)
+    truth_slug = _url_slug(truth_url)
+    if not claimed_slug or claimed_slug != truth_slug:
+        return "different"
+
+    if _url_date_prefix(claimed_url) != _url_date_prefix(truth_url):
+        return "dated_snapshot"
+    return "moved"
+
+
 def domain_matches_publisher(publisher: str, final_url: str, html: str) -> bool:
     """Check the claimed publisher against the page's identity.
 

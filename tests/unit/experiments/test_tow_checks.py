@@ -18,10 +18,12 @@ import pytest
 from runners.tow_checks import (
     MIN_EXCERPT_COVERAGE,
     MIN_EXCERPT_RUN,
+    classify_slug_relationship,
     date_within_tolerance,
     decide_verdict,
     domain_matches_publisher,
     excerpt_on_page,
+    known_republication_network,
     match_excerpt,
     normalize,
     parse_claim_date,
@@ -650,6 +652,177 @@ class TestSyndicationVerdict:
 
         assert verdict == "verified"
         assert checks["syndicated_copy"] is False
+
+
+class TestKnownRepublicationNetwork:
+    """Test suite for the static sister-site lookup (#745).
+
+    Built from the full-200 run's 17 wrong-delivered cases
+    (docs/design/research/tow-full-200-readout-2026-10-16.md): most
+    were faithful republications the grader penalized for not
+    matching Tow's single canonical outlet. A verify task's publisher
+    check should not penalize a known, documented republication
+    partner the same as a fabrication.
+
+    Tests use the real publisher names the production table is keyed
+    on -- organization names are public knowledge, not dataset text;
+    the dataset's own excerpts and article URLs never appear here or
+    anywhere else in the repo, per the project's standing rule.
+    """
+
+    def test_states_newsroom_sister_site_matches(self) -> None:
+        """South Dakota Searchlight republishing Missouri Independent."""
+        assert (
+            known_republication_network(
+                "South Dakota Searchlight", "Missouri Independent"
+            )
+            == "states_newsroom"
+        )
+
+    def test_npr_affiliate_content_partnership_matches(self) -> None:
+        """KBIA and KCUR carry Missouri Independent's statehouse coverage
+        under an explicit content-sharing partnership (both are
+        University of Missouri NPR member stations); not independently
+        fetch-verified, missouriindependent.com blocks robots.txt.
+        """
+        assert (
+            known_republication_network("KBIA", "Missouri Independent")
+            == "npr_affiliate_partnership"
+        )
+        assert (
+            known_republication_network("KCUR", "Missouri Independent")
+            == "npr_affiliate_partnership"
+        )
+
+    def test_mississippi_today_cc_license_matches(self) -> None:
+        """Mississippi Today publishes under a Creative Commons license
+        local papers may republish; not independently fetch-verified,
+        mississippitoday.org blocks robots.txt.
+        """
+        assert (
+            known_republication_network("Meridian Star", "Mississippi Today")
+            == "mississippi_today_cc"
+        )
+
+    def test_wsj_dow_jones_syndication_matches(self) -> None:
+        """Confirmed by direct fetch (2026-11-05): the Kanebridge News
+        page carries a "Copyright 2020, Dow Jones & Company" notice and
+        a WSJ logo badge on the article itself, which is licensed WSJ
+        syndication, not Kanebridge's own reporting.
+        """
+        assert (
+            known_republication_network("Kanebridge News", "The Wall Street Journal")
+            == "wsj_dow_jones_syndication"
+        )
+
+    def test_unrelated_publishers_return_none(self) -> None:
+        """A genuinely unrelated outlet is not in any known network."""
+        assert known_republication_network("Random Blog", "The New York Times") is None
+
+    def test_unconfirmed_pairs_are_not_in_the_table(self) -> None:
+        """Plausible-but-unverified pairs are deliberately excluded.
+
+        Spokesman-Review/Seattle Times is plausible (regional wire
+        pickup) but spokesman.com disallows crawlers entirely
+        (``Disallow: /``), so it was never confirmed and does not
+        belong in a table whose entries are either documented policy
+        or a direct observed fetch.
+        """
+        assert (
+            known_republication_network("The Spokesman-Review", "Seattle Times") is None
+        )
+
+    def test_matching_is_order_independent(self) -> None:
+        """Claimed and truth may appear in either argument position."""
+        assert known_republication_network(
+            "Missouri Independent", "South Dakota Searchlight"
+        ) == known_republication_network(
+            "South Dakota Searchlight", "Missouri Independent"
+        )
+
+    def test_empty_strings_return_none(self) -> None:
+        """No publisher name on either side cannot match anything."""
+        assert known_republication_network("", "Missouri Independent") is None
+        assert known_republication_network("South Dakota Searchlight", "") is None
+
+
+class TestSlugRelationship:
+    """Test suite for comparing claimed and truth URLs by slug (#745).
+
+    #745's own title: detect syndication without relying on
+    ``rel=canonical``, which many smaller and local outlets never
+    set. Comparing the URL slug (not just the host) distinguishes a
+    moved/re-sectioned copy of the same article from a citation to a
+    different, dated snapshot of an updated story.
+
+    Fixtures use the invented ``harborgazette.example`` domain and
+    invented article slugs already established elsewhere in this
+    file -- the real-world case each pattern is drawn from is named
+    in the docstring, but the actual dataset URL never appears here,
+    per the project's standing rule (the leak scanner enforces this
+    on every commit).
+    """
+
+    def test_identical_url_is_identical(self) -> None:
+        """Byte-identical URLs."""
+        url = "https://www.harborgazette.example/history/article/original-piece"
+        assert classify_slug_relationship(url, url) == "identical"
+
+    def test_same_slug_different_section_is_moved(self) -> None:
+        """Same article, re-sectioned.
+
+        (Real-world anchor: tow-0105, San Francisco Chronicle -- same
+        slug, section path changed from one category to another.)
+        """
+        claimed = (
+            "https://www.harborgazette.example/weather/article/"
+            "coastal-storm-advisory-issued"
+        )
+        truth = (
+            "https://www.harborgazette.example/local/article/"
+            "coastal-storm-advisory-issued"
+        )
+        assert classify_slug_relationship(claimed, truth) == "moved"
+
+    def test_same_slug_different_date_path_is_dated_snapshot(self) -> None:
+        """An older dated URL of the same running story.
+
+        (Real-world anchor: tow-0129, TechCrunch's "timeline" article
+        pattern -- the slug matches but the date-in-path segment
+        differs, which is a near-miss worth flagging, not a moved
+        page.)
+        """
+        claimed = (
+            "https://www.harborgazette.example/2024/08/17/"
+            "ongoing-harbor-inquiry-timeline/"
+        )
+        truth = (
+            "https://www.harborgazette.example/2025/01/27/"
+            "ongoing-harbor-inquiry-timeline/"
+        )
+        assert classify_slug_relationship(claimed, truth) == "dated_snapshot"
+
+    def test_different_slug_is_different(self) -> None:
+        """A genuinely different article, even on the right domain."""
+        claimed = "https://www.harborgazette.example/2025/01/27/different-story/"
+        truth = "https://www.harborgazette.example/2024/05/29/original-story/"
+        assert classify_slug_relationship(claimed, truth) == "different"
+
+    def test_different_host_same_slug_is_different(self) -> None:
+        """A matching slug on a different host is not a host-relative claim.
+
+        This function compares slug relationships on ONE site; a
+        cross-host match is the known-network lookup's job, not this
+        function's.
+        """
+        claimed = "https://sister-bureau.example/2024/05/24/shared-story/"
+        truth = "https://www.harborgazette.example/2024/05/29/shared-story/"
+        assert classify_slug_relationship(claimed, truth) == "different"
+
+    def test_empty_urls_are_different(self) -> None:
+        """Missing URLs never classify as identical, moved, or a snapshot."""
+        assert classify_slug_relationship("", "https://example.com/x/") == "different"
+        assert classify_slug_relationship("https://example.com/x/", "") == "different"
 
 
 class TestDomainMatch:

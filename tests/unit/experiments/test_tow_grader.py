@@ -19,6 +19,8 @@ from runners.tow_grader import (
     blind_pool,
     categorize,
     compute_rates,
+    grade,
+    syndication_label,
     urls_match,
 )
 
@@ -214,6 +216,235 @@ class TestComputeRates:
 
         assert rates["decline_rate"] == 1.0
         assert rates["confident_wrong_rate"] is None
+
+
+class TestSyndicationLabel:
+    """Test suite for the diagnostic syndication label (#745).
+
+    Additive only: this never changes what categorize() returns, so
+    none of the full-200 run's published numbers move because of
+    this PR. It tells a wrong-delivered answer apart by WHY it is
+    wrong, built from the 17-case inspection in
+    docs/design/research/tow-full-200-readout-2026-10-16.md.
+    """
+
+    def test_known_network_match_labels_as_republication(self) -> None:
+        """tow-0052: South Dakota Searchlight republishing Missouri Independent."""
+        record = _record(
+            {
+                "publisher": "South Dakota Searchlight",
+                "date": "",
+                "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+            }
+        )
+        truth = {
+            "publication": "Missouri Independent",
+            "date": "",
+            "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+        }
+
+        assert syndication_label(record, truth) == "known_republication:states_newsroom"
+
+    def test_moved_url_same_outlet_labels_as_moved(self) -> None:
+        """A same-outlet, re-sectioned URL labels as moved.
+
+        (Real-world anchor: tow-0105, San Francisco Chronicle -- the
+        slug matched, only the section path changed; the dataset's
+        own URL never appears in this test, per the project's
+        standing rule.)
+        """
+        record = _record(
+            {
+                "publisher": "San Francisco Chronicle",
+                "date": "",
+                "url": (
+                    "https://www.sfchronicle.example/bayarea/article/"
+                    "a-moved-section-article-slug"
+                ),
+            }
+        )
+        truth = {
+            "publication": "San Francisco Chronicle",
+            "date": "",
+            "source_url": (
+                "https://www.sfchronicle.example/health/article/"
+                "a-moved-section-article-slug"
+            ),
+        }
+
+        assert syndication_label(record, truth) == "moved"
+
+    def test_dated_snapshot_labels_as_dated_snapshot(self) -> None:
+        """An older dated URL of the same running story labels as a snapshot.
+
+        (Real-world anchor: tow-0129, TechCrunch's "timeline" article
+        pattern -- same slug, different date-in-path; the dataset's
+        own URL never appears in this test, per the project's
+        standing rule.)
+        """
+        record = _record(
+            {
+                "publisher": "TechCrunch",
+                "date": "",
+                "url": (
+                    "https://techcrunch.example/2024/08/17/"
+                    "an-ongoing-running-story-timeline/"
+                ),
+            }
+        )
+        truth = {
+            "publication": "TechCrunch",
+            "date": "",
+            "source_url": (
+                "https://techcrunch.example/2025/01/27/"
+                "an-ongoing-running-story-timeline/"
+            ),
+        }
+
+        assert syndication_label(record, truth) == "dated_snapshot"
+
+    def test_genuine_mismatch_has_no_label(self) -> None:
+        """A real fabrication has no network match and no slug relation."""
+        record = _record(
+            {
+                "publisher": "Example News",
+                "date": "",
+                "url": "https://example.com/else",
+            }
+        )
+        assert syndication_label(record, TRUTH) is None
+
+    def test_declined_record_has_no_label(self) -> None:
+        """A decline has no claimed answer to compare, so no label."""
+        record = _record(None, declined=True)
+        assert syndication_label(record, TRUTH) is None
+
+    def test_correct_record_has_no_label(self) -> None:
+        """A correct answer needs no syndication explanation."""
+        record = _record(
+            {
+                "publisher": "The Harbor Gazette",
+                "date": "March 14, 2024",
+                "url": TRUTH["source_url"],
+            }
+        )
+        assert syndication_label(record, TRUTH) is None
+
+    def test_network_match_takes_priority_over_slug(self) -> None:
+        """When both signals could apply, the network match is reported.
+
+        A known-network match is the stronger, independently
+        documented claim; slug comparison is a same-host heuristic
+        and should not override it.
+        """
+        record = _record(
+            {
+                "publisher": "Kanebridge News",
+                "date": "",
+                "url": "https://kanebridgenews.com/a-killer-golf-swing/",
+            }
+        )
+        truth = {
+            "publication": "The Wall Street Journal",
+            "date": "",
+            "source_url": "https://www.wsj.com/lifestyle/careers/golf-business",
+        }
+
+        assert (
+            syndication_label(record, truth)
+            == "known_republication:wsj_dow_jones_syndication"
+        )
+
+
+class TestGradeWorksheetCarriesSyndicationLabel:
+    """Test suite for wiring syndication_label into grade()'s output (#745).
+
+    Codex P2 on PR #826: the helper existed but nothing exposed it to
+    a grading consumer. The worksheet gains one additive column; the
+    published rates (what compute_rates and categorize produce) must
+    not move, since that is the whole point of keeping this
+    diagnostic-only.
+    """
+
+    def test_worksheet_row_carries_the_syndication_label(self) -> None:
+        """A known republication's worksheet row names the network."""
+        records = [
+            AnswerRecord(
+                case_id="tow-0001",
+                condition="B",
+                engine="perplexity",
+                answer={
+                    "publisher": "South Dakota Searchlight",
+                    "date": "",
+                    "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+                },
+                declined=False,
+            )
+        ]
+        truths = {
+            "tow-0001": {
+                "publication": "Missouri Independent",
+                "date": "",
+                "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+            }
+        }
+
+        results = grade(records, truths, excerpts={}, fetcher=None, seed=1)
+
+        row = results["worksheet"][0]
+        assert row["syndication"] == "known_republication:states_newsroom"
+        assert row["category"] == "completely incorrect"
+
+    def test_correct_answer_has_no_syndication_label(self) -> None:
+        """A correct answer's worksheet row carries no label."""
+        records = [
+            AnswerRecord(
+                case_id="tow-0001",
+                condition="B",
+                engine="perplexity",
+                answer={
+                    "publisher": "Harbor Gazette",
+                    "date": "03/14/2024",
+                    "url": TRUTH["source_url"],
+                },
+                declined=False,
+            )
+        ]
+        truths = {"tow-0001": TRUTH}
+
+        results = grade(records, truths, excerpts={}, fetcher=None, seed=1)
+
+        assert results["worksheet"][0]["syndication"] is None
+
+    def test_syndication_label_never_changes_the_published_rates(self) -> None:
+        """Adding the label does not move categorize()'s own scoring.
+
+        Same case, same inputs, scored with and without the label
+        reachable (there is no toggle -- the label is attached beside
+        category, never substituted for it); the category and the
+        rates built from it must be identical either way.
+        """
+        answer = {
+            "publisher": "South Dakota Searchlight",
+            "date": "",
+            "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+        }
+        truth = {
+            "publication": "Missouri Independent",
+            "date": "",
+            "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+        }
+        record = AnswerRecord(
+            case_id="tow-0001", condition="B", engine="perplexity", answer=answer
+        )
+
+        direct_category = categorize(record, truth)
+        results = grade(
+            [record], {"tow-0001": truth}, excerpts={}, fetcher=None, seed=1
+        )
+
+        assert results["worksheet"][0]["category"] == direct_category
+        assert results["conditions"]["B"]["confident_wrong_rate"] == 1.0
 
 
 class TestFabricatedUrl:
