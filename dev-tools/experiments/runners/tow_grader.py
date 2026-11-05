@@ -513,6 +513,13 @@ def grade(
                 "answer": json.dumps(payload["answer"], ensure_ascii=False),
                 "declined": payload["declined"],
                 "category": category,
+                # Issue #745 (Codex P2 on PR #826): additive only. This
+                # column never feeds compute_rates or categorize, so it
+                # cannot move a published rate; it exists so a grading
+                # consumer can tell a known republication or a moved/
+                # dated-snapshot citation apart from a genuine
+                # fabrication without re-deriving it by hand.
+                "syndication": syndication_label(record_view, truth),
             }
         )
 
@@ -626,7 +633,14 @@ def main() -> None:
         with open(args.worksheet, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
                 f,
-                fieldnames=["blind_id", "case_id", "answer", "declined", "category"],
+                fieldnames=[
+                    "blind_id",
+                    "case_id",
+                    "answer",
+                    "declined",
+                    "category",
+                    "syndication",
+                ],
             )
             writer.writeheader()
             writer.writerows(worksheet)

@@ -19,6 +19,7 @@ from runners.tow_grader import (
     blind_pool,
     categorize,
     compute_rates,
+    grade,
     syndication_label,
     urls_match,
 )
@@ -353,6 +354,97 @@ class TestSyndicationLabel:
             syndication_label(record, truth)
             == "known_republication:wsj_dow_jones_syndication"
         )
+
+
+class TestGradeWorksheetCarriesSyndicationLabel:
+    """Test suite for wiring syndication_label into grade()'s output (#745).
+
+    Codex P2 on PR #826: the helper existed but nothing exposed it to
+    a grading consumer. The worksheet gains one additive column; the
+    published rates (what compute_rates and categorize produce) must
+    not move, since that is the whole point of keeping this
+    diagnostic-only.
+    """
+
+    def test_worksheet_row_carries_the_syndication_label(self) -> None:
+        """A known republication's worksheet row names the network."""
+        records = [
+            AnswerRecord(
+                case_id="tow-0001",
+                condition="B",
+                engine="perplexity",
+                answer={
+                    "publisher": "South Dakota Searchlight",
+                    "date": "",
+                    "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+                },
+                declined=False,
+            )
+        ]
+        truths = {
+            "tow-0001": {
+                "publication": "Missouri Independent",
+                "date": "",
+                "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+            }
+        }
+
+        results = grade(records, truths, excerpts={}, fetcher=None, seed=1)
+
+        row = results["worksheet"][0]
+        assert row["syndication"] == "known_republication:states_newsroom"
+        assert row["category"] == "completely incorrect"
+
+    def test_correct_answer_has_no_syndication_label(self) -> None:
+        """A correct answer's worksheet row carries no label."""
+        records = [
+            AnswerRecord(
+                case_id="tow-0001",
+                condition="B",
+                engine="perplexity",
+                answer={
+                    "publisher": "Harbor Gazette",
+                    "date": "03/14/2024",
+                    "url": TRUTH["source_url"],
+                },
+                declined=False,
+            )
+        ]
+        truths = {"tow-0001": TRUTH}
+
+        results = grade(records, truths, excerpts={}, fetcher=None, seed=1)
+
+        assert results["worksheet"][0]["syndication"] is None
+
+    def test_syndication_label_never_changes_the_published_rates(self) -> None:
+        """Adding the label does not move categorize()'s own scoring.
+
+        Same case, same inputs, scored with and without the label
+        reachable (there is no toggle -- the label is attached beside
+        category, never substituted for it); the category and the
+        rates built from it must be identical either way.
+        """
+        answer = {
+            "publisher": "South Dakota Searchlight",
+            "date": "",
+            "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+        }
+        truth = {
+            "publication": "Missouri Independent",
+            "date": "",
+            "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+        }
+        record = AnswerRecord(
+            case_id="tow-0001", condition="B", engine="perplexity", answer=answer
+        )
+
+        direct_category = categorize(record, truth)
+        results = grade(
+            [record], {"tow-0001": truth}, excerpts={}, fetcher=None, seed=1
+        )
+
+        assert results["worksheet"][0]["category"] == direct_category
+        assert results["conditions"]["B"]["confident_wrong_rate"] == 1.0
 
 
 class TestFabricatedUrl:
