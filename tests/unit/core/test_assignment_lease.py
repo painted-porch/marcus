@@ -308,6 +308,71 @@ class TestAssignmentLeaseManager:
         assert stats["average_renewal_count"] == (2 + 8 + 12) / 3
 
 
+class TestK13ClosesTheLeaseExpiryStatusGap:
+    """ADR-0013 K13's own sweep found a fourth occurrence, previously unfixed.
+
+    ``recover_expired_lease`` manually clears ``task.assigned_to`` and
+    sets ``task.recovery_info`` on the in-memory ``Task`` (the comment
+    there calls the task model "the source of truth"), but never
+    touched ``task.status`` -- only the board write did. Unlike #807,
+    #816 and #814, nothing here ever patched this one; K13's generic
+    sync is the only thing that closes it, and it does so without this
+    file changing at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_in_memory_status_is_todo_after_recovery(self) -> None:
+        """Before K13: task.status stayed IN_PROGRESS in memory after a
+        recovered lease, even though the board (and assigned_to) agreed
+        it was TODO. The real wrapper, not a bare mock, proves the fix
+        reaches this path with no change to assignment_lease.py itself.
+        """
+        from src.marcus_mcp.kanban_task_sync import TaskSyncingKanbanClient
+
+        task = Task(
+            id="task-123",
+            name="Test Task",
+            description="Test",
+            status=TaskStatus.IN_PROGRESS,
+            priority=Priority.HIGH,
+            estimated_hours=5.0,
+            dependencies=[],
+            labels=[],
+            assigned_to="agent-001",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            due_date=None,
+        )
+        task_list = [task]
+
+        inner = Mock()
+        inner.update_task = AsyncMock(return_value=None)
+        inner.add_comment = AsyncMock(return_value=None)
+        wrapped = TaskSyncingKanbanClient(inner, lambda: task_list)
+
+        persistence = Mock()
+        persistence.remove_assignment = AsyncMock()
+
+        manager = AssignmentLeaseManager(
+            wrapped, persistence, default_lease_hours=4.0, task_list=task_list
+        )
+        expired_lease = AssignmentLease(
+            task_id="task-123",
+            agent_id="agent-001",
+            assigned_at=datetime.now(timezone.utc) - timedelta(hours=5),
+            lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
+            last_renewed=datetime.now(timezone.utc) - timedelta(hours=5),
+            progress_percentage=30,
+        )
+        manager.active_leases["task-123"] = expired_lease
+
+        success = await manager.recover_expired_lease(expired_lease)
+
+        assert success
+        assert task.assigned_to is None  # the pre-existing manual clear
+        assert task.status == TaskStatus.TODO  # the gap K13 closes
+
+
 class TestLeaseMonitor:
     """Test suite for LeaseMonitor."""
 

@@ -194,6 +194,18 @@ This is the same point arXiv 2609.12039 makes generally, cited here as supportin
 
 **Why the kernel and not the extension.** Every verification extension needs this same exclusion, and one that omits it fails silently, the same shape K4 and K7 both guard against by putting the mechanism in the kernel rather than each extension's discretion.
 
+### K13 — `update_task` leaves the caller's in-memory view consistent with what it just wrote
+
+**Recommendation.** `update_task` mutates the matching `Task` object in `state.project_tasks`, when one exists, with exactly the fields the caller passed, as part of the same call that writes the board. A caller that reads `state.project_tasks` immediately afterward sees its own write; nothing waits for `refresh_project_state`, which runs on a schedule this call does not control.
+
+**Evidence.** The same defect, found three times in one day, at three unrelated call sites, each independently: #807 (a dependent's handoff merge basis), #816 (`request_task_redo`'s own completion check), #814 (the phase gate a same-reply frontier count depends on). In every case, something wrote the board, and something else in the *same request* read `state.project_tasks` expecting the write to already be visible there. It was not, because nothing besides the next scheduled `refresh_project_state` ever made it visible.
+
+**Why a kernel guarantee and not a sweep.** A sweep finds every call site that exists today. `update_task` call sites are not finished growing — #814 was new code, not old debt, and had the bug on arrival. A sweep is a one-time patch against a problem that regenerates on the next PR that calls `update_task` and forgets to also touch `state.project_tasks`. The guarantee removes the thing to forget.
+
+**Why the mechanism sits at the `state.kanban_client` boundary, not inside the provider classes.** `KanbanInterface` and its four implementations (`sqlite_kanban.py`, `planka_kanban.py`, `github_kanban.py`, `linear_kanban.py`) have no reference to a `MarcusServer` or to `state.project_tasks` today, and several of them are constructed directly by standalone tooling (`dev-tools/experiments/runners/tow_runner.py`'s seed scripts, the live-check scripts this ADR's own evidence was gathered with) with no `MarcusServer` in the process at all. Teaching the provider classes about `state.project_tasks` would couple a board adapter to a specific server's in-memory cache, breaking that reuse. The guarantee is implemented as a thin wrapper applied where `state.kanban_client` is assigned: every provider stays exactly as decoupled as it is today, and every *caller* of `state.kanban_client.update_task(...)`, present or future, gets the guarantee without doing anything to earn it.
+
+**What this does not do.** It does not remove the need for #807's durable `committed_inputs` snapshot. That snapshot exists because Planka, GitHub and Linear never round-trip `inputs` through the board at all, which is a durability gap across requests and providers, not an in-process staleness window; K13 closes the latter, not the former.
+
 ---
 
 ## Inherited obligations
@@ -229,6 +241,7 @@ K1's test, that no kernel change is justified by one consumer alone, is the guar
 - The Multi-Agency Proclamation in `CLAUDE.md`, whose Invariant #2 v2 K4 implements
 - #798, the parked validation gate, designated the first concrete seam
 - #803, #804, #805, the three defects found while gathering these requirements
+- #807, #816, #814, the three independent recurrences of the same stale-in-memory shape K13's evidence rests on
 - #735, #677, #647, the software-building verification bugs that K4's evidence rests on
 - #299, domain-agnostic coordination, which K1 and K3 retire
 - #792, merged as `dc996a6f`, which placed all kernel state under one root
