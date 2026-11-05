@@ -43,8 +43,10 @@ for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
 
 from runners.tow_checks import (  # noqa: E402
     _compact,
+    classify_slug_relationship,
     date_within_tolerance,
     excerpt_on_page,
+    known_republication_network,
     parse_claim_date,
 )
 
@@ -192,6 +194,58 @@ def categorize(record: AnswerRecord, truth: Dict[str, str]) -> str:
     if any(present):
         return "partially incorrect"
     return "completely incorrect"
+
+
+def syndication_label(record: AnswerRecord, truth: Dict[str, str]) -> Optional[str]:
+    """Explain WHY a wrong-delivered answer is wrong, if syndication can (#745).
+
+    Additive diagnostic only: never changes what :func:`categorize`
+    returns, so no published Tow-category rate moves because of this
+    function. It tells a known, documented republication or a
+    moved/dated-snapshot citation apart from a genuine fabrication,
+    the distinction the full-200 readout's 17-case manual inspection
+    made by hand (docs/design/research/tow-full-200-readout-2026-10-16.md).
+
+    A known-network match takes priority over a slug relationship
+    when both could apply: the network table is an independently
+    documented or fetch-confirmed fact, while slug comparison is a
+    same-host heuristic.
+
+    Parameters
+    ----------
+    record : AnswerRecord
+        The answer under grading.
+    truth : Dict[str, str]
+        Ground truth: publication, date, source_url.
+
+    Returns
+    -------
+    Optional[str]
+        ``"known_republication:<network>"``, ``"moved"``,
+        ``"dated_snapshot"``, or None when nothing explains the
+        mismatch (including when the record is correct or declined,
+        which need no explanation).
+    """
+    if record.declined or not record.answer:
+        return None
+    category = categorize(record, truth)
+    if category not in ("partially incorrect", "completely incorrect"):
+        return None
+
+    network = known_republication_network(
+        str(record.answer.get("publisher") or ""),
+        str(truth.get("publication") or ""),
+    )
+    if network:
+        return f"known_republication:{network}"
+
+    slug_relationship = classify_slug_relationship(
+        str(record.answer.get("url") or ""),
+        str(truth.get("source_url") or ""),
+    )
+    if slug_relationship in ("moved", "dated_snapshot"):
+        return slug_relationship
+    return None
 
 
 def url_is_fabricated(
