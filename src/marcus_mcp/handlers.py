@@ -407,6 +407,29 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "clause the output violates)"
                         ),
                     },
+                    "defect_type": {
+                        "type": "string",
+                        "enum": [
+                            "implementation_gap",
+                            "requirement_gap",
+                            "model_gap",
+                        ],
+                        "description": (
+                            "Which kind of rejection this is: "
+                            "'implementation_gap' (the code is wrong "
+                            "against correct acceptance criteria — the "
+                            "default, and the only one this tool "
+                            "currently repairs), 'requirement_gap' (the "
+                            "acceptance criteria themselves missed "
+                            "something), or 'model_gap' (the check's "
+                            "assumption about the deployment environment "
+                            "doesn't match reality). Tagging the latter "
+                            "two does not yet change how this tool "
+                            "behaves — it records the classification for "
+                            "a future repair path to use."
+                        ),
+                        "default": "implementation_gap",
+                    },
                 },
                 "required": ["agent_id", "task_id", "reason"],
             },
@@ -1475,6 +1498,7 @@ async def handle_tool_call(
             agent_id = arguments.get("agent_id") if arguments else None
             task_id = arguments.get("task_id") if arguments else None
             reason = arguments.get("reason") if arguments else None
+            defect_type = arguments.get("defect_type") if arguments else None
 
             if not agent_id or not task_id or not reason:
                 result = {"error": "agent_id, task_id, and reason are required"}
@@ -1484,6 +1508,7 @@ async def handle_tool_call(
                     task_id=task_id,
                     reason=reason,
                     state=state,
+                    defect_type=defect_type,
                 )
 
         # Project monitoring tools

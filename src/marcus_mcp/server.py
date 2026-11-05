@@ -1899,6 +1899,7 @@ class MarcusServer:
                 agent_id: str,
                 task_id: str,
                 reason: str,
+                defect_type: Optional[str] = None,
             ) -> Dict[str, Any]:
                 """Send a completed task back to the board for a fresh agent to redo."""
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
@@ -1910,6 +1911,7 @@ class MarcusServer:
                     task_id=task_id,
                     reason=reason,
                     state=server,
+                    defect_type=defect_type,
                 )
 
                 # Log MCP tool response
@@ -1919,6 +1921,7 @@ class MarcusServer:
                         "agent_id": agent_id,
                         "task_id": task_id,
                         "reason": reason,
+                        "defect_type": defect_type,
                     },
                     response=result,
                 )

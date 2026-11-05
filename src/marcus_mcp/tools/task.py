@@ -32,6 +32,7 @@ from src.core.lease_invariants import (
     DEFAULT_SILENCE_TIMEOUT_MINUTES,
 )
 from src.core.models import (
+    DefectType,
     Priority,
     RecoveryInfo,
     Task,
@@ -8544,6 +8545,7 @@ async def request_task_redo(
     task_id: str,
     reason: str,
     state: Any,
+    defect_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Send a completed task back to the board for a fresh agent to redo.
@@ -8557,6 +8559,14 @@ async def request_task_redo(
     ``request_next_task`` cycle (Invariant #1) and decides HOW to fix it
     (Invariant #2) — reuse the previous worktree or start fresh.
 
+    Issue #809: a rejection can be one of three things (arXiv 2609.12039)
+    — the implementation was wrong, the acceptance criteria were wrong,
+    or the verifier's model of the deployment environment was wrong.
+    This tool only ever performs the first repair (try again, same
+    criteria), but ``defect_type`` now lets the caller record which kind
+    this rejection actually was, so that data exists for a later repair
+    path to route on. It does not change what this call does today.
+
     Parameters
     ----------
     agent_id : str
@@ -8568,16 +8578,23 @@ async def request_task_redo(
         was observed — e.g. the contract clause the output violates).
     state : Any
         Marcus server state instance.
+    defect_type : Optional[str]
+        Which of the three defect kinds this rejection was
+        (``DefectType``: ``"implementation_gap"``, ``"requirement_gap"``,
+        ``"model_gap"``). Defaults to ``"implementation_gap"`` when
+        omitted, matching this tool's only repair today. An unrecognized
+        value is rejected rather than silently stored.
 
     Returns
     -------
     Dict[str, Any]
         ``{"success": True, "task_id", "redo_count", "recovery_info"}``
         on success; ``{"success": False, "error": ...}`` with error codes
-        ``reason_required`` / ``task_not_found`` / ``task_not_done`` /
-        ``caller_not_active`` / ``max_redo_count_exceeded`` otherwise.
-        After ``max_redo_count_exceeded`` the caller's fallback is an
-        in-place fix.
+        ``reason_required`` / ``invalid_defect_type`` / ``task_not_found``
+        / ``task_not_done`` / ``caller_not_active`` /
+        ``max_redo_count_exceeded`` otherwise. After
+        ``max_redo_count_exceeded`` the caller's fallback is an in-place
+        fix.
     """
     if not reason or not reason.strip():
         return {
@@ -8587,6 +8604,18 @@ async def request_task_redo(
                 "A non-empty reason is required — the next agent needs a "
                 "diagnostic to act on. Describe what is wrong and how you "
                 "observed it."
+            ),
+        }
+
+    if defect_type is None:
+        defect_type = DefectType.IMPLEMENTATION_GAP.value
+    elif defect_type not in {dt.value for dt in DefectType}:
+        return {
+            "success": False,
+            "error": "invalid_defect_type",
+            "message": (
+                f"{defect_type!r} is not a recognized defect_type. Use "
+                f"one of: {', '.join(sorted(dt.value for dt in DefectType))}."
             ),
         }
 
@@ -8715,6 +8744,7 @@ async def request_task_redo(
         requested_by=agent_id,
         previous_worktree_path=previous_worktree_path,
         redo_count=redo_count,
+        defect_type=defect_type,
         recovery_expires_at=now + timedelta(hours=24),
         instructions=(
             f"🔁 **REDO REQUEST** — this task was completed by "
@@ -8795,6 +8825,7 @@ async def request_task_redo(
             "previous_agent": previous_agent,
             "redo_count": redo_count,
             "reason": reason,
+            "defect_type": defect_type,
         },
     )
 
@@ -9068,6 +9099,15 @@ async def report_blocker(
                     recovery_reason="blocker_repair",
                     previous_agent_branch=f"marcus/{agent_id}",
                     recovery_expires_at=now + timedelta(hours=24),
+                    # #809: a blocker-repair requeue is always the agent
+                    # itself admitting it got stuck on execution, never a
+                    # verifier disputing the requirement or the
+                    # environment model — so unlike request_task_redo,
+                    # there is no caller-supplied classification to
+                    # thread through here. Tagged for the same reason
+                    # request_task_redo defaults to it: consistency with
+                    # the one repair this tool actually performs.
+                    defect_type=DefectType.IMPLEMENTATION_GAP.value,
                     instructions=_repair_instructions(
                         blocker_description,
                         suggestions,

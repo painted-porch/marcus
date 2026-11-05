@@ -88,3 +88,65 @@ class TestRecoveryInfoRedoFields:
         info = RecoveryInfo.from_dict(legacy)
         assert info.redo_count == 0
         assert info.redo_reason is None
+
+
+class TestRecoveryInfoDefectType:
+    """Test suite for the #809 defect-type classification field.
+
+    Three defect kinds (arXiv 2609.12039): the implementation was
+    wrong, the requirement was wrong, or the verifier's model of the
+    deployment environment was wrong. This field only tags which one a
+    rejection was; it does not yet change any repair behavior.
+    """
+
+    def test_defect_type_defaults_to_unset(self) -> None:
+        """Existing constructors without defect_type keep working unchanged."""
+        info = RecoveryInfo(
+            recovered_at=datetime(2026, 8, 4, 12, 0, 0, tzinfo=timezone.utc),
+            recovered_from_agent="agent-1",
+            previous_progress=50,
+            time_spent_minutes=10.0,
+            recovery_reason="lease_expired",
+            instructions="continue",
+        )
+        assert info.defect_type is None
+
+    def test_to_dict_includes_defect_type(self) -> None:
+        """to_dict must serialize defect_type for kanban/context delivery."""
+        info = RecoveryInfo(
+            recovered_at=datetime(2026, 8, 4, 12, 0, 0, tzinfo=timezone.utc),
+            recovered_from_agent="agent_unicorn_1_3",
+            previous_progress=100,
+            time_spent_minutes=0.0,
+            recovery_reason="redo_requested",
+            instructions="fix it",
+            defect_type="requirement_gap",
+        )
+        assert info.to_dict()["defect_type"] == "requirement_gap"
+
+    def test_from_dict_round_trips_defect_type(self) -> None:
+        """from_dict(to_dict(x)) must preserve defect_type."""
+        original = RecoveryInfo(
+            recovered_at=datetime(2026, 8, 4, 12, 0, 0, tzinfo=timezone.utc),
+            recovered_from_agent="agent_unicorn_1_3",
+            previous_progress=100,
+            time_spent_minutes=0.0,
+            recovery_reason="redo_requested",
+            instructions="fix it",
+            defect_type="model_gap",
+        )
+        restored = RecoveryInfo.from_dict(original.to_dict())
+        assert restored.defect_type == "model_gap"
+
+    def test_from_dict_tolerates_payloads_without_defect_type(self) -> None:
+        """Persisted pre-#809 payloads (no defect_type key) still deserialize."""
+        legacy = {
+            "recovered_at": "2026-08-04T12:00:00+00:00",
+            "recovered_from_agent": "agent-1",
+            "previous_progress": 50,
+            "time_spent_minutes": 10.0,
+            "recovery_reason": "lease_expired",
+            "instructions": "continue",
+        }
+        info = RecoveryInfo.from_dict(legacy)
+        assert info.defect_type is None
