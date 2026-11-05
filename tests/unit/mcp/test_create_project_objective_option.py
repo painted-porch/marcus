@@ -137,6 +137,14 @@ def _recording_state() -> Mock:
     state.current_project_name = "Camp"
     state.current_project_id = "p-new"
     state.events = None
+    # The history store the primer is read back from (Codex P2 on PR #820):
+    # by default it holds the primer, so the happy path reads back as recorded.
+    stored = Mock()
+    stored.kind = "objective"
+    stored.subject = "project.objective"
+    stored.project_id = "p-new"
+    state.project_history_persistence = Mock()
+    state.project_history_persistence.load_decisions = AsyncMock(return_value=[stored])
     return state
 
 
@@ -201,3 +209,54 @@ class TestRecordProjectObjective:
         state.context = None
         ok = await _record_project_objective(state, "p-new", "Camp", "Build a camp.")
         assert ok is False
+
+
+class TestObjectiveRecordedMeansReadable:
+    """``objective_recorded`` is a read-back, not a hope (Codex P2 on PR #820).
+
+    ``_persist_decision_to_history`` swallows its own failures and
+    ``Context.log_decision`` tolerates a failed persistence, so a primer can
+    exist only in memory while the history read the agents use returns
+    nothing. The relay therefore reads the primer back from the history
+    store before claiming success.
+    """
+
+    @staticmethod
+    def _history(decisions: list) -> Mock:
+        history = Mock()
+        history.load_decisions = AsyncMock(return_value=decisions)
+        return history
+
+    @pytest.mark.asyncio
+    async def test_reports_false_when_the_history_store_has_no_primer(self) -> None:
+        from src.marcus_mcp.tools.nlp import _record_project_objective
+
+        state = _recording_state()
+        state.project_history_persistence = self._history([])
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new=AsyncMock(),  # "succeeds" without writing anything
+        ):
+            ok = await _record_project_objective(
+                state, "p-new", "Camp", "Build a camp."
+            )
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_reports_true_only_when_the_primer_reads_back(self) -> None:
+        from src.marcus_mcp.tools.nlp import _record_project_objective
+
+        stored = Mock()
+        stored.kind = "objective"
+        stored.subject = "project.objective"
+        stored.project_id = "p-new"
+        state = _recording_state()
+        state.project_history_persistence = self._history([stored])
+        with patch(
+            "src.marcus_mcp.tools.context._persist_decision_to_history",
+            new=AsyncMock(),
+        ):
+            ok = await _record_project_objective(
+                state, "p-new", "Camp", "Build a camp."
+            )
+        assert ok is True

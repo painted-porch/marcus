@@ -765,6 +765,28 @@ async def _record_project_objective(
         )
         return False
 
+    # "Recorded" means readable where the agents read. Both writes above
+    # tolerate a failed persistence silently (Codex P2 on PR #820), so the
+    # primer is read back from the history store query_project_history
+    # serves from before success is claimed.
+    history = getattr(state, "project_history_persistence", None)
+    try:
+        stored = await history.load_decisions(project_id) if history else []
+        readable = any(
+            getattr(d, "kind", None) == OBJECTIVE_KIND
+            and getattr(d, "subject", None) == OBJECTIVE_SUBJECT
+            for d in stored
+        )
+    except Exception as e:  # noqa: BLE001 - an unreadable store is a failed record
+        logger.warning(f"[create_project] Could not read the objective back: {e}")
+        readable = False
+    if not readable:
+        logger.warning(
+            f"[create_project] Objective for {project_name!r} was not found in "
+            "project history after writing it; reporting objective_recorded=False"
+        )
+        return False
+
     board_client = getattr(state, "kanban_client", None)
     target_id = _about_card_id(
         list(getattr(state, "project_tasks", None) or []), project_name
