@@ -1192,6 +1192,18 @@ async def _apply_handoff_to_dependent(
     raised, so it can never strand or eject the agent whose completion
     triggered it.
 
+    Codex P2, fifth round: treating the board as the ONLY merge basis
+    broke on Planka, GitHub and Linear, none of which round-trip
+    ``inputs`` at all — their converters drop the field on both create
+    and update, so ``get_task_by_id`` always comes back empty on those
+    providers. The merge basis is therefore the union of the board's
+    current row (authoritative on sqlite, and the only source of
+    board-seeded inputs anywhere) and Marcus's own durable
+    ``committed_inputs`` snapshot (authoritative regardless of provider,
+    since nothing else in the codebase ever writes a dependent's
+    ``inputs``). The snapshot wins on a key both sources have, since the
+    board's agreement with it is no guarantee on these three providers.
+
     Parameters
     ----------
     task : Task
@@ -1225,7 +1237,7 @@ async def _apply_handoff_to_dependent(
     # which is the behaviour an empty dependent would have given anyway.
     try:
         current = await state.kanban_client.get_task_by_id(dependent.id)
-        before = dict((current.inputs if current else {}) or {})
+        board_inputs = dict((current.inputs if current else {}) or {})
     except Exception as read_err:  # noqa: BLE001 - never fail a close
         logger.warning(
             "[#807] Could not read dependent %s from the board (%s); "
@@ -1236,6 +1248,25 @@ async def _apply_handoff_to_dependent(
         )
         return
 
+    # Codex P2, fifth round: the board alone is not authoritative on
+    # Planka, GitHub or Linear (see the docstring). Marcus's own durable
+    # snapshot of what it last committed fills that gap and wins ties,
+    # since those three providers can echo back nothing to disagree with.
+    committed_inputs: Dict[str, Any] = {}
+    if persistence is not None:
+        try:
+            committed_inputs = await persistence.get_committed_inputs(dependent.id)
+        except Exception as snap_err:  # noqa: BLE001 - degrade to board-only
+            logger.warning(
+                "[#807] Committed-inputs snapshot unreadable for "
+                "dependent %s (%s); falling back to the board alone, "
+                "which loses prior contributions on providers that "
+                "don't round-trip inputs.",
+                dependent.id,
+                snap_err,
+            )
+
+    before = {**board_inputs, **committed_inputs}
     kept = {k: v for k, v in before.items() if k not in prior_keys}
     new_inputs = {**payload, **kept}
     # Record what this close actually WROTE, not what it offered. A
@@ -1278,6 +1309,17 @@ async def _apply_handoff_to_dependent(
                 dependent.id,
                 prov_err,
                 task.id,
+            )
+        try:
+            await persistence.record_committed_inputs(dependent.id, new_inputs)
+        except Exception as snap_err:  # noqa: BLE001 - never fail a close
+            logger.warning(
+                "[#807] Committed-inputs snapshot write failed for "
+                "dependent %s (%s); a provider that doesn't round-trip "
+                "inputs may lose this close's contribution on the next "
+                "handoff into this dependent.",
+                dependent.id,
+                snap_err,
             )
 
 

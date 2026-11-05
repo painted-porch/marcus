@@ -66,6 +66,16 @@ class AssignmentPersistence:
         # board row holds the merged inputs and nothing about who wrote
         # which key, and a refresh replaces the cached task objects.
         self.input_provenance_file = self.storage_dir / "input_provenance.json"
+        # Codex P2 on PR #807: Planka, GitHub and Linear never round-trip
+        # a task's ``inputs`` at all (their converters drop the field on
+        # both create and update), so treating ``get_task_by_id`` as the
+        # merge basis for the handoff silently discards everything on
+        # those providers — board-seeded inputs and every prior
+        # contribution alike. Same shape as ``refused_attempts_file``
+        # above, same fix: Marcus keeps its own durable record of the
+        # last inputs it committed for each dependent, independent of
+        # whether the board can echo it back.
+        self.committed_inputs_file = self.storage_dir / "committed_inputs.json"
 
         # In-memory cache
         self._assignments_cache: Dict[str, Dict[str, Any]] = {}
@@ -81,6 +91,8 @@ class AssignmentPersistence:
         self._refused_attempts_loaded: bool = False
         self._input_provenance_cache: Dict[str, Dict[str, List[str]]] = {}
         self._input_provenance_loaded: bool = False
+        self._committed_inputs_cache: Dict[str, Dict[str, Any]] = {}
+        self._committed_inputs_loaded: bool = False
         self._lock_manager = EventLoopLockManager()
 
     @property
@@ -518,6 +530,98 @@ class AssignmentPersistence:
         async with aiofiles.open(tmp_path, "w") as f:
             await f.write(json.dumps(self._input_provenance_cache, indent=2))
         tmp_path.replace(self.input_provenance_file)
+
+    async def record_committed_inputs(
+        self, dependent_id: str, inputs: Dict[str, Any]
+    ) -> None:
+        """
+        Record the full inputs a handoff just committed for a dependent.
+
+        Codex P2 on PR #807. Reading ``get_task_by_id`` as the handoff's
+        merge basis is correct on sqlite, which round-trips ``inputs``,
+        but Planka, GitHub and Linear never store the field at all — a
+        read always comes back empty on those providers, so using the
+        board alone would make every handoff after the first one
+        overwrite, rather than merge into, a dependent's inputs. This
+        durable snapshot is the provider-independent fallback: whatever
+        Marcus itself last wrote survives regardless of what the board
+        can echo back.
+
+        Parameters
+        ----------
+            dependent_id
+                The task whose inputs were written.
+            inputs
+                The complete merged inputs just written to that task.
+        """
+        async with self.lock:
+            self._ensure_committed_inputs_loaded()
+            self._committed_inputs_cache[dependent_id] = dict(inputs)
+            await self._write_committed_inputs()
+
+    async def get_committed_inputs(self, dependent_id: str) -> Dict[str, Any]:
+        """
+        Read the last inputs Marcus itself committed for a dependent.
+
+        Parameters
+        ----------
+            dependent_id
+                The task whose last committed inputs are wanted.
+
+        Returns
+        -------
+            The last full inputs dict a handoff wrote, or an empty dict
+            when nothing was recorded — the right degradation, since the
+            caller merges this with whatever the board returns and an
+            empty dict contributes nothing extra.
+        """
+        async with self.lock:
+            self._ensure_committed_inputs_loaded()
+            recorded = self._committed_inputs_cache.get(dependent_id)
+            return dict(recorded) if recorded else {}
+
+    def _ensure_committed_inputs_loaded(self) -> None:
+        """Read the committed-inputs store into the cache once.
+
+        Caller holds the lock. A corrupt store degrades to "nothing
+        committed," which falls back to the board alone — the #807
+        pre-fix behaviour for providers that round-trip ``inputs``, and
+        no worse than before this store existed for ones that don't.
+        """
+        if self._committed_inputs_loaded:
+            return
+        self._committed_inputs_loaded = True
+        if not self.committed_inputs_file.exists():
+            return
+        try:
+            content = self.committed_inputs_file.read_text()
+            loaded = json.loads(content) if content else {}
+            if isinstance(loaded, dict):
+                merged: Dict[str, Dict[str, Any]] = {
+                    dependent: dict(inputs)
+                    for dependent, inputs in loaded.items()
+                    if isinstance(inputs, dict)
+                }
+                for dependent, inputs in self._committed_inputs_cache.items():
+                    merged[dependent] = inputs
+                self._committed_inputs_cache = merged
+        except (json.JSONDecodeError, IOError, OSError) as e:
+            logger.error(
+                f"Failed to read committed handoff inputs from "
+                f"{self.committed_inputs_file}: {e}. On a provider that "
+                "does not round-trip 'inputs' (Planka, GitHub, Linear) "
+                "this may lose data this close contributed (issue #807)."
+            )
+
+    async def _write_committed_inputs(self) -> None:
+        """Persist the committed-inputs snapshot. Caller holds the lock.
+
+        Temp file plus atomic rename, matching the other stores.
+        """
+        tmp_path = self.committed_inputs_file.with_suffix(".json.tmp")
+        async with aiofiles.open(tmp_path, "w") as f:
+            await f.write(json.dumps(self._committed_inputs_cache, indent=2))
+        tmp_path.replace(self.committed_inputs_file)
 
     async def record_refused_attempt(
         self, task_id: str, attempt: Dict[str, Any]

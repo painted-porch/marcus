@@ -105,6 +105,7 @@ class _Persistence:
 
     def __init__(self) -> None:
         self.rows: Dict[str, Dict[str, List[str]]] = {}
+        self.committed: Dict[str, Dict[str, Any]] = {}
 
     async def record_input_provenance(
         self, dependent_id: str, upstream_task_id: str, keys: List[str]
@@ -117,6 +118,16 @@ class _Persistence:
     ) -> List[str]:
         """Return the keys that upstream task last contributed."""
         return list(self.rows.get(dependent_id, {}).get(upstream_task_id, []))
+
+    async def record_committed_inputs(
+        self, dependent_id: str, inputs: Dict[str, Any]
+    ) -> None:
+        """Record the full inputs a handoff just committed."""
+        self.committed[dependent_id] = dict(inputs)
+
+    async def get_committed_inputs(self, dependent_id: str) -> Dict[str, Any]:
+        """Return the last inputs Marcus itself committed for this dependent."""
+        return dict(self.committed.get(dependent_id, {}))
 
 
 class _Kanban:
@@ -151,6 +162,32 @@ class _Kanban:
         self.writes.append((task_id, data))
         if "inputs" in data:
             self.board_inputs[task_id] = dict(data["inputs"])
+
+
+class _NoRoundTripKanban(_Kanban):
+    """A board that never echoes ``inputs`` back, like Planka/GitHub/Linear.
+
+    Codex P2 on PR #807, fifth round: those three providers' converters
+    drop ``inputs`` on both create and update, so ``get_task_by_id``
+    always comes back empty regardless of what was written. ``writes``
+    is still recorded so a test can confirm the attempted write
+    happened; ``board_inputs`` is simply never consulted by reads.
+    """
+
+    async def get_task_by_id(self, task_id: str) -> Optional[Task]:
+        """Return a task whose inputs are always empty, like Planka's."""
+        if task_id not in self.board_inputs:
+            return None
+        return _task(task_id, inputs={})
+
+    async def update_task(self, task_id: str, data: Dict[str, Any]) -> None:
+        """Record the write but never actually store ``inputs``."""
+        if self.fail_next_write_for == task_id:
+            self.fail_next_write_for = None
+            raise RuntimeError("board unreachable")
+        self.writes.append((task_id, data))
+        # Deliberately do not update self.board_inputs: that is the
+        # defect under test, not a bug in this double.
 
 
 def _state(
@@ -542,3 +579,79 @@ class TestProvenanceIsRecordedForWhatActuallyLanded:
 
         recorded = await persistence.get_input_provenance("verify-1", "find-1")
         assert recorded == ["claim"]
+
+
+class TestItSurvivesAProviderThatNeverRoundTripsInputs:
+    """Codex P2 on PR #807, fifth round.
+
+    Planka, GitHub and Linear never store ``inputs`` at all — a read
+    always comes back empty regardless of what was written. Treating
+    the board as the only merge basis makes every handoff after the
+    first one overwrite, rather than merge into, a dependent's inputs
+    on those three providers. Marcus's own durable ``committed_inputs``
+    snapshot is the fix: it is what actually gets read as "before" when
+    the board cannot be trusted to remember.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_upstream_closes_both_survive_without_board_round_trip(
+        self,
+    ) -> None:
+        """Neither upstream's contribution is lost, even though the board
+        never echoes ``inputs`` back."""
+        find = _task("find-1")
+        review = _task("review-1")
+        verify = _task("verify-1", deps=["find-1", "review-1"])
+        board = _NoRoundTripKanban(
+            {t.id: dict(t.inputs or {}) for t in (find, review, verify)}
+        )
+        persistence = _Persistence()
+        state = _state([find, review, verify], board=board, persistence=persistence)
+
+        await _handoff(find, {"claim_value": "0.862"}, state)
+        await _handoff(review, {"verdict": "looks right"}, state)
+
+        snapshot = await persistence.get_committed_inputs("verify-1")
+        assert snapshot["claim_value"] == "0.862"
+        assert snapshot["verdict"] == "looks right"
+
+    @pytest.mark.asyncio
+    async def test_a_redo_still_removes_the_superseded_key(self) -> None:
+        """The #803 property holds even without board round-trip: a key
+        present in round one and dropped in round two is actually gone,
+        not merely shadowed, once Marcus's own snapshot is the merge
+        basis instead of an always-empty board read."""
+        find = _task("find-1")
+        verify = _task("verify-1", deps=["find-1"])
+        board = _NoRoundTripKanban({t.id: dict(t.inputs or {}) for t in (find, verify)})
+        persistence = _Persistence()
+        state = _state([find, verify], board=board, persistence=persistence)
+
+        await _handoff(find, {"claim_value": "0.862", "note": "looked odd"}, state)
+        find.status = TaskStatus.TODO
+        find.assigned_to = None
+        await _handoff(find, {"claim_value": "0.904"}, state)
+
+        snapshot = await persistence.get_committed_inputs("verify-1")
+        assert snapshot["claim_value"] == "0.904"
+        assert "note" not in snapshot
+
+    @pytest.mark.asyncio
+    async def test_a_round_tripping_board_is_unaffected(self) -> None:
+        """Regression guard: sqlite-style boards behave exactly as before.
+
+        The board and the snapshot agree on every key here, so adding
+        the snapshot into the merge must not change what lands.
+        """
+        find = _task("find-1")
+        verify = _task("verify-1", deps=["find-1"], inputs={"excerpt": "BOARD SEEDED"})
+        persistence = _Persistence()
+        state = _state([find, verify], persistence=persistence)
+
+        await _handoff(find, {"claim_value": "0.862"}, state)
+
+        board_now = await state.kanban_client.get_task_by_id("verify-1")
+        assert board_now.inputs == {
+            "claim_value": "0.862",
+            "excerpt": "BOARD SEEDED",
+        }
