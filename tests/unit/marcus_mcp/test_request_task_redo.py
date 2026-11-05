@@ -359,6 +359,100 @@ class TestRequestTaskRedoCap:
         assert task.recovery_info is capped
 
 
+class TestRedoReadsTheBoardNotAStaleInMemoryStatus:
+    """#816: completion never sets the in-memory Task.status to DONE.
+
+    ``report_task_progress`` writes DONE into the board but never
+    touches the matching ``Task`` object's ``.status`` in
+    ``state.project_tasks`` directly; that object stays fresh only
+    because ``request_next_task`` happens to call
+    ``refresh_project_state`` on every poll. If ``request_task_redo``
+    is reached without an intervening refresh, the in-memory object
+    can still read IN_PROGRESS while the board already says DONE.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_board_done_task_is_redone_even_if_memory_is_stale(
+        self,
+    ) -> None:
+        """The board says DONE; the in-memory object hasn't caught up yet."""
+        task = _make_task(status=TaskStatus.IN_PROGRESS)
+        state = _make_state(task)
+        state.kanban_client.get_task_by_id = AsyncMock(
+            return_value=_make_task(status=TaskStatus.DONE)
+        )
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="wrong shape",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert task.status == TaskStatus.TODO
+
+    @pytest.mark.asyncio
+    async def test_a_board_in_progress_task_is_still_rejected(self) -> None:
+        """The board and memory agree it isn't done: still task_not_done."""
+        task = _make_task(status=TaskStatus.IN_PROGRESS)
+        state = _make_state(task)
+        state.kanban_client.get_task_by_id = AsyncMock(
+            return_value=_make_task(status=TaskStatus.IN_PROGRESS)
+        )
+
+        result = await request_task_redo(
+            agent_id="agent_integration",
+            task_id="task-impl-1",
+            reason="wrong shape",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "task_not_done"
+
+    @pytest.mark.asyncio
+    async def test_a_board_read_failure_falls_back_to_the_memory_status(
+        self,
+    ) -> None:
+        """A board outage degrades to the old, stale-but-functional check."""
+        task = _make_task(status=TaskStatus.DONE)
+        state = _make_state(task)
+        state.kanban_client.get_task_by_id = AsyncMock(
+            side_effect=RuntimeError("board unreachable")
+        )
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="wrong shape",
+                state=state,
+            )
+
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_the_board_not_knowing_the_task_falls_back_to_memory(
+        self,
+    ) -> None:
+        """``get_task_by_id`` returning None degrades the same way."""
+        task = _make_task(status=TaskStatus.DONE)
+        state = _make_state(task)
+        state.kanban_client.get_task_by_id = AsyncMock(return_value=None)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_redo(
+                agent_id="agent_integration",
+                task_id="task-impl-1",
+                reason="wrong shape",
+                state=state,
+            )
+
+        assert result["success"] is True
+
+
 class TestRedoEndpointExposure:
     """Tier-1 regression (PR #712 review): the tool must reach agents.
 
