@@ -74,6 +74,12 @@ Failed claims re-open the find task with the failures named, up to three rounds,
 A sample of cases, plus every case that needed more than one round, waits for a human approval.
 The slide deck is assembled only from accepted claims, and the slide check is a mapping check rather than a re-audit.
 
+**Status note (2026-11-05).** The retry and decline logic above is written and unit-tested, but the kernel hook that would let a real failing verify-task closure invoke it has been deliberately held back from the shared branch.
+Marcus's extension registration design (K2, part of ADR-0013's Phase 4 work) is meant to replace exactly this kind of wiring, and merging a hardcoded import now would hardwire the same collision K2 exists to prevent: two extensions wanting different behavior on the same task type, with no dispatch between them.
+Until K2 lands, Condition B's board-driven retry runs only in this researcher's local worktree, never on a shared server.
+What has been live-verified on shared infrastructure is narrower and still real: the kernel's evidence handoff correctly replaces a redone task's contributed keys rather than leaving a stale claim behind (issues #803, #807, #816).
+What has not been verified live is this project's own retry-and-decline function actually firing from a real verify-task failure through the kernel's close path, because nothing on develop calls it.
+
 **Condition C, the checker with no record.**
 The same deterministic checker from B applied to Condition A's final output as a post-hoc filter.
 No board, no eligibility, no held close, no approval, no bundle.
