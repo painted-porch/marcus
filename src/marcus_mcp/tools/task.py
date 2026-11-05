@@ -1158,16 +1158,47 @@ async def _apply_handoff_to_dependent(
 ) -> None:
     """Replace one dependent's keys from a closing task's payload.
 
-    Held under that dependent's handoff lock by the only caller, so the
-    provenance read, the input replacement, the board write and the
-    provenance update cannot interleave with another upstream's.
+    Held under that dependent's handoff lock by the only caller.
+
+    REDESIGNED (Codex P2 on PR #807, fourth round). Three earlier rounds
+    kept the merge basis — the dependent's "before" inputs — on the
+    ``dependent`` object the caller passed in, which is captured from
+    ``state.project_tasks`` BEFORE this lock is ever acquired.
+    ``refresh_project_state`` (server.py, run on every
+    ``request_next_task`` poll) can swap that whole list with fresh
+    objects at any ``await`` point, including while this lock is held —
+    it has no idea the lock exists. A second handoff can then acquire
+    the very same lock, correctly, and still merge against a stale
+    pre-write snapshot of the dependent, because the object it was given
+    was fixed before the lock was ever requested. The lock serialised
+    *order*, not *data freshness*.
+
+    The fix is to never trust the in-memory object for the merge basis
+    at all. The dependent's current ``inputs`` are read fresh from the
+    kanban board itself, inside the lock, immediately before computing
+    and writing the replacement. ``refresh_project_state`` only ever
+    reads the board and never writes ``inputs``, so once the merge basis
+    is the board rather than an object a caller might be holding stale,
+    there is nothing left for a second, uncoordinated writer to race
+    against: the lock now owns the one thing both this function and a
+    concurrent refresh actually touch.
+
+    One consequence worth naming: there is no longer anything to roll
+    back on a failed write, because nothing is written to the in-memory
+    object speculatively before the board write succeeds. A failure
+    simply means the attempted change never reached the board; nothing
+    is mutated, and — matching every other handoff failure path in this
+    codebase (#737, #667 Fix 2) — it is logged and swallowed rather than
+    raised, so it can never strand or eject the agent whose completion
+    triggered it.
 
     Parameters
     ----------
     task : Task
         The task that just closed.
     dependent : Task
-        The task whose inputs are being written.
+        The task whose inputs are being written. Used only for its
+        ``id``; its ``.inputs`` is never read, which is the point.
     payload : Dict[str, Any]
         The closing task's inputs and evidence, minus ``raw``.
     persistence : Any
@@ -1187,9 +1218,26 @@ async def _apply_handoff_to_dependent(
                 dependent.id,
                 prov_err,
             )
-    before = dict(dependent.inputs or {})
+
+    # The merge basis: the board's CURRENT row, fetched now, inside the
+    # lock — never the ``dependent`` object the caller captured before
+    # acquiring it. A missing board row degrades to "nothing to keep,"
+    # which is the behaviour an empty dependent would have given anyway.
+    try:
+        current = await state.kanban_client.get_task_by_id(dependent.id)
+        before = dict((current.inputs if current else {}) or {})
+    except Exception as read_err:  # noqa: BLE001 - never fail a close
+        logger.warning(
+            "[#807] Could not read dependent %s from the board (%s); "
+            "this close is skipped for it rather than risking a write "
+            "against an unknown prior state.",
+            dependent.id,
+            read_err,
+        )
+        return
+
     kept = {k: v for k, v in before.items() if k not in prior_keys}
-    dependent.inputs = {**payload, **kept}
+    new_inputs = {**payload, **kept}
     # Record what this close actually WROTE, not what it offered. A
     # key the board seeded, or another upstream task contributed,
     # beats this payload and stays in ``kept``; attributing it here
@@ -1197,43 +1245,27 @@ async def _apply_handoff_to_dependent(
     # owned, which would turn the #803 fix into a way around the
     # very rule it preserves.
     contributed = [k for k in payload if k not in kept]
-    board_written = True
+
     try:
-        await state.kanban_client.update_task(
-            dependent.id, {"inputs": dependent.inputs}
-        )
-    except Exception as handoff_err:  # noqa: BLE001 - roll the copy back
-        board_written = False
-        # Roll the in-memory copy back to what the board still holds
-        # (Codex P2 on PR #807, second round). Keeping the new copy
-        # was the older behaviour and it is unsafe under set
-        # replacement: a removal that never reached the board made
-        # the key vanish from memory while the board kept it and its
-        # owner kept the record, so another upstream could
-        # contribute the same key and both records would claim it.
-        # The first owner's next close would then delete the second
-        # one's persisted value, which is exactly the guarantee this
-        # function is supposed to hold. Memory and board agreeing is
-        # worth more than a fresher copy the next refresh discards.
-        dependent.inputs = before
+        await state.kanban_client.update_task(dependent.id, {"inputs": new_inputs})
+    except Exception as handoff_err:  # noqa: BLE001 - never fail a close
         logger.warning(
             "[#737] Claim handoff: kanban write failed for dependent "
-            "%s (%s); the in-memory copy was rolled back so it still "
-            "matches the board.",
+            "%s (%s); nothing was written, so the board and the "
+            "in-memory copy stay in agreement.",
             dependent.id,
             handoff_err,
         )
-    # Provenance is narrowed only AFTER the board has the matching
-    # inputs (Codex P2 on PR #807). A re-close that drops an optional
-    # key and then fails to reach the board would otherwise record
-    # the narrower set while the board still held the dropped key:
-    # the next refresh resurrects it, no one is recorded as its
-    # author, and every later close treats it as board-seeded and can
-    # never clear it. Keeping the previous, wider record is the safe
-    # direction, because it can only over-clear keys this task
-    # legitimately owned, never a board-seeded one, which is never
-    # attributed to anybody in the first place.
-    if persistence is not None and board_written:
+        return
+
+    # The in-memory copy is refreshed as a courtesy for anything in
+    # THIS request that reads it synchronously afterward. It is no
+    # longer load-bearing for correctness: the next handoff into this
+    # dependent re-reads the board under the lock regardless of what
+    # this object says by then.
+    dependent.inputs = new_inputs
+
+    if persistence is not None:
         try:
             await persistence.record_input_provenance(
                 dependent.id, task.id, contributed
