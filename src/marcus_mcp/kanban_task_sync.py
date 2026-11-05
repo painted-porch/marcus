@@ -57,6 +57,34 @@ def _coerce(key: str, value: Any) -> Any:
     return value
 
 
+def _apply(task: Task, key: str, value: Any) -> None:
+    """Land one updated field onto the in-memory ``Task``.
+
+    ``source_context`` is special: ``sqlite_kanban.update_task`` merges
+    a dict value into the existing column rather than replacing it
+    (Codex P1 on PR #660) — a caller passing a partial update like
+    ``{"scaffold_path": ...}`` expects the board's other keys
+    (``contract_file``, ``product_intent``, ...) to survive. A bare
+    ``setattr`` here would replace the whole dict and make
+    ``state.project_tasks`` disagree with the board it was just
+    supposed to agree with (Codex P2 on PR #821). Every other field
+    sqlite treats as a plain replace, which plain ``setattr`` already
+    is; ``inputs`` is also a replace by the same source's own comment
+    (issue #737) and needs no special case here.
+    """
+    if key == "source_context":
+        if value is None:
+            task.source_context = None
+            return
+        if isinstance(value, dict):
+            if not value:
+                return  # empty dict is a no-op, matching sqlite's own rule
+            existing = getattr(task, "source_context", None) or {}
+            task.source_context = {**existing, **value}
+            return
+    setattr(task, key, _coerce(key, value))
+
+
 class TaskSyncingKanbanClient:
     """Wraps a kanban client so ``update_task`` also syncs in-memory tasks.
 
@@ -83,12 +111,35 @@ class TaskSyncingKanbanClient:
             reassigns that list wholesale; capturing it once would sync
             against a list nothing reads any more.
         """
-        self._inner = inner
-        self._tasks_source = tasks_source
+        # Routed through object.__setattr__ directly: __setattr__ below
+        # delegates everything else to self._inner, which does not exist
+        # on the first of these two lines yet.
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_tasks_source", tasks_source)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate anything not defined here to the wrapped client."""
         return getattr(self._inner, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Delegate attribute writes to the wrapped client too.
+
+        Codex P1 on PR #821: callers that read-then-write a provider
+        attribute directly (``create_project``'s SQLite reuse path
+        clears and later re-sets ``kanban_client.project_id`` and
+        ``board_id``) need that write to land on the real client. Only
+        delegating reads (via ``__getattr__``) let a bare ``setattr``
+        create a same-named attribute on this wrapper instead, which
+        then shadowed the real client's value forever — the wrapper
+        kept returning its own stale ``None`` no matter what
+        ``auto_setup_project`` set on the inner provider afterward, and
+        a project registered with that null id served every project's
+        tasks on the next switch.
+        """
+        if name in ("_inner", "_tasks_source"):
+            object.__setattr__(self, name, value)
+            return
+        setattr(self._inner, name, value)
 
     def __eq__(self, other: object) -> bool:
         """Compare by the wrapped client's identity, not the wrapper's.
@@ -136,7 +187,7 @@ class TaskSyncingKanbanClient:
                 if task.id == task_id:
                     for key, value in updates.items():
                         if hasattr(task, key):
-                            setattr(task, key, _coerce(key, value))
+                            _apply(task, key, value)
                     break
         except Exception as sync_err:  # noqa: BLE001 - the write already landed
             logger.warning(

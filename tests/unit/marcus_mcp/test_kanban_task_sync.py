@@ -149,6 +149,100 @@ class TestItCoercesAStringStatusToTheEnum:
         assert task.status == "not_a_real_status"
 
 
+class TestItMergesSourceContextLikeSqliteDoes:
+    """Codex P2 on PR #821.
+
+    sqlite_kanban.update_task merges a dict source_context into the
+    existing column rather than replacing it (Codex P1 on PR #660), so
+    a caller passing a partial update expects the board's other keys
+    to survive. A bare setattr here would replace the whole dict.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_partial_update_preserves_existing_keys(self) -> None:
+        task = _task("t1")
+        task.source_context = {
+            "contract_file": "contract.md",
+            "product_intent": "a chatbot",
+        }
+        inner = Mock()
+        inner.update_task = AsyncMock(return_value=None)
+        wrapped = TaskSyncingKanbanClient(inner, lambda: [task])
+
+        await wrapped.update_task(
+            "t1", {"source_context": {"scaffold_path": "scaffold/path"}}
+        )
+
+        assert task.source_context == {
+            "contract_file": "contract.md",
+            "product_intent": "a chatbot",
+            "scaffold_path": "scaffold/path",
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_empty_dict_is_a_no_op(self) -> None:
+        task = _task("t1")
+        task.source_context = {"contract_file": "contract.md"}
+        inner = Mock()
+        inner.update_task = AsyncMock(return_value=None)
+        wrapped = TaskSyncingKanbanClient(inner, lambda: [task])
+
+        await wrapped.update_task("t1", {"source_context": {}})
+
+        assert task.source_context == {"contract_file": "contract.md"}
+
+    @pytest.mark.asyncio
+    async def test_none_clears_the_field(self) -> None:
+        task = _task("t1")
+        task.source_context = {"contract_file": "contract.md"}
+        inner = Mock()
+        inner.update_task = AsyncMock(return_value=None)
+        wrapped = TaskSyncingKanbanClient(inner, lambda: [task])
+
+        await wrapped.update_task("t1", {"source_context": None})
+
+        assert task.source_context is None
+
+
+class TestAttributeWritesDelegateToo:
+    """Codex P1 on PR #821.
+
+    create_project's SQLite-reuse path clears and later re-sets
+    kanban_client.project_id / board_id directly on the client. Only
+    delegating reads let that write create a same-named attribute on
+    the wrapper instead, shadowing the real client's value forever: a
+    project registered under the wrapper's stale None id would serve
+    every project's tasks on the next switch.
+    """
+
+    def test_a_direct_attribute_write_lands_on_the_inner_client(self) -> None:
+        inner = Mock()
+        wrapped = TaskSyncingKanbanClient(inner, lambda: [])
+
+        wrapped.project_id = "proj-123"
+
+        assert inner.project_id == "proj-123"
+        assert "project_id" not in wrapped.__dict__
+
+    def test_a_later_read_sees_the_inner_clients_current_value(self) -> None:
+        """Simulates auto_setup_project setting the id on the inner
+        client AFTER the wrapper cleared it -- the read must see the
+        new value, not a stale one cached on the wrapper."""
+        inner = Mock()
+        wrapped = TaskSyncingKanbanClient(inner, lambda: [])
+
+        wrapped.project_id = None  # cleared, as create_project does
+        inner.project_id = "proj-456"  # auto_setup_project sets it later
+
+        assert wrapped.project_id == "proj-456"
+
+    def test_internal_attributes_still_land_on_the_wrapper_itself(self) -> None:
+        inner = Mock()
+        wrapped = TaskSyncingKanbanClient(inner, lambda: [])
+
+        assert wrapped._inner is inner
+
+
 class TestItDoesNotTouchTheWrongTask:
     """Only the task named by task_id is affected."""
 
