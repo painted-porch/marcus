@@ -71,7 +71,8 @@ Cheaper now, and it leaves the software assumptions in the core where three of f
 
 ### K2 — How an extension registers
 
-**Recommendation.** An extension declares, per project, a named set of task types it serves and, for each, the evidence it requires, the verifier the kernel should call, and whether checks may be injected.
+**Recommendation.** An extension declares, per project, a named set of task types it serves and, for each, the evidence it requires and whether checks may be injected.
+Dispatch is pull, not call: the kernel never invokes an extension's code directly; it gates a task of the declared type and offers it on the board, and the extension's own agent, scoped to its project by the registration, claims it through `request_next_task` like any other agent and reports its verdict as evidence.
 Registration is board state, not configuration, so the record of what verified a project is in the project.
 
 **The open question, resolved: the project record, not a new tool.** Both extensions that exist today already write the project record directly — `tow_runner.py` and the numerical-report verifier's `numeric_runner.py` each construct a `ProjectConfig` and call `registry.add_project()` from Python, in-process. Neither goes through `create_project`, the existing MCP tool, because that tool's provider whitelist (`src/marcus_mcp/tools/project_management.py`) does not even accept `sqlite`, the provider both of them use. A new MCP tool for registration would be a *third* surface for something two extensions already do twice, the same way, without one.
