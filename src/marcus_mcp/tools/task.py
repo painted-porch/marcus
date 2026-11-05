@@ -8381,12 +8381,36 @@ async def request_task_redo(
             "message": f"Task {task_id} not found in the current project.",
         }
 
-    if task.status != TaskStatus.DONE:
+    # #816: the in-memory ``task`` pulled from ``state.project_tasks`` above
+    # is only as fresh as the last ``refresh_project_state`` call — nothing
+    # in the completion path (``report_task_progress``) sets this object's
+    # ``.status`` to DONE; it only writes DONE into the board. Checking
+    # ``task.status`` directly can therefore reject a genuinely-completed
+    # task as ``task_not_done`` if no refresh landed between the close and
+    # this call. Read the board fresh instead, mirroring ``report_blocker``'s
+    # Guard 1 a few hundred lines down. A board read failure (or a provider
+    # that returns ``None``) degrades to the in-memory status rather than
+    # blocking the redo outright — stale-but-functional beats broken.
+    board_status: Any = None
+    try:
+        current_task = await state.kanban_client.get_task_by_id(task_id)
+        board_status = (
+            getattr(current_task, "status", None) if current_task is not None else None
+        )
+    except Exception as board_err:  # noqa: BLE001 - degrade to the stale status
+        logger.warning(
+            "request_task_redo: could not read %s from the board (%s); "
+            "falling back to the in-memory status.",
+            task_id,
+            board_err,
+        )
+    effective_status = board_status if board_status is not None else task.status
+    if effective_status not in {TaskStatus.DONE, "done", "completed"}:
         return {
             "success": False,
             "error": "task_not_done",
             "message": (
-                f"Task {task_id} is {task.status.value!r}, not 'done' — only "
+                f"Task {task_id} is {effective_status!r}, not 'done' — only "
                 "completed work can be sent back for redo. For an in-flight "
                 "task, report a blocker instead."
             ),
