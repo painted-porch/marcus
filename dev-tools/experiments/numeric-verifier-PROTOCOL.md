@@ -65,6 +65,7 @@ A checking agent on the same model, with access to the writer's conversation, ve
 Up to three rounds.
 No board, no eligibility rule, no declined outcome, no record.
 This reproduces the colleague's current setup.
+The checker's access to the writer's conversation is implemented by resuming the writer's own session, not by starting a fresh one that reads only the finished report and claims file: H3 is specifically about a checker that can see the writer's reasoning, and a fresh session would not have that, so it would not test H3 at all.
 
 **Condition B, Marcus enforced.**
 The same writer agent produces a report and a claims file.
