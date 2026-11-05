@@ -3917,6 +3917,24 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
 
                 _mark("kanban_update")
 
+                # Codex P2 on PR #814: the board write above lands the
+                # assignment, but nothing synced this task's own in-memory
+                # object in ``state.project_tasks`` — it kept reading TODO,
+                # unassigned, until the next ``refresh_project_state``. The
+                # frontier this very request reports (``#804``, below) walks
+                # ``state.project_tasks`` through ``apply_board_wide_gates``,
+                # so a sibling task gated on "is an implementation task for
+                # this feature in progress" could be miscounted as claimable
+                # using THIS task's stale pre-assignment status. Same
+                # staleness shape fixed for completion (#816) and the
+                # handoff (#807) this session; the fix here is the same one
+                # ``request_task_redo`` already uses: the in-memory object
+                # is the source of truth going forward, so set it directly
+                # rather than waiting for a refresh that may not come before
+                # this reply is built.
+                optimal_task.status = TaskStatus.IN_PROGRESS
+                optimal_task.assigned_to = agent_id
+
                 # Sync subtask manager's assigned_to so Cato/analytics
                 # see attribution immediately on pickup, not only at
                 # completion. Without this, Subtask.assigned_to stays

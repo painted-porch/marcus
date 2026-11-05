@@ -403,6 +403,71 @@ class TestVerdictWhenDrained:
         assert verdict.tasks_unclaimable == 1
 
     @pytest.mark.asyncio
+    async def test_a_just_assigned_implementation_task_still_blocks_its_phase(
+        self,
+    ) -> None:
+        """Codex P2 on PR #814: a stale in-memory status undercounts correctly.
+
+        ``request_next_task`` writes a task's new status and assignee to
+        the board, but a prior version never synced that same task's own
+        in-memory object in ``state.project_tasks`` -- it kept reading
+        TODO/unassigned until the next ``refresh_project_state``. This
+        reproduces the gap directly against the object both the gate and
+        the drain verdict actually read: with the implementation task's
+        in-memory status still TODO (what it looked like right after
+        assignment, before the fix), the phase gate cannot see the
+        implementation phase as live and wrongly offers the testing task.
+        Setting the in-memory status to IN_PROGRESS -- the fix -- closes
+        the gap, matching what ``request_next_task`` does the instant the
+        board write for the assignment succeeds.
+        """
+        stale_impl = _task(
+            "i",
+            TaskStatus.TODO,
+            assigned_to=None,
+            name="Implement payments endpoint",
+            labels=["implementation", "payments"],
+        )
+        done_impl = _task(
+            "i-done",
+            TaskStatus.DONE,
+            name="Implement payments backend",
+            labels=["implementation", "payments"],
+        )
+        testing = _task(
+            "t",
+            name="Test payments endpoint",
+            labels=["testing", "payments"],
+        )
+        state = _state([stale_impl, done_impl, testing])
+
+        from src.marcus_mcp.tools.task import apply_board_wide_gates
+
+        scoped = [stale_impl, done_impl, testing]
+        tasks_by_id = {t.id: t for t in scoped}
+
+        allowed_while_stale = apply_board_wide_gates(
+            list(scoped), scoped, tasks_by_id, state
+        )
+        assert testing in allowed_while_stale, (
+            "the bug: the testing task is wrongly offered because the "
+            "just-assigned implementation task still reads TODO in memory"
+        )
+
+        stale_impl.status = TaskStatus.IN_PROGRESS
+        stale_impl.assigned_to = "agent-1"
+
+        allowed_once_synced = apply_board_wide_gates(
+            list(scoped), scoped, tasks_by_id, state
+        )
+        assert testing not in allowed_once_synced
+
+        fixed_verdict = await compute_board_drain(state, PROJECT)
+        assert fixed_verdict.tasks_claimable == 0
+        assert fixed_verdict.tasks_in_flight == 1
+        assert fixed_verdict.tasks_unclaimable == 1
+
+    @pytest.mark.asyncio
     async def test_readme_alone_is_claimable_like_the_selector(self) -> None:
         """README is held back until 90% done unless it is the only task left."""
         tasks = [
