@@ -71,6 +71,7 @@ class TestQueryProjectHistoryOpinions:
             subject="subject.1",
             kind="assessment",
             since="2026-11-03T00:00:00+00:00",
+            window_minutes=None,
         )
 
     @pytest.mark.asyncio

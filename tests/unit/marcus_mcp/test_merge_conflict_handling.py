@@ -425,9 +425,11 @@ class TestMergeDefensiveReset:
         """
         import inspect
 
-        from src.marcus_mcp.tools.task import report_task_progress
+        # The progress implementation lives in _record_progress;
+        # report_task_progress wraps it to add the board marker.
+        from src.marcus_mcp.tools.task import _record_progress
 
-        source = inspect.getsource(report_task_progress)
+        source = inspect.getsource(_record_progress)
 
         # The override variable must exist and be used in the
         # update_task_progress call.
@@ -458,9 +460,11 @@ class TestMergeDefensiveReset:
         # success=True.
         import inspect
 
-        from src.marcus_mcp.tools.task import report_task_progress
+        # The progress implementation lives in _record_progress;
+        # report_task_progress wraps it to add the board marker.
+        from src.marcus_mcp.tools.task import _record_progress
 
-        source = inspect.getsource(report_task_progress)
+        source = inspect.getsource(_record_progress)
 
         # The failure path must record success=False with the
         # merge_conflict blocker.

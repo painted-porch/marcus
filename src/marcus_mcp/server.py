@@ -1794,6 +1794,8 @@ class MarcusServer:
                 verifications: Optional[List[Dict[str, Any]]] = None,
                 evidence: Optional[Dict[str, Any]] = None,
                 lease_epoch: Optional[int] = None,
+                subject: Optional[str] = None,
+                observation: Optional[str] = None,
             ) -> Dict[str, Any]:
                 """Report progress on a task.
 
@@ -1830,6 +1832,8 @@ class MarcusServer:
                     verifications=verifications,
                     evidence=evidence,
                     lease_epoch=lease_epoch,
+                    subject=subject,
+                    observation=observation,
                 )
 
                 # Log MCP tool response
@@ -1845,6 +1849,7 @@ class MarcusServer:
                         "readiness_probe": readiness_probe,
                         "verifications": verifications,
                         "evidence": evidence,
+                        "subject": subject,
                     },
                     response=result,
                 )
@@ -2280,6 +2285,7 @@ class MarcusServer:
                 subject: Optional[str] = None,
                 kind: Optional[str] = None,
                 since: Optional[str] = None,
+                window_minutes: Optional[int] = None,
                 limit: Optional[int] = None,
                 offset: Optional[int] = None,
             ) -> Dict[str, Any]:
@@ -2298,7 +2304,9 @@ class MarcusServer:
                   affecting_task_id)
                 - opinions: Opinions grouped by subject with the count of
                   distinct agents who posted on it (filter by subject, kind,
-                  or since); pagination is over subjects
+                  or since; pass window_minutes to also get how many agents
+                  posted recently, and to order by that); pagination is over
+                  subjects
                 - artifacts: Find artifacts (filter by task_id, artifact_type,
                   or agent_id)
                 - agent_history: Get agent history (requires agent_id)
@@ -2384,6 +2392,8 @@ class MarcusServer:
                     filters["kind"] = kind
                 if since is not None:
                     filters["since"] = since
+                if window_minutes is not None:
+                    filters["window_minutes"] = window_minutes
                 # Pagination was documented but never forwarded.
                 if limit is not None:
                     filters["limit"] = limit

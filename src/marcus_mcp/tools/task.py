@@ -52,6 +52,7 @@ from src.integrations.behavior_evidence import (
 from src.logging.agent_events import log_agent_event
 from src.logging.conversation_logger import conversation_logger, log_thinking
 from src.marcus_mcp.coordinator.drain import compute_board_drain
+from src.marcus_mcp.tools.context import give_opinion
 from src.marcus_mcp.utils import serialize_for_mcp
 
 logger = logging.getLogger(__name__)
@@ -6629,6 +6630,97 @@ def _live_lease_held_by_other(state: Any, task_id: str, agent_id: str) -> bool:
 
 
 async def report_task_progress(
+    agent_id: str,
+    task_id: str,
+    status: str,
+    progress: int,
+    message: str,
+    state: Any,
+    start_command: Optional[str] = None,
+    readiness_probe: Optional[str] = None,
+    verifications: Optional[List[Dict[str, Any]]] = None,
+    evidence: Optional[Dict[str, Any]] = None,
+    lease_epoch: Optional[int] = None,
+    subject: Optional[str] = None,
+    observation: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Report progress, and leave a counted marker on the board with it.
+
+    Everything about the progress report itself is unchanged; see
+    :func:`_record_progress`, which this delegates to.
+
+    The marker is the deliberation layer's write path, moved onto the
+    work. In Grasse's stigmergy a termite does not decide to inform
+    anyone: the pellet it deposits IS the stimulus the next termite
+    responds to, so the signal is a byproduct of the work and costs
+    nothing extra. An opinion posted through its own tool is the
+    opposite, a civic act with its own cost, and in 30 agent-minutes of
+    real Minecraft runs agents posted zero of them while writing the
+    same observations into progress messages, where nothing could count
+    them (record: ~/marcus-experiments/minecraft-plumbing/RESULTS.md).
+
+    So ``subject`` names what the observation is about and the message
+    already written becomes the opinion, unless ``observation`` says the
+    crew-relevant part separately. The marker never decides the fate of
+    the report: a report the board rejected records nothing, and a
+    marker that fails or raises is reported beside a progress report
+    that still succeeded.
+
+    Parameters
+    ----------
+    subject : Optional[str]
+        Short slug naming what the observation is about (``wood.scarce``).
+        Marcus normalises it, and opinions on the same subject from
+        different agents are counted together.
+    observation : Optional[str]
+        The crew-relevant observation; defaults to ``message``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        The progress report's own result, plus ``marker`` when a subject
+        was given.
+    """
+    result = await _record_progress(
+        agent_id=agent_id,
+        task_id=task_id,
+        status=status,
+        progress=progress,
+        message=message,
+        state=state,
+        start_command=start_command,
+        readiness_probe=readiness_probe,
+        verifications=verifications,
+        evidence=evidence,
+        lease_epoch=lease_epoch,
+    )
+    if not subject or not str(subject).strip():
+        return result
+    if isinstance(result, dict) and result.get("success") is False:
+        # Nothing is recorded for work the board did not accept.
+        return result
+    what = (observation or message or "").strip()
+    if not what:
+        return result
+    try:
+        marker = await give_opinion(
+            agent_id=agent_id,
+            subject=subject,
+            what=what,
+            state=state,
+            why="",
+            impact="",
+            task_id=task_id,
+        )
+    except Exception as error:  # noqa: BLE001 - the work is the point
+        logger.warning("Marker on %s from %s failed: %s", task_id, agent_id, error)
+        marker = {"success": False, "error": str(error)}
+    if isinstance(result, dict):
+        result["marker"] = marker
+    return result
+
+
+async def _record_progress(
     agent_id: str,
     task_id: str,
     status: str,
