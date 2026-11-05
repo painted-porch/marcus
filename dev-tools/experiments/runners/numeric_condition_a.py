@@ -49,6 +49,7 @@ for _entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
+from runners.numeric_cost_watchdog import check_before_next_pass  # noqa: E402
 from runners.numeric_writer import INSTRUCTIONS as WRITER_INSTRUCTIONS  # noqa: E402
 from runners.numeric_writer import (  # noqa: E402
     build_workspace,
@@ -198,6 +199,7 @@ def run_condition_a_case(
     model: str = DEFAULT_MODEL,
     max_rounds: int = MAX_ROUNDS,
     timeout: int = 900,
+    stop_line: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Run one case through the full write-then-self-check loop.
 
@@ -216,20 +218,54 @@ def run_condition_a_case(
         How many write-then-check rounds before giving up.
     timeout : int
         Seconds per claude -p invocation.
+    stop_line : Optional[float]
+        An approved spend ceiling for this case, in dollars. When
+        given, accumulated spend is checked via
+        ``numeric_cost_watchdog.check_before_next_pass`` before every
+        single ``claude -p`` launch in this loop -- the write pass
+        and the self-check pass alike -- and the case halts rather
+        than launching the next one once the line is reached.
+        ``None`` (the default) performs no check at all, so a caller
+        that does not opt in spends exactly as before.
 
     Returns
     -------
     Dict[str, Any]
-        ``verdict`` (accept or exhausted), ``rounds``, ``session_id``,
-        ``round_log`` (one entry per attempt), and the final
-        ``report``/``claims`` read back from the workspace.
+        ``verdict`` (accept, exhausted, or stopped_cost_limit),
+        ``rounds``, ``session_id``, ``round_log`` (one entry per
+        attempt), and the final ``report``/``claims`` read back from
+        the workspace.
     """
     workspace = build_workspace(staged_dir, out_dir)
     session_id = str(uuid.uuid4())
     round_log: List[Dict[str, Any]] = []
 
+    def over_the_line() -> bool:
+        """Check accumulated spend now, when a stop_line was given."""
+        if stop_line is None:
+            return False
+        check = check_before_next_pass(
+            transcript_paths_for(session_id), stop_line, model
+        )
+        return check.should_stop
+
+    def stopped(rounds_completed: int) -> Dict[str, Any]:
+        """Build the halted-run result at the current workspace state."""
+        final = collect_output(workspace)
+        return {
+            "verdict": "stopped_cost_limit",
+            "rounds": rounds_completed,
+            "session_id": session_id,
+            "round_log": round_log,
+            "report": final["report"],
+            "claims": final["claims"],
+        }
+
     prompt = WRITER_INSTRUCTIONS
     for round_n in range(1, max_rounds + 1):
+        if over_the_line():
+            return stopped(round_n - 1)
+
         if round_n == 1:
             write_result = _run_claude(
                 prompt, workspace, model, timeout, session_id=session_id
@@ -239,6 +275,10 @@ def run_condition_a_case(
                 prompt, workspace, model, timeout, resume=session_id
             )
         got = collect_output(workspace)
+
+        if over_the_line():
+            return stopped(round_n - 1)
+
         check_result = _run_claude(
             SELF_CHECK_INSTRUCTIONS, workspace, model, timeout, resume=session_id
         )
@@ -315,6 +355,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--max-rounds", type=int, default=MAX_ROUNDS)
     p.add_argument("--timeout", type=int, default=900)
+    p.add_argument(
+        "--stop-line",
+        type=float,
+        default=None,
+        help="Approved spend ceiling in dollars; omit to run unchecked.",
+    )
     return p
 
 
@@ -338,6 +384,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         model=args.model,
         max_rounds=args.max_rounds,
         timeout=args.timeout,
+        stop_line=args.stop_line,
     )
     print(f"model: {args.model}")
     print(f"verdict: {outcome['verdict']}")

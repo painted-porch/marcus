@@ -19,6 +19,7 @@ Standalone, for scoring a rehearsal::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import Counter
@@ -44,6 +45,47 @@ from runners.numeric_claims import (  # noqa: E402
 )
 
 STAGED_SUBDIR = "staged"
+HASHES_FILENAME = "HASHES.json"
+
+
+def _check_staged_integrity(staged: Path) -> Optional[str]:
+    """Catch a workspace's staged/ copy diverging from what was staged.
+
+    The writer is handed its own copy of the staged evaluation
+    (``numeric_writer.build_workspace``), not the original, so nothing
+    stops it from editing that copy before the checker reads it. The
+    staging step writes ``HASHES.json`` into the original directory
+    before any workspace is built, and that file is carried along in
+    the copy, so it is a trustworthy manifest of what was there first.
+
+    Parameters
+    ----------
+    staged : Path
+        The workspace's ``staged/`` directory.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the first mismatch found, or ``None`` when
+        no manifest is present (nothing to check against) or every
+        manifested file still matches.
+    """
+    manifest_path = staged / HASHES_FILENAME
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as exc:
+        return f"staged/{HASHES_FILENAME} could not be read: {exc}"
+
+    for name, expected in manifest.items():
+        path = staged / name
+        if not path.exists():
+            return f"staged/{name} is missing but was present when staged"
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            return f"staged/{name} was modified after staging (hash mismatch)"
+    return None
 
 
 def verify_workspace(workspace: Path) -> Dict[str, Any]:
@@ -66,6 +108,26 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
     staged = workspace / STAGED_SUBDIR
     report_path = workspace / "report.md"
     claims_path = workspace / "claims.json"
+
+    integrity_error = _check_staged_integrity(staged)
+    if integrity_error:
+        return {
+            "verdict": VERDICT_FAILED,
+            "parse_error": integrity_error,
+            "results": [],
+            "failed_claims": [],
+            "summary": {
+                "claims_declared": 0,
+                "claims_required": 0,
+                "kinds": {},
+                "figures_in_text": 0,
+                "coverage": 0.0,
+                "verified": 0,
+                "failed": 0,
+                "unresolvable": 0,
+                "uncovered": 0,
+            },
+        }
 
     sources = load_sources(staged)
     report_text = report_path.read_text() if report_path.exists() else ""

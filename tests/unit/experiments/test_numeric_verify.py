@@ -7,6 +7,7 @@ report that declares five tidy claims and writes six numbers has not
 been fully checked.
 """
 
+import hashlib
 import json
 
 import pytest
@@ -232,3 +233,112 @@ class TestCodexFindingMissingReportIsAFailure:
         out = verify_workspace(workspace)
         assert out["verdict"] == "failed"
         assert out.get("parse_error")
+
+
+def _stage_hashes(workspace):
+    """Write a HASHES.json manifest matching the staged files as-is.
+
+    Parameters
+    ----------
+    workspace : pathlib.Path
+        The workspace whose ``staged/`` contents to hash.
+    """
+    staged = workspace / "staged"
+    hashes = {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(staged.glob("*"))
+        if p.is_file()
+    }
+    (staged / "HASHES.json").write_text(json.dumps(hashes, indent=2))
+
+
+class TestCodexFindingStagedIntegrity:
+    """A writer could modify its own staged/ copy and have it trusted.
+
+    verify_workspace read staged/ unconditionally, with no check that
+    it still matched what numeric_stage.py originally wrote. A writer
+    that edited its workspace's staged/ copy -- by mistake or to make
+    a wrong claim look right -- would have that edit treated as
+    ground truth, and load_condition_b does not catch it either since
+    it calls this same function. HASHES.json, written by the staging
+    step before any workspace is built, is the manifest this checks
+    against.
+    """
+
+    @pytest.mark.unit
+    def test_clean_staged_files_pass_through_unaffected(self, workspace):
+        """A manifest that matches every file changes nothing."""
+        _stage_hashes(workspace)
+        write(
+            workspace,
+            "The overall score was 0.9.",
+            [
+                {
+                    "id": "c1",
+                    "value": 0.9,
+                    "label": "overall R2",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "r2_overall",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "verified"
+        assert not out.get("parse_error")
+
+    @pytest.mark.unit
+    def test_a_modified_staged_file_is_caught_not_trusted(self, workspace):
+        """A writer editing its own staged/ copy must not pass as truth."""
+        _stage_hashes(workspace)
+        (workspace / "staged" / "metrics.json").write_text(
+            json.dumps({"n_records": 100, "r2_overall": 0.99})
+        )
+        write(
+            workspace,
+            "The overall score was 0.99.",
+            [
+                {
+                    "id": "c1",
+                    "value": 0.99,
+                    "label": "overall R2",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "r2_overall",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+        assert "metrics.json" in out["parse_error"]
+
+    @pytest.mark.unit
+    def test_a_staged_file_deleted_after_staging_is_caught(self, workspace):
+        """A staged file missing from a manifested set is a failure."""
+        _stage_hashes(workspace)
+        (workspace / "staged" / "metrics.json").unlink()
+        write(workspace, "The overall score was 0.9.", [])
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+        assert "metrics.json" in out["parse_error"]
+
+    @pytest.mark.unit
+    def test_no_manifest_present_is_not_an_integrity_failure(self, workspace):
+        """Workspaces without a HASHES.json (e.g. older fixtures) still
+        verify normally -- there is nothing to check tampering against."""
+        write(
+            workspace,
+            "The overall score was 0.9.",
+            [
+                {
+                    "id": "c1",
+                    "value": 0.9,
+                    "label": "overall R2",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "r2_overall",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "verified"

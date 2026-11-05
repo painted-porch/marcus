@@ -35,7 +35,9 @@ VERDICT_FAILED = "failed"
 VERDICT_UNRESOLVABLE = "unresolvable"
 VERDICT_UNCOVERED = "uncovered"
 
-_NUMBER_RE = re.compile(r"(?<![\w.])(-?\d{1,3}(?:,\d{3})+|-?\d+(?:\.\d+)?)(?![\w])")
+_NUMBER_RE = re.compile(
+    r"(?<![\w.])" r"(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)" r"[xX]?(?![\w])"
+)
 _CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
 
 _SAFE_BINOPS = {
@@ -254,6 +256,8 @@ def resolve_address(address: str, sources: Dict[str, Any]) -> Any:
 
     # CSV: either an aggregate or a row selector plus a column.
     if rest[0] == "sum":
+        if len(rest) < 2:
+            raise KeyError(f"malformed sum address, no column given: {address}")
         column = rest[1]
         total = 0.0
         for row in data:
@@ -343,8 +347,13 @@ def _within_tolerance(
     bool
         True when the stated value is acceptable.
     """
+    if isinstance(truth, bool) and isinstance(stated, bool):
+        return stated == truth
     if isinstance(truth, bool) or isinstance(stated, bool):
-        return bool(stated) == bool(truth)
+        # One side is a genuine boolean and the other is a real
+        # number; these are different kinds of claim and must never
+        # be treated as equal just because the number is truthy.
+        return False
     try:
         s = float(_coerce(stated))
         t = float(_coerce(truth))

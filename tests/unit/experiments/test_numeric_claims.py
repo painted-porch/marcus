@@ -984,3 +984,121 @@ class TestHaikuSmokeFindingRoundedRestatement:
         )
         res = check_claims([c], sources, report_text="Maize R2 exceeds 0.48 overall.")
         assert [r for r in res if r.verdict == "uncovered"] == []
+
+
+class TestCodexFindingMultiplierSuffix:
+    """A ratio written as "~23x" was invisible to the figure extractor.
+
+    PROTOCOL.md's motivating example is exactly this shape: a stated
+    ratio of "~23x" that recomputed to 22.1. The old regex's trailing
+    negative lookahead treated the "x" as a disqualifying word
+    character, so the number never matched at all and the ratio could
+    ship with no coverage claim and no chance of being caught.
+    """
+
+    @pytest.mark.unit
+    def test_integer_ratio_with_multiplier_suffix_is_extracted(self):
+        """ "~23x" yields the figure 23, not nothing."""
+        assert extract_numbers("Maize has ~23x as many records as cotton.") == ["23"]
+
+    @pytest.mark.unit
+    def test_decimal_ratio_with_multiplier_suffix_is_extracted_in_full(self):
+        """ "22.1x" yields 22.1, not the truncated 22."""
+        assert extract_numbers("The true ratio is 22.1x cotton's count.") == ["22.1"]
+
+    @pytest.mark.unit
+    def test_multiplier_suffix_does_not_swallow_a_following_word(self):
+        """A digit run glued to real letters is still not a figure."""
+        assert extract_numbers("See table 23xyz for details.") == []
+
+
+class TestCodexFindingCommaGroupedDecimal:
+    """A comma-grouped figure lost its fractional part on extraction.
+
+    The comma-grouped alternative of the number regex had no optional
+    decimal suffix, so "1,234.5" matched only "1,234" and the stated
+    figure silently changed value before it ever reached the checker.
+    """
+
+    @pytest.mark.unit
+    def test_comma_grouped_figure_keeps_its_decimal_part(self):
+        """ "1,234.5" is extracted whole, not truncated to "1,234"."""
+        assert extract_numbers("A value of 1,234.5 was recorded.") == ["1,234.5"]
+
+    @pytest.mark.unit
+    def test_comma_grouped_integer_is_still_extracted_without_a_decimal(self):
+        """The common integer case is unaffected by the fix."""
+        assert extract_numbers("1,234 records were evaluated.") == ["1,234"]
+
+
+class TestCodexFindingSumAddressMissingColumn:
+    """A malformed "sum" address crashed the checker instead of failing
+
+    one claim.
+
+    ``resolve_address`` read ``rest[1]`` for the column name without
+    checking ``rest`` had a second element, so an address like
+    "tiers.csv:sum" (no ":column" suffix) raised an uncaught
+    ``IndexError`` instead of the ``KeyError`` every other malformed
+    address produces. An uncaught exception from one claim's address
+    takes down the whole run, not just that claim.
+    """
+
+    @pytest.mark.unit
+    def test_sum_address_missing_a_column_is_unresolvable_not_a_crash(self, sources):
+        """A sum address with no column name fails gracefully."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="broken aggregate",
+            source="tiers.csv",
+            key="sum",
+            kind="lookup",
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+
+class TestCodexFindingBooleanNumericConfusion:
+    """A boolean truth value could be matched by any nonzero number.
+
+    ``_within_tolerance`` treated "either side is a bool" as "compare
+    as booleans", so a consistency claim whose computed truth is
+    ``True`` would accept a stated value of, say, ``42`` because
+    ``bool(42) == bool(True)``. A boolean and a genuine number are
+    different kinds of claim and must never be treated as equal.
+    """
+
+    @pytest.mark.unit
+    def test_a_nonzero_number_does_not_satisfy_a_boolean_truth(self, sources):
+        """A numeric claim value must not pass against a boolean truth."""
+        required = [
+            c
+            for c in required_consistency_claims(sources)
+            if c.id == "required:tiers-total"
+        ]
+        assert required, "fixture tiers.csv must balance against n_records"
+        broken = Claim(
+            id=required[0].id,
+            value=42,
+            label=required[0].label,
+            kind=required[0].kind,
+            expr=required[0].expr,
+            inputs=required[0].inputs,
+        )
+        res = check_claims([broken], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "failed"
+
+    @pytest.mark.unit
+    def test_matching_booleans_still_pass(self, sources):
+        """The fix must not break a genuine boolean-to-boolean match."""
+        required = [
+            c
+            for c in required_consistency_claims(sources)
+            if c.id == "required:tiers-total"
+        ]
+        assert required
+        res = check_claims(list(required), sources)
+        assert [r for r in res if r.verdict == "failed"] == []

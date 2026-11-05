@@ -15,6 +15,7 @@ from runners.numeric_condition_a import (
     read_self_check,
     run_condition_a_case,
 )
+from runners.numeric_cost_watchdog import StopCheck
 
 
 @pytest.fixture
@@ -314,3 +315,79 @@ class TestModelParameter:
         with patch("runners.numeric_condition_a._run_claude", fake):
             run_condition_a_case(staged, tmp_path / "out", model="claude-haiku-4-5")
         assert len(set(seen_models)) == 1
+
+
+class TestCodexFindingCostWatchdogWiring:
+    """check_before_next_pass existed but nothing in this runner called it.
+
+    numeric_cost_watchdog.check_before_next_pass is documented as
+    mandatory before every claude -p invocation in this exact loop,
+    but the only caller in the whole codebase was an uncommitted,
+    never-launched scratch orchestrator. A real run had no way to
+    actually stop at an approved cost ceiling. stop_line is opt-in
+    (None, the default, checks nothing, so every existing caller is
+    unaffected) but when given, it must be enforced before each pass.
+    """
+
+    @pytest.mark.unit
+    def test_omitting_stop_line_never_checks_cost(self, staged, tmp_path):
+        """No stop_line means no watchdog call at all, as before."""
+        fake, _ = fake_claude_factory([write_report_and_claims, accept])
+        with (
+            patch("runners.numeric_condition_a._run_claude", fake),
+            patch("runners.numeric_condition_a.check_before_next_pass") as mock_check,
+        ):
+            run_condition_a_case(staged, tmp_path / "out")
+        mock_check.assert_not_called()
+
+    @pytest.mark.unit
+    def test_already_over_the_line_stops_before_any_pass_runs(self, staged, tmp_path):
+        """Nothing is launched if the line was already reached."""
+        fake, calls = fake_claude_factory([write_report_and_claims, accept])
+        with (
+            patch("runners.numeric_condition_a._run_claude", fake),
+            patch(
+                "runners.numeric_condition_a.check_before_next_pass",
+                return_value=StopCheck(spent=25.0, stop_line=20.0, should_stop=True),
+            ),
+        ):
+            outcome = run_condition_a_case(staged, tmp_path / "out", stop_line=20.0)
+        assert calls["n"] == 0
+        assert outcome["verdict"] == "stopped_cost_limit"
+        assert outcome["rounds"] == 0
+
+    @pytest.mark.unit
+    def test_reaching_the_line_after_the_write_pass_skips_self_check(
+        self, staged, tmp_path
+    ):
+        """A line crossed mid-round still halts before the next pass."""
+        fake, calls = fake_claude_factory([write_report_and_claims])
+        checks = [
+            StopCheck(spent=10.0, stop_line=20.0, should_stop=False),
+            StopCheck(spent=25.0, stop_line=20.0, should_stop=True),
+        ]
+        with (
+            patch("runners.numeric_condition_a._run_claude", fake),
+            patch(
+                "runners.numeric_condition_a.check_before_next_pass",
+                side_effect=checks,
+            ),
+        ):
+            outcome = run_condition_a_case(staged, tmp_path / "out", stop_line=20.0)
+        assert calls["n"] == 1  # the write pass ran, the self-check did not
+        assert outcome["verdict"] == "stopped_cost_limit"
+
+    @pytest.mark.unit
+    def test_staying_under_the_line_runs_the_case_normally(self, staged, tmp_path):
+        """A stop_line that is never reached changes nothing else."""
+        fake, calls = fake_claude_factory([write_report_and_claims, accept])
+        with (
+            patch("runners.numeric_condition_a._run_claude", fake),
+            patch(
+                "runners.numeric_condition_a.check_before_next_pass",
+                return_value=StopCheck(spent=1.0, stop_line=20.0, should_stop=False),
+            ),
+        ):
+            outcome = run_condition_a_case(staged, tmp_path / "out", stop_line=20.0)
+        assert outcome["verdict"] == "accept"
+        assert calls["n"] == 2
