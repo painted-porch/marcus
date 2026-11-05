@@ -1919,6 +1919,45 @@ async def create_tasks(
             state=state,
         )
 
+        # A seeded list goes straight onto the current board: no
+        # decomposition, no new project scope, no About card. The full
+        # creator path (create_project_from_description) mints a fresh
+        # sqlite project scope and an About card every time, so a task
+        # created through it landed where the agents registered to this
+        # project could never see it (live check, 2026-11-05).
+        seed_specs = options.get("tasks")
+        if isinstance(seed_specs, list):
+            from src.integrations.seeded_tasks import build_seeded_tasks
+
+            seeded = build_seeded_tasks(seed_specs, current_project.name or "project")
+            # task_metadata is stamped with the registry id the agents are
+            # registered to, the same id create_project backfills.
+            creator.active_project_id = current_project.id
+            created = await creator.create_tasks_on_board(seeded)
+            if hasattr(state, "refresh_project_state"):
+                try:
+                    await state.refresh_project_state()
+                # The tasks are on the board either way; a failed refresh is
+                # only a stale count until the next one.
+                except Exception as refresh_err:  # noqa: BLE001
+                    logger.warning(
+                        f"create_tasks: refresh after seeding failed: {refresh_err}"
+                    )
+            return {
+                "success": True,
+                "tasks_created": len(created),
+                "board": {
+                    "project_id": project_id,
+                    "board_id": board_id,
+                    "board_name": board_name or current_board_name,
+                },
+                "tasks": [
+                    {"id": str(getattr(t, "id", "")), "name": getattr(t, "name", "")}
+                    for t in created
+                ],
+                "seeded": True,
+            }
+
         # Use the creator to parse tasks from description
         result = await creator.create_project_from_description(
             description=task_description,
