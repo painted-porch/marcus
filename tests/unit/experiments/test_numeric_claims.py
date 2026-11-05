@@ -782,3 +782,135 @@ class TestPassingVerdictsShowTheirWorking:
         res = check_claims([c], sources)[0]
         assert res.verdict == "failed"
         assert res.detail == "maize R2: stated 0.92, source says 0.886"
+
+
+class TestCodexFindingNegativeSigns:
+    """P2: the figure-extraction regex dropped minus signs.
+
+    A correct claim of -0.5 against a source value of -0.5 produced
+    an uncovered 0.5 and failed verification; a positive 0.5 claim
+    could cover an incorrect -0.5 in the prose and let a sign error
+    pass. Both directions matter: the sign has to be part of the
+    figure, not stripped before comparison.
+    """
+
+    @pytest.mark.unit
+    def test_extract_numbers_keeps_a_leading_minus(self):
+        """A negative figure in prose is extracted with its sign."""
+        assert "-0.5" in extract_numbers("The correlation was -0.5.")
+
+    @pytest.mark.unit
+    def test_negative_claim_matching_negative_text_is_covered(self, sources):
+        """A correct negative claim against correct negative prose passes."""
+        c = Claim(
+            id="c1",
+            value=-0.5,
+            label="bias",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+            tolerance={"type": "abs", "value": 1.0},
+        )
+        res = check_claims([c], sources, report_text="The bias was -0.5.")
+        uncovered = [r for r in res if r.verdict == "uncovered"]
+        assert uncovered == []
+
+    @pytest.mark.unit
+    def test_positive_claim_does_not_cover_a_negative_figure(self, sources):
+        """A sign error in the text must not be hidden by a positive claim."""
+        c = Claim(
+            id="c1",
+            value=0.5,
+            label="bias",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+            tolerance={"type": "abs", "value": 1.0},
+        )
+        res = check_claims([c], sources, report_text="The bias was -0.5.")
+        uncovered = [r for r in res if r.verdict == "uncovered"]
+        assert len(uncovered) == 1
+        assert "-0.5" in uncovered[0].detail
+
+
+class TestCodexFindingRequiredClaimsDontGrantCoverage:
+    """P2: a harness-injected claim silently covered a writer's bare figure.
+
+    A required consistency claim (value 100, from a rate_pct column
+    totalling 100) landed in the same coverage set as writer-declared
+    claims. A report saying "accuracy is 100%" with zero declared
+    claims passed coverage because the harness's own check happened
+    to also be the number 100 -- the writer gets credit for a claim
+    it never made.
+    """
+
+    @pytest.mark.unit
+    def test_bare_figure_matching_a_required_claims_value_is_uncovered(self, sources):
+        """The writer must declare its own claim; the harness's doesn't count."""
+        res = check_report([], sources, report_text="Prediction accuracy is 100%.")
+        uncovered = [r for r in res if r.verdict == "uncovered"]
+        assert any("100" in r.detail for r in uncovered)
+
+    @pytest.mark.unit
+    def test_writer_declared_claim_still_grants_coverage(self, sources):
+        """The fix must not break ordinary, honestly declared coverage."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        res = check_report([c], sources, report_text="R2 was 0.858.")
+        uncovered = [r for r in res if r.verdict == "uncovered"]
+        assert uncovered == []
+
+
+class TestCodexFindingSlideLabelRequired:
+    """P2: a slide cell with no label skipped label validation entirely.
+
+    A cell carrying maize's verified value and claim id, titled
+    "Cotton performance" but with no cell-level label, was accepted:
+    the check only compared labels when both sides had one. A correct
+    number can end up presented as the wrong crop's result.
+    """
+
+    @pytest.mark.unit
+    def test_missing_cell_label_is_a_problem_not_skipped(self):
+        """A slide cell must state which claim's label it is showing."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.886, label="maize R2"
+            )
+        }
+        spec = {"slides": [{"cells": [{"value": "0.886", "claim": "c1"}]}]}
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_empty_cell_label_is_a_problem_not_skipped(self):
+        """An empty-string label is not a pass by omission either."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.886, label="maize R2"
+            )
+        }
+        spec = {"slides": [{"cells": [{"value": "0.886", "claim": "c1", "label": ""}]}]}
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_matching_label_still_passes(self):
+        """The fix must not break the ordinary, correctly labelled case."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.886, label="maize R2"
+            )
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": "0.886", "claim": "c1", "label": "maize R2"}]}
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "maize R2"}) == []

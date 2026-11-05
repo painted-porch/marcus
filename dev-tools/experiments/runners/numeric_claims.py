@@ -35,7 +35,7 @@ VERDICT_FAILED = "failed"
 VERDICT_UNRESOLVABLE = "unresolvable"
 VERDICT_UNCOVERED = "uncovered"
 
-_NUMBER_RE = re.compile(r"(?<![\w.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)(?![\w])")
+_NUMBER_RE = re.compile(r"(?<![\w.])(-?\d{1,3}(?:,\d{3})+|-?\d+(?:\.\d+)?)(?![\w])")
 _CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
 
 _SAFE_BINOPS = {
@@ -139,6 +139,14 @@ class CheckResult:
         Human-readable reason, carried back to the writer on a retry.
     label : str
         The claim's label, used by the slide mapping check.
+    reason : str
+        What kind of failure this is, when ``verdict`` is
+        ``"failed"``: ``"value_mismatch"`` (the stated figure itself
+        is wrong) or ``"label_mismatch"`` (the figure is correct but
+        filed under the wrong name or unit). Empty for every other
+        verdict. A false decline is only a correct figure wrongly
+        rejected on its value; a label mismatch is the checker
+        working as intended and must not be scored as one.
     """
 
     claim_id: str
@@ -147,6 +155,7 @@ class CheckResult:
     expected: Any = None
     detail: str = ""
     label: str = ""
+    reason: str = ""
 
 
 def load_sources(staged_dir: Path) -> Dict[str, Any]:
@@ -524,6 +533,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             return CheckResult(
                 verdict=VERDICT_FAILED,
                 expected=truth,
+                reason="value_mismatch",
                 detail=(
                     f"{claim.label}: stated {claim.value}, " f"source says {truth}"
                 ),
@@ -534,6 +544,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             return CheckResult(
                 verdict=VERDICT_FAILED,
                 expected=truth,
+                reason="label_mismatch",
                 detail=f"{claim.label}: {contradiction}",
                 **base,
             )
@@ -581,6 +592,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         return CheckResult(
             verdict=VERDICT_FAILED,
             expected=truth,
+            reason="value_mismatch",
             detail=(
                 f"{claim.label}: stated {claim.value}, recomputed {truth} "
                 f"from {inputs_detail}"
@@ -599,18 +611,27 @@ def check_claims(
     claims: Sequence[Claim],
     sources: Dict[str, Any],
     report_text: Optional[str] = None,
+    coverage_claims: Optional[Sequence[Claim]] = None,
 ) -> List[CheckResult]:
     """Check every claim, and every number in the report text.
 
     Parameters
     ----------
     claims : Sequence[Claim]
-        The claims the report declared.
+        Every claim to resolve and return a verdict for.
     sources : Dict[str, Any]
         Output of :func:`load_sources`.
     report_text : Optional[str]
         When given, every figure in the text must be covered by a
         claim; uncovered figures are returned as their own results.
+    coverage_claims : Optional[Sequence[Claim]]
+        Which claims may grant coverage of a figure in the text.
+        Defaults to ``claims`` itself. :func:`check_report` passes
+        only the writer's own declared claims here, never the
+        harness-injected required checks: a required check sharing a
+        value with a bare figure in the prose (e.g. a consistency
+        claim of ``100`` and a report saying "100%") must not let a
+        writer skip declaring that figure as its own claim.
 
     Returns
     -------
@@ -622,7 +643,7 @@ def check_claims(
         return results
 
     stated = set()
-    for c in claims:
+    for c in coverage_claims if coverage_claims is not None else claims:
         stated.add(str(c.value))
         coerced = _coerce(c.value)
         if isinstance(coerced, float):
@@ -768,7 +789,12 @@ def check_report(
         the text with no claim behind it.
     """
     required = required_consistency_claims(sources)
-    return check_claims(list(required) + list(claims), sources, report_text=report_text)
+    return check_claims(
+        list(required) + list(claims),
+        sources,
+        report_text=report_text,
+        coverage_claims=claims,
+    )
 
 
 def check_slide_spec(
@@ -823,7 +849,16 @@ def check_slide_spec(
                 continue
             expected_label = labels.get(claim_id)
             cell_label = cell.get("label")
-            if expected_label and cell_label and cell_label != expected_label:
+            # A missing or empty label is not a pass by omission: the
+            # whole point of this check is that a figure stays under
+            # its accepted label, and a cell that states no label at
+            # all makes that unverifiable, not satisfied.
+            if expected_label and not cell_label:
+                problems.append(
+                    f"{where}: claim {claim_id} has no label on the "
+                    f"slide cell; expected '{expected_label}'"
+                )
+            elif expected_label and cell_label != expected_label:
                 problems.append(
                     f"{where}: claim {claim_id} is '{expected_label}' "
                     f"but appears under '{cell_label}'"

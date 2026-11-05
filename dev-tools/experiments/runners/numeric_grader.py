@@ -75,6 +75,12 @@ class ClaimRecord:
         The value as the report (or slide) stated it.
     resolved : Any
         The value the staged data supports, when resolvable.
+    reason : str
+        What kind of failure this is, when ``verdict`` is
+        ``"failed"`` -- ``"value_mismatch"`` or ``"label_mismatch"``.
+        A false decline is only a correct figure rejected on its
+        value; a label-mismatch rejection is the checker working as
+        intended (right number, wrong row) and must not count as one.
     """
 
     claim_id: str
@@ -82,6 +88,7 @@ class ClaimRecord:
     verdict: str
     stated: Any = None
     resolved: Any = None
+    reason: str = ""
 
 
 @dataclass
@@ -160,6 +167,7 @@ def load_condition_b(
                 verdict=r.verdict,
                 stated=r.value,
                 resolved=r.expected,
+                reason=r.reason,
             )
             for r in outcome["results"]
         ]
@@ -315,6 +323,7 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
         c
         for c in record.claims
         if c.verdict in (VERDICT_FAILED, VERDICT_UNRESOLVABLE)
+        and c.reason != "label_mismatch"
         and c.resolved is not None
         and not _materially_different(c.stated, c.resolved)
     ]

@@ -374,3 +374,45 @@ class TestStagingEntryPoint:
         written = json.loads(manifest.read_text())
         assert len(written["cases"]) == 2
         assert written["seed"] == 1
+
+
+class TestCodexFindingStaleTimestampDayBoundary:
+    """P2: _shift_stamp left month/year boundaries unchanged.
+
+    max(1, dt.day - 1) is a no-op on the first of any month. For a
+    case with the stale_sibling trap on such a day, stage_case then
+    reused the current evaluation's own directory name as the "stale"
+    one and overwrote its metrics.json and per_crop.csv with
+    perturbed values -- corrupting the current source artifacts
+    rather than creating a stale sibling beside them. The manifest
+    still records the original, uncorrupted values, so the staged
+    data and the ground truth would have silently diverged.
+    """
+
+    @pytest.mark.unit
+    def test_first_of_the_month_still_shifts_to_a_distinct_timestamp(self):
+        """A day-1 timestamp must not come back unchanged."""
+        from runners.numeric_stage import _shift_stamp
+
+        stamp = "20261101_120000"
+        assert _shift_stamp(stamp) != stamp
+
+    @pytest.mark.unit
+    def test_first_of_the_month_shifts_into_the_prior_month(self):
+        """The result is a real earlier calendar day, not a clamp to day 1."""
+        from datetime import datetime
+
+        from runners.numeric_stage import _shift_stamp
+
+        stamp = "20261101_120000"
+        shifted = datetime.strptime(_shift_stamp(stamp), "%Y%m%d_%H%M%S")
+        original = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
+        assert shifted < original
+        assert (original - shifted).days == 1
+
+    @pytest.mark.unit
+    def test_ordinary_midmonth_day_still_shifts_back_one(self):
+        """The fix must not change the already-correct ordinary case."""
+        from runners.numeric_stage import _shift_stamp
+
+        assert _shift_stamp("20261115_120000") == "20261114_120000"

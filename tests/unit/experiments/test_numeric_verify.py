@@ -201,3 +201,34 @@ class TestRetryHandoff:
         out = verify_workspace(workspace)
         assert out["summary"]["kinds"]["lookup"] == 2
         assert out["summary"]["kinds"]["derived"] == 1
+
+
+class TestCodexFindingMissingReportIsAFailure:
+    """P2: a missing or empty report.md was never reported as a problem.
+
+    report_path.read_text() if exists else "" produced an empty
+    string, which was then passed to check_report as None, disabling
+    coverage checks entirely rather than failing loudly. A workspace
+    with clean staged data and a valid (or empty) claims list could
+    receive a verified verdict and coverage of 1.0 despite containing
+    no report at all. numeric_grader.load_condition_b calls this
+    verifier directly, so this would have scored an incomplete run as
+    clean.
+    """
+
+    @pytest.mark.unit
+    def test_missing_report_file_is_a_failure(self, workspace):
+        """No report.md at all must not verify."""
+        (workspace / "claims.json").write_text(json.dumps({"claims": []}))
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+        assert out.get("parse_error")
+
+    @pytest.mark.unit
+    def test_empty_report_file_is_a_failure(self, workspace):
+        """An empty report.md is not a clean, coverage-complete report."""
+        (workspace / "report.md").write_text("")
+        (workspace / "claims.json").write_text(json.dumps({"claims": []}))
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+        assert out.get("parse_error")

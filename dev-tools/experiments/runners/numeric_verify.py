@@ -72,18 +72,23 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
 
     declared: List[Claim] = []
     parse_error: Optional[str] = None
+    if not report_path.exists():
+        parse_error = "report.md is missing"
+    elif not report_text.strip():
+        parse_error = "report.md is empty"
+
     if claims_path.exists():
         try:
             raw = json.loads(claims_path.read_text())
             items = raw.get("claims", []) if isinstance(raw, dict) else raw
             declared = [Claim.from_dict(item) for item in items]
         except (json.JSONDecodeError, AttributeError, TypeError) as exc:
-            parse_error = f"claims.json could not be read: {exc}"
+            parse_error = parse_error or f"claims.json could not be read: {exc}"
     else:
-        parse_error = "claims.json is missing"
+        parse_error = parse_error or "claims.json is missing"
 
     results: List[CheckResult] = check_report(
-        declared, sources, report_text=report_text or None
+        declared, sources, report_text=report_text if report_path.exists() else None
     )
 
     counts = Counter(r.verdict for r in results)

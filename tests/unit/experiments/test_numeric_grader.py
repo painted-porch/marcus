@@ -409,3 +409,49 @@ class TestMaterialityThreshold:
         ]
         out = score_case(make_record("case-1", CONDITION_B, claims), {})
         assert len(out["false_declines"]) == 1
+
+
+class TestCodexFindingLabelRejectionNotAFalseDecline:
+    """P2: a correctly rejected label error was counted as a false decline.
+
+    maize R2 0.886 labelled as cotton fails the label check (the
+    checker working as intended) but had equal stated/resolved
+    numeric values, so the materiality check alone classified it as
+    a correct figure wrongly declined. That inverts the meaning of
+    the false-decline rate: it would have penalized the checker for
+    catching the exact wrong-row error it exists to catch.
+    """
+
+    @pytest.mark.unit
+    def test_label_mismatch_rejection_is_not_a_false_decline(self):
+        """Right number, wrong label: a real catch, not a false decline."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="failed",
+                stated=0.886,
+                resolved=0.886,
+                reason="label_mismatch",
+            ),
+        ]
+        out = score_case(make_record("case-1", CONDITION_B, claims), {})
+        assert out["false_declines"] == []
+
+    @pytest.mark.unit
+    def test_value_mismatch_rejection_of_a_correct_figure_is_still_a_false_decline(
+        self,
+    ):
+        """The original case this predicate exists for still works."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="failed",
+                stated=0.886,
+                resolved=0.886,
+                reason="value_mismatch",
+            ),
+        ]
+        out = score_case(make_record("case-1", CONDITION_B, claims), {})
+        assert len(out["false_declines"]) == 1

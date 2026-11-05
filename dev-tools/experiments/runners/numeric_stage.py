@@ -31,7 +31,7 @@ import json
 import math
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -627,7 +627,7 @@ def _shift_stamp(stamp: str) -> str:
         A timestamp one day earlier.
     """
     dt = datetime.strptime(stamp, "%Y%m%d_%H%M%S")
-    return dt.replace(day=max(1, dt.day - 1)).strftime("%Y%m%d_%H%M%S")
+    return (dt - timedelta(days=1)).strftime("%Y%m%d_%H%M%S")
 
 
 def build_parser() -> argparse.ArgumentParser:
