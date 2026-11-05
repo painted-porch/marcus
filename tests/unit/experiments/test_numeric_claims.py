@@ -914,3 +914,73 @@ class TestCodexFindingSlideLabelRequired:
             ]
         }
         assert check_slide_spec(spec, accepted, {"c1": "maize R2"}) == []
+
+
+class TestHaikuSmokeFindingOrderedListMarkers:
+    """A markdown ordered-list marker was read as a data figure.
+
+    Found analyzing the unauthorized Haiku smoke case: a Conclusions
+    section's "1. Adding confidence intervals..." produced an
+    uncovered figure "1", and likewise for 2, 3, 4. This affects any
+    writer on any model that uses an ordered list, so it was corrupting
+    the coverage measure for every condition, not a Haiku-specific gap.
+    """
+
+    @pytest.mark.unit
+    def test_ordered_list_markers_are_not_figures(self):
+        """A numbered recommendation list contributes no bare figures."""
+        text = (
+            "Next steps:\n"
+            "1. Adding confidence intervals.\n"
+            "2. Implementing crop-specific variants.\n"
+            "3. Weighting training data.\n"
+            "4. Collecting more records.\n"
+        )
+        assert extract_numbers(text) == []
+
+    @pytest.mark.unit
+    def test_a_real_figure_at_the_start_of_a_sentence_is_still_extracted(self):
+        """The fix must not blind the extractor to an ordinary figure."""
+        assert extract_numbers("5 fields were excluded.") == ["5"]
+
+    @pytest.mark.unit
+    def test_a_decimal_after_a_list_marker_is_still_extracted(self):
+        """Only the bare integer marker is excluded, not a real value
+        that happens to follow one on the same line."""
+        text = "1. R2 was 0.886 for this crop."
+        assert extract_numbers(text) == ["0.886"]
+
+    @pytest.mark.unit
+    def test_claims_covering_the_list_items_report_no_coverage_gap(self, sources):
+        """End to end: the Haiku smoke case's exact pattern now passes."""
+        text = (
+            "To reduce the poor-tier rate, consider:\n"
+            "1. Adding confidence intervals.\n"
+            "2. Implementing crop-specific variants.\n"
+        )
+        res = check_claims([], sources, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+
+class TestHaikuSmokeFindingRoundedRestatement:
+    """A claim restated at coarser rounding was not recognized as covered.
+
+    claims.json declared maize R2 as 0.481 (c8); the report's
+    Conclusions section restated it as "0.48", a correct rounding to
+    two decimal places, and the coverage check did not recognize the
+    two as the same figure.
+    """
+
+    @pytest.mark.unit
+    def test_a_claim_restated_rounded_to_two_places_is_covered(self, sources):
+        """0.481 restated as 0.48 must not count as an uncovered figure."""
+        c = Claim(
+            id="c8",
+            value=0.481,
+            label="maize R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        res = check_claims([c], sources, report_text="Maize R2 exceeds 0.48 overall.")
+        assert [r for r in res if r.verdict == "uncovered"] == []

@@ -359,11 +359,23 @@ def _within_tolerance(
     return abs(s - t) <= amount
 
 
+#: A markdown ordered-list marker at the start of a line: one or more
+#: digits, a dot, then whitespace, e.g. "1. Adding confidence
+#: intervals." The digit here numbers a list item, not a measurement,
+#: and a writer using an ordered list (any model, not model-specific)
+#: would otherwise show up as a run of uncovered figures 1, 2, 3, ...
+_ORDERED_LIST_MARKER_RE = re.compile(r"^\s*\d+\.\s", re.MULTILINE)
+
+
 def extract_numbers(text: str) -> List[str]:
     """Pull every figure out of report prose.
 
     Claim references of the form ``[c12]`` are stripped first, so an
-    identifier is never mistaken for a figure.
+    identifier is never mistaken for a figure. A markdown ordered-list
+    marker ("1. ", "2. ", ...) at the start of a line is stripped the
+    same way: it numbers a list item, not a measurement, and any
+    figure that genuinely follows it on the same line (a real value
+    after the list text begins) is still extracted normally.
 
     Parameters
     ----------
@@ -376,6 +388,7 @@ def extract_numbers(text: str) -> List[str]:
         Figures as they appear, in order of appearance.
     """
     cleaned = _CLAIM_REF_RE.sub(" ", text or "")
+    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
     return [m.group(1) for m in _NUMBER_RE.finditer(cleaned)]
 
 
@@ -651,6 +664,15 @@ def check_claims(
             if coerced.is_integer():
                 stated.add(str(int(coerced)))
                 stated.add(f"{int(coerced):,}")
+            else:
+                # A claim may be restated in prose at coarser
+                # rounding than it was declared at -- 0.481 written
+                # as "0.48" in a later section is still the same
+                # figure, not a new, unclaimed one. Covers rounding
+                # to 0-3 decimal places, which spans the precision
+                # these reports actually use.
+                for places in range(4):
+                    stated.add(f"{round(coerced, places):g}")
     for figure in extract_numbers(report_text):
         normalized = figure.replace(",", "")
         if figure in stated or normalized in stated:

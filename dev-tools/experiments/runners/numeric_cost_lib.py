@@ -42,6 +42,51 @@ PriceTable = Tuple[float, float, float, float]
 #: Source: the claude-api skill's pricing table, read 2026-11-05.
 OPUS_5_PRICES: PriceTable = (5.00, 25.00, 0.50, 6.25)
 
+#: $/MTok for Haiku 4.5. Same source and date as OPUS_5_PRICES.
+#: Roughly a fifth of Opus's input/output rate; pricing a Haiku
+#: transcript under the Opus table overstates its cost by that
+#: factor, which is the bug this table exists to prevent.
+HAIKU_4_5_PRICES: PriceTable = (1.00, 5.00, 0.10, 1.25)
+
+#: Model id (as passed to ``claude --model``) to its price table.
+#: A caller names the model explicitly; there is no silent default
+#: that happens to match whichever model actually produced the
+#: transcript being priced.
+MODEL_PRICES = {
+    "claude-opus-5": OPUS_5_PRICES,
+    "claude-haiku-4-5": HAIKU_4_5_PRICES,
+}
+
+
+def prices_for_model(model: str) -> PriceTable:
+    """Look up the price table for a model name.
+
+    Parameters
+    ----------
+    model : str
+        A model id as passed to ``claude --model``.
+
+    Returns
+    -------
+    PriceTable
+        That model's ``(input, output, cache_read, cache_write)``
+        dollars-per-MTok rates.
+
+    Raises
+    ------
+    KeyError
+        When the model has no price table on record. This is a hard
+        failure by design: guessing a price table for an unlisted
+        model risks exactly the under- or over-pricing bug this
+        function exists to rule out.
+    """
+    if model not in MODEL_PRICES:
+        raise KeyError(
+            f"no price table for {model!r}; add one to MODEL_PRICES "
+            f"in numeric_cost_lib.py before pricing its transcripts"
+        )
+    return MODEL_PRICES[model]
+
 
 def _usage_blocks(path: Path) -> Iterable[Dict[str, Any]]:
     """Yield every usage block in one transcript file.

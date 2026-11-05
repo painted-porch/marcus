@@ -9,7 +9,13 @@ a synthetic transcript of known shape, and the stop decision's boundary.
 import json
 
 import pytest
-from runners.numeric_cost_lib import OPUS_5_PRICES, session_cost, total_dollars
+from runners.numeric_cost_lib import (
+    HAIKU_4_5_PRICES,
+    OPUS_5_PRICES,
+    prices_for_model,
+    session_cost,
+    total_dollars,
+)
 from runners.numeric_cost_watchdog import check_before_next_pass
 
 
@@ -185,7 +191,9 @@ class TestCheckBeforeNextPass:
                 }
             ],
         )
-        result = check_before_next_pass([tmp_path / "t.jsonl"], stop_line=75.0)
+        result = check_before_next_pass(
+            [tmp_path / "t.jsonl"], stop_line=75.0, model="claude-opus-5"
+        )
         assert result.should_stop is False
 
     @pytest.mark.unit
@@ -203,7 +211,9 @@ class TestCheckBeforeNextPass:
                 }
             ],
         )
-        result = check_before_next_pass([tmp_path / "t.jsonl"], stop_line=1.0)
+        result = check_before_next_pass(
+            [tmp_path / "t.jsonl"], stop_line=1.0, model="claude-opus-5"
+        )
         assert result.should_stop is True
 
     @pytest.mark.unit
@@ -220,7 +230,9 @@ class TestCheckBeforeNextPass:
                 }
             ],
         )
-        result = check_before_next_pass([tmp_path / "t.jsonl"], stop_line=1.0)
+        result = check_before_next_pass(
+            [tmp_path / "t.jsonl"], stop_line=1.0, model="claude-opus-5"
+        )
         assert result.should_stop is True
         assert result.spent > result.stop_line
 
@@ -238,5 +250,48 @@ class TestCheckBeforeNextPass:
                 }
             ],
         )
-        result = check_before_next_pass([tmp_path / "t.jsonl"], stop_line=75.0)
+        result = check_before_next_pass(
+            [tmp_path / "t.jsonl"], stop_line=75.0, model="claude-opus-5"
+        )
         assert result.spent == pytest.approx(1.0, abs=0.0001)
+
+
+class TestModelSpecificPricing:
+    """A bug caught live: total_dollars defaulted to Opus pricing
+    regardless of which model actually produced the transcript.
+
+    Running Haiku 4.5 against the default Opus price table priced its
+    tokens at roughly 5x-25x their real cost, which would have made
+    the $20 stop line enforce an effective ~$4 ceiling while also
+    reporting a wrong per-case cost for the final readout. The price
+    table must be explicit, not assumed from whichever model this
+    module was written against.
+    """
+
+    @pytest.mark.unit
+    def test_haiku_table_prices_far_below_opus_for_the_same_tokens(self, tmp_path):
+        """The same transcript must cost less under Haiku's real rates."""
+        path = tmp_path / "t.jsonl"
+        write_transcript(
+            path,
+            [
+                {
+                    "input_tokens": 22,
+                    "output_tokens": 15770,
+                    "cache_read_input_tokens": 527072,
+                    "cache_creation_input_tokens": 45020,
+                }
+            ],
+        )
+        opus_cost = session_cost(path, OPUS_5_PRICES)["dollars"]
+        haiku_cost = session_cost(path, HAIKU_4_5_PRICES)["dollars"]
+        assert haiku_cost < opus_cost / 4
+
+    @pytest.mark.unit
+    def test_price_table_lookup_by_model_name_is_explicit(self):
+        """A caller must name the model; there is no silent default
+        that happens to match whichever model is actually running."""
+        assert prices_for_model("claude-haiku-4-5") == HAIKU_4_5_PRICES
+        assert prices_for_model("claude-opus-5") == OPUS_5_PRICES
+        with pytest.raises(KeyError):
+            prices_for_model("claude-sonnet-5")

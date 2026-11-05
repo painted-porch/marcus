@@ -27,7 +27,7 @@ for _entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
     if _entry not in sys.path:
         sys.path.insert(0, _entry)
 
-from runners.numeric_cost_lib import total_dollars  # noqa: E402
+from runners.numeric_cost_lib import prices_for_model, total_dollars  # noqa: E402
 
 
 @dataclass
@@ -50,7 +50,9 @@ class StopCheck:
     should_stop: bool
 
 
-def check_before_next_pass(transcript_paths: List[Path], stop_line: float) -> StopCheck:
+def check_before_next_pass(
+    transcript_paths: List[Path], stop_line: float, model: str
+) -> StopCheck:
     """Decide whether to launch the next pass, from real spend so far.
 
     Call this immediately before every ``claude -p`` invocation in the
@@ -64,6 +66,12 @@ def check_before_next_pass(transcript_paths: List[Path], stop_line: float) -> St
         Every transcript this run has written so far.
     stop_line : float
         The approved ceiling for the whole run.
+    model : str
+        The model actually being run, e.g. ``"claude-haiku-4-5"``.
+        Required, not defaulted: pricing a Haiku run under Opus's
+        table (or the reverse) over- or under-states real spend by
+        the ratio between the two rates, which is exactly the bug a
+        stop-line check exists to prevent, not commit.
 
     Returns
     -------
@@ -71,5 +79,6 @@ def check_before_next_pass(transcript_paths: List[Path], stop_line: float) -> St
         ``should_stop`` is the answer a caller must act on by not
         launching the next pass, not merely a value to log.
     """
-    spent = total_dollars(transcript_paths)
+    prices = prices_for_model(model)
+    spent = total_dollars(transcript_paths, prices)
     return StopCheck(spent=spent, stop_line=stop_line, should_stop=spent >= stop_line)
