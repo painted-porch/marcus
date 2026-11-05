@@ -141,19 +141,27 @@ Four-layer error framework: exceptions, strategies, responses, monitoring.
 ### Reliability & Error Handling
 - [ADR-0010: Comprehensive Error Framework](./0010-comprehensive-error-framework.md)
 
+### Task Graph & Coordination
+- [ADR-0011: Graph Augmenter Protocol](./0011-graph-augmenter-protocol.md)
+- [ADR-0012: Session-Model Migration](./0012-session-model-migration.md)
+- [ADR-0013: The Coordination Kernel and Its Extensions](./0013-kernel-and-extensions.md)
+
 ### Future ADRs (Planned)
 
-The following ADRs are referenced in existing documentation but not yet written:
+The following topics are referenced in existing documentation but not yet written.
+Numbers are assigned when an ADR is written, not reserved in advance: the list below
+previously assigned 0011, 0012 and 0013 to topics that were never written under those
+numbers, which collided with the ADRs that were.
 
-- **ADR-0005:** NLP Pipeline Architecture
-- **ADR-0006:** Kanban Provider Abstraction (Planka, GitHub, Linear)
-- **ADR-0007:** AI/LLM Provider Abstraction (OpenAI, Anthropic, Ollama)
-- **ADR-0009:** Post-Project Analysis System
-- **ADR-0011:** Memory System Architecture (Multi-tier caching)
-- **ADR-0012:** Task Dependency Graph Management
-- **ADR-0013:** Lease-Based Task Assignment
-- **ADR-0014:** Agent Workspace Isolation
-- **ADR-0015:** MCP Protocol Integration
+- NLP pipeline architecture
+- Kanban provider abstraction (Planka, GitHub, Linear)
+- AI/LLM provider abstraction (OpenAI, Anthropic, Ollama)
+- Post-project analysis system
+- Memory system architecture (multi-tier caching)
+- Task dependency graph management
+- Lease-based task assignment (partly decided in ADR-0012 D3 and D11)
+- Agent workspace isolation (partly decided in ADR-0012 D1)
+- MCP protocol integration
 
 ## How to Use This Documentation
 
