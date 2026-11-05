@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04**; the other nine remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K12 accepted 2026-11-05**; the other nine remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -177,6 +177,23 @@ The larger and riskier cut, and it would define the extension interface against 
 Minecraft proves the kernel is domain-agnostic.
 Each needs its own witness and neither substitutes for the other.
 
+### K12 — Offer-time eligibility: the kernel never offers a verification task to the agent whose own work it would verify
+
+**Accepted 2026-11-05 (Lawrence Gray).**
+
+**Decision.** `request_next_task` excludes, for any task whose type is "verify this artifact," every agent registered as that artifact's producer or as that agent's vendor.
+The exclusion happens where the kernel decides what to offer, and the refusal is silent, so the rule cannot be probed by a worker testing where its edge is.
+
+**Evidence.** The citation verifier already builds this (`src/marcus_mcp/coordinator/eligibility.py` → `filter_eligible_tasks`, #737) and names it as one of four board-enforced guarantees: "no one checks their own work."
+It is not named anywhere in this ADR, and nothing stops a second verification extension from shipping without it.
+
+**Why this is not an accuracy argument.** The full-200 readout measured Condition B, the full institution with eligibility included, against Condition C, a plain filter with no eligibility rule and no human signature, in a benign lab, and C's raw error rate was not worse: 9.5 percent against B's 12.1, with the readout's own conclusion that "the checker is what catches the errors, and the checker is about 300 lines of ordinary code."
+Eligibility is not what lowers that number.
+What it buys is everything the readout lists as beyond C's reach: a check that cannot be skipped, run by someone who cannot see the claim under review, under adversarial pressure rather than a benign lab with no knowledge a filter was coming.
+This is the same point arXiv 2609.12039 makes generally, cited here as supporting vocabulary rather than evidence: narrowing the gaps needs authority from outside the inner loop, and the agent whose own work is on trial is not outside it.
+
+**Why the kernel and not the extension.** Every verification extension needs this same exclusion, and one that omits it fails silently, the same shape K4 and K7 both guard against by putting the mechanism in the kernel rather than each extension's discretion.
+
 ---
 
 ## Inherited obligations
@@ -215,3 +232,6 @@ K1's test, that no kernel change is justified by one consumer alone, is the guar
 - #735, #677, #647, the software-building verification bugs that K4's evidence rests on
 - #299, domain-agnostic coordination, which K1 and K3 retire
 - #792, merged as `dc996a6f`, which placed all kernel state under one root
+- #737 and `docs/design/on-the-record-as-built.md`, where K12's existing mechanism (`filter_eligible_tasks`) and its "no one checks their own work" guarantee are already shipped
+- The full-200 readout (`docs/design/research/tow-full-200-readout-2026-10-16.md`), whose Condition B/C comparison K12's evidence rests on, and corrects a prior reading of
+- [arXiv 2609.12039](https://arxiv.org/abs/2609.12039), "Reality Is the Final Verifier," cited by K4 and K12 as supporting vocabulary, not as evidence
