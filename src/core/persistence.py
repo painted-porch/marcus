@@ -7,14 +7,17 @@ file-based storage and ready for database backends.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import aiofiles
 
@@ -24,6 +27,25 @@ from src.core.events import Event
 from src.core.paths import DATA_DIR_ENV
 
 logger = logging.getLogger(__name__)
+
+try:
+    import fcntl
+
+    _FCNTL_AVAILABLE = True
+except ImportError:
+    # fcntl is POSIX-only (issue #883 review). On a platform without it
+    # (Windows), FilePersistence degrades to the pre-#883 per-instance
+    # asyncio.Lock only -- correct for a single process/instance, not
+    # safe across two independent writers -- rather than failing to
+    # import at all and taking the whole server down with it.
+    _FCNTL_AVAILABLE = False
+    logger.warning(
+        "fcntl is not available on this platform; FilePersistence's "
+        "cross-process write lock is disabled. Concurrent writers "
+        "(two processes, or two independent FilePersistence instances "
+        "in one process) sharing a data directory can lose each "
+        "other's writes. See issue #883."
+    )
 
 
 #: A JSON field name as it may appear in a ``where`` prefilter.
@@ -149,12 +171,90 @@ class FilePersistence(PersistenceBackend):
         """Get the file path for a collection."""
         return self.storage_dir / f"{collection}.json"
 
+    @contextlib.asynccontextmanager
+    async def _cross_process_lock(self, file_path: Path) -> AsyncIterator[None]:
+        """Serialize a collection's read-modify-write across writers.
+
+        ``_get_lock``'s ``asyncio.Lock`` only serializes callers that
+        share this exact ``FilePersistence`` instance and event loop.
+        It does nothing for two independent instances in the same
+        process (e.g. ``ProjectRegistry()`` constructed twice, once by
+        the long-lived server and once by a short-lived helper) or for
+        two separate OS processes writing the same data directory
+        (issue #883: a project registered while another process held
+        a stale read of the collection file overwrote it on write,
+        silently dropping the first process's entry). An OS-level
+        advisory lock (``fcntl.flock``) on a sibling ``.lock`` file
+        closes both gaps: it is held per file descriptor, not per
+        Python object, so it serializes every writer regardless of
+        which instance or process it came from.
+
+        Blocking ``flock(LOCK_EX)`` in a worker thread (the first cut
+        of this fix) shares the default executor with ``aiofiles``'s
+        own file I/O. Under enough concurrent writers, every worker
+        thread can end up parked on the lock while the thread holding
+        it has nowhere left to run its own read/write or release the
+        lock -- a deadlock, reproduced by Codex review with 40
+        independent writers. That is strictly worse than #883's
+        original bug (a race loses one entry; this could hang
+        persistence, and anything else sharing the executor,
+        entirely).
+
+        So this never blocks a thread: it polls ``flock(LOCK_EX |
+        LOCK_NB)`` directly on the event loop and backs off with
+        ``asyncio.sleep`` on ``BlockingIOError`` between attempts.
+        There is no acquisition timeout -- a bounded wait that gives
+        up and proceeds unlocked would silently reintroduce #883's
+        race under load, which is worse than waiting. A write under
+        this lock is a few milliseconds of JSON (de)serialization, so
+        real contention resolves almost immediately; a wait past a
+        few seconds is logged as a warning, once per acquisition, so
+        a genuinely stuck holder (e.g. a process frozen mid-write) is
+        visible rather than silently absorbed into latency.
+
+        On a platform without ``fcntl`` (Windows), this degrades to a
+        no-op -- the per-instance ``asyncio.Lock`` in ``_get_lock`` is
+        the only protection there; a warning is logged once at import
+        time (see the ``try``/``except ImportError`` above).
+        """
+        if not _FCNTL_AVAILABLE:
+            yield
+            return
+
+        lock_path = file_path.with_suffix(file_path.suffix + ".lock")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            start = time.monotonic()
+            delay = 0.001
+            warned = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    waited = time.monotonic() - start
+                    if waited > 5.0 and not warned:
+                        logger.warning(
+                            f"Waiting >5s to acquire the cross-process "
+                            f"lock for {lock_path}; another process or "
+                            f"instance may be stuck holding it."
+                        )
+                        warned = True
+                    await asyncio.sleep(delay + random.uniform(0, delay))
+                    delay = min(delay * 2, 0.05)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
     async def store(self, collection: str, key: str, data: Dict[str, Any]) -> None:
         """Store data in a collection."""
         lock = self._get_lock(collection)
-        async with lock:
+        file_path = self._get_collection_file(collection)
+        async with lock, self._cross_process_lock(file_path):
             # Load existing data
-            file_path = self._get_collection_file(collection)
             existing_data: Dict[str, Any] = {}
 
             if file_path.exists():
@@ -246,9 +346,8 @@ class FilePersistence(PersistenceBackend):
     async def delete(self, collection: str, key: str) -> None:
         """Delete data from a collection."""
         lock = self._get_lock(collection)
-        async with lock:
-            file_path = self._get_collection_file(collection)
-
+        file_path = self._get_collection_file(collection)
+        async with lock, self._cross_process_lock(file_path):
             if not file_path.exists():
                 return
 
@@ -272,9 +371,8 @@ class FilePersistence(PersistenceBackend):
     async def clear_old(self, collection: str, days: int) -> int:
         """Clear data older than specified days."""
         lock = self._get_lock(collection)
-        async with lock:
-            file_path = self._get_collection_file(collection)
-
+        file_path = self._get_collection_file(collection)
+        async with lock, self._cross_process_lock(file_path):
             if not file_path.exists():
                 return 0
 

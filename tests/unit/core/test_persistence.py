@@ -142,6 +142,80 @@ class TestFilePersistence:
         items = await file_persistence.query("concurrent")
         assert len(items) == 3
 
+    async def test_concurrent_writers_do_not_lose_each_others_entries(self, temp_dir):
+        """Two independent FilePersistence instances racing on the same
+        collection file must not drop each other's writes.
+
+        ``_get_lock``'s asyncio.Lock is per-instance, so it does
+        nothing when two separate ``FilePersistence`` objects point at
+        the same directory -- e.g. two ``ProjectRegistry()``
+        instances in one process, or two separate OS processes
+        sharing a data directory (issue #883: a second project
+        registered on an already-running server never appeared in
+        the shared projects.json; the write path's own cross-process
+        locking gap is the explanation that reproduces deterministically
+        here. A plain asyncio.Lock on one instance can't close this --
+        only an OS-level lock shared by file descriptor, not by Python
+        object, can).
+        """
+        writer_a = FilePersistence(storage_dir=temp_dir)
+        writer_b = FilePersistence(storage_dir=temp_dir)
+
+        # Before the fix, two independent instances' asyncio.Lock
+        # objects never contended with each other, so both writers'
+        # read-modify-write cycles could interleave freely and the
+        # loser's entry was silently overwritten. Running them
+        # concurrently, with no artificial delay needed, is enough to
+        # trigger that interleaving on an unlocked implementation.
+        await asyncio.gather(
+            writer_a.store("projects", "proj-1", {"name": "proj-1"}),
+            writer_b.store("projects", "proj-2", {"name": "proj-2"}),
+        )
+
+        on_disk = json.loads((temp_dir / "projects.json").read_text())
+        assert set(on_disk.keys()) == {"proj-1", "proj-2"}
+
+    async def test_many_concurrent_writers_do_not_deadlock(self, temp_dir):
+        """A blocking cross-process lock on the default executor can
+        deadlock -- this must complete quickly instead.
+
+        The first cut of #883's fix ran ``fcntl.flock(LOCK_EX)`` (a
+        blocking call) in a worker thread via ``asyncio.to_thread``.
+        That thread pool is the same default executor ``aiofiles``
+        uses for its own file I/O. With enough concurrent writers,
+        every worker thread can end up parked waiting on the lock
+        while the thread actually holding it has no free thread left
+        to run its own read/write or release the lock -- a real
+        deadlock (Codex review on PR #885 reproduced it with 40
+        independent writers). This test uses the same count,
+        specifically more than the default executor's worker cap
+        (``min(32, cpu_count + 4)``), so it cannot pass by accident on
+        a machine with enough CPUs to avoid exhausting the pool.
+
+        The fix never blocks a thread: it polls a non-blocking flock
+        and backs off on the event loop instead. There is no
+        acquisition timeout in the implementation (a bounded wait
+        that gives up would silently reintroduce #883 under load), so
+        correctness here is bounded by this test's own
+        ``asyncio.wait_for`` instead -- a deadlock shows up as this
+        test timing out, not as an exception.
+        """
+        writer_count = 40
+        writers = [FilePersistence(storage_dir=temp_dir) for _ in range(writer_count)]
+
+        async def store_all() -> None:
+            await asyncio.gather(
+                *(
+                    writer.store("projects", f"proj-{i}", {"name": f"proj-{i}"})
+                    for i, writer in enumerate(writers)
+                )
+            )
+
+        await asyncio.wait_for(store_all(), timeout=10.0)
+
+        on_disk = json.loads((temp_dir / "projects.json").read_text())
+        assert set(on_disk.keys()) == {f"proj-{i}" for i in range(writer_count)}
+
 
 class TestSQLitePersistence:
     """Test suite for SQLite-based persistence"""
