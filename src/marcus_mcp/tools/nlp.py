@@ -19,8 +19,8 @@ from src.integrations.nlp_tools import add_feature_natural_language
 logger = logging.getLogger(__name__)
 
 # Serializes concurrent kanban_client initialization in create_project.
-# Without this, simultaneous batch-experiment calls all evaluate
-# need_new_client=True and race to overwrite state.kanban_client, leaving
+# Without this, simultaneous batch-experiment calls race to overwrite
+# state.kanban_client with their own freshly-built client, leaving
 # earlier callers with orphaned connections and triggering the dedup-guard
 # loop (~720s stall).
 #
@@ -1244,11 +1244,26 @@ async def _create_project_inner(
             options.get("provider", cfg_provider) if options else cfg_provider
         )
 
-        # Check if current client matches requested provider — serialize under
-        # the per-loop kanban init lock so concurrent create_project calls
+        # Always build a brand-new client for this project, under the
+        # per-loop kanban init lock so concurrent create_project calls
         # don't race to overwrite state.kanban_client with partially-
         # initialized instances. Resolved at call time so each event loop
         # gets its own lock (HTTP transport may use multiple loops).
+        #
+        # Issue #856 Codex P1: this used to reuse ``state.kanban_client``
+        # whenever the requested provider matched the currently-active
+        # one, clearing only ``project_id``/``board_id`` in place. That
+        # object is frequently the SAME instance ProjectContextManager
+        # has cached for the active project (project.py stamps
+        # ``state.kanban_client = await project_manager.get_kanban_client()``).
+        # Mutating it in place to point at a brand-new project/board
+        # corrupted that cache entry: selecting the old project again
+        # returned a client now wired to the new project's board, still
+        # stamping its tasks with the OLD project's registry id (#854),
+        # so the old project's agents could see and claim the new
+        # project's work. A fresh, unshared instance can never alias a
+        # cached context, so there is nothing to corrupt and nothing to
+        # evict.
         async with _kanban_init_lock_manager.get_lock():
             current_provider = None
             if state.kanban_client and hasattr(state.kanban_client, "provider"):
@@ -1258,46 +1273,27 @@ async def _create_project_inner(
                     else str(state.kanban_client.provider)
                 )
 
-            need_new_client = (
-                not state.kanban_client or current_provider != requested_provider
-            )
+            try:
+                state.kanban_client = KanbanFactory.create(requested_provider)
+                if hasattr(state.kanban_client, "connect"):
+                    await state.kanban_client.connect()
+                logger.info(
+                    f"Initialized kanban client "
+                    f"(provider={requested_provider}, "
+                    f"was={current_provider}) "
+                    f"for new project '{project_name}'"
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize kanban client: {e}")
+                return {
+                    "success": False,
+                    "error": (
+                        f"Failed to initialize kanban provider "
+                        f"'{requested_provider}': {e}"
+                    ),
+                }
 
-            if need_new_client:
-                try:
-                    state.kanban_client = KanbanFactory.create(requested_provider)
-                    if hasattr(state.kanban_client, "connect"):
-                        await state.kanban_client.connect()
-                    logger.info(
-                        f"Initialized kanban client "
-                        f"(provider={requested_provider}, "
-                        f"was={current_provider}) "
-                        f"for new project '{project_name}'"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to initialize kanban client: {e}")
-                    return {
-                        "success": False,
-                        "error": (
-                            f"Failed to initialize kanban provider "
-                            f"'{requested_provider}': {e}"
-                        ),
-                    }
-
-        # Clear stale project/board IDs to force new project creation
-        # Restored from deleted pipeline_tracked_nlp.py
-        # The creator checks if these are set and skips creation if they are
-        # CRITICAL: This affects task and subtask creation ordering
-        # NOTE: SQLite provider doesn't have project_id/board_id attributes
-        if state.kanban_client:
-            if hasattr(state.kanban_client, "client"):
-                state.kanban_client.client.project_id = None
-                state.kanban_client.client.board_id = None
-            elif hasattr(state.kanban_client, "project_id"):
-                state.kanban_client.project_id = None
-                state.kanban_client.board_id = None
-            logger.info(
-                f"Creating NEW project '{project_name}' (complexity={complexity})"
-            )
+        logger.info(f"Creating NEW project '{project_name}' (complexity={complexity})")
 
         # Initialize project creator
         creator = NaturalLanguageProjectCreator(
