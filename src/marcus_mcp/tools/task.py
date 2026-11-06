@@ -52,6 +52,7 @@ from src.integrations.behavior_evidence import (
 )
 from src.logging.agent_events import log_agent_event
 from src.logging.conversation_logger import conversation_logger, log_thinking
+from src.marcus_mcp.coordinator.agent_project import project_for_agent
 from src.marcus_mcp.coordinator.drain import compute_board_drain
 from src.marcus_mcp.coordinator.task_type_registration import (
     task_type_registration,
@@ -1500,14 +1501,25 @@ def clear_validation_retry(task_id: str) -> None:
     clear_blocker_attempts(task_id)
 
 
-async def get_project_board_context(state: Any) -> Dict[str, Optional[str]]:
+async def get_project_board_context(
+    state: Any, agent_id: Optional[str] = None
+) -> Dict[str, Optional[str]]:
     """
-    Extract project and board context from state.
+    Extract project and board context for a conversation-log entry.
 
     Parameters
     ----------
     state : Any
         Marcus server state instance
+    agent_id : Optional[str]
+        The agent this context is being stamped for (ADR-0013 K6: the
+        agent's registration is the only source of the project for any
+        write; the server's active project -- whichever project a
+        human last switched to -- must never be a fallback, or an
+        agent's own log lines can be filed under a different project
+        on a multi-project server, the same defect #805 found in
+        ``log_decision``). ``None`` keeps the pre-K6 active-project
+        behavior, for callers with no agent in scope.
 
     Returns
     -------
@@ -1523,25 +1535,31 @@ async def get_project_board_context(state: Any) -> Dict[str, Optional[str]]:
     }
 
     try:
-        # Get active project from registry
-        if hasattr(state, "project_registry") and state.project_registry:
-            active_project = await state.project_registry.get_active_project()
-            if active_project:
-                context["project_id"] = active_project.id
-                context["project_name"] = active_project.name
+        registry = getattr(state, "project_registry", None)
+        if registry:
+            project = None
+            if agent_id is not None:
+                owning_project_id = project_for_agent(agent_id, state)
+                if owning_project_id is not None:
+                    project = await registry.get_project(owning_project_id)
+            else:
+                project = await registry.get_active_project()
+            if project:
+                context["project_id"] = project.id
+                context["project_name"] = project.name
 
                 # Extract board_id from provider_config
-                provider_config = active_project.provider_config or {}
+                provider_config = project.provider_config or {}
 
-                if active_project.provider == "planka":
+                if project.provider == "planka":
                     context["board_id"] = provider_config.get("board_id")
                     # Board name might not be available, we could fetch it
                     # from kanban client if needed
-                elif active_project.provider == "github":
+                elif project.provider == "github":
                     # GitHub uses repo as the "board"
                     context["board_id"] = provider_config.get("repo")
                     context["board_name"] = provider_config.get("repo")
-                elif active_project.provider == "linear":
+                elif project.provider == "linear":
                     # Linear uses team_id and project_id
                     context["board_id"] = provider_config.get("team_id")
                     context["board_name"] = provider_config.get("team_id")
@@ -3583,8 +3601,9 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
     if hasattr(state, "ensure_lease_monitor_running"):
         await state.ensure_lease_monitor_running()
 
-    # Get project/board context
-    project_context = await get_project_board_context(state)
+    # Get project/board context, stamped from the agent's own
+    # registration, not the server's active project (ADR-0013 K6).
+    project_context = await get_project_board_context(state, agent_id)
 
     # Log task request
     conversation_logger.log_worker_message(
@@ -7235,8 +7254,9 @@ async def _record_progress(
 
     _timer = PhaseTimer()
 
-    # Get project/board context
-    project_context = await get_project_board_context(state)
+    # Get project/board context, stamped from the agent's own
+    # registration, not the server's active project (ADR-0013 K6).
+    project_context = await get_project_board_context(state, agent_id)
     _timer.mark("ctx_setup")
 
     # Log progress update
@@ -9324,8 +9344,9 @@ async def report_blocker(
     Dict[str, Any]
         Dict with AI suggestions and success status
     """
-    # Get project/board context
-    project_context = await get_project_board_context(state)
+    # Get project/board context, stamped from the agent's own
+    # registration, not the server's active project (ADR-0013 K6).
+    project_context = await get_project_board_context(state, agent_id)
 
     # Log blocker report
     conversation_logger.log_worker_message(
@@ -10697,9 +10718,6 @@ async def unassign_task(
         - agent_id: str (the agent it was unassigned from)
         - task_id: str
     """
-    # Get project/board context
-    project_context = await get_project_board_context(state)
-
     try:
         # Initialize kanban if needed
         await state.initialize_kanban()
@@ -10729,6 +10747,11 @@ async def unassign_task(
                 "error": f"Task {task_id} is not currently assigned",
                 "task_id": task_id,
             }
+
+        # Get project/board context, stamped from the now-resolved
+        # agent's own registration (ADR-0013 K6), not whichever
+        # project the server happens to have active.
+        project_context = await get_project_board_context(state, agent_id)
 
         # Log the unassignment request
         conversation_logger.log_pm_decision(

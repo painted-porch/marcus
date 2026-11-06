@@ -17,6 +17,7 @@ from src.core.project_history import (
     ProjectHistoryPersistence,
 )
 from src.logging.agent_events import log_agent_event
+from src.marcus_mcp.coordinator.agent_project import project_for_agent
 
 logger = logging.getLogger(__name__)
 
@@ -120,13 +121,13 @@ async def log_decision(
             )
 
         # Persist to project history for post-project analysis, under
-        # the project the AGENT is registered to (#805). The server's
-        # active project is the wrong source for the reasons
-        # ``_project_for_agent`` records: it is None before any project
-        # is selected, and on a multi-project server it need not be the
-        # agent's, so a decision was filed under whichever project a
-        # human last switched to, or dropped entirely.
-        decision_project = _project_for_agent(agent_id, state)
+        # the project the AGENT is registered to (#805, ADR-0013 K6).
+        # The server's active project is the wrong source for the
+        # reasons ``project_for_agent`` records: it is None before any
+        # project is selected, and on a multi-project server it need
+        # not be the agent's, so a decision was filed under whichever
+        # project a human last switched to, or dropped entirely.
+        decision_project = project_for_agent(agent_id, state)
         if decision_project is None:
             logger.warning(
                 "[#805] Decision %s by unregistered agent %s has no project "
@@ -232,27 +233,6 @@ async def _board_for_opinion(
     return client, project_name, tasks
 
 
-def _project_for_agent(agent_id: str, state: Any) -> Optional[str]:
-    """Return the project an opinion by ``agent_id`` belongs to, if registered.
-
-    The agent's registration (``state.agent_project_map``) is the only
-    source used. ``register_agent`` refuses a registration without a
-    ``project_id`` and the map is rehydrated from persisted registrations
-    after a restart, so a registered agent is always found. The server's
-    ACTIVE project (``Context.project_id``, ``state.current_project_id``)
-    is deliberately not a fallback: it is ``None`` before any project is
-    selected and need not be the agent's on a multi-project server, and
-    an unregistered caller has no business posting an opinion
-    (marcus-44 review of PR #800).
-    """
-    mapping = getattr(state, "agent_project_map", None)
-    if isinstance(mapping, dict):
-        mapped = mapping.get(agent_id)
-        if mapped:
-            return str(mapped)
-    return None
-
-
 async def give_opinion(
     agent_id: str,
     subject: str,
@@ -318,7 +298,7 @@ async def give_opinion(
         # A task-less opinion is readable only through its project stamp,
         # so it is refused when the agent is not registered rather than
         # written where no reader will ever find it.
-        project_id = _project_for_agent(agent_id, state)
+        project_id = project_for_agent(agent_id, state)
         if project_id is None and task_id is None:
             return {
                 "success": False,
