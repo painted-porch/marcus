@@ -367,6 +367,7 @@ class TestCodexFindingClaimShapeIsValidatedBeforeResolution:
                 "b": "per_crop.csv:crop=cotton:n_records",
             },
             tolerance={"type": "abs", "value": 0.01},
+            unit="plain",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
 
@@ -388,6 +389,7 @@ class TestDerivedClaims:
                 "b": "per_crop.csv:crop=cotton:n_records",
             },
             tolerance={"type": "abs", "value": 0.01},
+            unit="plain",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
 
@@ -405,6 +407,7 @@ class TestDerivedClaims:
                 "b": "per_crop.csv:crop=cotton:n_records",
             },
             tolerance={"type": "abs", "value": 0.5},
+            unit="plain",
         )
         res = check_claims([c], sources)[0]
         assert res.verdict == "failed"
@@ -424,6 +427,7 @@ class TestDerivedClaims:
                 "b": "tiers.csv:tier=Poor:rate_pct",
             },
             tolerance={"type": "abs", "value": 0.05},
+            unit="percent",
         )
         assert check_claims([c], sources)[0].verdict == "failed"
 
@@ -487,6 +491,7 @@ class TestConsistencyClaims:
             kind="consistency",
             expr="a == b",
             inputs={"a": "tiers.csv:sum:n_records", "b": "metrics.json:n_records"},
+            unit="plain",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
 
@@ -506,6 +511,7 @@ class TestConsistencyClaims:
             kind="consistency",
             expr="a == b",
             inputs={"a": "tiers.csv:sum:n_records", "b": "metrics.json:n_records"},
+            unit="plain",
         )
         res = check_claims([c], srcs)[0]
         assert res.verdict == "failed"
@@ -993,6 +999,7 @@ class TestPassingVerdictsShowTheirWorking:
                 "b": "per_crop.csv:crop=cotton:n_records",
             },
             tolerance={"type": "abs", "value": 0.01},
+            unit="plain",
         )
         res = check_claims([c], sources)[0]
         assert res.verdict == "verified"
@@ -1008,6 +1015,7 @@ class TestPassingVerdictsShowTheirWorking:
             kind="consistency",
             expr="a == b",
             inputs={"a": "tiers.csv:sum:n_records", "b": "metrics.json:n_records"},
+            unit="plain",
         )
         res = check_claims([c], sources)[0]
         assert res.verdict == "verified"
@@ -1377,6 +1385,7 @@ class TestCodexFindingBooleanNumericConfusion:
             kind=required[0].kind,
             expr=required[0].expr,
             inputs=required[0].inputs,
+            unit=required[0].unit,
         )
         res = check_claims([broken], sources)
         assert len(res) == 1
@@ -2313,6 +2322,7 @@ class TestCodexFindingDerivedClaimsGetRowLabelProtectionToo:
             kind="derived",
             expr="a",
             inputs={"a": "per_crop.csv:crop=maize:r2"},
+            unit="fraction",
         )
         res = check_claims([c], sources)[0]
         assert res.verdict == "failed"
@@ -2330,6 +2340,7 @@ class TestCodexFindingDerivedClaimsGetRowLabelProtectionToo:
             kind="derived",
             expr="a",
             inputs={"a": "per_crop.csv:crop=maize:r2"},
+            unit="fraction",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
 
@@ -2349,6 +2360,7 @@ class TestCodexFindingDerivedClaimsGetRowLabelProtectionToo:
                 "b": "per_crop.csv:crop=cotton:n_records",
             },
             tolerance={"type": "abs", "value": 0.01},
+            unit="plain",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
 
@@ -2368,6 +2380,7 @@ class TestCodexFindingDerivedClaimsGetRowLabelProtectionToo:
                 "a": "tiers.csv:tier=Excellent:n_records",
                 "b": "tiers.csv:tier=Good:n_records",
             },
+            unit="count",
         )
         res = check_claims([c], sources)[0]
         assert res.verdict == "failed"
@@ -3564,3 +3577,105 @@ class TestCodexFindingSegmentationSurvivesMaskingAndOpeningMarkers:
             f"expected cotton's mistagged sentence to be caught exactly "
             f"once; got {len(mistagged_cotton_catches)} in {text!r}"
         )
+
+
+class TestCodexFindingDerivedUnitIsDeclaredNeverInferred:
+    """A derived or consistency claim's result unit comes only from
+    its own declaration, never from its inputs' addresses.
+
+    Codex's scenario: maize count 60, total count 100, expr
+    "100 * a / b" -- both inputs are counts, so the old
+    address-based inference called the result "fraction" (neither
+    input's column looked like a percent column), even though the
+    expression's own *100 makes the result percent-scale. "60%
+    [c1]" was wrongly rejected and "6000% [c1]" wrongly passed.
+
+    units manifest could never settle this either -- it describes
+    staged columns, not the arithmetic a writer chooses to apply to
+    them. Only the writer who wrote the expression knows its own
+    scale, so it must declare it.
+    """
+
+    PERCENT_SOURCES = {"metrics.json": {"maize_count": 60, "total_count": 100}}
+    CLAIM_KWARGS = {
+        "id": "c1",
+        "value": 60,
+        "label": "maize share of total",
+        "kind": "derived",
+        "expr": "100 * a / b",
+        "inputs": {
+            "a": "metrics.json:maize_count",
+            "b": "metrics.json:total_count",
+        },
+    }
+
+    @pytest.mark.unit
+    def test_declared_percent_unit_accepts_the_percent_literal(self):
+        c = Claim(**self.CLAIM_KWARGS, unit="percent")
+        res = check_claims(
+            [c], self.PERCENT_SOURCES, report_text="Maize share is 60% [c1]."
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_declared_percent_unit_rejects_the_unscaled_literal(self):
+        """Codex's exact over-rejection, inverted: with the unit
+        correctly declared, the wrong "6000%" is now what fails,
+        not the correct "60%"."""
+        c = Claim(**self.CLAIM_KWARGS, unit="percent")
+        res = check_claims(
+            [c], self.PERCENT_SOURCES, report_text="Maize share is 6000% [c1]."
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_a_misdeclared_fraction_unit_fails_at_the_percent_check(self):
+        """A claim whose own declaration says "fraction" is checked
+        on that scale, even when the expression's real result is
+        percent-scale -- the declaration is load-bearing, not
+        decorative. "60%" scaled as a fraction is 0.6, which does
+        not match this claim's value of 60."""
+        c = Claim(**self.CLAIM_KWARGS, unit="fraction")
+        res = check_claims(
+            [c], self.PERCENT_SOURCES, report_text="Maize share is 60% [c1]."
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_a_derived_claim_with_no_declared_unit_is_rejected_by_the_gate(self):
+        """No unit at all is a named problem through
+        _malformed_claim_shape, the same gate every other missing
+        field for a derived claim goes through -- not a silent
+        fallback to guessing from the inputs."""
+        c = Claim(**self.CLAIM_KWARGS)
+        res = check_claims([c], self.PERCENT_SOURCES)
+        assert res[0].verdict == "unresolvable"
+        assert "unit" in res[0].detail.lower()
+
+    @pytest.mark.unit
+    def test_a_consistency_claim_with_no_declared_unit_is_rejected_too(self):
+        c = Claim(
+            id="c1",
+            value=True,
+            label="totals agree",
+            kind="consistency",
+            expr="a == b",
+            inputs={"a": "metrics.json:maize_count", "b": "metrics.json:total_count"},
+        )
+        res = check_claims([c], self.PERCENT_SOURCES)
+        assert res[0].verdict == "unresolvable"
+        assert "unit" in res[0].detail.lower()
+
+    @pytest.mark.unit
+    def test_a_lookup_claim_still_needs_no_declared_unit(self, sources):
+        """Lookups are unaffected -- their unit still comes from the
+        manifest or the column-name heuristic, exactly as before."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"

@@ -1132,6 +1132,13 @@ def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
     return f", within a declared {unit} tolerance of {amount}"
 
 
+#: The four result-unit categories the stager's own units manifest
+#: already uses (numeric_stage.UNITS_BY_FILE). A derived or
+#: consistency claim must declare one explicitly; see
+#: _malformed_claim_shape and _inferred_claim_unit.
+_VALID_CLAIM_UNITS = frozenset({"fraction", "percent", "count", "plain"})
+
+
 def _malformed_claim_shape(claim: Claim) -> Optional[str]:
     """Check a claim's own fields before any resolution is attempted.
 
@@ -1181,6 +1188,19 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
                     f"{claim.label}: input {var!r} is not a usable "
                     f"address: {address!r}"
                 )
+        # An expression can change scale in a way its inputs' own
+        # units never predict -- "100 * a / b" turns two counts into
+        # a percent-scale result, and nothing about "a" or "b" being
+        # counts says so. Only the writer who wrote the expression
+        # knows what it produces, so that unit is declared here, not
+        # inferred from the inputs the way a lookup's is inferred
+        # from its own source column.
+        if claim.unit not in _VALID_CLAIM_UNITS:
+            return (
+                f"{claim.label}: {claim.kind} claim has no declared unit "
+                f"(one of {sorted(_VALID_CLAIM_UNITS)}); its expression's "
+                f"own scale is not something a checker can guess"
+            )
     if claim.tolerance is not None:
         if not isinstance(claim.tolerance, dict):
             return f"{claim.label}: tolerance is not an object: {claim.tolerance!r}"
@@ -1631,18 +1651,30 @@ def _inferred_claim_unit(
 ) -> Optional[str]:
     """Decide whether a claim's own value is a fraction or a percent.
 
-    An explicit ``claim.unit`` always wins. Otherwise, every address
-    the claim reads is resolved in turn -- against ``units`` (the
-    stager's own manifest) first, falling back to the column-name
-    heuristic only for an address the manifest does not cover -- and
-    every address agreeing on percent, or every one agreeing on
-    not-percent, settles it. Reading some of each (a ratio mixing a
-    percent column with a non-percent one, which this trial does not
-    actually do) or reading no column at all is genuinely
-    undetermined, not a default -- a caller that needs the unit to
-    resolve a '%'-suffixed figure must treat ``None`` as a problem to
-    report, not a reason to guess "fraction" and risk silently over-
-    or under-rejecting a correct figure.
+    A lookup's unit always comes from its own addressing: an
+    explicit ``claim.unit`` first, otherwise every address the claim
+    reads resolved against ``units`` (the stager's own manifest),
+    falling back to the column-name heuristic only for an address
+    the manifest does not cover. A derived or consistency claim's
+    unit comes *only* from its own declaration -- never inferred
+    from its inputs' addresses -- because the expression in between
+    can change the scale in a way no input's own unit predicts ("100
+    * a / b" turns two counts into a percent-scale result).
+    :func:`_malformed_claim_shape` already guarantees a derived or
+    consistency claim reaching this function has a valid declared
+    unit; a ``"count"`` or ``"plain"`` declaration (not
+    percent-scale at all) returns ``None`` here, the same as "truly
+    undetermined" -- such a claim's figure is never expected to
+    carry a '%' sign in the first place.
+
+    Reading some percent and some non-percent addresses for one
+    lookup claim (a ratio mixing a percent column with a non-percent
+    one, which this trial does not actually do), or reading no
+    column at all, is genuinely undetermined, not a default -- a
+    caller that needs the unit to resolve a '%'-suffixed figure must
+    treat ``None`` as a problem to report, not a reason to guess
+    "fraction" and risk silently over- or under-rejecting a correct
+    figure.
 
     Parameters
     ----------
@@ -1652,7 +1684,7 @@ def _inferred_claim_unit(
         The stager's own units manifest, from
         :func:`numeric_verify.verify_workspace`'s trusted sibling
         copy; ``None`` when none is available, which leaves every
-        address to the column-name heuristic exactly as before.
+        lookup address to the column-name heuristic exactly as before.
 
     Returns
     -------
@@ -1660,6 +1692,8 @@ def _inferred_claim_unit(
         ``"fraction"`` or ``"percent"``, or ``None`` when neither an
         explicit declaration nor the claim's own addressing settles it.
     """
+    if claim.kind in ("derived", "consistency"):
+        return claim.unit if claim.unit in ("fraction", "percent") else None
     if claim.unit in ("fraction", "percent"):
         return claim.unit
     addresses = _claim_addresses(claim)
@@ -1936,6 +1970,7 @@ def required_consistency_claims(sources: Dict[str, Any]) -> List[Claim]:
                         "a": f"{name}:sum:{COUNT_COLUMN}",
                         "b": f"{SUMMARY_SOURCE}:{SUMMARY_COUNT_KEY}",
                     },
+                    unit="plain",
                 )
             )
 
@@ -1948,6 +1983,7 @@ def required_consistency_claims(sources: Dict[str, Any]) -> List[Claim]:
                     kind="consistency",
                     expr="a",
                     inputs={"a": f"{name}:sum:{RATE_COLUMN}"},
+                    unit="percent",
                     tolerance={
                         "type": "abs",
                         "value": max(

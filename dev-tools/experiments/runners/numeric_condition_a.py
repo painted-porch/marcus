@@ -72,6 +72,13 @@ the staged files say. Check derived figures by recomputing them. Check
 whether any two figures in the report contradict each other (a total that
 should match a sum, a ratio that should match two counts).
 
+Every claim with "kind": "derived" must also declare a "unit": "fraction",
+"percent", "count", or "plain" -- what scale YOUR OWN expression's result
+is on, not what its inputs were. A claim with no "unit", or with the wrong
+one for what its expression actually produces (dividing two counts by
+100 and multiplying produces a percent-scale result even though neither
+input was a percent), is a defect to reject just like a wrong value.
+
 Decide: ACCEPT or REJECT.
 
 If REJECT, write exactly why, naming the specific claim id and what is

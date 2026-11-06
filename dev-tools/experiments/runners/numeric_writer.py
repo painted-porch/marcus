@@ -84,6 +84,15 @@ Each claim is an object:
   key       (lookup only) where in that file to look
   expr      (derived only) the arithmetic, e.g. "a / b"
   inputs    (derived only) {"a": "<address>", "b": "<address>"}
+  unit      (derived only, required) "fraction", "percent", "count", or
+            "plain" -- what scale your own expression's result is on.
+            A lookup's unit is already known from the data it reads;
+            yours is not, because your expression can change the scale
+            your inputs were on. "a / b" dividing two record counts
+            produces a plain ratio ("plain"). "100 * a / b" dividing
+            two counts produces a percent-scale share ("percent"), even
+            though neither input was itself a percent. State what YOUR
+            OWN arithmetic produces, not what the inputs were.
   tolerance optional {"type": "abs"|"rel", "value": <number>}
             omit for an exact match
 
@@ -114,7 +123,17 @@ WORKED EXAMPLES
      "kind": "derived", "expr": "a / b",
      "inputs": {"a": "per_crop.csv:crop=maize:n_records",
                 "b": "per_crop.csv:crop=cotton:n_records"},
+     "unit": "plain",
      "tolerance": {"type": "abs", "value": 0.05}}
+
+  A derived figure that is itself a percentage. In report.md: "Maize
+  makes up 60% [c3] of evaluated records." In claims.json:
+
+    {"id": "c3", "value": 60, "label": "maize share of records",
+     "kind": "derived", "expr": "100 * a / b",
+     "inputs": {"a": "per_crop.csv:crop=maize:n_records",
+                "b": "metrics.json:n_records"},
+     "unit": "percent"}
 
 RULES
 
@@ -123,6 +142,10 @@ RULES
   - Any figure you compute, round, or combine is "derived", never
     "lookup". Rounding a value makes it derived, and it needs a
     tolerance wide enough to cover the rounding you did.
+  - Every derived claim declares its own "unit". Get this wrong and a
+    correctly stated percentage will be rejected, or an incorrectly
+    scaled one will pass -- the checker trusts what you declare here,
+    it does not guess from your inputs.
   - A label must match the row it reads. Do not put one crop's figure
     under another crop's name, or a figure's value under another
     figure's name.
