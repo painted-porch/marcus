@@ -13,6 +13,7 @@ a worker that can see the answer is not being tested.
 
 import csv
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -383,6 +384,25 @@ class TestRegisterBoard:
         assert "sqlite" in stored.tags
 
     @pytest.mark.asyncio
+    async def test_registry_id_matches_the_kanban_project_id(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """GH-306: the kanban project id is the single source of truth,
+        not an auto-generated registry UUID -- a task's own
+        ``project_id`` field is written from this same string at
+        creation time, so a registry lookup by that id must find this
+        project. Issue #830, second half: a seeded board's K2
+        registration was unreachable because this id used to be a
+        random UUID instead."""
+        db = tmp_path / "kanban-claude.db"
+
+        project_id = await tow_runner.register_board(
+            "tow-b-claude", str(db), registry=registry
+        )
+
+        assert project_id == "tow-b-claude"
+
+    @pytest.mark.asyncio
     async def test_registration_is_idempotent(
         self, tmp_path: Path, registry: Any
     ) -> None:
@@ -394,6 +414,86 @@ class TestRegisterBoard:
 
         assert first == second
         assert len(await registry.list_projects(provider="sqlite")) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_same_project_id_against_a_different_db_is_refused(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """Codex P2, round 1 on PR #838: ProjectConfig.id is now the
+        kanban project id (GH-306), so seeding the same project_id
+        into a second database must not silently overwrite the first
+        registration -- add_project() replaces both persistence and
+        the cache under that id unconditionally, discarding the
+        original board's path and any K2 registration it carried, and
+        redirecting anything already holding this project id to the
+        new board."""
+        from src.core.error_framework import StateConflictError
+
+        first_db = str(tmp_path / "kanban-first.db")
+        second_db = str(tmp_path / "kanban-second.db")
+
+        await tow_runner.register_board("tow-b-claude", first_db, registry=registry)
+
+        with pytest.raises(StateConflictError):
+            await tow_runner.register_board(
+                "tow-b-claude", second_db, registry=registry
+            )
+
+        stored = await registry.get_project("tow-b-claude")
+        assert stored is not None
+        assert Path(stored.provider_config["db_path"]) == Path(first_db).resolve()
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_uuid_record_is_migrated_not_duplicated(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """Codex P2, round 2 on PR #838: a board registered by the
+        pre-GH-306 code carries a generated UUID as its registry id,
+        not project_id. Re-registering it must not create a second,
+        empty-registrations project while the original (carrying real
+        K2 registrations and the active-project slot) stays live under
+        the UUID -- it must migrate in place: one record, under
+        project_id, with the registrations and active status carried
+        over, the UUID record gone."""
+        from src.core.project_registry import ProjectConfig
+
+        db = str(tmp_path / "kanban-claude.db")
+        absolute = str(Path(db).resolve())
+        now = datetime.now(timezone.utc)
+        legacy_id = "ad71d867-8384-4db7-b125-d84d6d2acf8c"
+        legacy = ProjectConfig(
+            id=legacy_id,
+            name="tow-b-claude - Main Board",
+            provider="sqlite",
+            provider_config={
+                "db_path": absolute,
+                "project_name": "tow-b-claude",
+                "attachments_dir": str(Path(absolute).parent / "attachments"),
+                "project_id": "tow-b-claude",
+            },
+            created_at=now,
+            last_used=now,
+            tags=["auto-created", "sqlite", "tow-experiment"],
+            task_type_registrations={
+                "verify": {"evidence_schema": {"required": ["verdict"]}}
+            },
+        )
+        await registry.add_project(legacy)
+        await registry.set_active_project(legacy_id)
+
+        new_id = await tow_runner.register_board("tow-b-claude", db, registry=registry)
+
+        assert new_id == "tow-b-claude"
+        boards = await registry.list_projects(provider="sqlite")
+        assert len(boards) == 1
+        canonical = boards[0]
+        assert canonical.id == "tow-b-claude"
+        assert canonical.task_type_registrations == {
+            "verify": {"evidence_schema": {"required": ["verdict"]}}
+        }
+        active = await registry.get_active_project()
+        assert active is not None
+        assert active.id == "tow-b-claude"
 
 
 class TestProjectPrefixedTaskIds:
