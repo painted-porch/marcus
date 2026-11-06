@@ -38,7 +38,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Set
 
 from src.cost_tracking.cost_recorder import canonical_project_id
-from src.cost_tracking.cost_store import CostStore, TokenEvent
+from src.cost_tracking.cost_store import CostStore
+from src.cost_tracking.usage_ingestion import UsageRecord, ingest_usage_records
 from src.cost_tracking.worker_intent import (
     classify_tool_intent,
     extract_task_id_from_user_message,
@@ -314,34 +315,46 @@ class WorkerJSONLIngester:
         # which Marcus code path created the project. Normalizing here
         # keeps every token_events row consistent regardless of source.
         canonical_pid = canonical_project_id(binding.project_id)
-        event = TokenEvent(
+        project_id = canonical_pid if canonical_pid is not None else binding.project_id
+
+        # Issue #742 / ADR-0013 K8 consequence 3: this ingester is now
+        # one caller of the generic usage-ingestion API, not the only
+        # path into token_events. request_id_override keeps the raw
+        # Claude Code requestId as the stored request_id verbatim
+        # (globally unique already), so existing exact-match dedup and
+        # the backfill path (update_attribution, keyed on this same
+        # column) are unaffected by this refactor.
+        usage_record = UsageRecord(
             run_id=binding.run_id,
-            project_id=(
-                canonical_pid if canonical_pid is not None else binding.project_id
-            ),
             agent_id=binding.agent_id,
-            agent_role="worker",
-            parent_agent_id=binding.parent_agent_id,
-            task_id=resolved_task_id,
-            tool_intent=tool_intent,
-            operation="turn",
+            seq=str(record.get("requestId") or f"{session_id}:{turn_index}"),
+            at=record.get("timestamp") or "",
             provider="anthropic",
             model=str(message.get("model", "unknown")),
             input_tokens=int(usage.get("input_tokens", 0)),
-            cache_creation_tokens=int(usage.get("cache_creation_input_tokens", 0)),
-            cache_read_tokens=int(usage.get("cache_read_input_tokens", 0)),
             output_tokens=int(usage.get("output_tokens", 0)),
-            session_id=session_id,
+            cache_read_tokens=int(usage.get("cache_read_input_tokens", 0)),
+            cache_creation_tokens=int(usage.get("cache_creation_input_tokens", 0)),
+            task_id=resolved_task_id,
+            basis="attested",
+            reported_by="agent",
+            request_id_override=record.get("requestId"),
+            operation="turn",
+            tool_intent=tool_intent,
             turn_index=turn_index,
-            request_id=record.get("requestId"),
-            timestamp=_parse_timestamp(record.get("timestamp")),
+            session_id=session_id,
+            parent_agent_id=binding.parent_agent_id,
         )
         try:
-            self.store.record_event(event)
+            ack = ingest_usage_records(self.store, project_id, [usage_record])
         except Exception as exc:  # pragma: no cover
             logger.warning("ingester swallowed store error: %s", exc)
             # Do not advance dedup counters on insert failure; let a
             # retry pick this record up.
+            self._turn_counter[session_id] -= 1
+            return False
+        if ack.rejected:  # pragma: no cover - defensive, our own shape
+            logger.warning("ingester record rejected: %s", ack.rejected)
             self._turn_counter[session_id] -= 1
             return False
 

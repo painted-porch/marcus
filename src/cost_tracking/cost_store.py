@@ -153,7 +153,39 @@ CREATE TABLE IF NOT EXISTS token_events (
   -- short labels passed by the call site. Both NULL on legacy rows
   -- and on first-attempt calls (the common case).
   was_retry             INTEGER,
-  retry_reason          TEXT
+  retry_reason          TEXT,
+  -- Generic usage-ingestion columns (ADR-0013 K8 consequence 3,
+  -- issue #742, shape agreed with the Minecraft harness). NULL for
+  -- every pre-existing row and for any row written by a caller that
+  -- doesn't supply this provenance.
+  -- ``attribution``: 'held' (inside the agent's claimed task's
+  -- window), 'between_tasks', or 'controller' (a planner/controller
+  -- call, never a worker's). Distinct from ``task_id`` itself so a
+  -- reader can tell "no task" from "not yet attributed".
+  attribution           TEXT,
+  -- ``reported_by``: who relayed this row -- 'harness', 'controller',
+  -- or 'agent' (a worker's own self-report, the one case a dishonest
+  -- model could in principle inflate or omit).
+  reported_by           TEXT,
+  -- ``basis``: 'attested' (unverified, worker/relay-reported) or
+  -- 'vendor_usage_block' (relayed straight from the provider's own
+  -- usage block, never touched by the model) or 'metered' (Marcus
+  -- observed the call itself, e.g. ai_usage_middleware.py).
+  basis                 TEXT,
+  -- ``reported_usd``: the vendor- or relay-priced dollar figure, when
+  -- the caller has one (e.g. pi's own per-call price). This is
+  -- provenance only -- the canonical price Marcus computes is
+  -- ``v_event_cost``'s token-count x model_prices calculation, which
+  -- this column never overrides.
+  reported_usd          REAL,
+  -- ``priced_by``: whose table produced ``reported_usd`` (e.g.
+  -- 'pi@0.82.0'), so two attested prices for the same call are never
+  -- silently mixed with Marcus's own.
+  priced_by             TEXT,
+  -- ``reasoning_tokens``: billed as output by most providers but
+  -- tracked separately where the caller's own ledger distinguishes
+  -- it (pi does).
+  reasoning_tokens      INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_te_run       ON token_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_te_project   ON token_events(project_id);
@@ -398,6 +430,15 @@ class TokenEvent:
     # "rate_limit", ...).  Both NULL for first-attempt calls.
     was_retry: Optional[bool] = None
     retry_reason: Optional[str] = None
+    # Generic usage-ingestion provenance (ADR-0013 K8 consequence 3,
+    # issue #742). See SCHEMA_SQL's column comments for each field's
+    # meaning; all optional so every existing caller is unaffected.
+    attribution: Optional[str] = None
+    reported_by: Optional[str] = None
+    basis: Optional[str] = None
+    reported_usd: Optional[float] = None
+    priced_by: Optional[str] = None
+    reasoning_tokens: Optional[int] = None
 
 
 @dataclass
@@ -687,6 +728,7 @@ class CostStore:
         self._dedup_pre_index_migration()
         self._tool_intent_migration()
         self._phase0_persist_signals_migration()
+        self._usage_ingestion_migration()
         self.conn.executescript(SCHEMA_SQL)
         self.conn.commit()
 
@@ -878,6 +920,47 @@ class CostStore:
 
         self.conn.commit()
 
+    #: Generic usage-ingestion columns (ADR-0013 K8 consequence 3,
+    #: issue #742). All nullable so legacy rows survive without backfill.
+    _USAGE_INGESTION_TOKEN_EVENTS_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("attribution", "TEXT"),
+        ("reported_by", "TEXT"),
+        ("basis", "TEXT"),
+        ("reported_usd", "REAL"),
+        ("priced_by", "TEXT"),
+        ("reasoning_tokens", "INTEGER"),
+    )
+
+    def _usage_ingestion_migration(self) -> None:
+        """Add the generic usage-ingestion columns to existing DBs.
+
+        Fresh installs get the columns via ``SCHEMA_SQL``. For an
+        existing cost DB the columns don't exist; this migration adds
+        them as nullable so old rows survive with NULL. Idempotent:
+        detects each column via ``PRAGMA table_info`` and skips
+        columns that already exist, the same per-column granularity
+        :meth:`_phase0_persist_signals_migration` uses.
+        """
+        tables = {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "token_events" not in tables:
+            # Fresh install — SCHEMA_SQL will create the columns.
+            return
+        te_cols = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(token_events)").fetchall()
+        }
+        for col_name, col_type in self._USAGE_INGESTION_TOKEN_EVENTS_COLUMNS:
+            if col_name not in te_cols:
+                self.conn.execute(
+                    f"ALTER TABLE token_events ADD COLUMN {col_name} {col_type}"
+                )
+        self.conn.commit()
+
     def _dedup_pre_index_migration(self) -> None:
         """Compact duplicate ``request_id`` rows before the index lands.
 
@@ -937,9 +1020,10 @@ class CostStore:
                 provider, model, input_tokens, cache_creation_tokens,
                 cache_read_tokens, output_tokens, latency_ms, session_id,
                 turn_index, request_id, status, error_type, was_retry,
-                retry_reason, timestamp
+                retry_reason, attribution, reported_by, basis,
+                reported_usd, priced_by, reasoning_tokens, timestamp
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?,
                       COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))
             """,
             (
@@ -966,6 +1050,12 @@ class CostStore:
                 event.error_type,
                 _b(event.was_retry),
                 event.retry_reason,
+                event.attribution,
+                event.reported_by,
+                event.basis,
+                event.reported_usd,
+                event.priced_by,
+                event.reasoning_tokens,
                 event.timestamp.isoformat() if event.timestamp else None,
             ),
         )
