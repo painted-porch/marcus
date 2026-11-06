@@ -13,6 +13,7 @@ produce instead of the provider's own id.
 
 from datetime import datetime, timezone
 from typing import Any, Dict
+from unittest.mock import Mock
 
 import pytest
 
@@ -42,10 +43,10 @@ def _project(
 
 class TestBuildProviderConfigCarriesTheRegistryId:
     def test_planka_config_carries_the_registry_id(self) -> None:
-        from src.config.marcus_config import get_config
-
         manager = _manager()
-        manager.config = get_config()
+        manager.config = (
+            Mock()
+        )  # see module docstring: no real config/env (#873 follow-up)
         project = _project(
             "planka",
             {"project_id": "planka-proj-77", "board_id": "kb-1"},
@@ -59,10 +60,10 @@ class TestBuildProviderConfigCarriesTheRegistryId:
         assert config["project_id"] == "planka-proj-77"
 
     def test_linear_config_carries_the_registry_id(self) -> None:
-        from src.config.marcus_config import get_config
-
         manager = _manager()
-        manager.config = get_config()
+        manager.config = (
+            Mock()
+        )  # see module docstring: no real config/env (#873 follow-up)
         project = _project(
             "linear",
             {"project_id": "linear-proj-9", "team_id": "t-1"},
@@ -79,10 +80,10 @@ class TestBuildProviderConfigCarriesTheRegistryId:
 
         carrying registry_project_id alongside it is a no-op there,
         not a special case to avoid."""
-        from src.config.marcus_config import get_config
-
         manager = _manager()
-        manager.config = get_config()
+        manager.config = (
+            Mock()
+        )  # see module docstring: no real config/env (#873 follow-up)
         project = _project("sqlite", {}, project_id="camp-1")
 
         config = manager._build_provider_config(project)
@@ -94,10 +95,10 @@ class TestBuildProviderConfigCarriesTheRegistryId:
 
         not be able to spoof registry_project_id and point a task at
         a different project's registry entry."""
-        from src.config.marcus_config import get_config
-
         manager = _manager()
-        manager.config = get_config()
+        manager.config = (
+            Mock()
+        )  # see module docstring: no real config/env (#873 follow-up)
         project = _project(
             "planka",
             {"project_id": "planka-proj-77", "registry_project_id": "spoofed"},
@@ -119,12 +120,20 @@ class TestEndToEndThroughKanbanFactory:
     def test_a_planka_card_is_stamped_with_the_registry_id(self) -> None:
         from unittest.mock import patch
 
-        from src.config.marcus_config import get_config
         from src.integrations.kanban_factory import KanbanFactory
         from src.integrations.providers.planka import Planka
 
         manager = _manager()
-        manager.config = get_config()
+        # Planka.__init__ writes these three straight into os.environ, which
+        # requires real strings -- a bare Mock() (safe everywhere else in
+        # this file) fails with "TypeError: str expected, not Mock" here.
+        manager.config = Mock(
+            kanban=Mock(
+                planka_base_url="https://planka.test",
+                planka_email="agent@test.local",
+                planka_password="test-password",
+            )
+        )
         project = _project(
             "planka",
             {"project_id": "planka-proj-77", "board_id": "kb-1"},
@@ -139,6 +148,14 @@ class TestEndToEndThroughKanbanFactory:
                 "src.integrations.kanban_client.KanbanClient._load_workspace_state",
                 return_value=None,
             ),
+            # KanbanFactory.create() unconditionally calls get_config() at
+            # its own top, even though the planka branch below never uses
+            # the result when an explicit config dict (ours) is passed.
+            # Patched so the deliberately-cleared os.environ/Path.exists
+            # above don't make a stale cached config the only thing
+            # standing between this test and a real validation failure
+            # (issue #873's own follow-up).
+            patch("src.integrations.kanban_factory.get_config", return_value=Mock()),
         ):
             provider = KanbanFactory.create("planka", config)
 
@@ -148,14 +165,15 @@ class TestEndToEndThroughKanbanFactory:
         assert task.project_id == "uuid-registry-1"
 
     def test_a_linear_issue_is_stamped_with_the_registry_id(self) -> None:
-        from unittest.mock import AsyncMock
+        from unittest.mock import AsyncMock, patch
 
-        from src.config.marcus_config import get_config
         from src.integrations.kanban_factory import KanbanFactory
         from src.integrations.providers.linear_kanban import LinearKanban
 
         manager = _manager()
-        manager.config = get_config()
+        manager.config = (
+            Mock()
+        )  # see module docstring: no real config/env (#873 follow-up)
         project = _project(
             "linear",
             {"project_id": "linear-proj-9", "team_id": "t-1"},
@@ -164,7 +182,12 @@ class TestEndToEndThroughKanbanFactory:
         config = manager._build_provider_config(project)
         config["mcp_function_caller"] = AsyncMock()
 
-        provider = KanbanFactory.create("linear", config)
+        # KanbanFactory.create() unconditionally calls get_config() at its
+        # own top, even though the linear branch below never uses the
+        # result when an explicit config dict (ours) is passed -- the
+        # same issue #873 follow-up found in the planka test above.
+        with patch("src.integrations.kanban_factory.get_config", return_value=Mock()):
+            provider = KanbanFactory.create("linear", config)
         assert isinstance(provider, LinearKanban)
         issue = {
             "id": "issue-1",
