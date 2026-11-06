@@ -43,6 +43,12 @@ class Planka(KanbanInterface):
                 os.environ["PLANKA_BOARD_ID"] = config["board_id"]
 
         self.client = KanbanClientWithCreate()
+        # Issue #854: carried down from project_context_manager's
+        # _build_provider_config when this instance was constructed
+        # from a registered ProjectConfig; None for a standalone
+        # construction. See KanbanClient._card_to_task for how it is
+        # used.
+        self.client.registry_project_id = config.get("registry_project_id")
         self.connected = False
         # Don't print to stdout - it corrupts MCP protocol
         # Use logging instead if needed
