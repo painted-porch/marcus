@@ -18,9 +18,37 @@ import pytest
 
 from src.core.persistence import FilePersistence, Persistence
 from src.core.project_registry import ProjectRegistry
-from src.marcus_mcp.tools.project_management import add_project
+from src.marcus_mcp.tools.project_management import ADD_PROJECT_PROVIDERS, add_project
 
 pytestmark = pytest.mark.unit
+
+
+def test_advertised_schema_accepts_every_provider_the_implementation_does() -> None:
+    """The legacy stdio transport validates a tool call's arguments
+    against its advertised JSON schema before handle_tool_call ever
+    runs (confirmed by Codex review on this PR: "sqlite" reached
+    add_project's own validation fine when called directly, but the
+    real stdio tool call never got past the server's own schema
+    check, because handlers.py's advertised enum had its own,
+    separate ["planka", "linear", "github"] literal that this PR's
+    first round forgot to update alongside add_project's).
+
+    Same class of drift as #871's project_root and #880's kind
+    argument reaching an older server: an accepted-value list and an
+    advertised schema, copy-pasted into two places, silently drift.
+    Closed here by making handlers.py import ADD_PROJECT_PROVIDERS
+    rather than hold its own literal -- this test asserts that import
+    actually happened, so a future hand-edit back to a hardcoded list
+    fails here instead of shipping an unreachable branch again.
+    """
+    from src.marcus_mcp.handlers import get_tool_definitions
+
+    add_project_tool = next(
+        tool for tool in get_tool_definitions("human") if tool.name == "add_project"
+    )
+    advertised = add_project_tool.inputSchema["properties"]["provider"]["enum"]
+
+    assert set(advertised) == set(ADD_PROJECT_PROVIDERS)
 
 
 def _file_backed_registry(storage_dir: Path) -> ProjectRegistry:

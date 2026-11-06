@@ -13,6 +13,17 @@ from src.logging.conversation_logger import conversation_logger
 
 logger = logging.getLogger(__name__)
 
+#: add_project's accepted provider values. Single source of truth for
+#: both the implementation's own validation below and the legacy
+#: stdio schema's advertised enum (handlers.py). Issue #886's review
+#: found provider="sqlite" rejected by the advertised schema before
+#: this function ever ran, the same accepted-value-vs-advertised-
+#: schema drift as #871's project_root and #880's kind argument --
+#: importing this constant instead of a second literal list closes
+#: that gap here for good rather than relying on two lists staying
+#: in sync by habit.
+ADD_PROJECT_PROVIDERS = ["planka", "linear", "github", "sqlite"]
+
 
 async def list_projects(server: Any, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -232,7 +243,7 @@ async def add_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": "name and provider are required"}
 
     # Validate provider
-    if provider not in ["planka", "linear", "github", "sqlite"]:
+    if provider not in ADD_PROJECT_PROVIDERS:
         return {"success": False, "error": f"Invalid provider: {provider}"}
 
     if provider == "sqlite":

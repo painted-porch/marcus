@@ -89,6 +89,7 @@ from .tools.predictions import (  # Prediction tools
     predict_task_outcome,
 )
 from .tools.project_management import (  # Project management tools
+    ADD_PROJECT_PROVIDERS,
     add_project,
     get_current_project,
     list_projects,
@@ -960,8 +961,10 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     "name": {"type": "string", "description": "Project name"},
                     "provider": {
                         "type": "string",
-                        "description": "Provider type (planka, linear, github)",
-                        "enum": ["planka", "linear", "github"],
+                        "description": (
+                            "Provider type (" + ", ".join(ADD_PROJECT_PROVIDERS) + ")"
+                        ),
+                        "enum": ADD_PROJECT_PROVIDERS,
                     },
                     "config": {
                         "type": "object",
