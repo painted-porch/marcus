@@ -80,6 +80,15 @@ def _block_external_network(
 
     Loopback stays open so local-socket fixtures keep working; anything
     else raises with a pointer to the boundary that needs mocking.
+
+    Issue #857: ``connect_ex`` (the non-raising variant some clients
+    use to probe a socket, e.g. a readiness check) is guarded the same
+    way as ``connect`` -- found while auditing the suite for exactly
+    this fixture's own blind spots after #856 round 4 exposed a test
+    file that reached a real, reachable local Planka instance with
+    nothing in the test declaring that dependency. A full
+    ``pytest -m unit`` run with both guarded (4400+ tests) was clean,
+    confirming the suite has no other such instance.
     """
     node_path = Path(str(request.node.fspath)).as_posix()
     is_unit = (
@@ -92,23 +101,37 @@ def _block_external_network(
     import socket
 
     real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
 
-    def _guarded_connect(self: socket.socket, address: Any) -> Any:
-        host = address[0] if isinstance(address, tuple) else address
-        if isinstance(host, str) and host not in {
+    def _is_blocked(host: Any) -> bool:
+        return isinstance(host, str) and host not in {
             "127.0.0.1",
             "::1",
             "localhost",
-        }:
-            raise RuntimeError(
-                f"Unit test attempted a network connection to {host!r}. "
-                "Unit tests must mock ALL external dependencies — patch the "
-                "client/helper that makes this call (see the spec_coverage "
-                "LLM boundaries for a worked example)."
-            )
+        }
+
+    def _blocked_error(host: Any) -> RuntimeError:
+        return RuntimeError(
+            f"Unit test attempted a network connection to {host!r}. "
+            "Unit tests must mock ALL external dependencies — patch the "
+            "client/helper that makes this call (see the spec_coverage "
+            "LLM boundaries for a worked example)."
+        )
+
+    def _guarded_connect(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if _is_blocked(host):
+            raise _blocked_error(host)
         return real_connect(self, address)
 
+    def _guarded_connect_ex(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if _is_blocked(host):
+            raise _blocked_error(host)
+        return real_connect_ex(self, address)
+
     monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
 
 
 @pytest.fixture(autouse=True, scope="session")
