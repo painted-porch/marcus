@@ -99,3 +99,41 @@ class TestUpdateTaskForwardsBlockedAndDeclined:
             if call.args[0] == "github.update_issue"
         ]
         assert len(update_calls) == 1
+
+
+class TestUpdateTaskRaisesWhenTheLabelMoveFails:
+    """Codex P2, round 1 on PR #839.
+
+    The issue-field update can succeed while the follow-up label move
+    does not -- update_task must not then hand back a task whose
+    status silently never changed, with no exception for a caller
+    like report_blocker's lane-death path to roll back on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_label_update_raises(self) -> None:
+        from src.core.error_framework import KanbanIntegrationError
+
+        calls: List[str] = []
+
+        async def _call(tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+            calls.append(tool)
+            if tool == "github.get_issue":
+                return {"issue": {"number": 7, "labels": []}}
+            if tool == "github.update_issue":
+                # The issue-field update (state="open") succeeds; the
+                # follow-up label write (the second update_issue call,
+                # made by move_task_to_column's own _replace_status_label)
+                # is rejected.
+                if calls.count("github.update_issue") == 1:
+                    return {"success": True, "issue": {"labels": []}}
+                return {"success": False}
+            return {"success": True}
+
+        caller = AsyncMock(side_effect=_call)
+        provider = _ConcreteGitHubKanban(
+            {"mcp_function_caller": caller, "owner": "acme", "repo": "widgets"}
+        )
+
+        with pytest.raises(KanbanIntegrationError):
+            await provider.update_task("7", {"status": TaskStatus.BLOCKED})

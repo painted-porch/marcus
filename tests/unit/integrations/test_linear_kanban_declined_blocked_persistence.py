@@ -123,3 +123,21 @@ class TestReadBackChecksTheStateNameFirst:
 
         assert task is not None
         assert task.status == TaskStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_a_state_named_unblocked_does_not_read_back_as_blocked(
+        self,
+    ) -> None:
+        """Codex P2, round 1 on PR #839: the old substring match made
+        "blocked" in "unblocked" a false match, misreading an
+        unstarted issue as BLOCKED -- and since task selection only
+        considers TODO, that work became unclaimable."""
+        caller = AsyncMock(
+            return_value={"success": True, "issue": _issue("Unblocked", "unstarted")}
+        )
+        provider = _provider(caller)
+
+        task = await provider.update_task("issue-1", {"name": "noop"})
+
+        assert task is not None
+        assert task.status == TaskStatus.TODO

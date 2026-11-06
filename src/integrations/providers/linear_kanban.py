@@ -153,9 +153,14 @@ class LinearKanban(KanbanInterface):
             "completed": TaskStatus.DONE,
             "canceled": TaskStatus.DONE,
         }
-        if "declined" in state_name:
+        # Exact match, not substring (Codex P2, round 1 on PR #839): a
+        # team's own state named e.g. "Unblocked" contains "blocked"
+        # as a substring, which previously misread an unstarted issue
+        # as BLOCKED -- and since task selection only considers TODO,
+        # that work became unclaimable.
+        if state_name == "declined":
             status = TaskStatus.DECLINED
-        elif "blocked" in state_name:
+        elif state_name == "blocked":
             status = TaskStatus.BLOCKED
         else:
             state_type = (

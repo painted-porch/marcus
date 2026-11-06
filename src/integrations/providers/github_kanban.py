@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from src.core.error_framework import ErrorContext, KanbanIntegrationError
 from src.core.models import Priority, Task, TaskStatus
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
 
@@ -259,7 +260,26 @@ class GitHubKanban(KanbanInterface):
             )
 
         if label_column is not None:
-            await self.move_task_to_column(task_id, label_column)
+            moved = await self.move_task_to_column(task_id, label_column)
+            if not moved:
+                # Codex P2, round 1 on PR #839: the issue-field update
+                # above already succeeded, but the label move did not
+                # persist the status itself. Returning the old issue
+                # here would hand callers (e.g. report_blocker's
+                # lane-death path) a task whose status silently never
+                # changed, with no exception to trigger their own
+                # rollback.
+                raise KanbanIntegrationError(
+                    board_name="github",
+                    operation="update_task",
+                    context=ErrorContext(
+                        operation="update_task",
+                        custom_context={
+                            "issue_number": task_id,
+                            "column": label_column,
+                        },
+                    ),
+                )
             result = await self.mcp_caller(
                 "github.get_issue",
                 {
