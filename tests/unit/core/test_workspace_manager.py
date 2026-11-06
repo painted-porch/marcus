@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -175,6 +176,56 @@ class TestWorkspaceManager:
         # Should be forbidden now
         with pytest.raises(WorkspaceSecurityError):
             manager.validate_path(custom_forbidden)
+
+    def test_default_config_honors_marcus_config_env_var_first(self, tmp_path):
+        """MARCUS_CONFIG must win over the repo-root config_marcus.json
+        (issue #891).
+
+        _load_default_config's own candidate list checked
+        MARCUS_CONFIG LAST, after the XDG location and the repo-root
+        config_marcus.json -- the opposite priority of every other
+        config-loading path in this codebase
+        (MarcusConfig.get_config(), the legacy ConfigLoader,
+        KanbanClient._load_config). An explicit override could lose
+        to an ambient repo-root file here even when both are set.
+
+        Both the repo-root path and the MARCUS_CONFIG path "exist"
+        here, with different content, so a correct priority order is
+        the only way this test passes.
+        """
+        override_dir = tmp_path / "override"
+        override_dir.mkdir()
+        override_main = tmp_path / "override-workspace"
+        override_main.mkdir()
+        override_path = override_dir / "config_marcus.json"
+        override_path.write_text(
+            json.dumps({"project": {"workspaces": {"main": str(override_main)}}})
+        )
+
+        marcus_root = tmp_path / "marcus-root"
+        marcus_root.mkdir()
+        repo_root_main = tmp_path / "repo-root-workspace"
+        repo_root_main.mkdir()
+        (marcus_root / "config_marcus.json").write_text(
+            json.dumps({"project": {"workspaces": {"main": str(repo_root_main)}}})
+        )
+
+        manager = WorkspaceManager.__new__(WorkspaceManager)
+        manager.marcus_root = str(marcus_root)
+        manager.forbidden_paths = {manager.marcus_root}
+        manager.agent_workspaces = {}
+        manager.project_config = None
+
+        with patch(
+            "src.core.workspace.os.environ",
+            {"MARCUS_CONFIG": str(override_path)},
+        ):
+            manager._load_default_config()
+
+        assert manager.project_config is not None
+        assert manager.project_config.main_workspace == os.path.abspath(
+            str(override_main)
+        )
 
 
 if __name__ == "__main__":

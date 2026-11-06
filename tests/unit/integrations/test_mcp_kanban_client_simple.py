@@ -260,6 +260,56 @@ class TestKanbanClient:
             assert mock_env["PLANKA_AGENT_EMAIL"] == "demo@demo.demo"
             assert mock_env["PLANKA_AGENT_PASSWORD"] == "demo"
 
+    @pytest.mark.unit
+    def test_load_config_honors_marcus_config_env_var(self):
+        """MARCUS_CONFIG must win over both the cwd and repo-root
+        candidates (issue #891).
+
+        _load_config's own candidate list never checked MARCUS_CONFIG
+        at all -- every other config-loading path in this codebase
+        (MarcusConfig.get_config(), the legacy ConfigLoader) checks it
+        first. An isolated experiment or live check that sets
+        MARCUS_CONFIG expecting Marcus to honor it could not actually
+        rely on that here: this client would silently fall back to
+        whatever config_marcus.json happened to be in the cwd or the
+        repo root instead, exactly the class of bug the #883/#886
+        live check's own addendum found.
+
+        Both the cwd path and the MARCUS_CONFIG path "exist" here,
+        with different content, so a correct priority order is the
+        only way this test passes -- it isn't enough for the override
+        to merely work when nothing else is present.
+        """
+        override_config = json.dumps({"project_id": "from-marcus-config-override"})
+        cwd_config = json.dumps({"project_id": "from-cwd-should-lose"})
+
+        def selective_path_exists(self):
+            path_str = str(self)
+            if path_str == "/fake/override/config_marcus.json":
+                return True
+            if path_str == "config_marcus.json":
+                return True
+            return False
+
+        def selective_open(path, *args, **kwargs):
+            if str(path) == "/fake/override/config_marcus.json":
+                return mock_open(read_data=override_config)()
+            return mock_open(read_data=cwd_config)()
+
+        with (
+            patch(
+                "src.integrations.kanban_client.os.environ",
+                {"MARCUS_CONFIG": "/fake/override/config_marcus.json"},
+            ),
+            patch("pathlib.Path.exists", selective_path_exists),
+            patch("builtins.open", selective_open),
+            patch("sys.stderr"),
+            patch.object(KanbanClient, "_load_workspace_state", return_value=None),
+        ):
+            client = KanbanClient()
+
+        assert client.project_id == "from-marcus-config-override"
+
     @pytest.mark.asyncio
     async def test_get_available_tasks_success(
         self,

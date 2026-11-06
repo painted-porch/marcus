@@ -314,17 +314,32 @@ class KanbanClient:
         Notes
         -----
         The config file is searched in multiple locations:
-        1. Current working directory
-        2. Project root (relative to this file)
+        1. ``MARCUS_CONFIG`` environment variable, if set (highest priority)
+        2. Current working directory
+        3. Project root (relative to this file)
+
+        Issue #891: this is one of four independent config-loading
+        code paths in Marcus, and this one used to be the one that
+        never checked ``MARCUS_CONFIG`` at all -- every other path
+        (``MarcusConfig.get_config()``, the legacy ``ConfigLoader``)
+        checks it first. An isolated experiment or live check setting
+        ``MARCUS_CONFIG`` could not actually rely on a Planka-backed
+        client (this one) honoring it.
         """
         # Try multiple locations for config file
         from pathlib import Path
 
-        config_paths = [
-            Path("config_marcus.json"),  # Current directory
-            # Project root
-            Path(__file__).parent.parent.parent / "config_marcus.json",
-        ]
+        config_paths = []
+        env_override = os.environ.get("MARCUS_CONFIG")
+        if env_override:
+            config_paths.append(Path(env_override))
+        config_paths.extend(
+            [
+                Path("config_marcus.json"),  # Current directory
+                # Project root
+                Path(__file__).parent.parent.parent / "config_marcus.json",
+            ]
+        )
 
         config_path = None
         for path in config_paths:
