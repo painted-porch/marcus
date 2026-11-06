@@ -85,7 +85,7 @@ class TestCoverage:
         """Every figure declared gives complete coverage."""
         write(
             workspace,
-            "The overall score was 0.9.",
+            "The overall score was 0.9 [c1].",
             [
                 {
                     "id": "c1",
@@ -106,7 +106,7 @@ class TestCoverage:
         """A number with no claim is a failure of the report."""
         write(
             workspace,
-            "The overall score was 0.9, and cotton reached 0.44.",
+            "The overall score was 0.9 [c1], and cotton reached 0.44.",
             [
                 {
                     "id": "c1",
@@ -271,7 +271,7 @@ class TestCodexFindingStagedIntegrity:
         _stage_hashes(workspace)
         write(
             workspace,
-            "The overall score was 0.9.",
+            "The overall score was 0.9 [c1].",
             [
                 {
                     "id": "c1",
@@ -328,7 +328,7 @@ class TestCodexFindingStagedIntegrity:
         verify normally -- there is nothing to check tampering against."""
         write(
             workspace,
-            "The overall score was 0.9.",
+            "The overall score was 0.9 [c1].",
             [
                 {
                     "id": "c1",
@@ -342,3 +342,61 @@ class TestCodexFindingStagedIntegrity:
         )
         out = verify_workspace(workspace)
         assert out["verdict"] == "verified"
+
+
+class TestCodexFindingMistaggedFiguresDoNotCorruptCoverage:
+    """A mistagged figure must count against coverage, not around it.
+
+    #828's own fix added a value-mismatch-under-tag result, but it
+    was coded as VERDICT_FAILED. verify_workspace's coverage and
+    claims_required math only subtracted VERDICT_UNCOVERED results,
+    so a report with exactly this problem could still report 100%
+    coverage and a wrong claims_required count. Reclassified as
+    VERDICT_UNCOVERED (a figure with no valid claim behind it is
+    exactly what "uncovered" means), this now reads correctly with
+    no change needed in this file.
+    """
+
+    @pytest.mark.unit
+    def test_a_mistagged_figure_lowers_reported_coverage(self, workspace):
+        """R2 is 0.8 [c1], backed by a verified claim of 0.9, is not
+        100% coverage."""
+        write(
+            workspace,
+            "R2 is 0.8 [c1].",
+            [
+                {
+                    "id": "c1",
+                    "value": 0.9,
+                    "label": "overall R2",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "r2_overall",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["summary"]["coverage"] < 1.0
+        assert out["summary"]["uncovered"] == 1
+
+    @pytest.mark.unit
+    def test_a_mistagged_figure_does_not_inflate_claims_required(self, workspace):
+        """A mistagged figure must not be miscounted as a harness-required
+        claim -- claims_required must equal the genuine required count,
+        whether or not a mistag is also present in the same report."""
+        claims = [
+            {
+                "id": "c1",
+                "value": 0.9,
+                "label": "overall R2",
+                "kind": "lookup",
+                "source": "metrics.json",
+                "key": "r2_overall",
+            }
+        ]
+        write(workspace, "R2 is 0.9 [c1].", claims)
+        clean_required = verify_workspace(workspace)["summary"]["claims_required"]
+
+        write(workspace, "R2 is 0.8 [c1].", claims)
+        out = verify_workspace(workspace)
+        assert out["summary"]["claims_required"] == clean_required
