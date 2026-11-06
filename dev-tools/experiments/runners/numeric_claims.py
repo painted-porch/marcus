@@ -1684,6 +1684,58 @@ def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
 _VALID_CLAIM_UNITS = frozenset({"fraction", "percent", "count", "plain"})
 
 
+def _safe_declared_number(value: Any) -> Tuple[Optional[float], Optional[str]]:
+    """Convert a claim's own declared numeric field to a safe float.
+
+    A field decoded from JSON can be any Python type JSON allows,
+    including an integer of unbounded size -- a writer's claims file
+    with ``"value": 1`` followed by four hundred zeros parses fine,
+    because Python ints have no fixed size, and reaches this far
+    still looking like an ordinary number. Rounds 19 and 24 guarded
+    the *computed* side of a derived claim's comparison (an
+    expression's own result) against exactly this, inside the same
+    handler already wrapped around evaluating it -- but a claim's
+    own *declared* value never passes through that evaluation at
+    all, so it reached ``_within_tolerance``'s unguarded ``float()``
+    call unconverted, outside any handler, and crashed the whole
+    check with an uncaught ``OverflowError``. Converting here, once,
+    at the gate every claim passes through before anything else
+    reads its fields, means every later comparison receives an
+    already-safe float and never performs -- or fails -- this
+    conversion again.
+
+    Parameters
+    ----------
+    value : Any
+        The raw field value (a claim's own ``value``, or a declared
+        tolerance's own ``"value"``).
+
+    Returns
+    -------
+    Tuple[Optional[float], Optional[str]]
+        ``(number, problem)``. ``number`` is the converted, finite
+        float on success, with ``problem`` ``None``. On failure,
+        ``number`` is ``None`` and ``problem`` names why -- including
+        a magnitude too large for ``float``, or a non-finite result
+        (``inf``, ``nan``), which a bare ``float()`` call accepts
+        without complaint but no later comparison can meaningfully
+        use.
+    """
+    if isinstance(value, bool):
+        # bool is a subclass of int; float(True) silently succeeds
+        # as 1.0, exactly the kind of "technically converts, means
+        # nothing" case this gate exists to catch at the field, not
+        # three call sites downstream.
+        return None, f"is not numeric: {value!r}"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return None, f"is not a usable number ({exc})"
+    if not math.isfinite(number):
+        return None, f"is not a finite number: {value!r}"
+    return number, None
+
+
 def _malformed_claim_shape(
     claim: Claim, units: Optional[Dict[str, Dict[str, str]]] = None
 ) -> Optional[str]:
@@ -1722,6 +1774,19 @@ def _malformed_claim_shape(
         # Claim.from_dict defaults a missing "label" field to "",
         # which must not quietly waive this.
         return f"claim {claim.id!r} has no label"
+    # Every claim, whatever its kind, declares the value it is
+    # asserting -- converted and stored here, once, so no later
+    # comparison (_within_tolerance, the prose and slide-cell paths)
+    # ever converts, or fails to convert, it again. A bool is left
+    # untouched: a consistency claim asserting a relation ("a == b")
+    # legitimately declares ``True``, and _within_tolerance already
+    # compares a bool claim against a bool truth on its own terms,
+    # never by converting either side to float.
+    if not isinstance(claim.value, bool):
+        declared_value, value_problem = _safe_declared_number(claim.value)
+        if value_problem:
+            return f"{claim.label}: value {value_problem}"
+        claim.value = declared_value
     if claim.kind == "lookup":
         if not isinstance(claim.source, str) or not claim.source:
             return f"{claim.label}: lookup claim has no source file"
@@ -1811,9 +1876,12 @@ def _malformed_claim_shape(
         if not isinstance(claim.tolerance, dict):
             return f"{claim.label}: tolerance is not an object: {claim.tolerance!r}"
         if "value" in claim.tolerance:
-            amount = claim.tolerance["value"]
-            if not isinstance(amount, (int, float)) or isinstance(amount, bool):
-                return f"{claim.label}: tolerance value is not numeric: {amount!r}"
+            tolerance_value, tolerance_problem = _safe_declared_number(
+                claim.tolerance["value"]
+            )
+            if tolerance_problem:
+                return f"{claim.label}: tolerance value {tolerance_problem}"
+            claim.tolerance["value"] = tolerance_value
     return None
 
 

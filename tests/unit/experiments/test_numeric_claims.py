@@ -5151,3 +5151,84 @@ class TestCodexFindingSlideCellValueMustBeExactlyOneFigure:
         }
         problems = check_slide_spec(spec, accepted, {"c1": "overall R2"})
         assert problems == []
+
+
+class TestCodexFindingNumericMagnitudeIsGuardedAtTheGate:
+    """A claim's own declared ``value`` -- unlike a derived claim's
+    *computed* result, guarded by rounds 19 and 24 inside the same
+    handler already wrapped around evaluating it -- never passes
+    through anything that catches ``OverflowError``: a JSON claims
+    file with ``"value": 1`` followed by four hundred zeros parses
+    fine (Python ints have no fixed size) and reached
+    ``_within_tolerance``'s unguarded ``float()`` call, which crashed
+    the whole check instead of producing an ``unresolvable`` verdict
+    for one claim. ``_malformed_claim_shape`` now converts and stores
+    a safe float for every numeric field a claim declares -- its own
+    value and a declared tolerance's own value -- once, at the gate,
+    the same mechanical-sweep shape round 21 gave every other field
+    this function reads. "numeric magnitude" is a parametrized row
+    alongside them, so any present or future numeric field is covered
+    the same way.
+    """
+
+    BAD_MAGNITUDES = [10**400, -(10**400), 1e309, float("nan")]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_value", BAD_MAGNITUDES, ids=repr)
+    def test_an_unsafe_declared_value_is_unresolvable_not_a_crash(
+        self, sources, bad_value
+    ):
+        c = Claim(
+            id="c1",
+            value=bad_value,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_amount", BAD_MAGNITUDES, ids=repr)
+    def test_an_unsafe_tolerance_value_is_unresolvable_not_a_crash(
+        self, sources, bad_amount
+    ):
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+            tolerance={"type": "abs", "value": bad_amount},
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_an_ordinary_declared_value_still_verifies(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_a_boolean_consistency_value_is_still_left_alone(self, sources):
+        """The gate must not treat a legitimate boolean assertion
+        ("a == b") as an unsafe number -- bool is never converted,
+        never rejected, and never raises an OverflowError in the
+        first place."""
+        c = Claim(
+            id="c1",
+            value=True,
+            label="tier total equals records",
+            kind="consistency",
+            expr="a == b",
+            inputs={"a": "tiers.csv:sum:n_records", "b": "metrics.json:n_records"},
+            unit="plain",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
