@@ -149,6 +149,28 @@ class TestRequestTaskDeclineHappyPath:
         assert payload["reason"] == "wrong"
 
     @pytest.mark.asyncio
+    async def test_releases_file_locks_the_task_held(self) -> None:
+        """A decline is terminal the same way report_blocker's
+        lane-death path is, and must release #206 file locks the same
+        way (Codex P1 on PR #834) -- otherwise another task declaring
+        those files stays blocked by a holder that will never finish.
+        """
+        task = _make_task()
+        state = _make_state(task)
+        state.file_lock_registry = Mock()
+        state.file_lock_registry.release = AsyncMock(return_value=2)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        state.file_lock_registry.release.assert_awaited_once_with("verify-1")
+
+    @pytest.mark.asyncio
     async def test_survives_a_kanban_write_failure(self) -> None:
         """A board write failure must not fail the decline -- the task
         model is the source of truth, matching request_task_redo."""

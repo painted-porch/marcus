@@ -9079,6 +9079,12 @@ async def request_task_decline(
             if task_id in state.lease_manager.active_leases:
                 await state.lease_manager.release_lease(task_id, reason="declined")
 
+    # #206 file locks (Codex P1 on PR #834): a decline is terminal the
+    # same way report_blocker's lane-death path is, and must release the
+    # same way -- otherwise another task declaring these files stays
+    # blocked by a holder that will never finish.
+    await _release_task_file_locks(state, task_id, "decline")
+
     log_agent_event(
         "task_declined",
         {

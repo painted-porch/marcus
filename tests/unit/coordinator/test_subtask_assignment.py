@@ -356,6 +356,151 @@ class TestSubtaskAssignment:
         assert subtask2.id != subtask1.id
 
 
+class TestTerminalSubtasksAreNeverReoffered:
+    """A declined or blocked subtask must not be re-offered (Codex P1 on PR #834).
+
+    A decline clears the subtask's own ``assigned_to``, which is what
+    ``assigned_task_ids`` is built from -- without an explicit terminal
+    check here, a declined subtask looks exactly like a fresh TODO to
+    the next agent that asks.
+    """
+
+    @pytest.fixture
+    def subtask_manager(self, tmp_path):
+        """Create a subtask manager with test data."""
+        return SubtaskManager(state_file=tmp_path / "subtasks_test.json")
+
+    @pytest.fixture
+    def parent_task_in_progress(self):
+        """Create a parent task in IN_PROGRESS status."""
+        return Task(
+            id="parent-task-2",
+            name="Parent Task 2",
+            description="Parent task with subtasks in progress",
+            status=TaskStatus.IN_PROGRESS,
+            priority=Priority.HIGH,
+            assigned_to="agent-1",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            due_date=None,
+            estimated_hours=8.0,
+            labels=["backend", "api"],
+        )
+
+    def test_a_declined_subtask_is_never_reoffered(
+        self, subtask_manager, parent_task_in_progress
+    ):
+        project_tasks = [parent_task_in_progress]
+        subtasks_data = [
+            {
+                "name": "Subtask 1",
+                "description": "First subtask",
+                "estimated_hours": 2.0,
+                "dependencies": [],
+            },
+        ]
+        created = subtask_manager.add_subtasks(
+            parent_task_in_progress.id, subtasks_data, project_tasks
+        )
+        subtask = next(t for t in project_tasks if t.id == created[0].id)
+        subtask.status = TaskStatus.DECLINED
+        subtask.assigned_to = None
+
+        offered = find_next_available_subtask(
+            agent_id="agent-2",
+            project_tasks=project_tasks,
+            subtask_manager=subtask_manager,
+            assigned_task_ids=set(),
+        )
+
+        assert offered is None
+
+    def test_a_blocked_subtask_is_never_reoffered(
+        self, subtask_manager, parent_task_in_progress
+    ):
+        project_tasks = [parent_task_in_progress]
+        subtasks_data = [
+            {
+                "name": "Subtask 1",
+                "description": "First subtask",
+                "estimated_hours": 2.0,
+                "dependencies": [],
+            },
+        ]
+        created = subtask_manager.add_subtasks(
+            parent_task_in_progress.id, subtasks_data, project_tasks
+        )
+        subtask = next(t for t in project_tasks if t.id == created[0].id)
+        subtask.status = TaskStatus.BLOCKED
+        subtask.assigned_to = None
+
+        offered = find_next_available_subtask(
+            agent_id="agent-2",
+            project_tasks=project_tasks,
+            subtask_manager=subtask_manager,
+            assigned_task_ids=set(),
+        )
+
+        assert offered is None
+
+    def test_a_done_subtask_is_still_never_reoffered(
+        self, subtask_manager, parent_task_in_progress
+    ):
+        """Pre-existing behavior, confirmed unchanged by this fix."""
+        project_tasks = [parent_task_in_progress]
+        subtasks_data = [
+            {
+                "name": "Subtask 1",
+                "description": "First subtask",
+                "estimated_hours": 2.0,
+                "dependencies": [],
+            },
+        ]
+        created = subtask_manager.add_subtasks(
+            parent_task_in_progress.id, subtasks_data, project_tasks
+        )
+        subtask = next(t for t in project_tasks if t.id == created[0].id)
+        subtask.status = TaskStatus.DONE
+        subtask.assigned_to = None
+
+        offered = find_next_available_subtask(
+            agent_id="agent-2",
+            project_tasks=project_tasks,
+            subtask_manager=subtask_manager,
+            assigned_task_ids=set(),
+        )
+
+        assert offered is None
+
+    def test_a_todo_subtask_is_still_offered(
+        self, subtask_manager, parent_task_in_progress
+    ):
+        """Confirms the terminal check is specific to DONE/BLOCKED/
+        DECLINED, not a blanket refusal."""
+        project_tasks = [parent_task_in_progress]
+        subtasks_data = [
+            {
+                "name": "Subtask 1",
+                "description": "First subtask",
+                "estimated_hours": 2.0,
+                "dependencies": [],
+            },
+        ]
+        subtask_manager.add_subtasks(
+            parent_task_in_progress.id, subtasks_data, project_tasks
+        )
+
+        offered = find_next_available_subtask(
+            agent_id="agent-2",
+            project_tasks=project_tasks,
+            subtask_manager=subtask_manager,
+            assigned_task_ids=set(),
+        )
+
+        assert offered is not None
+        assert offered.name == "Subtask 1"
+
+
 class TestDependencyChecking:
     """Test suite for GH-64: dependency checking in subtask assignment."""
 
