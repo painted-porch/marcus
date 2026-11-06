@@ -201,6 +201,7 @@ class TestPhaseGateSharesTheSettledRule:
         assert phase_satisfied_by(integration) == {
             TaskStatus.DONE,
             TaskStatus.BLOCKED,
+            TaskStatus.DECLINED,
         }
 
     def test_ordinary_tasks_still_require_done(self) -> None:

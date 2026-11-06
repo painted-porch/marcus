@@ -778,3 +778,84 @@ class TestAlreadyDoneCompletionGuard:
         # proceeds into the pipeline instead of being refused.
         assert result.get("status") != "task_already_complete"
         state.kanban_client.update_task.assert_called()
+
+
+class TestDeclinedCompletionGuard:
+    """Codex P2, round 5 on PR #834.
+
+    A completion report that arrives after a successful
+    ``request_task_decline`` must not overwrite DECLINED with DONE.
+    The uncontested-task fallback above accepts a report when no
+    lease or assignment remains (exactly decline's own cleanup), and
+    the original terminal-status guard only recognized DONE -- so
+    DECLINED was not actually terminal against a late completion
+    report, the exact property K5 exists to guarantee.
+    """
+
+    def _declined_task(self, task_id: str, is_subtask: bool = False) -> Task:
+        now = datetime.now(timezone.utc)
+        return Task(
+            id=task_id,
+            name="Declined",
+            description="",
+            status=TaskStatus.DECLINED,
+            priority=Priority.MEDIUM,
+            assigned_to=None,
+            created_at=now,
+            updated_at=now,
+            due_date=None,
+            estimated_hours=1.0,
+            dependencies=[],
+            task_type="verify",
+            is_subtask=is_subtask,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejects_completion_when_task_declined(self) -> None:
+        """A late completion report for a declined task must be
+        refused before the validation gate, not accepted via the
+        uncontested-task fallback (decline's own cleanup leaves no
+        lease and no assignment, which is exactly what that fallback
+        looks for)."""
+        state = _make_state_with_assignment("agent-001", task_id="verify-1")
+        state.kanban_client.get_all_tasks = AsyncMock(
+            return_value=[self._declined_task("verify-1")]
+        )
+
+        result = await report_task_progress(
+            agent_id="agent-001",
+            task_id="verify-1",
+            status="completed",
+            progress=100,
+            message="finished",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "task_declined"
+        assert "verify-1" in result["message"]
+        state.kanban_client.update_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_declined_subtask_is_also_refused(self) -> None:
+        """Unlike the DONE guard, DECLINED is never set provisionally
+        by this completion path -- only request_task_decline sets it --
+        so there is no legitimate retry to protect. Subtasks are not
+        exempt."""
+        subtask = self._declined_task("sub-1", is_subtask=True)
+        state = _make_state_with_assignment("agent-001", task_id="sub-1")
+        state.project_tasks = [subtask]
+        state.kanban_client.get_all_tasks = AsyncMock(return_value=[])
+
+        result = await report_task_progress(
+            agent_id="agent-001",
+            task_id="sub-1",
+            status="completed",
+            progress=100,
+            message="finished",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "task_declined"
+        state.kanban_client.update_task.assert_not_called()

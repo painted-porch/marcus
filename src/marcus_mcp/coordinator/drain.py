@@ -234,6 +234,16 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
             else:
                 blocked += 1
             continue
+        if task.status == TaskStatus.DECLINED:
+            # ADR-0013 K5: terminal, like BLOCKED, but never a merge
+            # conflict a worker is mid-resolving -- a verifier declined
+            # it; nobody is coming back to it the way a lease holder
+            # might return to a conflict. Counted as blocked, never
+            # in-flight, so the drain verdict agrees with
+            # deps_allow_claim's own strict gate that this can never
+            # become claimable again.
+            blocked += 1
+            continue
         # A decomposed parent is a container: the selector moves it to
         # IN_PROGRESS when its first child is claimed and completes it when
         # the last child is done, so its own status says nothing about live
@@ -251,7 +261,7 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
             in_flight += 1
             continue
         # Only TODO remains: TaskStatus is exactly TODO, IN_PROGRESS, DONE,
-        # BLOCKED, and the first three are handled above.
+        # BLOCKED and DECLINED, and the other four are handled above.
         if task.is_subtask and task.parent_task_id and subtask_path:
             # The subtask selector's rules: parent not DONE, the parent's and
             # the subtask's HARD dependencies done, soft ones skipped. No

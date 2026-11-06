@@ -284,12 +284,23 @@ class GitHubKanban(KanbanInterface):
                     "state": "closed",
                 },
             )
+            return True
         elif column_lower in ["in progress", "in-progress"]:
             return await self._replace_status_label(task_id, "in-progress")
         elif column_lower == "blocked":
             return await self._replace_status_label(task_id, "blocked")
 
-        return True
+        # Codex P1 (round 4 on PR #834): a column this provider has no
+        # mapping for (e.g. "declined" -- tracked separately in #835)
+        # must not silently report success. The caller trusts this
+        # return value to decide whether the status actually persisted.
+        logger.warning(
+            "[GithubKanban] move_task_to_column: no mapping for column "
+            "'%s' on issue %s; status was not persisted",
+            column_name,
+            task_id,
+        )
+        return False
 
     # Labels that encode the board column. Anything else on the issue
     # (priority/*, domain/*, user-managed labels) is not ours to touch.

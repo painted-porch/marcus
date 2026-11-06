@@ -2140,8 +2140,11 @@ class AssignmentLeaseManager:
         or has spent its budget, so there is no further cadence to
         consult. The one remaining guard is defense in depth (Simon
         decision 011b3fad): never recover a task the board already shows
-        as terminal (DONE/BLOCKED); the lease is stale bookkeeping and
-        recovering it would hand finished work to a fresh agent.
+        as terminal (DONE/BLOCKED/DECLINED); the lease is stale
+        bookkeeping and recovering it would hand finished -- or
+        declined -- work to a fresh agent (DECLINED added: Codex
+        round-6 sweep on PR #834, the same gap as scheduler.py's
+        _SETTLED_STATUSES).
 
         Parameters
         ----------
@@ -2161,7 +2164,7 @@ class AssignmentLeaseManager:
                     status_str = (
                         getattr(status_value, "value", None) or str(status_value)
                     ).lower()
-                    if status_str in {"done", "completed", "blocked"}:
+                    if status_str in {"done", "completed", "blocked", "declined"}:
                         self.recoveries_skipped_terminal_status += 1
                         logger.warning(
                             f"Task {lease.task_id} is terminal "

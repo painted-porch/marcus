@@ -19,6 +19,7 @@ from .task import (
     report_blocker,
     report_task_progress,
     request_next_task,
+    request_task_decline,
     request_task_redo,
 )
 
@@ -32,6 +33,7 @@ __all__ = [
     "report_task_progress",
     "report_blocker",
     "request_task_redo",
+    "request_task_decline",
     # Artifact tools
     "log_artifact",
     # Context tools

@@ -913,6 +913,12 @@ class KanbanClient:
             status = TaskStatus.DONE
         elif "PROGRESS" in list_name:
             status = TaskStatus.IN_PROGRESS
+        elif "DECLINED" in list_name:
+            # ADR-0013 K5 / Codex P2 on PR #834: read-back symmetry with
+            # the write side (Planka.move_task_to_column's "declined"
+            # column). Only a board with such a list ever hits this --
+            # one without it keeps reading TODO, same as today.
+            status = TaskStatus.DECLINED
         elif "BLOCKED" in list_name or "ON HOLD" in list_name:
             status = TaskStatus.BLOCKED
         else:

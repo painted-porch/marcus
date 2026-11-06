@@ -159,8 +159,14 @@ def find_next_available_subtask(
         if subtask.id in assigned_task_ids:
             continue
 
-        # Skip if already complete
-        if subtask.status == TaskStatus.DONE:
+        # Skip terminal subtasks. DECLINED (ADR-0013 K5, Codex P1 on PR
+        # #834) must join DONE here: a decline clears the subtask's own
+        # assignment, so assigned_task_ids no longer excludes it, and
+        # without this check it would be re-offered to the next agent
+        # exactly like a fresh TODO. BLOCKED joins them for the same
+        # reason -- a terminal subtask is never re-offered, regardless
+        # of which terminal status it reached.
+        if subtask.status in (TaskStatus.DONE, TaskStatus.BLOCKED, TaskStatus.DECLINED):
             continue
 
         # Find parent task

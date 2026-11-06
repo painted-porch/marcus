@@ -4,11 +4,14 @@ Linear implementation of KanbanInterface.
 Uses Linear MCP Server to manage tasks and projects
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from src.core.models import Priority, Task, TaskStatus
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
+
+logger = logging.getLogger(__name__)
 
 
 class LinearKanban(KanbanInterface):
@@ -266,7 +269,21 @@ class LinearKanban(KanbanInterface):
             "blocked": "Blocked",
         }
 
-        status_name = state_map.get(column_name.lower(), column_name)
+        status_name = state_map.get(column_name.lower())
+        if status_name is None:
+            # Codex P1 (round 4 on PR #834): a column this provider has
+            # no mapping for (e.g. "declined" -- tracked separately in
+            # #835) must not silently report success by sending Linear
+            # a status name it will not recognize either. The caller
+            # trusts this return value to decide whether the status
+            # actually persisted.
+            logger.warning(
+                "[LinearKanban] move_task_to_column: no mapping for "
+                "column '%s' on issue %s; status was not persisted",
+                column_name,
+                task_id,
+            )
+            return False
 
         # Update issue with new status
         result = await self.mcp_caller(

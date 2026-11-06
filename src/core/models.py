@@ -25,12 +25,19 @@ class TaskStatus(Enum):
         Task is completed
     BLOCKED : str
         Task cannot proceed due to dependencies or issues
+    DECLINED : str
+        A verification task's holder has concluded the claim it checks
+        cannot be verified. Terminal, distinct from DONE (the check did
+        not pass), from a worker-reported BLOCKED (no worker is stuck;
+        the check concluded), and from the implicit "try again" of a
+        requeued blocker (ADR-0013 K5, Accepted 2026-11-05).
     """
 
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     DONE = "done"
     BLOCKED = "blocked"
+    DECLINED = "declined"
 
 
 class DefectType(Enum):

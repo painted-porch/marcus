@@ -7511,6 +7511,37 @@ async def _record_progress(
                     ),
                 }
 
+            # Guard: a DECLINED task is terminal (ADR-0013 K5) against a
+            # late or retried completion report the same way a DONE task
+            # already is above -- otherwise request_task_decline's
+            # guarantee that nothing ever reopens a declined task is
+            # false precisely when it matters most: a completion report
+            # for the agent's prior work in flight when the decline
+            # landed. Unlike the DONE guard, subtasks are NOT excluded:
+            # DECLINED is only ever set by request_task_decline itself,
+            # never provisionally by this completion path, so there is
+            # no legitimate retry to protect (Codex P2, round 5 on PR
+            # #834).
+            if task is not None and task.status in {
+                TaskStatus.DECLINED,
+                "declined",
+            }:
+                logger.warning(
+                    f"report_task_progress(completed) rejected: agent "
+                    f"{agent_id} reported completion on task {task_id} "
+                    "which was DECLINED. DECLINED is terminal; a "
+                    "completion report never reopens it."
+                )
+                return {
+                    "success": False,
+                    "status": "task_declined",
+                    "message": (
+                        f"Task {task_id} was declined -- terminal, and "
+                        "not reopened by a completion report. Request "
+                        "your next task."
+                    ),
+                }
+
             # In-flight guard (transport-retry dedupe). The MCP transport
             # can re-send this slow completed call after a reconnect, so a
             # second report for the same task can reach the gate while the
@@ -8146,9 +8177,28 @@ async def _record_progress(
         elif status == "blocked":
             # Guard 1: DONE tasks are immutable — cannot revert to BLOCKED.
             # Mirrors the check in report_blocker (same bug vector).
+            # DECLINED joins it (Codex P2, round 5 on PR #834 flagged the
+            # sibling gap in the "completed" branch above; swept here and
+            # in report_blocker's own Guard 1 too): a late or retried
+            # "blocked" report must not revert a terminal decline either.
             _current = await state.kanban_client.get_task_by_id(task_id)
             if _current is not None:
                 _cur_status = _current.status
+                if _cur_status in {TaskStatus.DECLINED, "declined"}:
+                    logger.warning(
+                        f"report_task_progress(blocked) rejected: agent "
+                        f"{agent_id} tried to block task {task_id} which "
+                        f"was DECLINED. DECLINED is terminal."
+                    )
+                    return {
+                        "success": False,
+                        "status": "task_declined",
+                        "message": (
+                            f"Task {task_id} was declined — terminal, and "
+                            "not reopened by a blocker report. Request "
+                            "your next task."
+                        ),
+                    }
                 if _cur_status in {TaskStatus.DONE, "done", "completed"}:
                     logger.warning(
                         f"report_task_progress(blocked) rejected: agent "
@@ -8926,6 +8976,235 @@ async def request_task_redo(
     }
 
 
+async def request_task_decline(
+    agent_id: str,
+    task_id: str,
+    reason: str,
+    state: Any,
+) -> Dict[str, Any]:
+    """
+    Mark a task DECLINED: this could not be verified, terminally.
+
+    ADR-0013 K5 (Accepted 2026-11-05): a verifier that concludes a
+    claim cannot be verified needs a way to say so that is distinct
+    from DONE (the check did not pass), from a worker-reported BLOCKED
+    (no worker is stuck; the check concluded), and from the implicit
+    "try again" of ``report_blocker``'s repair-rung requeue, which
+    sends the task back for another attempt on a budget separate from
+    any redo bound — silently defeating it for exactly this case.
+
+    DECLINED is terminal on the board (``deps_allow_claim``'s strict
+    gate for ordinary tasks only ever accepts DONE, so a declined
+    upstream's dependents stay unclaimable forever) and settled for an
+    integration task's best-effort claim, the same way BLOCKED already
+    is (``SETTLED_FOR_BEST_EFFORT``, ``src/core/task_claimability.py``).
+
+    Parameters
+    ----------
+    agent_id : str
+        The declining agent's ID. Must currently hold the task's
+        active lease — the same requirement ``report_blocker``'s
+        Guard 2 places on who may act on a task, so a lease-expired
+        agent cannot decline work the recovery holder has since taken.
+    task_id : str
+        ID of the task to decline.
+    reason : str
+        Non-empty: why this could not be verified.
+    state : Any
+        Marcus server state instance.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``{"success": True, "task_id", "status": "declined"}`` on
+        success; ``{"success": False, "error": ...}`` with error codes
+        ``reason_required`` / ``task_not_found`` / ``not_task_holder``
+        otherwise.
+    """
+    if not reason or not reason.strip():
+        return {
+            "success": False,
+            "error": "reason_required",
+            "message": (
+                "A non-empty reason is required — the record needs a "
+                "diagnostic for why this could not be verified."
+            ),
+        }
+
+    task = next(
+        (t for t in (getattr(state, "project_tasks", None) or []) if t.id == task_id),
+        None,
+    )
+    if task is None:
+        return {
+            "success": False,
+            "error": "task_not_found",
+            "message": f"Task {task_id} not found in the current project.",
+        }
+
+    # Guard: a decline requires positive ownership of a claimable-held
+    # task (ADR-0013 K12's "no one acts on work they don't hold",
+    # applied to decline -- Codex P1 on PR #834). Only IN_PROGRESS is
+    # claimable-held: an unclaimed TODO has no holder to decline it,
+    # and a DONE/BLOCKED/already-DECLINED task is settled and must not
+    # be overwritten. A lease-manager miss is never a pass-through --
+    # it means no one currently holds this task, not "check assigned_to
+    # instead".
+    if task.status != TaskStatus.IN_PROGRESS:
+        return {
+            "success": False,
+            "error": "task_not_held",
+            "message": (
+                f"Task {task_id} is {task.status.value}, not in progress "
+                "— only a task currently being worked on can be declined."
+            ),
+        }
+
+    if hasattr(state, "lease_manager") and state.lease_manager:
+        active_lease = state.lease_manager.active_leases.get(task_id)
+        if active_lease is None or active_lease.agent_id != agent_id:
+            holder = active_lease.agent_id if active_lease is not None else "no one"
+            return {
+                "success": False,
+                "error": "not_task_holder",
+                "message": (
+                    f"Task {task_id} is held by {holder}, not {agent_id}. "
+                    "Request your next task to continue contributing."
+                ),
+            }
+    elif not task.assigned_to or task.assigned_to != agent_id:
+        return {
+            "success": False,
+            "error": "not_task_holder",
+            "message": (
+                f"Task {task_id} is assigned to "
+                f"{task.assigned_to or 'no one'}, not {agent_id}."
+            ),
+        }
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Task model is the source of truth (mirrors request_task_redo
+    # and lease-expiry recovery).
+    task.status = TaskStatus.DECLINED
+    task.assigned_to = None
+    task.updated_at = now
+
+    # 2. Board dual-write, best-effort: the model update above is what
+    # deps_allow_claim and compute_board_drain read; a kanban miss must
+    # not strand the declining agent. ``_board_persisted`` tracks whether
+    # this agent's own board write can actually be trusted, surfaced in
+    # the reply below (Codex P1, round 4 on PR #834) -- a provider that
+    # cannot represent DECLINED (GitHub, Linear; tracked in #835) must
+    # say so rather than let the caller believe the board agrees with
+    # the in-memory model when it does not.
+    _board_persisted = True
+    try:
+        await state.kanban_client.update_task(
+            task_id,
+            {"status": TaskStatus.DECLINED, "assigned_to": None},
+        )
+    except Exception as e:
+        _board_persisted = False
+        logger.warning(
+            "request_task_decline: kanban update failed for %s: %s", task_id, e
+        )
+    try:
+        await state.kanban_client.add_comment(
+            task_id,
+            f"\N{CROSS MARK} DECLINED by {agent_id}: could not be "
+            f"verified.\n\nReason: {reason}",
+        )
+    except Exception as e:
+        logger.warning(
+            "request_task_decline: kanban comment failed for %s: %s", task_id, e
+        )
+    # Some providers (GitHub, Linear) do not persist a status through
+    # update_task at all -- the same gap report_blocker's lane-death
+    # path already works around with an explicit move, best-effort. A
+    # provider with no mapping for "declined" returns False rather than
+    # silently claiming success (fixed alongside this in
+    # github_kanban.py / linear_kanban.py).
+    if hasattr(state.kanban_client, "move_task_to_column"):
+        try:
+            moved = await state.kanban_client.move_task_to_column(task_id, "declined")
+            if not moved:
+                _board_persisted = False
+        except Exception as move_err:  # noqa: BLE001 - best effort
+            _board_persisted = False
+            logger.warning(
+                "request_task_decline: move_task_to_column('declined') "
+                "failed for %s: %s",
+                task_id,
+                move_err,
+            )
+
+    # 2b. Subtask record (Codex P1, round 3 on PR #834): the board write
+    # above cannot substitute for this. SubtaskManager's store is what
+    # actually persists subtask state -- a migrated subtask may have no
+    # kanban row at all -- and is what request_next_task's own subtask
+    # path reads back. Mirrors report_blocker's lane-death path exactly
+    # (``isinstance(..., dict)`` guard, not just ``hasattr``, since a
+    # bare Mock state would otherwise always look like it has one).
+    _subtasks = getattr(getattr(state, "subtask_manager", None), "subtasks", None)
+    if isinstance(_subtasks, dict) and task_id in _subtasks:
+        state.subtask_manager.update_subtask_status(
+            task_id, TaskStatus.DECLINED, state.project_tasks
+        )
+
+    # 3. Release coordination state -- a declined task is terminal for
+    # the current agent, the same decoupling report_blocker's BLOCKED
+    # path and request_task_redo's TODO path both already apply
+    # (status changes must release coordination state independently of
+    # anything else, Simon decision 011b3fad).
+    if hasattr(state, "agent_status") and agent_id in state.agent_status:
+        agent = state.agent_status[agent_id]
+        agent.current_tasks = []
+        if hasattr(state, "agent_tasks") and agent_id in state.agent_tasks:
+            del state.agent_tasks[agent_id]
+        if hasattr(state, "assignment_persistence"):
+            await state.assignment_persistence.remove_assignment(agent_id)
+        if hasattr(state, "lease_manager") and state.lease_manager:
+            if task_id in state.lease_manager.active_leases:
+                await state.lease_manager.release_lease(task_id, reason="declined")
+
+    # #206 file locks (Codex P1 on PR #834): a decline is terminal the
+    # same way report_blocker's lane-death path is, and must release the
+    # same way -- otherwise another task declaring these files stays
+    # blocked by a holder that will never finish.
+    await _release_task_file_locks(state, task_id, "decline")
+
+    log_agent_event(
+        "task_declined",
+        {
+            "task_id": task_id,
+            "declined_by": agent_id,
+            "reason": reason,
+        },
+    )
+
+    _provider = getattr(getattr(state.kanban_client, "provider", None), "value", None)
+    result: Dict[str, Any] = {
+        "success": True,
+        "task_id": task_id,
+        "status": "declined",
+        "persisted": _board_persisted,
+        "message": (
+            f"Task {task_id} is marked DECLINED — terminal, not "
+            "claimable again. Request your next task to continue "
+            "contributing."
+        ),
+    }
+    if not _board_persisted:
+        result["provider"] = _provider
+        result["message"] += (
+            f" (the {_provider or 'board'} provider could not represent "
+            "this status -- it is recorded in Marcus's own state but "
+            "not visible there)"
+        )
+    return result
+
+
 async def report_blocker(
     agent_id: str,
     task_id: str,
@@ -8979,9 +9258,27 @@ async def report_blocker(
         # Guard 1: DONE tasks are immutable — stale agents cannot revert them.
         # This fixes the snake_game-v10 bug where a lease-expired agent called
         # report_blocker after the new holder already completed the task.
+        # DECLINED joins it (Codex P2, round 5 on PR #834, swept to every
+        # sibling guard of this shape): a stale report_blocker call must
+        # not revert a terminal decline either.
         current_task = await state.kanban_client.get_task_by_id(task_id)
         if current_task is not None:
             task_status_val = current_task.status
+            if task_status_val in {TaskStatus.DECLINED, "declined"}:
+                logger.warning(
+                    f"report_blocker rejected: agent {agent_id} tried to "
+                    f"block task {task_id} which was DECLINED. DECLINED is "
+                    "terminal."
+                )
+                return {
+                    "success": False,
+                    "status": "task_declined",
+                    "message": (
+                        f"Task {task_id} was declined — terminal, and not "
+                        "reopened by a blocker report. Request your next "
+                        "task."
+                    ),
+                }
             if task_status_val in {TaskStatus.DONE, "done", "completed"}:
                 logger.warning(
                     f"report_blocker rejected: agent {agent_id} tried to block "
