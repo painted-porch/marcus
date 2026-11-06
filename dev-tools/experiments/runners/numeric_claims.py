@@ -620,6 +620,122 @@ def _words_in(text: str) -> Set[str]:
     return set(re.findall(r"[a-z0-9/]+", (text or "").lower()))
 
 
+#: Sentence-ending punctuation followed by whitespace, or end of
+#: text. Splitting on this is a heuristic, not a parser: it is good
+#: enough to isolate "Cotton's R2 is 0.886 [c1]." as its own unit
+#: without pulling in the sentence before or after it, which is all
+#: this check needs.
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s+|$)")
+
+
+def _sentence_at(text: str, position: int) -> str:
+    """Return the sentence enclosing a character position in text.
+
+    Parameters
+    ----------
+    text : str
+        The text to search.
+    position : int
+        A character offset into ``text``.
+
+    Returns
+    -------
+    str
+        The sentence containing ``position`` -- from the end of the
+        previous sentence-ending punctuation (or the start of the
+        text) to the next one (or the end of the text).
+    """
+    start = 0
+    for m in _SENTENCE_BOUNDARY_RE.finditer(text):
+        if m.end() > position:
+            break
+        start = m.end()
+    end = len(text)
+    tail_match = _SENTENCE_BOUNDARY_RE.search(text, position)
+    if tail_match:
+        end = tail_match.end()
+    return text[start:end]
+
+
+def _prose_label_contradiction(
+    claim: Claim, sentence: str, sources: Dict[str, Any]
+) -> Optional[str]:
+    """Report a sentence that contradicts the row a tagged claim reads.
+
+    :func:`label_contradiction` catches a claim whose own ``label``
+    names the wrong row. Neither it nor the derived-claim equivalent
+    catches a report sentence that names the wrong row while tagging
+    a claim whose own label is perfectly correct: "Cotton's R2 is
+    0.886 [c1]." where ``c1`` correctly reads and labels maize's own
+    0.886. The claim is right; the sentence lies, and nothing before
+    this checked the sentence's own words at all.
+
+    Generalizes the same sibling-row rule :func:`label_contradiction`
+    and the derived-claim version use, applied to the sentence
+    surrounding a tagged figure instead of the claim's own label, and
+    covering both a lookup claim's single row and a derived or
+    consistency claim's inputs.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim a figure in ``sentence`` is tagged with.
+    sentence : str
+        The sentence enclosing the tagged figure (see
+        :func:`_sentence_at`).
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the contradiction, or ``None``.
+    """
+    addresses: List[str] = []
+    if (
+        claim.kind == "lookup"
+        and isinstance(claim.source, str)
+        and isinstance(claim.key, str)
+    ):
+        addresses.append(f"{claim.source}:{claim.key}")
+    elif claim.kind in ("derived", "consistency") and isinstance(claim.inputs, dict):
+        addresses.extend(v for v in claim.inputs.values() if isinstance(v, str))
+
+    owned_by_column: Dict[Tuple[str, str], Set[str]] = {}
+    for address in addresses:
+        parts = address.split(":")
+        if len(parts) < 2 or "=" not in parts[1]:
+            continue
+        source_file = parts[0]
+        sel_col, sel_val = parts[1].split("=", 1)
+        owned_by_column.setdefault((source_file, sel_col), set()).add(sel_val)
+
+    sentence_words = _words_in(sentence)
+    for (source_file, sel_col), owned in owned_by_column.items():
+        rows = sources.get(source_file)
+        if not isinstance(rows, list) or not rows:
+            continue
+        # Naming every row the claim actually reads earns the
+        # sentence the right to mention others, the same allowance
+        # label_contradiction and its derived-claim equivalent give a
+        # label -- naming only some of them is not covered by it.
+        names_every_owned_row = all(v.lower() in sentence_words for v in owned)
+        if names_every_owned_row:
+            continue
+        siblings = {
+            str(row.get(sel_col, "")).strip()
+            for row in rows
+            if str(row.get(sel_col, "")).strip() not in owned
+        }
+        for other in siblings:
+            if other and other.lower() in sentence_words:
+                return (
+                    f"sentence says {other!r} but the tagged claim reads "
+                    f"{sel_col}={sorted(owned)!r}"
+                )
+    return None
+
+
 def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     """Report a label that contradicts the row the claim reads.
 
@@ -1054,7 +1170,7 @@ def _check_one(
     )
 
 
-def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
+def _tag_figures(text: str) -> List[Tuple[str, Optional[str], int]]:
     """Pair each figure in report prose with the claim id tagged after it.
 
     A number is bound to the next ``[cN]`` tag that appears before any
@@ -1069,9 +1185,13 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
 
     Returns
     -------
-    List[Tuple[str, Optional[str]]]
-        ``(figure, claim_id)`` pairs in order of appearance;
+    List[Tuple[str, Optional[str], int]]
+        ``(figure, claim_id, position)`` in order of appearance;
         ``claim_id`` is ``None`` when the figure carries no tag.
+        ``position`` is the figure's own character offset in
+        ``_normalize_numeric_text(text)`` -- every substitution that
+        function makes preserves character length, so the offset is
+        valid against the caller's own ``text`` too.
     """
     cleaned = _normalize_numeric_text(text or "")
     cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
@@ -1093,19 +1213,21 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
         tokens.append((m.start(), "ref", m.group(1)))
     tokens.sort(key=lambda t: t[0])
 
-    pairs: List[Tuple[str, Optional[str]]] = []
+    pairs: List[Tuple[str, Optional[str], int]] = []
     pending_value: Optional[str] = None
-    for _, kind, val in tokens:
+    pending_position = 0
+    for position, kind, val in tokens:
         if kind == "num":
             if pending_value is not None:
-                pairs.append((pending_value, None))
+                pairs.append((pending_value, None, pending_position))
             pending_value = val
+            pending_position = position
         elif pending_value is not None:
-            pairs.append((pending_value, val))
+            pairs.append((pending_value, val, pending_position))
             pending_value = None
         # else: a tag with no preceding unbound number -- ignore it.
     if pending_value is not None:
-        pairs.append((pending_value, None))
+        pairs.append((pending_value, None, pending_position))
     return pairs
 
 
@@ -1455,7 +1577,8 @@ def check_claims(
     coverage_lookup = {
         c.id: c for c in (coverage_claims if coverage_claims is not None else claims)
     }
-    for figure, ref_id in _tag_figures(report_text):
+    normalized_text = _normalize_numeric_text(report_text)
+    for figure, ref_id, position in _tag_figures(report_text):
         if ref_id is None:
             results.append(
                 CheckResult(
@@ -1504,6 +1627,26 @@ def check_claims(
                             f"figure {figure} is tagged [{ref_id}], but that "
                             f"claim's value is {claim.value}"
                         )
+                    ),
+                )
+            )
+            continue
+        # The tag and value both check out, but the sentence stating
+        # the figure is the writer's own prose, and nothing above
+        # reads it: #827 step 2 -- a right number under a correct
+        # claim can still sit in a sentence that names the wrong row.
+        sentence = _sentence_at(normalized_text, position)
+        contradiction = _prose_label_contradiction(claim, sentence, sources)
+        if contradiction:
+            results.append(
+                CheckResult(
+                    claim_id=f"uncovered:{figure}",
+                    verdict=VERDICT_UNCOVERED,
+                    value=figure,
+                    expected=claim.value,
+                    detail=(
+                        f"figure {figure} is tagged [{ref_id}], but its own "
+                        f"sentence contradicts that claim: {contradiction}"
                     ),
                 )
             )

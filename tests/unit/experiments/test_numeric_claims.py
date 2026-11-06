@@ -2599,6 +2599,106 @@ class TestCodexFindingSlideTitleBindsToASpecificClaimsProvenance:
         assert problems == []
 
 
+class TestIssue827Step2ProseLabelCheck:
+    """A right number under a correct claim can still sit in a lying
+    sentence -- #827's second half.
+
+    Step 1 (mandatory [cN] tags, binding coverage to the specific
+    claim tagged rather than any claim sharing the value) closed the
+    half where a figure states the wrong number. This closes the
+    other half: a figure that states the *right* number, under a
+    claim whose own label is *also* correct, but inside a sentence
+    that names a different row. "Cotton's R2 is 0.886 [c1]." where
+    c1 correctly reads and labels maize's own 0.886 -- the claim is
+    right, the sentence lies, and nothing before this read the
+    sentence's own words at all.
+    """
+
+    @pytest.mark.unit
+    def test_the_original_827_worked_example_is_caught(self, sources):
+        """The exact example from the issue."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        res = check_claims([c], sources, report_text="Cotton's R2 is 0.886 [c1].")
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+        assert "0.886" in bad[0].claim_id or bad[0].value == "0.886"
+
+    @pytest.mark.unit
+    def test_a_correctly_worded_sentence_still_passes(self, sources):
+        """The fix must not disturb the ordinary, correctly worded case."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        res = check_claims([c], sources, report_text="Maize's R2 is 0.886 [c1].")
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_sentence_mentioning_a_sibling_as_context_still_passes(self, sources):
+        """Naming the claim's own row earns the sentence the right to
+        mention a sibling too, the same allowance a label already
+        has -- a sentence is not punished for ordinary comparison."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        res = check_claims(
+            [c],
+            sources,
+            report_text="Maize's R2 of 0.886 [c1] far outperforms cotton's.",
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_the_check_applies_to_derived_claims_too(self, sources):
+        """A single-input derived claim gets the same sentence check
+        a lookup does, the same way label_contradiction's own
+        derived-claim generalization works."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="derived",
+            expr="a",
+            inputs={"a": "per_crop.csv:crop=maize:r2"},
+        )
+        res = check_claims([c], sources, report_text="Cotton's R2 is 0.886 [c1].")
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_only_the_sentence_with_the_tagged_figure_is_checked(self, sources):
+        """A sibling word in a different sentence must not contaminate
+        this one -- the check is scoped to one sentence, not the
+        whole report."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Cotton did poorly overall. Maize's R2 is 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+
 class TestCodexFindingPercentScaleInProseIsRespected:
     """The slide-cell percent fix did not reach the prose path.
 
