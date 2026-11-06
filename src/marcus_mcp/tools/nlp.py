@@ -1861,11 +1861,11 @@ async def create_tasks(
     # for.
     existing_tasks: List[Any] = []
     if isinstance(options.get("tasks"), list):
+        from src.core.project_registry import task_belongs_to_project
+
         all_board_tasks = await kanban_client.get_all_tasks()
         existing_tasks = [
-            t
-            for t in all_board_tasks
-            if getattr(t, "project_id", None) == current_project.id
+            t for t in all_board_tasks if task_belongs_to_project(t, current_project)
         ]
     _tasks_rejection = _validate_tasks_option(
         options, project_name or "active project", existing_tasks=existing_tasks

@@ -154,3 +154,57 @@ class TestCreateTasksSeeded:
         # Resolved to the SAME project's task, never the other
         # project's same-named one.
         assert torches.dependencies == ["board-task-1"]
+
+    @pytest.mark.asyncio
+    async def test_depends_on_resolves_for_a_planka_shaped_project(self) -> None:
+        """Issue #855, Codex P2: the board-task filter must match a
+
+        Planka-shaped task (``project_id`` is the PROVIDER's own id,
+        not the registry id) via ``task_belongs_to_project``, the
+        same identity gap PR #853 bridged elsewhere."""
+        from src.marcus_mcp.tools import nlp as nlp_module
+
+        state = _state()
+        project = MagicMock()
+        project.name = "Camp"
+        project.id = "uuid-registry-1"
+        project.provider_config = {
+            "project_id": "planka-proj-77",
+            "board_id": "kb-1",
+            "board_name": "Main",
+        }
+        state.project_registry.get_active_project = AsyncMock(return_value=project)
+
+        existing = MagicMock()
+        existing.id = "board-task-1"
+        existing.name = "Raise the north wall"
+        existing.project_id = "planka-proj-77"  # the PROVIDER's own id
+        kanban_client = await state.project_manager.get_kanban_client()
+        kanban_client.get_all_tasks = AsyncMock(return_value=[existing])
+
+        created_task = MagicMock()
+        created_task.id = "k-78"
+        created_task.name = "Torches on the north wall"
+        creator = MagicMock()
+        creator.create_tasks_on_board = AsyncMock(return_value=[created_task])
+        with patch(
+            "src.integrations.nlp_tools.NaturalLanguageProjectCreator",
+            return_value=creator,
+        ):
+            result = await nlp_module.create_tasks(
+                task_description="curated",
+                options={
+                    "tasks": [
+                        {
+                            "name": "Torches on the north wall",
+                            "depends_on": ["Raise the north wall"],
+                        }
+                    ]
+                },
+                state=state,
+            )
+
+        assert result["success"] is True
+        tasks = creator.create_tasks_on_board.call_args.args[0]
+        (torches,) = tasks
+        assert torches.dependencies == ["board-task-1"]
