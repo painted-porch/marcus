@@ -812,6 +812,25 @@ class TestKanbanClient:
             task_title = client._card_to_task(card_title)
             assert task_title.name == "Task with title"
 
+    def test_card_to_task_stamps_the_configured_project_id(self):
+        """Codex P1, round 1 on PR #842: a card carries no project id
+        of its own -- the client is scoped to one project per
+        instance, so _card_to_task must stamp it from self.project_id.
+        Previously left None, silently breaking any project_id-scoped
+        filter over tasks from this provider (e.g.
+        get_all_board_tasks)."""
+        with (
+            patch("src.integrations.kanban_client.os.path.exists", return_value=False),
+            patch("src.integrations.kanban_client.os.environ", {}),
+            patch("sys.stderr"),
+        ):
+            client = KanbanClient()
+            client.project_id = "planka-project-123"
+
+            task = client._card_to_task({"id": "card-1", "name": "Task"})
+
+            assert task.project_id == "planka-project-123"
+
     @pytest.mark.asyncio
     async def test_mcp_connection_error(self):
         """Test handling of MCP connection errors."""

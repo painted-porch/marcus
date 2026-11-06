@@ -972,6 +972,13 @@ class KanbanClient:
             actual_hours=0.0,
             dependencies=dependencies,
             labels=labels,
+            # Codex P1, round 1 on PR #842: a card carries no project
+            # id of its own on a Planka board -- the client is scoped
+            # to one project per instance (self.project_id), which is
+            # the single source of truth every K2 lookup already
+            # assumes. Previously left None, silently breaking any
+            # project_id-scoped filter over cards from this provider.
+            project_id=getattr(self, "project_id", None),
         )
 
         # Store original ID as a custom attribute

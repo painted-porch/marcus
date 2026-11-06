@@ -2002,7 +2002,7 @@ class MarcusServer:
             async def get_all_board_tasks(
                 board_id: str, project_id: str
             ) -> Dict[str, Any]:
-                """Get all tasks from a specific Planka board."""
+                """Get all tasks from the board (issue #840: any provider)."""
                 from .tools.task import get_all_board_tasks as impl
 
                 return await impl(

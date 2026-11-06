@@ -57,7 +57,7 @@ from src.marcus_mcp.coordinator.task_type_registration import (
     task_type_registration,
 )
 from src.marcus_mcp.tools.context import give_opinion
-from src.marcus_mcp.utils import serialize_for_mcp
+from src.marcus_mcp.utils import safe_serialize_task, serialize_for_mcp
 
 logger = logging.getLogger(__name__)
 
@@ -10621,39 +10621,45 @@ async def get_all_board_tasks(
     board_id: str, project_id: str, state: Any
 ) -> Dict[str, Any]:
     """
-    Get all tasks from a specific Planka board.
+    Get all tasks from the board.
 
-    This tool fetches all tasks directly from a Planka board,
-    useful for validation and inspection purposes.
+    Reads through ``state.kanban_client``, the provider the running
+    server is actually configured with (issue #840: this used to
+    construct a ``PlankaKanban`` directly with an empty config,
+    hardwiring the tool to Planka regardless of the server's real
+    provider -- a kernel/extension boundary violation, ADR-0013 K1).
+    Optionally scoped to ``project_id`` when one is given, since every
+    provider stamps ``project_id`` on each task.
 
     Parameters
     ----------
     board_id : str
-        The Planka board ID to fetch tasks from
+        Passed through to the reply as-is; not every provider has a
+        notion of a board id distinct from the project.
     project_id : str
-        The Planka project ID
+        When truthy, the reply is filtered to tasks carrying this
+        project id. Empty/``None`` returns every task on the board.
     state : Any
-        Marcus server state instance
+        Marcus server state instance.
 
     Returns
     -------
     Dict[str, Any]
         Dictionary containing:
         - success: bool
-        - tasks: List of task dictionaries from Planka
+        - tasks: List of task dictionaries
         - count: Number of tasks retrieved
     """
     try:
-        from src.integrations.providers.planka_kanban import PlankaKanban
+        await state.initialize_kanban()
 
-        provider = PlankaKanban(config={})
-        await provider.connect()
-
-        tasks = await provider.get_all_tasks()
+        tasks = await state.kanban_client.get_all_tasks()
+        if project_id:
+            tasks = [t for t in tasks if getattr(t, "project_id", None) == project_id]
 
         return {
             "success": True,
-            "tasks": tasks,
+            "tasks": [safe_serialize_task(t) for t in tasks],
             "count": len(tasks),
             "board_id": board_id,
             "project_id": project_id,
