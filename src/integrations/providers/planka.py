@@ -43,6 +43,42 @@ class Planka(KanbanInterface):
                 os.environ["PLANKA_BOARD_ID"] = config["board_id"]
 
         self.client = KanbanClientWithCreate()
+
+        # Issue #856 round 2, Codex P1: KanbanClient._load_config() reads
+        # project_id/board_id from config_marcus.json BEFORE falling back
+        # to the PLANKA_PROJECT_ID/PLANKA_BOARD_ID env vars just set
+        # above -- so when config_marcus.json already holds some OTHER
+        # project's ids, the ones supplied here (this project's own,
+        # from its registered ProjectConfig) never take effect. The
+        # client stays bound to the wrong board while every card it
+        # fetches gets stamped with THIS project's registry id (#854),
+        # so the wrong board's tasks pass this project's scoping filter.
+        # Explicitly override whatever _load_config() picked up with the
+        # ids this provider was actually constructed for, logging loudly
+        # if they disagree so a misbound client fails loudly instead of
+        # leaking silently.
+        if config:
+            supplied_project_id = config.get("project_id")
+            supplied_board_id = config.get("board_id")
+            if supplied_project_id and self.client.project_id != supplied_project_id:
+                logger.warning(
+                    f"[Planka] config_marcus.json's project_id "
+                    f"({self.client.project_id!r}) disagreed with the "
+                    f"project this client was constructed for "
+                    f"({supplied_project_id!r}); overriding with the "
+                    f"constructed-for value."
+                )
+                self.client.project_id = supplied_project_id
+            if supplied_board_id and self.client.board_id != supplied_board_id:
+                logger.warning(
+                    f"[Planka] config_marcus.json's board_id "
+                    f"({self.client.board_id!r}) disagreed with the "
+                    f"board this client was constructed for "
+                    f"({supplied_board_id!r}); overriding with the "
+                    f"constructed-for value."
+                )
+                self.client.board_id = supplied_board_id
+
         # Issue #854: carried down from project_context_manager's
         # _build_provider_config when this instance was constructed
         # from a registered ProjectConfig; None for a standalone
