@@ -286,6 +286,79 @@ async def _release_task_file_locks(state: Any, task_id: str, context: str) -> No
         )
 
 
+def _not_current_assignment_reply(
+    agent_id: str, task_id: str, verb: str
+) -> Dict[str, Any]:
+    """Build the reply for a stale/duplicate status report.
+
+    Issue #858, Codex P2: a report_task_progress("blocked") or
+    ("completed") call used to release coordination state
+    unconditionally on a lease-manager-level check alone -- which
+    passes for a task whose lease was already released (e.g. the SAME
+    task, reported again after the agent moved on). The release code
+    then cleared whatever the agent CURRENTLY holds, not the task
+    being reported: block A, claim B, re-report A blocked, and B's
+    hold got wiped by a report that was never about B. The fix is
+    this guard, checked before any release happens: the reported
+    task_id must be in the agent's current_tasks, or nothing is
+    released and this reply is returned instead.
+    """
+    return {
+        "success": False,
+        "status": "not_current_assignment",
+        "message": (
+            f"Task {task_id} is not {agent_id}'s current assignment "
+            f"anymore -- this looks like a stale or duplicate {verb} "
+            "report. No coordination state was changed."
+        ),
+    }
+
+
+def _agent_still_holds_task(state: Any, agent_id: str, task_id: str) -> bool:
+    """Check whether ``task_id`` is in ``agent_id``'s current_tasks.
+
+    False both when the agent holds a DIFFERENT task (the #858 bug)
+    and when the agent is not registered at all. Callers that want to
+    skip the check entirely for an unregistered agent check
+    ``agent_id in state.agent_status`` themselves first.
+    """
+    agent = state.agent_status.get(agent_id)
+    if agent is None:
+        return False
+    return any(t.id == task_id for t in agent.current_tasks)
+
+
+def _agent_holds_live_lease(state: Any, agent_id: str, task_id: str) -> bool:
+    """Check whether the lease manager confirms ``agent_id`` currently
+
+    holds ``task_id``, independent of ``current_tasks``.
+
+    Issue #858, Codex P2 round 3: ``current_tasks`` starts empty for a
+    worker restored after a server restart (``worker_from_record``;
+    ``MarcusServer._reconcile_registrations_with_leases`` can only
+    repopulate it from ``project_tasks``, which itself starts empty
+    until ``refresh_project_state`` runs). The lease manager, by
+    contrast, IS rebuilt from persistence on startup, which makes it
+    the authoritative source across a restart -- the same cold-cache
+    fallback the "completed" branch's own stale-completion guard
+    already uses (``report_task_progress``, the ``lease_holder_matches``
+    check). Without this, a legitimate first post-restart blocked
+    report from the real lease holder was rejected as a stale/duplicate
+    report by Guard 3.
+    """
+    if not (hasattr(state, "lease_manager") and state.lease_manager is not None):
+        return False
+    try:
+        lease = state.lease_manager.active_leases.get(task_id)
+        return lease is not None and getattr(lease, "agent_id", None) == agent_id
+    except Exception as lease_err:  # noqa: BLE001 - fail closed to the caller's guard
+        logger.warning(
+            f"Cold-cache lease lookup failed for {task_id}/{agent_id}: "
+            f"{lease_err}. Falling through to the current_tasks check."
+        )
+        return False
+
+
 def _repair_instructions(
     blocker_description: str,
     suggestions: Any,
@@ -7555,7 +7628,28 @@ async def _record_progress(
                             state, "tasks_being_assigned", set()
                         )
 
-                        if no_active_lease and no_other_agent and no_in_flight:
+                        # Issue #858, Codex P2: the three signals above
+                        # only ask "is task_id contested by someone
+                        # else" -- none of them ask whether agent_id
+                        # has ITSELF already moved on to a different
+                        # task. assignment_task_id is guaranteed not
+                        # None-equal-to-task_id here (that's how this
+                        # block was entered), so a non-None value means
+                        # this agent currently holds something else.
+                        # Accepting this late completion as
+                        # "uncontested" would then release THAT task's
+                        # coordination state, not task_id's -- the same
+                        # bug Guard 3 closes for the "blocked" branch,
+                        # reached here through the accept path instead
+                        # of a missing guard.
+                        agent_has_moved_on = assignment_task_id is not None
+
+                        if (
+                            no_active_lease
+                            and no_other_agent
+                            and no_in_flight
+                            and not agent_has_moved_on
+                        ):
                             uncontested = True
                     except Exception as race_err:
                         # Defensive: if the uncontested check raises
@@ -7634,6 +7728,11 @@ async def _record_progress(
 
         # Update task in kanban
         update_data: Dict[str, Any] = {"progress": progress}
+        # Issue #858 round 2, Codex P2: the "blocked" branch writes the
+        # board itself, before the release below, rather than relying
+        # on the shared write further down — set True once that write
+        # has actually succeeded, so the shared write isn't repeated.
+        _blocked_board_write_done = False
 
         # VALIDATION GATE: Check if implementation task needs validation
         if status == "completed":
@@ -8418,7 +8517,72 @@ async def _record_progress(
                         ),
                     }
 
+            # Guard 3 (issue #858, Codex P2): Guard 2 only catches a
+            # DIFFERENT agent holding the lease — it passes when this
+            # task's lease was already released (e.g. this very task,
+            # reported blocked a second time after the agent moved on
+            # to a new one). Without this guard, the release below
+            # would clear whatever the agent CURRENTLY holds, not the
+            # task actually being reported.
+            #
+            # Round 3: current_tasks is not the only legitimate source
+            # of truth for "does this agent hold this task" -- a worker
+            # restored after a server restart starts with an empty
+            # current_tasks (see _agent_holds_live_lease's docstring),
+            # so a real lease holder's first post-restart blocked
+            # report must not be rejected as stale just because the
+            # in-memory cache hasn't caught up yet.
+            if (
+                agent_id in state.agent_status
+                and not _agent_still_holds_task(state, agent_id, task_id)
+                and not _agent_holds_live_lease(state, agent_id, task_id)
+            ):
+                logger.warning(
+                    f"report_task_progress(blocked) ignored: agent "
+                    f"{agent_id} no longer holds task {task_id} as its "
+                    f"current assignment (stale or duplicate report)."
+                )
+                return _not_current_assignment_reply(agent_id, task_id, "blocked")
+
             update_data["status"] = TaskStatus.BLOCKED
+            # Unassign on the board too (mirrors report_blocker's own
+            # kanban update): the agent's hold is being released below,
+            # so the card must not still show it as the assignee.
+            update_data["assigned_to"] = None
+
+            # Issue #858 round 2, Codex P2: write the board BEFORE
+            # releasing coordination state, not after. The release used
+            # to run first, relying on the shared update_task call
+            # further down the function to write BLOCKED afterward — so
+            # a transient provider failure on that later write left the
+            # board showing IN_PROGRESS while the assignment and lease
+            # were already gone: the agent's retry of the same blocked
+            # report would then hit Guard 3's not_current_assignment
+            # rejection (current_tasks already empty), and the lease
+            # monitor had nothing left to recover. Writing first and
+            # returning the provider error on failure — leaving the
+            # assignment and lease untouched so the report is retryable
+            # — has no such window; this is the same order
+            # report_blocker's own terminal give-up path already uses.
+            try:
+                await state.kanban_client.update_task(task_id, update_data)
+            except Exception as board_write_err:
+                logger.error(
+                    f"report_task_progress(blocked) board write failed for "
+                    f"task {task_id}, agent {agent_id}: {board_write_err}. "
+                    "Coordination state left untouched; retry the same report."
+                )
+                return {
+                    "success": False,
+                    "status": "board_write_failed",
+                    "error": str(board_write_err),
+                    "message": (
+                        f"Could not record task {task_id} as blocked on the "
+                        "board; your assignment and lease are untouched. "
+                        "Retry the same report."
+                    ),
+                }
+            _blocked_board_write_done = True
 
             # Record blocker in Memory if available
             if hasattr(state, "memory") and state.memory and message:
@@ -8443,8 +8607,63 @@ async def _record_progress(
                     blockers=[message],
                 )
 
-        # Update Kanban card
-        await state.kanban_client.update_task(task_id, update_data)
+            # Release coordination state — a blocked task is terminal for
+            # the current agent, exactly like DONE/DECLINED (issue #851).
+            # Without this, the agent's current_tasks/agent_tasks entry
+            # and lease all stay held, so request_next_task keeps refusing
+            # it with "You already have a task assigned" even though the
+            # task is sitting unassigned and BLOCKED on the board — until
+            # the agent's run ends and something else cleans it up
+            # externally. Mirrors the "completed" branch's release above.
+            # Only reached once the board write above has succeeded.
+            #
+            # Issue #858, Codex P2 round 4: Guard 3 was checked BEFORE the
+            # await on update_task above, not after. Two overlapping
+            # blocked reports for the same task A can both pass Guard 3;
+            # while the second is suspended in that await, the first
+            # finishes and the agent claims B. When the second resumes,
+            # without this recheck it would release whatever the agent
+            # CURRENTLY holds (B) a second time, deleting B's assignment
+            # and persistence while B's lease stays active -- the exact
+            # race version of round 1's bug. Re-verifying ownership of
+            # task_id specifically, after the await, closes the window
+            # without a new lock: if ownership changed while this call
+            # was suspended, some other report for THIS task already
+            # released it, and there is nothing left for this call to
+            # release.
+            if agent_id in state.agent_status and (
+                _agent_still_holds_task(state, agent_id, task_id)
+                or _agent_holds_live_lease(state, agent_id, task_id)
+            ):
+                agent = state.agent_status[agent_id]
+                agent.current_tasks = [
+                    t for t in agent.current_tasks if t.id != task_id
+                ]
+                if (
+                    agent_id in state.agent_tasks
+                    and getattr(state.agent_tasks[agent_id], "task_id", None) == task_id
+                ):
+                    del state.agent_tasks[agent_id]
+                await state.assignment_persistence.remove_assignment(agent_id)
+                if hasattr(state, "lease_manager") and state.lease_manager:
+                    if task_id in state.lease_manager.active_leases:
+                        await state.lease_manager.release_lease(
+                            task_id, reason="blocked"
+                        )
+                        logger.info(f"Removed lease for blocked task {task_id}")
+            else:
+                logger.info(
+                    f"report_task_progress(blocked) board write for task "
+                    f"{task_id} succeeded, but {agent_id} no longer owns "
+                    "it as of the recheck after the write -- a concurrent "
+                    "report for this same task already released it. "
+                    "Nothing left to release."
+                )
+
+        # Update Kanban card (the "blocked" branch already wrote it above,
+        # before releasing coordination state -- issue #858 round 2).
+        if not _blocked_board_write_done:
+            await state.kanban_client.update_task(task_id, update_data)
         _timer.mark("kanban_update")
 
         # Update task progress (including checklist items).
