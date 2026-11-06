@@ -1,0 +1,314 @@
+"""The verifier: check a written report against the evaluation it describes.
+
+This is the checking half of the trial, and it calls no model. It
+loads the staged evaluation, loads the claims the writer declared,
+adds the cross-checks the harness requires whatever the writer said,
+and returns one verdict per claim plus one for every figure in the
+report text that no claim covers.
+
+It never sees the writer's reasoning. It is handed the report, the
+claims and the staged files, and nothing else, so it checks the data
+rather than the writer's account of the data.
+
+Standalone, for scoring a rehearsal::
+
+    python dev-tools/experiments/runners/numeric_verify.py
+        --workspace ~/marcus-experiments/.../rehearsal/case-003
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
+for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
+    if entry not in sys.path:
+        sys.path.insert(0, entry)
+
+from runners.numeric_claims import (  # noqa: E402
+    VERDICT_FAILED,
+    VERDICT_UNCOVERED,
+    VERDICT_UNRESOLVABLE,
+    VERDICT_VERIFIED,
+    CheckResult,
+    Claim,
+    check_report,
+    extract_numbers,
+    load_sources,
+)
+from runners.numeric_writer import (  # noqa: E402
+    trusted_hashes_path,
+    trusted_units_path,
+)
+
+STAGED_SUBDIR = "staged"
+
+
+def _check_staged_integrity(
+    workspace: Path,
+) -> Tuple[Optional[str], Dict[str, str]]:
+    """Catch a workspace's staged/ copy diverging from what was staged.
+
+    The writer is handed its own copy of the staged evaluation
+    (``numeric_writer.build_workspace``), not the original, so
+    nothing stops it from editing that copy before the checker reads
+    it. A manifest living *inside* the workspace is not a defense
+    against that: a writer (or a bug in one) that edits a staged file
+    can just as easily rewrite or delete an in-workspace manifest to
+    match. The real manifest build_workspace writes lives outside the
+    workspace entirely (:func:`runners.numeric_writer.
+    trusted_hashes_path`), computed from the original staged files
+    before any copy existed for anyone to edit -- the only thing this
+    function trusts.
+
+    A missing or mismatched manifest is always a verification
+    failure. It is never treated as "nothing to check": every real
+    workspace from :func:`build_workspace` has one, so its absence
+    means either staging was skipped entirely or the manifest itself
+    was tampered with, and either way the data cannot be trusted.
+
+    The manifest is also the allowlist: a file sitting in ``staged/``
+    that the manifest never named was never hashed when the case was
+    staged, so it cannot be a staged artifact that got tampered with
+    -- it is something dropped in afterward, by a writer or a bug in
+    one, and ``load_sources`` must never be able to read it as if it
+    were real staged data (the manifest's keys are what the caller
+    passes it as its allowlist).
+
+    Parameters
+    ----------
+    workspace : Path
+        The workspace (not just its ``staged/`` subdirectory, since
+        the manifest this checks against is a sibling of the
+        workspace, not inside it).
+
+    Returns
+    -------
+    Tuple[Optional[str], Dict[str, str]]
+        A description of the problem (or ``None`` when every
+        manifested file matches and nothing unmanifested is present),
+        and the manifest itself (empty when it could not be read).
+    """
+    manifest_path = trusted_hashes_path(workspace)
+    if not manifest_path.exists():
+        return (
+            f"no trusted hash manifest at {manifest_path} -- staged data "
+            f"cannot be verified",
+            {},
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as exc:
+        return f"trusted hash manifest could not be read: {exc}", {}
+
+    staged = workspace / STAGED_SUBDIR
+    for name, expected in manifest.items():
+        path = staged / name
+        if not path.exists():
+            return f"staged/{name} is missing but was present when staged", manifest
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            return (
+                f"staged/{name} was modified after staging (hash mismatch)",
+                manifest,
+            )
+
+    unexpected = sorted(
+        path.name
+        for path in staged.glob("*")
+        if path.is_file() and path.name not in manifest
+    )
+    if unexpected:
+        return (
+            f"staged/{unexpected[0]} is present but was never part of the "
+            f"trusted manifest -- not a staged artifact",
+            manifest,
+        )
+    return None, manifest
+
+
+def verify_workspace(workspace: Path) -> Dict[str, Any]:
+    """Check one written report against its staged evaluation.
+
+    Parameters
+    ----------
+    workspace : Path
+        Directory holding ``staged/``, ``report.md`` and
+        ``claims.json``.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``verdict`` (verified or failed), the per-claim ``results``,
+        the ``failed_claims`` a retry would be handed, the
+        ``summary`` counts the grader reads, and ``sources`` --
+        the staged data itself (empty on an integrity failure), so a
+        caller checking a later artifact against the same report (the
+        slide deck) can reuse it rather than reloading staged files
+        the manifest never trusted.
+    """
+    workspace = Path(workspace).expanduser()
+    staged = workspace / STAGED_SUBDIR
+    report_path = workspace / "report.md"
+    claims_path = workspace / "claims.json"
+
+    integrity_error, trusted_manifest = _check_staged_integrity(workspace)
+    if integrity_error:
+        return {
+            "verdict": VERDICT_FAILED,
+            "parse_error": integrity_error,
+            "results": [],
+            "failed_claims": [],
+            "sources": {},
+            "summary": {
+                "claims_declared": 0,
+                "claims_required": 0,
+                "kinds": {},
+                "figures_in_text": 0,
+                "coverage": 0.0,
+                "verified": 0,
+                "failed": 0,
+                "unresolvable": 0,
+                "uncovered": 0,
+            },
+        }
+
+    sources = load_sources(staged, allowed_names=trusted_manifest.keys())
+    report_text = report_path.read_text() if report_path.exists() else ""
+
+    # The units manifest is an accuracy aid, not a tamper-evidence
+    # boundary like the hashes above: a staged case written before
+    # this manifest existed, or whose build_workspace copy predates
+    # it, has none, and that must fall back to the column-name
+    # heuristic exactly as before -- never a hard verification failure.
+    units_manifest_path = trusted_units_path(workspace)
+    try:
+        units_manifest = (
+            json.loads(units_manifest_path.read_text())
+            if units_manifest_path.exists()
+            else {}
+        )
+    except json.JSONDecodeError:
+        units_manifest = {}
+
+    declared: List[Claim] = []
+    parse_error: Optional[str] = None
+    if not report_path.exists():
+        parse_error = "report.md is missing"
+    elif not report_text.strip():
+        parse_error = "report.md is empty"
+
+    if claims_path.exists():
+        try:
+            raw = json.loads(claims_path.read_text())
+            items = raw.get("claims", []) if isinstance(raw, dict) else raw
+            declared = [Claim.from_dict(item) for item in items]
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
+            parse_error = parse_error or f"claims.json could not be read: {exc}"
+    else:
+        parse_error = parse_error or "claims.json is missing"
+
+    results: List[CheckResult] = check_report(
+        declared,
+        sources,
+        report_text=report_text if report_path.exists() else None,
+        units=units_manifest,
+    )
+
+    counts = Counter(r.verdict for r in results)
+    figures = extract_numbers(report_text)
+    covered = len(figures) - counts.get(VERDICT_UNCOVERED, 0)
+    coverage = (covered / len(figures)) if figures else 1.0
+
+    kinds = Counter(c.kind for c in declared)
+
+    bad = [
+        r
+        for r in results
+        if r.verdict in (VERDICT_FAILED, VERDICT_UNRESOLVABLE, VERDICT_UNCOVERED)
+    ]
+
+    return {
+        "verdict": VERDICT_VERIFIED if not bad and not parse_error else VERDICT_FAILED,
+        "parse_error": parse_error,
+        "results": results,
+        "failed_claims": [{"claim_id": r.claim_id, "detail": r.detail} for r in bad],
+        "sources": sources,
+        "summary": {
+            "claims_declared": len(declared),
+            "claims_required": len(results)
+            - len(declared)
+            - counts.get(VERDICT_UNCOVERED, 0),
+            "kinds": dict(kinds),
+            "figures_in_text": len(figures),
+            "coverage": round(coverage, 3),
+            "verified": counts.get(VERDICT_VERIFIED, 0),
+            "failed": counts.get(VERDICT_FAILED, 0),
+            "unresolvable": counts.get(VERDICT_UNRESOLVABLE, 0),
+            "uncovered": counts.get(VERDICT_UNCOVERED, 0),
+        },
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the verifier's argument parser.
+
+    Returns
+    -------
+    argparse.ArgumentParser
+        Configured parser.
+    """
+    p = argparse.ArgumentParser(prog="numeric_verify")
+    p.add_argument("--workspace", required=True)
+    p.add_argument("--show", type=int, default=25)
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Check one workspace and print the verdict.
+
+    Parameters
+    ----------
+    argv : Optional[List[str]]
+        Command-line arguments; ``None`` reads ``sys.argv``.
+
+    Returns
+    -------
+    int
+        Zero when the report verified.
+    """
+    args = build_parser().parse_args(argv)
+    outcome = verify_workspace(Path(args.workspace))
+    s = outcome["summary"]
+
+    if outcome["parse_error"]:
+        print(f"PARSE ERROR: {outcome['parse_error']}")
+
+    print(f"verdict           {outcome['verdict'].upper()}")
+    print(f"claims declared   {s['claims_declared']}  kinds={s['kinds']}")
+    print(f"figures in text   {s['figures_in_text']}")
+    print(f"coverage          {s['coverage']:.1%}")
+    print(
+        f"verdicts          verified={s['verified']} failed={s['failed']} "
+        f"unresolvable={s['unresolvable']} uncovered={s['uncovered']}"
+    )
+
+    bad = outcome["failed_claims"]
+    if bad:
+        print(f"\nproblems ({len(bad)}):")
+        for item in bad[: args.show]:
+            print(f"  {item['claim_id']:28s} {item['detail'][:90]}")
+        if len(bad) > args.show:
+            print(f"  ... {len(bad) - args.show} more")
+    return 0 if outcome["verdict"] == VERDICT_VERIFIED else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
