@@ -1,16 +1,35 @@
 import json
 import os
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
 from src.config.settings import Settings
 
+pytestmark = pytest.mark.unit
+
 
 class TestSettings:
     def test_default_settings(self):
-        """Test loading default settings"""
-        settings = Settings(config_path="nonexistent.json")
+        """Test loading default settings.
+
+        Settings._load_config falls back to src.config.config_loader's
+        ConfigLoader whenever config_path points at a file that doesn't
+        exist. ConfigLoader searches several fixed locations, including
+        the project root (via __file__), independent of the test's own
+        cwd -- so an unpatched ConfigLoader silently picks up whatever
+        real config_marcus.json happens to exist on the machine running
+        the test (issue #879: this assertion used to read 0.1, matching
+        one developer's personal, untracked config_marcus.json, instead
+        of the code's real, documented default of 0.7). Patched so this
+        test asserts the code's actual default regardless of machine.
+        """
+        with patch(
+            "src.config.settings.get_config",
+            side_effect=FileNotFoundError("no config_marcus.json for this test"),
+        ):
+            settings = Settings(config_path="nonexistent.json")
 
         # Check default values
         assert settings.get("monitoring_interval") == 900
@@ -19,7 +38,7 @@ class TestSettings:
 
         # Check nested values
         assert settings.get("risk_thresholds.high_risk") == 0.8
-        assert settings.get("ai_settings.temperature") == 0.1
+        assert settings.get("ai_settings.temperature") == 0.7
 
     def test_load_from_file(self):
         """Test loading settings from file"""
