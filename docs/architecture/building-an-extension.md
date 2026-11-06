@@ -124,7 +124,7 @@ while idle < cfg.idle_exits:
     task_type = str(task.get("task_type") or "")
     handler = handlers.get(task_type)   # your extension's own dispatch, in YOUR code
     ...
-    evidence = await handler(task)
+    evidence = handler(task)   # synchronous in this example; your own handlers decide
     await client.report_task_progress(
         agent_id=cfg.agent_id, task_id=task_id,
         status="completed", evidence=evidence,
@@ -142,10 +142,15 @@ Its code imports a verification function by name directly into the kernel's own 
 This is exactly the failure mode K2 exists to close.
 If you find yourself writing an `import` of your own verification code into anything under `src/marcus_mcp/`, stop — that is the sign you need a registration, not a shortcut around one.
 
-## No one checks their own work (ADR-0013 K12)
+## No one checks their own work (ADR-0013 K12) — decided generally, implemented narrowly
 
-If your extension's task chain includes a verification step, the kernel will not offer that verification task to the agent that produced the work being verified, nor to another agent registered under the same vendor.
-This is enforced in `src/marcus_mcp/coordinator/eligibility.py`'s `filter_eligible_tasks`, at the point the kernel decides what to offer — not something your extension needs to implement itself, and not something a worker can detect or probe around, because the refusal is silent.
+K12's decision is general: a verification extension needs the kernel to exclude an artifact's producer, and anyone who shares its vendor, from the task that checks that artifact.
+**Its current implementation is not general yet.**
+`src/marcus_mcp/coordinator/eligibility.py`'s `is_eligible` only applies this exclusion to a task whose `task_type` is the literal string `"verify"`, and `_claim_authors` only discovers the producer by walking that task's direct dependencies for ones typed exactly `"find"`.
+
+If your extension's task types are named anything else — `"check"` instead of `"verify"`, say, or a producer type other than `"find"` — **this guarantee does not apply to you today**, even though K12 itself does not depend on those specific names.
+Until the implementation generalizes, either reuse the `find`/`verify` names, or treat this as still your own responsibility and say so explicitly in your own extension's documentation.
+This is enforced, where it applies, at the point the kernel decides what to offer (`filter_eligible_tasks`) — not something your extension calls — and the refusal is silent, so a worker cannot probe around it.
 
 ## Where the kernel/extension boundary sits in the code
 
