@@ -173,6 +173,7 @@ class ProjectHistoryQuery:
         decision_offset: int = 0,
         artifact_limit: int = 10000,
         artifact_offset: int = 0,
+        decision_kind: Optional[str] = None,
     ) -> ProjectHistory:
         """
         Get complete project history with pagination.
@@ -193,6 +194,11 @@ class ProjectHistoryQuery:
             Maximum number of artifacts to load (default: 10000)
         artifact_offset : int
             Number of artifacts to skip (default: 0)
+        decision_kind : Optional[str]
+            Load only decisions of this ``kind`` (``"decision"``,
+            ``"assessment"``, ``"objective"``). The predicate is pushed
+            into the store, so the page is cut from matching rows rather
+            than filtered after paging (#881). None loads every kind.
 
         Returns
         -------
@@ -207,6 +213,7 @@ class ProjectHistoryQuery:
             decision_offset=decision_offset,
             artifact_limit=artifact_limit,
             artifact_offset=artifact_offset,
+            decision_kind=decision_kind,
         )
 
     # Task Queries
@@ -461,11 +468,16 @@ class ProjectHistoryQuery:
         # outright (Codex P2 on PR #800). The loop stops on the first
         # empty page rather than the first short one, because a page
         # can come back short when malformed rows were skipped.
+        # The walk reads only the kind it is grouping, because the store can
+        # filter in the query now (#881). Behaviour is unchanged, since
+        # ``group_opinions_by_subject`` drops the other kinds anyway; what
+        # changes is that this read, which every agent pull makes, no longer
+        # carries the project's decisions through memory to throw them away.
         decisions: list[Decision] = []
         offset = 0
         while True:
             page = await self.aggregator.history_persistence.load_decisions(
-                project_id, limit=DECISION_PAGE_SIZE, offset=offset
+                project_id, limit=DECISION_PAGE_SIZE, offset=offset, kind=kind
             )
             if not page:
                 break

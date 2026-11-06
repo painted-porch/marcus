@@ -615,7 +615,12 @@ class ProjectHistoryPersistence:
     _TASK_ID_CHUNK = 500
 
     async def _load_project_rows(
-        self, collection: str, project_id: str, limit: int, offset: int
+        self,
+        collection: str,
+        project_id: str,
+        limit: int,
+        offset: int,
+        where: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """
         Load the rows of ``collection`` that belong to ``project_id``, paged.
@@ -646,6 +651,12 @@ class ProjectHistoryPersistence:
             Maximum rows to return (capped at 10000)
         offset : int
             Rows to skip, newest first
+        where : Optional[dict[str, Any]]
+            Extra storage prefilter, ANDed with the project clauses and
+            pushed into storage with them, so a page is cut from matching
+            rows. A caller that filters the returned page instead gets a
+            page of whatever was newest, which is why ``kind`` arrives
+            here rather than being applied afterwards (#881).
 
         Returns
         -------
@@ -654,8 +665,9 @@ class ProjectHistoryPersistence:
         """
         page_limit = min(limit, 10000)
         fetch = page_limit + offset
+        extra = dict(where or {})
         rows = await self._backend.query(
-            collection, where={"project_id": project_id}, limit=fetch
+            collection, where={"project_id": project_id, **extra}, limit=fetch
         )
         project_task_ids = sorted(
             await self._get_task_ids_from_conversations(project_id)
@@ -664,7 +676,7 @@ class ProjectHistoryPersistence:
             chunk = project_task_ids[start : start + self._TASK_ID_CHUNK]
             rows.extend(
                 await self._backend.query(
-                    collection, where={"task_id": chunk}, limit=fetch
+                    collection, where={"task_id": chunk, **extra}, limit=fetch
                 )
             )
 
@@ -687,7 +699,11 @@ class ProjectHistoryPersistence:
         return unique[offset : offset + page_limit]
 
     async def load_decisions(
-        self, project_id: str, limit: int = 10000, offset: int = 0
+        self,
+        project_id: str,
+        limit: int = 10000,
+        offset: int = 0,
+        kind: Optional[str] = None,
     ) -> list[Decision]:
         """
         Load decisions for a project from SQLite with pagination.
@@ -709,6 +725,16 @@ class ProjectHistoryPersistence:
             Maximum number of decisions to return (default: 10000)
         offset : int, optional
             Number of decisions to skip (default: 0)
+        kind : Optional[str], optional
+            Keep only this ``kind``: ``"decision"`` for choices an agent
+            made, ``"assessment"`` for opinions, ``"objective"`` for the
+            project primer. The predicate is pushed into the query, so
+            the page is cut from matching rows and a decision behind many
+            newer opinions is still found; ``limit`` is a page limit, so
+            filtering the returned page instead would hide everything
+            older (#881). ``"decision"`` also matches a row with no
+            ``kind`` at all, because :meth:`Decision.from_dict` loads
+            those as decisions. None loads every kind, as before.
 
         Returns
         -------
@@ -719,8 +745,15 @@ class ProjectHistoryPersistence:
 
         with error_context("load_decisions", custom_context={"project_id": project_id}):
             try:
+                where: Optional[dict[str, Any]] = None
+                if kind is not None:
+                    # A row written before ``kind`` existed loads as a
+                    # decision, so the filter must match a null or absent
+                    # field too, or it would hide exactly the rows an
+                    # unfiltered read calls decisions.
+                    where = {"kind": [kind, None] if kind == "decision" else [kind]}
                 paginated_decisions = await self._load_project_rows(
-                    "decisions", project_id, limit, offset
+                    "decisions", project_id, limit, offset, where=where
                 )
 
                 # Parse decisions

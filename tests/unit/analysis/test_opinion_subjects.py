@@ -8,6 +8,7 @@ cannot raise a subject's weight.
 """
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -179,9 +180,13 @@ class TestSummarizeSubjectsReadsEveryPage:
         ]
 
         async def load_decisions(
-            project_id: str, limit: int = DECISION_PAGE_SIZE, offset: int = 0
+            project_id: str,
+            limit: int = DECISION_PAGE_SIZE,
+            offset: int = 0,
+            kind: Optional[str] = None,
         ) -> list[Decision]:
-            return rows[offset : offset + limit]
+            matching = [r for r in rows if kind is None or r.kind == kind]
+            return matching[offset : offset + limit]
 
         aggregator = Mock()
         aggregator.history_persistence.load_decisions = AsyncMock(
@@ -197,6 +202,13 @@ class TestSummarizeSubjectsReadsEveryPage:
             for call in aggregator.history_persistence.load_decisions.await_args_list
         ]
         assert offsets == [0, DECISION_PAGE_SIZE, 2 * DECISION_PAGE_SIZE]
+        # The walk reads only the kind it groups, so the store pages over
+        # matching rows instead of carrying the rest through memory (#881).
+        kinds = {
+            call.kwargs["kind"]
+            for call in aggregator.history_persistence.load_decisions.await_args_list
+        }
+        assert kinds == {"assessment"}
 
     @pytest.mark.asyncio
     async def test_small_project_reads_one_page_and_stops(self) -> None:
@@ -209,7 +221,9 @@ class TestSummarizeSubjectsReadsEveryPage:
         rows = [_opinion("d1", "agent-1", "farm.flooded", 0)]
         aggregator = Mock()
         aggregator.history_persistence.load_decisions = AsyncMock(
-            side_effect=lambda project_id, limit, offset: rows[offset : offset + limit]
+            side_effect=lambda project_id, limit, offset, kind=None: rows[
+                offset : offset + limit
+            ]
         )
 
         entries = await ProjectHistoryQuery(aggregator).summarize_subjects("p1")

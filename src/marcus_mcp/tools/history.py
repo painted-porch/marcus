@@ -19,11 +19,6 @@ from src.analysis.query_api import ProjectHistoryQuery
 
 logger = logging.getLogger(__name__)
 
-#: How many decision rows a kind-filtered read scans before paging. The
-#: store's own ceiling, so a filtered read sees everything an unfiltered
-#: one could (#881).
-_DECISION_SCAN_CAP = 10000
-
 
 async def query_project_history(
     project_id: str,
@@ -220,29 +215,18 @@ async def query_project_history(
                         project_id, filters["affecting_task_id"]
                     )
                 )
-            elif wanted_kind is not None:
-                # The store paginates, so filtering the page it returns is
-                # not filtering: on a board busy with opinions the newest
-                # rows are assessments and a ten-row page of them filters
-                # down to nothing while decisions sit just behind it
-                # (Codex on PR #881). The kind predicate therefore runs
-                # over the whole history, within the 10000-row cap the
-                # store already enforces, and the page is cut from the
-                # matching rows, so an offset counts decisions rather than
-                # the opinions between them.
-                history = await query_api.get_project_history(
-                    project_id,
-                    decision_limit=_DECISION_SCAN_CAP,
-                    decision_offset=0,
-                )
-                matching = _of_wanted_kind(history.decisions)
-                decisions = matching[offset : offset + limit]
             else:
-                # No filter - get all decisions with pagination
+                # No row filter: the store pages, and when a kind is asked
+                # for it filters in the query so the page is cut from
+                # MATCHING rows. Filtering the returned page would not
+                # work: ``limit`` is a page limit, so a decision behind
+                # more opinions than a page holds would be permanently
+                # invisible at every offset (Codex on PR #881).
                 history = await query_api.get_project_history(
                     project_id,
                     decision_limit=limit,
                     decision_offset=offset,
+                    decision_kind=wanted_kind,
                 )
                 decisions = history.decisions
 

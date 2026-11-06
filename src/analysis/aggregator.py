@@ -279,7 +279,9 @@ class ProjectHistoryAggregator:
         )
 
         # Simple in-memory cache (60s TTL)
-        self._cache: dict[str, tuple[ProjectHistory, datetime]] = {}
+        # Keyed on the project AND every parameter that changes the
+        # result, so one request is never served another's history (#881).
+        self._cache: dict[tuple[Any, ...], tuple[ProjectHistory, datetime]] = {}
         self._cache_ttl = 60  # seconds
 
     async def aggregate_project(
@@ -291,6 +293,7 @@ class ProjectHistoryAggregator:
         decision_offset: int = 0,
         artifact_limit: int = 10000,
         artifact_offset: int = 0,
+        decision_kind: Optional[str] = None,
     ) -> ProjectHistory:
         """
         Aggregate all historical data for a project with pagination.
@@ -317,9 +320,23 @@ class ProjectHistoryAggregator:
         ProjectHistory
             Unified data structure with all project execution data
         """
-        # Check cache
-        if project_id in self._cache:
-            cached_history, cached_at = self._cache[project_id]
+        # Check cache. The key carries every parameter that changes the
+        # result: it used to be the project alone, so one page's history
+        # was served for another page's request, and with a kind filter
+        # that staleness would hand a caller opinions labelled as the
+        # crew's decisions (#881).
+        cache_key = (
+            project_id,
+            include_conversations,
+            include_kanban,
+            decision_limit,
+            decision_offset,
+            artifact_limit,
+            artifact_offset,
+            decision_kind,
+        )
+        if cache_key in self._cache:
+            cached_history, cached_at = self._cache[cache_key]
             now = datetime.now(timezone.utc)
             age = (now - cached_at).total_seconds()
             if age < self._cache_ttl:
@@ -328,7 +345,10 @@ class ProjectHistoryAggregator:
 
         # Load new persistent registries with pagination
         decisions = await self.history_persistence.load_decisions(
-            project_id, limit=decision_limit, offset=decision_offset
+            project_id,
+            limit=decision_limit,
+            offset=decision_offset,
+            kind=decision_kind,
         )
         artifacts = await self.history_persistence.load_artifacts(
             project_id, limit=artifact_limit, offset=artifact_offset
@@ -424,7 +444,7 @@ class ProjectHistoryAggregator:
         )
 
         # Cache result
-        self._cache[project_id] = (history, datetime.now(timezone.utc))
+        self._cache[cache_key] = (history, datetime.now(timezone.utc))
 
         return history
 
