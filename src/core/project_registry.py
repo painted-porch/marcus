@@ -478,6 +478,51 @@ class ProjectRegistry:
         """
         return self._cache.get(project_id)
 
+    def get_project_by_provider_id(
+        self, provider_project_id: str
+    ) -> Optional[ProjectConfig]:
+        """
+        Resolve a provider's own project id to its owning registry entry.
+
+        Interim fix for issue #849's regression on Planka and Linear
+        (Codex P2 on PR #853): ``Task.project_id`` is stamped from the
+        PROVIDER's project id for these two providers, while a
+        registry entry created by ``add_project``/``sync_projects``
+        carries an independently generated UUID as its own ``id`` --
+        the two never match, unlike the SQLite path (GH-306), whose
+        registry id and provider project id are the same string by
+        construction. ``get_project`` alone therefore cannot resolve
+        these tasks; this is the one-call bridge, not a replacement
+        for it.
+
+        This is deliberately a read-side workaround, not the real
+        fix. The real fix is to stamp the registry id as
+        ``Task.project_id`` at the source -- when a Planka/Linear
+        client is constructed from a ``ProjectConfig``, carrying that
+        config's registry id alongside the provider config it already
+        takes -- so a task's own id always matches a registry key
+        directly, the same guarantee the SQLite path already has.
+        Tracked as a follow-up (issue #854); this method exists so
+        today's lookup degrades correctly in the meantime, scanning
+        only the in-memory cache, with no I/O.
+
+        Parameters
+        ----------
+            provider_project_id
+                The id as the *provider* (Planka, Linear) knows it --
+                ``provider_config["project_id"]`` on the owning entry,
+                not that entry's own registry ``id``.
+
+        Returns
+        -------
+            The owning project's configuration, or None when no
+            cached entry's ``provider_config["project_id"]`` matches.
+        """
+        for project in self._cache.values():
+            if project.provider_config.get("project_id") == provider_project_id:
+                return project
+        return None
+
     def get_active_project_sync(self) -> Optional[ProjectConfig]:
         """
         Get the currently active project from cache, without any I/O.

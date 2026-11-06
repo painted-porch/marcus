@@ -1581,6 +1581,49 @@ async def get_project_board_context(
     return context
 
 
+async def _response_project_for_task(task: Task, state: Any) -> Optional[Any]:
+    """Resolve the project a ``request_next_task`` response attributes to a task.
+
+    ADR-0013 K6 (issue #849): resolved from the TASK's own
+    ``project_id``, never the server's active project -- the same
+    shape #845 fixed for conversation-log context, a different field
+    in the same response block that PR left untouched. A legacy task
+    with no ``project_id`` at all falls back to the active project,
+    matching every other K2-keyed lookup's rule.
+
+    Parameters
+    ----------
+    task : Task
+        The task about to be offered to an agent.
+    state : Any
+        Marcus server state; only a real ``project_registry`` is
+        consulted.
+
+    Returns
+    -------
+    Optional[Any]
+        The owning ``ProjectConfig``, or ``None`` when there is no
+        project registry or nothing resolves.
+    """
+    if not (hasattr(state, "project_registry") and state.project_registry):
+        return None
+    task_project_id = getattr(task, "project_id", None)
+    if not task_project_id:
+        return await state.project_registry.get_active_project()
+
+    resolved = await state.project_registry.get_project(task_project_id)
+    if resolved is not None:
+        return resolved
+    # Codex P2 on PR #853: Planka and Linear stamp Task.project_id
+    # from the PROVIDER's own project id, not the registry's id --
+    # the SQLite path's GH-306 guarantee (the two are the same
+    # string) does not hold for these two. Bridge it here; see
+    # get_project_by_provider_id's own docstring and issue #854 for
+    # the real fix (stamping the registry id at kanban-client
+    # construction instead of resolving it after the fact).
+    return state.project_registry.get_project_by_provider_id(task_project_id)
+
+
 async def _planner_cost_context(
     state: Any,
     *,
@@ -4186,21 +4229,9 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     },
                 )
 
-                # Add project context if available. ADR-0013 K6 (issue
-                # #849): resolved from the TASK's own project_id, not
-                # the server's active project -- the same shape #845
-                # fixed for conversation-log context, a different
-                # field in the same response block. A legacy task with
-                # no project_id at all falls back to the active
-                # project, matching every other K2-keyed lookup's rule.
-                response_project = None
-                if hasattr(state, "project_registry") and state.project_registry:
-                    task_project_id = getattr(optimal_task, "project_id", None)
-                    response_project = (
-                        await state.project_registry.get_project(task_project_id)
-                        if task_project_id
-                        else await state.project_registry.get_active_project()
-                    )
+                # Add project context if available (ADR-0013 K6, issue
+                # #849) -- see _response_project_for_task's own docstring.
+                response_project = await _response_project_for_task(optimal_task, state)
 
                 # Serialize the response properly
                 response: Dict[str, Any] = {

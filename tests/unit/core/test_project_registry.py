@@ -127,6 +127,69 @@ def _registry() -> ProjectRegistry:
     return ProjectRegistry(Persistence(MemoryPersistence()))
 
 
+class TestGetProjectByProviderId:
+    """Issue #849 regression, Codex P2 on PR #853.
+
+    Planka and Linear stamp ``Task.project_id`` from the PROVIDER's
+    own project id, while a registry entry created by
+    ``add_project``/``sync_projects`` carries an independently
+    generated UUID as its own ``id`` -- unlike the SQLite path
+    (GH-306), where the two are the same string by construction.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resolves_a_planka_shaped_task_by_its_provider_id(self) -> None:
+        registry = _registry()
+        await registry.add_project(
+            _config(
+                id="uuid-registry-1",
+                provider="planka",
+                provider_config={"project_id": "planka-proj-77", "board_id": "b-1"},
+            )
+        )
+
+        found = registry.get_project_by_provider_id("planka-proj-77")
+
+        assert found is not None
+        assert found.id == "uuid-registry-1"
+
+    @pytest.mark.asyncio
+    async def test_resolves_a_linear_shaped_task_by_its_provider_id(self) -> None:
+        registry = _registry()
+        await registry.add_project(
+            _config(
+                id="uuid-registry-2",
+                provider="linear",
+                provider_config={"project_id": "linear-proj-9", "team_id": "t-1"},
+            )
+        )
+
+        found = registry.get_project_by_provider_id("linear-proj-9")
+
+        assert found is not None
+        assert found.id == "uuid-registry-2"
+
+    def test_no_match_returns_none(self) -> None:
+        registry = _registry()
+
+        assert registry.get_project_by_provider_id("nothing-here") is None
+
+    @pytest.mark.asyncio
+    async def test_does_not_match_the_registry_id_itself(self) -> None:
+        """A registry id is not a provider id; the two must not be
+        confused even when a caller passes one where the other goes."""
+        registry = _registry()
+        await registry.add_project(
+            _config(
+                id="uuid-registry-3",
+                provider="planka",
+                provider_config={"project_id": "planka-proj-3"},
+            )
+        )
+
+        assert registry.get_project_by_provider_id("uuid-registry-3") is None
+
+
 class TestGetActiveProjectSync:
     """Issue #830: a synchronous cache read for callers that cannot await.
 
