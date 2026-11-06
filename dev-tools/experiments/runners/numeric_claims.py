@@ -744,6 +744,55 @@ def _metric_contradiction(
     return None
 
 
+def _metric_contradiction_for_addresses(
+    text: str, addresses: Sequence[str], sources: Dict[str, Any]
+) -> Optional[str]:
+    """Run :func:`_metric_contradiction` from a raw address list.
+
+    The one entry point every surface -- a claim's own label, the
+    sentence a tagged figure sits in, a slide title, and (through
+    exact-match equality, never reaching here) a slide cell's label
+    -- uses to check metric identity, the same way
+    :func:`_owned_rows_for_addresses` plus
+    :func:`_text_contradicts_owned_rows` is the one entry point for
+    row identity.
+
+    Scoped to exactly one address, the same way round 31 scoped the
+    label check to a single-input derived claim: a claim combining
+    more than one metric (a ratio, a sum) has no single "own metric"
+    left to compare text against.
+
+    Parameters
+    ----------
+    text : str
+        The text to check (a label, a sentence, a slide title).
+    addresses : Sequence[str]
+        Staged addresses, e.g. ``"per_crop.csv:crop=maize:mean_ape"``.
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the contradiction, or ``None``.
+    """
+    if len(addresses) != 1:
+        return None
+    parts = addresses[0].split(":")
+    if len(parts) < 3 or "=" not in parts[1]:
+        return None
+    rows = sources.get(parts[0])
+    if not isinstance(rows, list) or not rows:
+        return None
+    # The selector column itself ("tier" in "tier=Good:n_records")
+    # is a row label, not a metric -- an ordinary sentence naming
+    # its own row ("Good tier has 5 [c1].") would otherwise be read
+    # as naming a sibling "metric" called "tier".
+    sel_col = parts[1].split("=", 1)[0]
+    row = {column: v for column, v in rows[0].items() if column != sel_col}
+    return _metric_contradiction(_words_in(text), parts[-1], row)
+
+
 #: A closing or opening quotation mark a writer's model might use,
 #: named by codepoint rather than written as a literal glyph -- see
 #: the Unicode block above for why.
@@ -1038,7 +1087,14 @@ def _prose_label_contradiction(
                     f"sentence says {other!r} but the tagged claim reads "
                     f"{sel_col}={sorted(owned)!r}"
                 )
-    return None
+
+    # A sentence naming a different metric of the correct row --
+    # "Maize median APE is 20% [c1]." for a claim that correctly
+    # reads mean_ape and is correctly labelled "maize mean APE". The
+    # row check above only catches a different crop; this catches a
+    # different column of the correct one, scoped to a single
+    # address the same way the label check is.
+    return _metric_contradiction_for_addresses(sentence, addresses, sources)
 
 
 def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
@@ -1101,8 +1157,9 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     # median APE" for a claim that actually reads mean_ape. The row
     # check above only catches a different crop; this catches a
     # different column of the correct one.
-    own_column = parts[-1]
-    metric_contradiction = _metric_contradiction(label_words, own_column, rows[0])
+    metric_contradiction = _metric_contradiction_for_addresses(
+        claim.label, [f"{claim.source}:{claim.key}"], sources
+    )
     if metric_contradiction:
         return metric_contradiction
 
@@ -1218,18 +1275,7 @@ def _derived_label_contradiction(
     # expression combines more than one metric and "the metric" is
     # not a single thing to compare a label against.
     addresses = [a for a in inputs.values() if isinstance(a, str)]
-    if len(addresses) == 1:
-        parts = addresses[0].split(":")
-        if len(parts) >= 3 and "=" in parts[1]:
-            rows = sources.get(parts[0])
-            if isinstance(rows, list) and rows:
-                own_column = parts[-1]
-                metric_contradiction = _metric_contradiction(
-                    label_words, own_column, rows[0]
-                )
-                if metric_contradiction:
-                    return metric_contradiction
-    return None
+    return _metric_contradiction_for_addresses(claim.label, addresses, sources)
 
 
 def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
@@ -2437,11 +2483,14 @@ def check_slide_spec(
             # A figure matching more than one cell's value is bound
             # to whichever of them the title's own words do not rule
             # out -- it is only a contradiction when every candidate
-            # claim this figure could be is contradicted.
+            # claim this figure could be is contradicted. Row identity
+            # and metric identity are both checked, the same two
+            # checks a tagged prose sentence gets.
             contradictions = [
                 _text_contradicts_owned_rows(
                     title, _owned_rows_for_addresses(addresses), sources
                 )
+                or _metric_contradiction_for_addresses(title, addresses, sources)
                 for _, addresses in matches
             ]
             if all(contradictions):

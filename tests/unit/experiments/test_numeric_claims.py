@@ -3975,3 +3975,159 @@ class TestCodexFindingLabelMustNameTheRightMetricToo:
         res = check_claims([c], self.PER_CROP_SOURCES)[0]
         assert res.verdict == "failed"
         assert res.reason == "label_mismatch"
+
+
+class TestCodexFindingMetricIdentityAppliesToProseAndSlideTitlesToo:
+    """The metric-identity check ran on claim labels, not on the
+    tagged sentence or a slide title -- the prose twin of round 31,
+    the same shape round 26 was to round 23's row check.
+
+    A correctly labelled claim ("maize mean APE" reading mean_ape 20)
+    still let "Maize median APE is 20% [c1]." through, because the
+    sentence the figure sits in never reached _metric_contradiction
+    at all. Fixed with the same one entry point
+    (_metric_contradiction_for_addresses) every surface now calls:
+    the claim's own label, the tagged prose sentence, and a slide
+    title.
+    """
+
+    PER_CROP_SOURCES = {
+        "per_crop.csv": [
+            {"crop": "maize", "mean_ape": 20.0, "median_ape": 15.0},
+            {"crop": "cotton", "mean_ape": 10.0, "median_ape": 8.0},
+        ]
+    }
+
+    @pytest.mark.unit
+    def test_a_sentence_naming_the_sibling_metric_is_caught(self):
+        """Codex's exact scenario: the claim's own label is correct
+        ("maize mean APE"), but the sentence states a different
+        metric name around the same figure."""
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize mean APE",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape",
+            unit="percent",
+        )
+        res = check_claims(
+            [c],
+            self.PER_CROP_SOURCES,
+            report_text="Maize median APE is 20% [c1].",
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_a_sentence_naming_its_own_metric_still_passes(self):
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize mean APE",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape",
+            unit="percent",
+        )
+        res = check_claims(
+            [c],
+            self.PER_CROP_SOURCES,
+            report_text="Maize mean APE is 20% [c1].",
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_slide_title_naming_the_sibling_metric_is_rejected(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=20.0,
+                label="maize mean APE",
+                addresses=("per_crop.csv:crop=maize:mean_ape",),
+                unit="percent",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Maize median APE 20%",
+                    "cells": [
+                        {"value": 20.0, "claim": "c1", "label": "maize mean APE"}
+                    ],
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c1": "maize mean APE"}, sources=self.PER_CROP_SOURCES
+        )
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_slide_title_naming_its_own_metric_still_passes(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=20.0,
+                label="maize mean APE",
+                addresses=("per_crop.csv:crop=maize:mean_ape",),
+                unit="percent",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Maize mean APE 20%",
+                    "cells": [
+                        {"value": 20.0, "claim": "c1", "label": "maize mean APE"}
+                    ],
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c1": "maize mean APE"}, sources=self.PER_CROP_SOURCES
+        )
+        assert problems == []
+
+
+class TestCodexFindingSelectorColumnIsNotAMetric:
+    """The row-selector column itself ("tier" in "tier=Good:n_records")
+    must never be read as a sibling metric name.
+
+    Found while regression-testing the prose/title extension above:
+    "Good tier has 5 [c1]." against tiers.csv's own n_records column
+    was flagged as naming the sibling metric "tier", because the
+    metric check's column loop did not exclude the selector column
+    the address already identifies by value, not by metric. An
+    ordinary sentence naming its own row this way is not a
+    contradiction.
+    """
+
+    TIER_SOURCES = {"tiers.csv": [{"tier": "Good", "n_records": 5}]}
+
+    @pytest.mark.unit
+    def test_a_sentence_naming_its_own_row_is_not_read_as_a_metric_name(self):
+        c = Claim(
+            id="c1",
+            value=5,
+            label="good tier count",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Good:n_records",
+        )
+        res = check_claims([c], self.TIER_SOURCES, report_text="Good tier has 5 [c1].")
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_label_naming_its_own_row_is_not_read_as_a_metric_name(self):
+        c = Claim(
+            id="c1",
+            value=5,
+            label="good tier count",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Good:n_records",
+        )
+        assert check_claims([c], self.TIER_SOURCES)[0].verdict == "verified"
