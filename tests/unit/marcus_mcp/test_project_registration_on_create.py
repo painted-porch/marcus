@@ -16,6 +16,38 @@ def _mock_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _patch_kanban_factory():
+    """Issue #856: create_project always builds a fresh client via
+    KanbanFactory.create now, even when the requested provider matches
+    the one already on state.kanban_client (it must never reuse/mutate
+    an existing instance -- that was the bug this fixed). Without this
+    patch the REAL factory runs and tries to construct/connect a real
+    Planka provider, which only happens to work here because this is a
+    dev machine with a local Planka reachable -- it fails in CI, and
+    even locally it clobbers the Mock's project_id/board_id the test
+    depends on. The fake factory returns a fresh Mock carrying the same
+    ids the test already expects.
+    """
+    from unittest.mock import AsyncMock, Mock, patch
+
+    from src.integrations.kanban_interface import KanbanProvider
+
+    def _fake_create(provider, config=None):
+        client = Mock()
+        client.provider = KanbanProvider.PLANKA
+        client.project_id = "1670692878487127607"
+        client.board_id = "1670692878621345337"
+        client.connect = AsyncMock()
+        return client
+
+    with patch(
+        "src.integrations.kanban_factory.KanbanFactory.create",
+        side_effect=_fake_create,
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_create_project_dedup_cache():
     """Clear the module-level dedup cache between tests.
 
@@ -83,8 +115,8 @@ async def test_create_project_registers_with_project_registry() -> None:
             return_value=mock_creator_result
         )
 
-        # Call create_project — provider matches so kanban_client
-        # is NOT replaced, keeping our mock with project_id/board_id
+        # Call create_project — the fake KanbanFactory.create (patched
+        # above) returns a client with the same project_id/board_id.
         result = await create_project(
             description="Build a flight simulator game",
             project_name="Flight Simulator",
