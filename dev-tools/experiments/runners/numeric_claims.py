@@ -919,15 +919,26 @@ _METRIC_TOKEN_ALIASES: Dict[str, str] = {
     "rate": "share",
     "pct": "share",
     "percent": "share",
+    "r2": "r2",
+    "ape": "ape",
+    "rmse": "rmse",
+    "mae": "mae",
 }
 
 
 def _metric_tokens(column: str) -> Set[str]:
-    """Canonical metric-concept tokens a staged column name carries.
+    """Known metric-concept tokens a staged column name carries.
 
     Splits on underscore and maps each piece through
     :data:`_METRIC_TOKEN_ALIASES`, so ``"mean_ape"`` and a label
     saying "average APE" share a token even though the words differ.
+    A piece the table does not recognize is dropped, not passed
+    through as itself: ``"r2_overall"`` splits into ``"r2"`` (a known
+    metric concept) and ``"overall"`` (a scope word, never a metric
+    concept on its own) -- keeping "overall" would let an unrelated
+    sentence that merely happens to use that ordinary word read as
+    naming this column's own metric. Only a recognized concept can
+    ever distinguish one sibling column from another.
 
     Parameters
     ----------
@@ -937,9 +948,63 @@ def _metric_tokens(column: str) -> Set[str]:
     Returns
     -------
     Set[str]
-        One canonical token per underscore-separated piece.
+        One canonical token per recognized underscore-separated
+        piece; pieces the alias table does not know are omitted.
     """
-    return {_METRIC_TOKEN_ALIASES.get(p, p) for p in column.lower().split("_") if p}
+    return {
+        _METRIC_TOKEN_ALIASES[p]
+        for p in column.lower().split("_")
+        if p in _METRIC_TOKEN_ALIASES
+    }
+
+
+#: A plain decimal number, nothing else -- deliberately stricter than
+#: Python's own ``float()``, which parses underscore-separated digit
+#: groups as one literal number (``float("20261103_224414")`` is a
+#: real, surprising success, not a rejection). A staged value that
+#: merely looks digit-heavy, like an ``eval_timestamp`` string, must
+#: never be read as numeric just because ``float()`` happens to
+#: accept it.
+_PLAIN_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _looks_numeric(value: Any) -> bool:
+    """Whether a sibling's own staged value is itself a number.
+
+    The sibling vocabulary for metric identity is built only from
+    numeric sibling columns or keys -- a staged file's non-numeric
+    metadata (a unit string like ``"BU / ACRE"``, a list of crop
+    names, an ``eval_timestamp`` string) is never a metric, whatever
+    word its own column or key happens to be named. A CSV row loads
+    every value as a string (``csv.DictReader``), so a genuinely
+    numeric column ("837") and a non-numeric one ("BU / ACRE") look
+    the same structurally; only the digits distinguish them. A JSON
+    source's non-numeric metadata can be any JSON type at all.
+
+    Parameters
+    ----------
+    value : Any
+        A sibling column's or key's own staged value.
+
+    Returns
+    -------
+    bool
+        True when the value is a number, or a string that spells one
+        plainly (optionally with a trailing ``'%'`` or ``','``
+        grouping) -- never true for a bool, a non-numeric string, or
+        any other type.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if stripped.endswith("%"):
+        stripped = stripped[:-1].strip()
+    stripped = stripped.replace(",", "")
+    return bool(_PLAIN_NUMBER_RE.fullmatch(stripped))
 
 
 #: A superscript digit maps to its ASCII digit when it follows a
@@ -1056,8 +1121,14 @@ def _metric_contradiction(
     exclude = (
         _SHARE_POPULATION_TOKENS if claim_unit in ("percent", "fraction") else set()
     )
-    for column in row:
+    for column, value in row.items():
         if column == own_column:
+            continue
+        if not _looks_numeric(value):
+            # A non-numeric sibling -- a unit string ("BU / ACRE"), a
+            # list of crop names, an eval_timestamp -- is metadata,
+            # never a metric a label could be confused with, whatever
+            # its own key or column happens to be named.
             continue
         sibling_tokens = _metric_tokens(column) - exclude
         if not sibling_tokens:

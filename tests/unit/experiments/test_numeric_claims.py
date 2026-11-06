@@ -5332,3 +5332,720 @@ class TestCodexFindingSoleFigureIsDecidedBySpanNotSpelling:
         }
         problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
         assert problems
+
+
+class TestCodexFindingSiblingVocabularyIsNumericMetricConceptsOnly:
+    """The fourth over-rejection from the metric-identity check. Two
+    distinct causes, both from the same root: the sibling vocabulary
+    a label or sentence is compared against was built from a
+    sibling's raw, split-on-underscore column or key name, keeping
+    every piece whether or not it was a recognized metric word, and
+    without ever checking whether the sibling's own value was a
+    number at all.
+
+    "Overall, 60 observations were evaluated." against a correct
+    n_records lookup was rejected because "overall" -- an ordinary
+    scope word, not a metric concept -- is one underscore-separated
+    piece of the sibling key "r2_overall", and the old code kept
+    every such piece verbatim. "The evaluation contains 60
+    observations across all crops." was rejected because "crops",
+    a non-numeric metadata key in the same JSON file (a list of crop
+    names, not a number), was treated as a sibling metric purely by
+    being a sibling key, never checked for being numeric.
+
+    Fixed two ways: _metric_tokens now keeps only pieces the alias
+    table recognizes as metric concepts (mean, median, min, max,
+    total, count, share, r2, ape, rmse, mae), dropping an unknown
+    piece like "overall" entirely rather than passing it through;
+    and _metric_contradiction now skips any sibling whose own staged
+    value is not itself a number, so "crops" (a list) and a unit
+    string like "BU / ACRE" are never candidates at all, whatever
+    their key or column is named.
+    """
+
+    @pytest.mark.unit
+    def test_a_scope_word_shared_with_a_sibling_key_is_not_a_contradiction(self):
+        """Codex's first exact scenario: "overall" is one piece of
+        the sibling key "r2_overall", but it names no metric concept
+        on its own."""
+        sources = {
+            "metrics.json": {
+                "n_records": 60,
+                "r2_overall": 0.858,
+            }
+        }
+        c = Claim(
+            id="c1",
+            value=60,
+            label="record count",
+            kind="lookup",
+            source="metrics.json",
+            key="n_records",
+        )
+        res = check_claims(
+            [c],
+            sources,
+            report_text="Overall, 60 [c1] observations were evaluated.",
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_nonnumeric_metadata_key_is_never_a_sibling_metric(self):
+        """Codex's second exact scenario: "crops" is a real metadata
+        key in the staged file, but its value is a list of crop
+        names, not a number -- never a metric to contradict."""
+        sources = {
+            "metrics.json": {
+                "n_records": 60,
+                "crops": ["cotton", "maize"],
+            }
+        }
+        c = Claim(
+            id="c1",
+            value=60,
+            label="record count",
+            kind="lookup",
+            source="metrics.json",
+            key="n_records",
+        )
+        res = check_claims(
+            [c],
+            sources,
+            report_text=(
+                "The evaluation contains 60 [c1] observations across all crops."
+            ),
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_digit_heavy_metadata_string_is_not_treated_as_numeric(self):
+        """eval_timestamp ("20261103_224414") is exactly the kind of
+        string Python's own float() would misparse as a huge number
+        (underscore-separated digit groups) -- it must still be
+        excluded as non-numeric metadata, not accidentally admitted
+        as a sibling metric because a naive float() probe accepted
+        it."""
+        sources = {
+            "metrics.json": {
+                "n_records": 60,
+                "eval_timestamp": "20261103_224414",
+            }
+        }
+        c = Claim(
+            id="c1",
+            value=60,
+            label="record count",
+            kind="lookup",
+            source="metrics.json",
+            key="n_records",
+        )
+        res = check_claims(
+            [c],
+            sources,
+            report_text=(
+                "A total of 60 [c1] records were timestamped during evaluation."
+            ),
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_unit_string_sibling_is_never_a_metric(self):
+        """A CSV row's own "unit" column ("BU / ACRE") is a string,
+        not a number, loaded by csv.DictReader the same as every
+        other cell -- it must never be read as a sibling metric
+        just because it sits in the same row."""
+        sources = {
+            "per_crop.csv": [
+                {
+                    "crop": "maize",
+                    "n_records": "837",
+                    "r2": "0.481",
+                    "unit": "BU / ACRE",
+                }
+            ]
+        }
+        c = Claim(
+            id="c1",
+            value=837,
+            label="maize record count",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:n_records",
+        )
+        res = check_claims(
+            [c],
+            sources,
+            report_text="Maize has 837 [c1] records, reported in BU / ACRE.",
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_genuine_sibling_metric_collision_is_still_caught(self):
+        """The fix narrows what counts as a sibling metric; it must
+        not narrow it to nothing. mean_ape and median_ape, both
+        genuinely numeric, must still collide the way round 31
+        intended."""
+        sources = {
+            "per_crop.csv": [
+                {"crop": "maize", "mean_ape": "20.0", "median_ape": "15.0"}
+            ]
+        }
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize median APE",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+    @pytest.mark.unit
+    def test_an_r2_metric_name_still_collides_with_a_sibling_r2(self):
+        """The newly recognized "r2" concept must still catch a
+        genuine r2-vs-r2 collision across two sibling addresses
+        (one per crop row), the reason it was added in the first
+        place."""
+        sources = {
+            "per_crop.csv": [
+                {"crop": "maize", "r2": "0.481"},
+                {"crop": "cotton", "r2": "0.444"},
+            ]
+        }
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="cotton R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+
+class TestCorpusSafetyNetRealReportSentencesNeverGoUncovered:
+    """A corpus regression test, requested after the fourth
+    over-rejection in this family: real sentences from four actual
+    numeric-verifier workspaces (three rehearsal cases and one
+    run-haiku smoke-test case, whose report.md was genuinely written
+    by a model, not hand-authored), each paired with the real claim
+    and real staged data it was checked against. Every sentence here
+    states a number its own claim actually supports; none of them
+    should ever be marked uncovered.
+
+    This corpus, run as of round 41, would have caught rounds 34, 36
+    and 41 before Codex did -- each introduced an over-rejection on
+    exactly the kind of ordinary sentence a real writer produces.
+    Sources are transcribed inline from the workspaces' own staged
+    files (not read from disk) so the test does not depend on those
+    experiment directories continuing to exist. Add a sentence here
+    the next time a round like this appears.
+    """
+
+    #: rehearsal/case-000 and run-haiku-smoke/case-000 share this
+    #: staged data (same evaluation, re-run); only their report
+    #: wording and claim labels differ.
+    CASE_000_SOURCES = {
+        "metrics.json": {
+            "n_records": 1476,
+            "r2_overall": 0.932,
+            "median_ape": 9.4,
+            "mean_ape": 16.7,
+            "eval_timestamp": "20261103_224414",
+            "crops": ["cotton", "maize", "soybeans", "wheat"],
+        },
+        "per_crop.csv": [
+            {
+                "crop": "maize",
+                "n_records": "837",
+                "r2": "0.481",
+                "median_ape": "9.2",
+                "mean_ape": "17.6",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "soybeans",
+                "n_records": "550",
+                "r2": "0.528",
+                "median_ape": "9.2",
+                "mean_ape": "14.9",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "wheat",
+                "n_records": "47",
+                "r2": "0.693",
+                "median_ape": "13.7",
+                "mean_ape": "15.5",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "cotton",
+                "n_records": "42",
+                "r2": "0.444",
+                "median_ape": "13.0",
+                "mean_ape": "21.6",
+                "unit": "LB / ACRE",
+            },
+        ],
+        "tiers.csv": [
+            {"tier": "Excellent", "n_records": "425", "rate_pct": "29.0"},
+            {"tier": "Good", "n_records": "343", "rate_pct": "23.4"},
+            {"tier": "Average", "n_records": "370", "rate_pct": "25.2"},
+            {"tier": "Poor", "n_records": "330", "rate_pct": "22.5"},
+        ],
+        "quartiles.csv": [
+            {
+                "quartile": "Q1",
+                "n_records": "369",
+                "median_area_value": "3250",
+                "median_ape": "12.4",
+            },
+            {
+                "quartile": "Q2",
+                "n_records": "369",
+                "median_area_value": "16880",
+                "median_ape": "10.9",
+            },
+            {
+                "quartile": "Q3",
+                "n_records": "369",
+                "median_area_value": "53655",
+                "median_ape": "8.7",
+            },
+            {
+                "quartile": "Q4",
+                "n_records": "369",
+                "median_area_value": "122400",
+                "median_ape": "6.6",
+            },
+        ],
+    }
+
+    CASE_002_SOURCES = {
+        "metrics.json": {
+            "n_records": 1525,
+            "r2_overall": 0.923,
+            "median_ape": 9.8,
+            "mean_ape": 17.4,
+        },
+        "per_crop.csv": [
+            {
+                "crop": "maize",
+                "n_records": "892",
+                "r2": "0.501",
+                "median_ape": "9.7",
+                "mean_ape": "18.8",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "soybeans",
+                "n_records": "553",
+                "r2": "0.547",
+                "median_ape": "9.2",
+                "mean_ape": "14.6",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "cotton",
+                "n_records": "42",
+                "r2": "0.179",
+                "median_ape": "15.2",
+                "mean_ape": "22.9",
+                "unit": "LB / ACRE",
+            },
+            {
+                "crop": "wheat",
+                "n_records": "38",
+                "r2": "0.574",
+                "median_ape": "13.1",
+                "mean_ape": "17.8",
+                "unit": "BU / ACRE",
+            },
+        ],
+        "tiers.csv": [
+            {"tier": "Excellent", "n_records": "414", "rate_pct": "27.1"},
+            {"tier": "Good", "n_records": "360", "rate_pct": "23.6"},
+            {"tier": "Average", "n_records": "404", "rate_pct": "26.5"},
+            {"tier": "Poor", "n_records": "347", "rate_pct": "22.8"},
+        ],
+    }
+
+    CASE_003_SOURCES = {
+        "metrics.json": {
+            "n_records": 1428,
+            "r2_overall": 0.925,
+            "median_ape": 9.8,
+            "mean_ape": 15.9,
+            "eval_timestamp": "20261103_224415",
+            "crops": ["cotton", "maize", "soybeans", "wheat"],
+        },
+        "per_crop.csv": [
+            {
+                "crop": "maize",
+                "n_records": "831",
+                "r2": "0.51",
+                "median_ape": "9.4",
+                "mean_ape": "16.4",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "soybeans",
+                "n_records": "516",
+                "r2": "0.475",
+                "median_ape": "9.5",
+                "mean_ape": "14.1",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "wheat",
+                "n_records": "44",
+                "r2": "0.584",
+                "median_ape": "15.7",
+                "mean_ape": "22.7",
+                "unit": "BU / ACRE",
+            },
+            {
+                "crop": "cotton",
+                "n_records": "37",
+                "r2": "0.311",
+                "median_ape": "17.4",
+                "mean_ape": "20.9",
+                "unit": "LB / ACRE",
+            },
+        ],
+    }
+
+    #: One tagged sentence per case, each lifted verbatim (or, for
+    #: run-haiku-smoke, genuinely model-written) from that workspace's
+    #: own report, with [cN] inserted at the figure its real claim
+    #: backs. (sources, claim, sentence) triples.
+    CORPUS = [
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c1",
+                value=1476,
+                label="total number of evaluated records",
+                kind="lookup",
+                source="metrics.json",
+                key="n_records",
+            ),
+            "The model was evaluated on 1476 [c1] county-level records "
+            "covering four crops (maize, soybeans, wheat, cotton).",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c6",
+                value=0.481,
+                label="maize R2",
+                kind="lookup",
+                source="per_crop.csv",
+                key="crop=maize:r2",
+            ),
+            "Maize has 837 records, an R-squared of 0.481 [c6], a median "
+            "APE of 9.2% and a mean APE of 17.6%.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c21",
+                value=94.0,
+                label="maize plus soybeans share of all evaluated records (%)",
+                kind="derived",
+                expr="(a + b) / c * 100",
+                inputs={
+                    "a": "per_crop.csv:crop=maize:n_records",
+                    "b": "per_crop.csv:crop=soybeans:n_records",
+                    "c": "metrics.json:n_records",
+                },
+                tolerance={"type": "abs", "value": 0.05},
+                unit="percent",
+            ),
+            "Maize and soybeans dominate the evaluation, together making "
+            "up 94.0% [c21] of records.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c31",
+                value=1468,
+                label="total records across all tiers in tiers.csv",
+                kind="lookup",
+                source="tiers.csv",
+                key="sum:n_records",
+            ),
+            "The tier counts add up to 1468 [c31] records, which is 8 "
+            "fewer than the number of evaluated records.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c42",
+                value=1.9,
+                label="ratio of Q1 to Q4 median APE",
+                kind="derived",
+                expr="a / b",
+                inputs={
+                    "a": "quartiles.csv:quartile=Q1:median_ape",
+                    "b": "quartiles.csv:quartile=Q4:median_ape",
+                },
+                tolerance={"type": "abs", "value": 0.05},
+                unit="plain",
+            ),
+            "The smallest-area quartile has about 1.9 [c42] times the "
+            "median error of the largest.",
+        ),
+        (
+            CASE_002_SOURCES,
+            Claim(
+                id="c1",
+                value=1525,
+                label="total evaluated records",
+                kind="lookup",
+                source="metrics.json",
+                key="n_records",
+            ),
+            "The model was evaluated on 1,525 [c1] records across four "
+            "crops (maize, soybeans, cotton, wheat).",
+        ),
+        (
+            CASE_002_SOURCES,
+            Claim(
+                id="c14",
+                value=0.179,
+                label="cotton R2",
+                kind="lookup",
+                source="per_crop.csv",
+                key="crop=cotton:r2",
+            ),
+            "Cotton is the weakest crop on every measure: R-squared of "
+            "0.179 [c14], median APE of 15.2% and mean APE of 22.9%.",
+        ),
+        (
+            CASE_002_SOURCES,
+            Claim(
+                id="c22",
+                value=80,
+                label="cotton plus wheat record count",
+                kind="derived",
+                expr="a + b",
+                inputs={
+                    "a": "per_crop.csv:crop=cotton:n_records",
+                    "b": "per_crop.csv:crop=wheat:n_records",
+                },
+                unit="count",
+            ),
+            "Cotton and wheat together contribute only 80 [c22] records, "
+            "so their figures rest on small samples.",
+        ),
+        (
+            CASE_002_SOURCES,
+            Claim(
+                id="c31",
+                value=774,
+                label="Excellent plus Good tier record count",
+                kind="derived",
+                expr="a + b",
+                inputs={
+                    "a": "tiers.csv:tier=Excellent:n_records",
+                    "b": "tiers.csv:tier=Good:n_records",
+                },
+                unit="count",
+            ),
+            "Only 774 [c31] records (50.8%) reach Good or Excellent.",
+        ),
+        (
+            CASE_003_SOURCES,
+            Claim(
+                id="c1",
+                value=1428,
+                label="total evaluated records",
+                kind="lookup",
+                source="metrics.json",
+                key="n_records",
+            ),
+            "The model was evaluated on 1428 [c1] records across four "
+            "crops (maize, soybeans, wheat, cotton).",
+        ),
+        (
+            CASE_003_SOURCES,
+            Claim(
+                id="c6",
+                value=6.1,
+                label="overall mean APE minus overall median APE (percentage points)",
+                kind="derived",
+                expr="a - b",
+                inputs={"a": "metrics.json:mean_ape", "b": "metrics.json:median_ape"},
+                tolerance={"type": "abs", "value": 0.05},
+                unit="percent",
+            ),
+            "The mean APE sits 6.1 [c6] percentage points above the "
+            "median, so a minority of records carry large errors.",
+        ),
+        (
+            CASE_003_SOURCES,
+            Claim(
+                id="c23",
+                value=94.3,
+                label="maize plus soybeans share of all records (%)",
+                kind="derived",
+                expr="(a + b) / c * 100",
+                inputs={
+                    "a": "per_crop.csv:crop=maize:n_records",
+                    "b": "per_crop.csv:crop=soybeans:n_records",
+                    "c": "metrics.json:n_records",
+                },
+                tolerance={"type": "abs", "value": 0.05},
+                unit="percent",
+            ),
+            "Maize and soybeans make up 94.3% [c23] of the evaluation, "
+            "and they have the lowest percentage errors.",
+        ),
+        (
+            CASE_003_SOURCES,
+            Claim(
+                id="c24",
+                value=81,
+                label="wheat plus cotton records combined",
+                kind="derived",
+                expr="a + b",
+                inputs={
+                    "a": "per_crop.csv:crop=wheat:n_records",
+                    "b": "per_crop.csv:crop=cotton:n_records",
+                },
+                unit="count",
+            ),
+            "Wheat and cotton together contribute only 81 [c24] records.",
+        ),
+        # run-haiku-smoke/case-000: same staged data as CASE_000, a
+        # genuinely model-written report and its own claim labels.
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c1",
+                value=0.932,
+                label="overall R2",
+                kind="lookup",
+                source="metrics.json",
+                key="r2_overall",
+            ),
+            "The model demonstrates strong overall performance with an "
+            "R2 of 0.932 [c1] across 1476 evaluated records spanning "
+            "four crops.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c2",
+                value=1476,
+                label="total evaluated records",
+                kind="lookup",
+                source="metrics.json",
+                key="n_records",
+            ),
+            "The model demonstrates strong overall performance with an "
+            "R2 of 0.932 across 1476 [c2] evaluated records spanning "
+            "four crops.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c22",
+                value=29.0,
+                label="Excellent tier percentage",
+                kind="lookup",
+                source="tiers.csv",
+                key="tier=Excellent:rate_pct",
+            ),
+            "Quality tiers are well-distributed across records, with "
+            "29.0% [c22] in the Excellent tier but 22.5% in the Poor "
+            "tier, indicating consistent but imperfect predictions.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c28",
+                value=22.5,
+                label="Poor tier percentage",
+                kind="lookup",
+                source="tiers.csv",
+                key="tier=Poor:rate_pct",
+            ),
+            "Quality tiers are well-distributed across records, with "
+            "29.0% in the Excellent tier but 22.5% [c28] in the Poor "
+            "tier, indicating consistent but imperfect predictions.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c7",
+                value=837,
+                label="maize record count",
+                kind="lookup",
+                source="per_crop.csv",
+                key="crop=maize:n_records",
+            ),
+            "Maize (837 [c7] records, BU/ACRE): The largest crop cohort, "
+            "maize achieves R2 0.481 with median APE 9.2% and mean APE "
+            "17.6%.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c8",
+                value=0.481,
+                label="maize R2",
+                kind="lookup",
+                source="per_crop.csv",
+                key="crop=maize:r2",
+            ),
+            "Maize (837 records, BU/ACRE): The largest crop cohort, "
+            "maize achieves R2 0.481 [c8] with median APE 9.2% and mean "
+            "APE 17.6%.",
+        ),
+        (
+            CASE_000_SOURCES,
+            Claim(
+                id="c41",
+                value=85,
+                label="improvement in median APE from Q1 to Q4 percentage",
+                kind="derived",
+                expr="((a - b) / a) * 100",
+                inputs={
+                    "a": "quartiles.csv:quartile=Q1:median_ape",
+                    "b": "quartiles.csv:quartile=Q4:median_ape",
+                },
+                tolerance={"type": "abs", "value": 0.5},
+                unit="percent",
+            ),
+            "The 85% [c41] improvement in median APE from Q1 to Q4 "
+            "demonstrates that the model's predictions benefit from the "
+            "aggregation effects of larger operations.",
+        ),
+    ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "sources,claim,sentence",
+        CORPUS,
+        ids=[f"{c.id}:{s[:40]}" for _, c, s in CORPUS],
+    )
+    def test_a_correct_real_sentence_is_never_uncovered(self, sources, claim, sentence):
+        """Checked against a single claim at a time, a real sentence's
+        OTHER untagged figures (this corpus tags only the one figure
+        each row exists to test) are flagged "no claim tag" by
+        design -- that is round 827's mandatory-tagging rule, not
+        this family of bug, so only the row's own tag is asserted
+        covered."""
+        res = check_claims([claim], sources, report_text=sentence)
+        own_tag = f"[{claim.id}]"
+        uncovered = [
+            r for r in res if r.verdict == "uncovered" and own_tag in (r.detail or "")
+        ]
+        assert uncovered == [], uncovered[0].detail if uncovered else None
