@@ -28,7 +28,7 @@ import operator
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 VERDICT_VERIFIED = "verified"
 VERDICT_FAILED = "failed"
@@ -220,6 +220,17 @@ class Claim:
         variables resolve to.
     tolerance : Optional[Dict[str, Any]]
         ``{"type": "abs"|"rel", "value": float}``. Absent means exact.
+    unit : Optional[str]
+        ``"fraction"`` (0-1, like an R2) or ``"percent"`` (0-100,
+        like a ``rate_pct`` share) -- which scale the claim's own
+        ``value`` is already on. Decides what a '%'-suffixed figure
+        in prose, a slide cell or a slide title actually means: a
+        fraction-unit claim's percent figure is divided by 100
+        before comparison ("48.1%" is 0.481); a percent-unit claim's
+        is not ("50%" is 50.0, the same number, not 0.5). Absent
+        means infer it from the claim's own source column name (see
+        :func:`_inferred_claim_unit`), since most claims do not
+        declare one explicitly.
     """
 
     id: str
@@ -231,6 +242,7 @@ class Claim:
     expr: Optional[str] = None
     inputs: Any = field(default_factory=dict)
     tolerance: Any = None
+    unit: Optional[str] = None
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "Claim":
@@ -256,6 +268,7 @@ class Claim:
             expr=raw.get("expr"),
             inputs=dict(raw.get("inputs") or {}),
             tolerance=raw.get("tolerance"),
+            unit=raw.get("unit"),
         )
 
 
@@ -292,6 +305,13 @@ class CheckResult:
         (the slide mapping check) that has only this result to work
         from, not the original ``Claim`` or the staged ``sources``
         it was resolved against.
+    unit : Optional[str]
+        From :func:`_inferred_claim_unit` at the time the claim was
+        checked: ``"fraction"``, ``"percent"``, or ``None`` when
+        undetermined. Carried forward the same way ``addresses`` is,
+        so a slide-cell or slide-title figure with a '%' can be
+        scaled correctly without re-deriving it from a ``Claim`` the
+        consumer does not have.
     """
 
     claim_id: str
@@ -302,6 +322,7 @@ class CheckResult:
     label: str = ""
     reason: str = ""
     addresses: Tuple[str, ...] = ()
+    unit: Optional[str] = None
 
 
 def load_sources(
@@ -864,7 +885,11 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=problem, **base)
     if claim.kind == "lookup":
         address = f"{claim.source}:{claim.key}"
-        base = {**base, "addresses": (address,)}
+        base = {
+            **base,
+            "addresses": (address,),
+            "unit": _inferred_claim_unit(claim),
+        }
         try:
             truth = resolve_address(address, sources)
         except KeyError as exc:
@@ -914,6 +939,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             "addresses": tuple(
                 v for v in (claim.inputs or {}).values() if isinstance(v, str)
             ),
+            "unit": _inferred_claim_unit(claim),
         }
         names: Dict[str, Any] = {}
         for var, address in (claim.inputs or {}).items():
@@ -1046,13 +1072,13 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
     for m in _NUMBER_RE.finditer(cleaned):
         figure = m.group(1)
         # A literal '%' immediately after the digits changes what
-        # number is actually being asserted ("0.481%" is 0.00481,
-        # not 0.481), the same scale change _percent_scaled already
-        # applies to a slide cell's value. _NUMBER_RE itself never
-        # captures the sign, so extract_numbers (which many other
-        # things rely on returning the bare digits) is unaffected;
-        # only this function's own figures carry it forward, for
-        # _figure_matches_claim_value to scale.
+        # number is actually being asserted ("0.481%" is 0.00481 for
+        # a fraction-scale claim, 0.5 for a percent-scale one) --
+        # _percent_aware_match is where that scale decision actually
+        # happens. _NUMBER_RE itself never captures the sign, so
+        # extract_numbers (which many other things rely on returning
+        # the bare digits) is unaffected; only this function's own
+        # figures carry it forward.
         if cleaned[m.end() : m.end() + 1] == "%":
             figure += "%"
         tokens.append((m.start(), "num", figure))
@@ -1113,18 +1139,6 @@ def _figure_matches_claim_value(
         original value is not rounding noise, it is a different
         number).
     """
-    if figure.endswith("%"):
-        # A literal '%' changes the number being asserted: "48.1%"
-        # is 0.481, "0.481%" is 0.00481 -- scaling down by 100 before
-        # comparing is the same rule _percent_scaled already applies
-        # to a slide cell's value, carried through to prose. No raw,
-        # unscaled fallback: the whole point is that the digits alone
-        # are not the number when a '%' follows them.
-        try:
-            scaled = float(figure[:-1].replace(",", "")) / 100
-        except ValueError:
-            return False
-        return _figure_matches_claim_value(f"{scaled:g}", value, tolerance)
     candidates = {str(value)}
     coerced = _coerce(value)
     if isinstance(coerced, float):
@@ -1153,6 +1167,168 @@ def _figure_matches_claim_value(
         except (TypeError, ValueError):
             return False
     return False
+
+
+#: A source column ending in any of these (case-insensitive) already
+#: holds a 0-100 share, not a 0-1 fraction -- "rate_pct" in
+#: numeric_stage.py is the authoritative example this list exists to
+#: recognize; a future staged column should follow the same
+#: convention rather than adding a new suffix here.
+_PERCENT_COLUMN_SUFFIXES = ("_pct", "pct", "percent", "share_pct")
+
+
+def _is_percent_column(column: str) -> bool:
+    """Decide whether a staged column name already holds a percent share.
+
+    Parameters
+    ----------
+    column : str
+        A column name, e.g. ``"rate_pct"`` or ``"r2"``.
+
+    Returns
+    -------
+    bool
+        True when the name matches the percent-column convention.
+    """
+    lowered = column.lower()
+    return any(lowered.endswith(suffix) for suffix in _PERCENT_COLUMN_SUFFIXES)
+
+
+def _claim_source_columns(claim: Claim) -> List[str]:
+    """Collect the trailing column name of every address a claim reads.
+
+    An address is always ``<file>:<...>:<column>``, so the column is
+    whatever follows the last ``:``. Used only to infer a claim's
+    unit from its own addressing, never to resolve a value.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim to inspect.
+
+    Returns
+    -------
+    List[str]
+        One entry per address the claim reads (one for a lookup, one
+        per input for a derived or consistency claim); empty when
+        the claim has no usable addressing at all.
+    """
+    addresses: List[str] = []
+    if (
+        claim.kind == "lookup"
+        and isinstance(claim.source, str)
+        and isinstance(claim.key, str)
+    ):
+        addresses.append(claim.key)
+    elif claim.kind in ("derived", "consistency") and isinstance(claim.inputs, dict):
+        addresses.extend(v for v in claim.inputs.values() if isinstance(v, str))
+    return [address.rsplit(":", 1)[-1] for address in addresses if address]
+
+
+def _inferred_claim_unit(claim: Claim) -> Optional[str]:
+    """Decide whether a claim's own value is a fraction or a percent.
+
+    An explicit ``claim.unit`` always wins. Otherwise, the claim's
+    own source column name decides: every address it reads agreeing
+    on percent, or every one agreeing on not-percent, settles it;
+    reading some of each (a ratio mixing a percent column with a
+    non-percent one, which this trial does not actually do) or
+    reading no column at all is genuinely undetermined, not a
+    default -- a caller that needs the unit to resolve a '%'-suffixed
+    figure must treat ``None`` as a problem to report, not a reason
+    to guess "fraction" and risk silently over- or under-rejecting a
+    correct figure.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim to inspect.
+
+    Returns
+    -------
+    Optional[str]
+        ``"fraction"`` or ``"percent"``, or ``None`` when neither an
+        explicit declaration nor the claim's own addressing settles it.
+    """
+    if claim.unit in ("fraction", "percent"):
+        return claim.unit
+    columns = _claim_source_columns(claim)
+    if not columns:
+        return None
+    flags = {_is_percent_column(c) for c in columns}
+    if flags == {True}:
+        return "percent"
+    if flags == {False}:
+        return "fraction"
+    return None
+
+
+def _percent_aware_match(
+    stated: Any,
+    value: Any,
+    unit: Optional[str],
+    tolerance: Optional[Dict[str, Any]] = None,
+    compare: Callable[[str, Any, Optional[Dict[str, Any]]], bool] = (
+        _figure_matches_claim_value
+    ),
+) -> Tuple[bool, Optional[str]]:
+    """Compare a stated figure against a claim's value, unit-aware.
+
+    The one rule used by the prose, slide-cell and slide-title
+    paths alike: a figure with no '%' is compared at face value,
+    whatever the claim's unit; a figure with one is scaled by 100
+    first only when the claim is on the fraction scale ("48.1%" is
+    0.481), and taken at face value when the claim is already on the
+    percent scale ("50%" is 50.0, not 0.5) -- never both ways for the
+    same figure, and never guessed at when the unit cannot be
+    determined at all.
+
+    Parameters
+    ----------
+    stated : Any
+        The figure as written (a slide cell's own value, or a figure
+        string already extracted from prose or a title).
+    value : Any
+        The claim's declared value.
+    unit : Optional[str]
+        From :func:`_inferred_claim_unit`: ``"fraction"``,
+        ``"percent"``, or ``None`` when undetermined.
+    tolerance : Optional[Dict[str, Any]]
+        The claim's own declared tolerance, if any.
+    compare : Callable[[str, Any, Optional[Dict[str, Any]]], bool]
+        What "matches at face value" means once the percent scale
+        question is settled. Prose restating a figure at coarser
+        rounding is still the same figure, so prose (the default)
+        uses :func:`_figure_matches_claim_value`'s rounding-tolerant
+        rule; a slide is supposed to literally restate the verified
+        value, so the slide paths pass :func:`_within_tolerance`
+        instead, which demands an exact (or explicitly toleranced)
+        match. Only this choice differs between the three callers --
+        the percent-scale decision below is identical for all of them.
+
+    Returns
+    -------
+    Tuple[bool, Optional[str]]
+        ``(matches, problem)``. ``problem`` is set, and ``matches``
+        is always ``False``, only when the figure carries a '%' and
+        ``unit`` could not be determined -- a named problem, not a
+        silent pass in either direction.
+    """
+    figure = str(stated)
+    if not figure.endswith("%"):
+        return compare(figure, value, tolerance), None
+    if unit is None:
+        return False, (
+            f"figure {figure!r} carries a percent sign, but whether the "
+            f"claim it is checked against is a fraction or already a "
+            f"percent could not be determined"
+        )
+    try:
+        raw = float(figure[:-1].replace(",", ""))
+    except ValueError:
+        return False, None
+    scaled = raw if unit == "percent" else raw / 100
+    return compare(f"{scaled:g}", value, tolerance), None
 
 
 def check_claims(
@@ -1219,7 +1395,10 @@ def check_claims(
                 )
             )
             continue
-        if not _figure_matches_claim_value(figure, claim.value, claim.tolerance):
+        matched, unit_problem = _percent_aware_match(
+            figure, claim.value, _inferred_claim_unit(claim), claim.tolerance
+        )
+        if not matched:
             # A figure whose own tagged claim does not support it has
             # no VALID claim behind it, same as no tag at all -- so
             # this is a coverage gap (VERDICT_UNCOVERED), not a
@@ -1235,8 +1414,11 @@ def check_claims(
                     value=figure,
                     expected=claim.value,
                     detail=(
-                        f"figure {figure} is tagged [{ref_id}], but that "
-                        f"claim's value is {claim.value}"
+                        unit_problem
+                        or (
+                            f"figure {figure} is tagged [{ref_id}], but that "
+                            f"claim's value is {claim.value}"
+                        )
                     ),
                 )
             )
@@ -1449,33 +1631,36 @@ def _text_contradicts_owned_rows(
     return None
 
 
-def _percent_scaled(value: Any) -> Any:
-    """Scale a percent-suffixed literal down by 100 before comparison.
+def _extract_figures_with_percent(text: str) -> List[str]:
+    """Pull every figure out of text, keeping a trailing '%' on each.
 
-    A slide cell's own ``value`` field can be a string carrying a
-    literal ``%``, and that character changes what number is being
-    asserted: "0.481%" is 0.00481, not 0.481. ``_coerce`` (used by
-    ``_within_tolerance``) strips the ``%`` without scaling, which
-    let a deck publish a figure 100x smaller or larger than the claim
-    it cites as if the two were the same number.
+    Like :func:`extract_numbers`, but a figure's own literal '%' is
+    kept as part of its text, for a caller (the slide-title check)
+    that must scale a percent-suffixed figure correctly rather than
+    silently compare its bare digits. Kept separate from
+    :func:`extract_numbers` so that function's existing contract (the
+    bare digits, no '%'), relied on by coverage-gap detection, is
+    unaffected.
 
     Parameters
     ----------
-    value : Any
-        A slide cell's ``value`` field, as written.
+    text : str
+        Slide title text.
 
     Returns
     -------
-    Any
-        ``value`` unchanged, unless it is a string ending in ``%``,
-        in which case the percentage, divided by 100.
+    List[str]
+        Figures as they appear, each with its own '%' if it has one.
     """
-    if isinstance(value, str) and value.strip().endswith("%"):
-        try:
-            return float(value.strip()[:-1].replace(",", "")) / 100
-        except ValueError:
-            return value
-    return value
+    cleaned = _normalize_numeric_text(text or "")
+    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
+    figures = []
+    for m in _NUMBER_RE.finditer(cleaned):
+        figure = m.group(1)
+        if cleaned[m.end() : m.end() + 1] == "%":
+            figure += "%"
+        figures.append(figure)
+    return figures
 
 
 def check_slide_spec(
@@ -1522,25 +1707,39 @@ def check_slide_spec(
         # and would crash that lookup. Treat it the same as "no claim
         # id" for the purposes of the title check, and report it
         # explicitly in the main loop below.
-        backed: List[Tuple[str, Any, Tuple[str, ...]]] = [
-            (cell["claim"], result.value, result.addresses)
+        backed: List[Tuple[str, Any, Tuple[str, ...], Optional[str]]] = [
+            (cell["claim"], result.value, result.addresses, result.unit)
             for cell in slide.get("cells", [])
             if isinstance(cell.get("claim"), str)
             for result in [accepted.get(cell["claim"])]
             if result is not None and result.verdict == VERDICT_VERIFIED
         ]
         title = str(slide.get("title") or "")
-        for figure in extract_numbers(title):
+        for figure in _extract_figures_with_percent(title):
+            matched_results = [
+                _percent_aware_match(
+                    figure, value, unit, None, compare=_within_tolerance
+                )
+                for _, value, _, unit in backed
+            ]
             matches = [
                 (claim_id, addresses)
-                for claim_id, value, addresses in backed
-                if _within_tolerance(figure, value, None)
-            ]
-            if not matches:
-                problems.append(
-                    f"{where_slide}: title states {figure}, which no "
-                    f"accepted cell on this slide backs"
+                for (claim_id, _, addresses, _), (matched, _) in zip(
+                    backed, matched_results
                 )
+                if matched
+            ]
+            unit_problem = next(
+                (problem for _, problem in matched_results if problem), None
+            )
+            if not matches:
+                if unit_problem:
+                    problems.append(f"{where_slide}: {unit_problem}")
+                else:
+                    problems.append(
+                        f"{where_slide}: title states {figure}, which no "
+                        f"accepted cell on this slide backs"
+                    )
                 continue
             if sources is None:
                 continue
@@ -1579,7 +1778,13 @@ def check_slide_spec(
                     f"{where}: claim {claim_id} did not pass " f"({result.verdict})"
                 )
                 continue
-            if not _within_tolerance(_percent_scaled(value), result.value, None):
+            matched, unit_problem = _percent_aware_match(
+                value, result.value, result.unit, None, compare=_within_tolerance
+            )
+            if unit_problem:
+                problems.append(f"{where}: {unit_problem}")
+                continue
+            if not matched:
                 problems.append(
                     f"{where}: shows {value} but claim {claim_id} "
                     f"was verified as {result.value}"
@@ -1616,7 +1821,7 @@ def check_slide_spec(
                 for figure in extract_numbers(cell_label):
                     if not any(
                         _within_tolerance(figure, backed_value, None)
-                        for _, backed_value, _ in backed
+                        for _, backed_value, _, _ in backed
                     ):
                         problems.append(
                             f"{where}: label {cell_label!r} states "

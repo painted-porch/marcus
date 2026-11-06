@@ -11,6 +11,7 @@ import pytest
 from runners.numeric_claims import (
     CheckResult,
     Claim,
+    _inferred_claim_unit,
     check_claims,
     check_report,
     check_slide_spec,
@@ -2462,10 +2463,16 @@ class TestCodexFindingSlideCellPercentScaleIsRespected:
     @pytest.mark.unit
     def test_a_correctly_converted_percentage_passes(self):
         """ "48.1%" is 0.481 -- the same number the claim verified,
-        just rendered the other conventional way."""
+        just rendered the other conventional way. unit is declared
+        explicitly here since a hand-built CheckResult carries no
+        addresses to infer it from."""
         accepted = {
             "c1": CheckResult(
-                claim_id="c1", verdict="verified", value=0.481, label="maize R2"
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="maize R2",
+                unit="fraction",
             )
         }
         spec = {
@@ -2645,3 +2652,273 @@ class TestCodexFindingPercentScaleInProseIsRespected:
         callers (coverage-gap detection, slide titles) depend on it."""
         text = "R2 was 0.858 across 1,200 records; median error 4.4%."
         assert set(extract_numbers(text)) >= {"0.858", "1,200", "4.4"}
+
+
+class TestCodexFindingPercentUnitIsClaimAware:
+    """One percent-scale rule, used by prose, cell and title alike.
+
+    The earlier percent fixes (rounds 25 and 26) assumed every
+    backing value is a fraction (0-1) and unconditionally divided a
+    percent-suffixed figure by 100. numeric_stage.py's own tiers.csv
+    writes rate_pct as 100 * n / total -- already on the 0-100
+    scale -- so a correct report saying "Excellent tier share is 50%
+    [c1]." against a lookup of 50.0 was flagged as a coverage gap: a
+    real over-rejection that would have penalized correct reports and
+    distorted the coverage metric in the paid run. The slide-title
+    path had the opposite, older gap: it still used extract_numbers,
+    which drops the '%' entirely, so "Maize R2 is 0.481%" passed
+    against a real 0.481 with no scale check applied at all.
+
+    _inferred_claim_unit decides fraction vs percent from the
+    claim's own source column name (or an explicit declaration);
+    _percent_aware_match is the one function all three surfaces now
+    share for the scale decision itself.
+    """
+
+    PERCENT_SOURCES = {"tiers.csv": [{"tier": "Excellent", "rate_pct": "50.0"}]}
+    FRACTION_SOURCES = {"metrics.json": {"r2_overall": 0.481}}
+
+    # --- prose -------------------------------------------------------
+
+    @pytest.mark.unit
+    def test_prose_percent_unit_claim_matches_at_face_value(self):
+        """ "50% [c1]" against a rate_pct lookup of 50.0 must pass --
+        the percent sign is just how a percent-scale value is
+        conventionally written, not a /100 instruction."""
+        c = Claim(
+            id="c1",
+            value=50.0,
+            label="Excellent tier share",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Excellent:rate_pct",
+        )
+        res = check_claims([c], self.PERCENT_SOURCES, report_text="Share is 50% [c1].")
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_prose_fraction_unit_claim_rejects_the_unscaled_literal(self):
+        """ "0.481% [c1]" against an R2 lookup of 0.481 must still fail
+        -- 0.481% is 0.00481, not 0.481."""
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        res = check_claims(
+            [c], self.FRACTION_SOURCES, report_text="Overall R2 is 0.481% [c1]."
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_prose_fraction_unit_claim_accepts_the_scaled_literal(self):
+        """ "48.1% [c1]" against the same R2 lookup must pass."""
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        res = check_claims(
+            [c], self.FRACTION_SOURCES, report_text="Overall R2 is 48.1% [c1]."
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    # --- slide cell ----------------------------------------------------
+
+    @pytest.mark.unit
+    def test_slide_cell_percent_unit_claim_matches_at_face_value(self):
+        """The same three cases, as a slide cell."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=50.0,
+                label="Excellent tier share",
+                addresses=("tiers.csv:tier=Excellent:rate_pct",),
+                unit="percent",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {"value": "50%", "claim": "c1", "label": "Excellent tier share"}
+                    ]
+                }
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "Excellent tier share"}) == []
+
+    @pytest.mark.unit
+    def test_slide_cell_fraction_unit_claim_rejects_the_unscaled_literal(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="overall R2",
+                addresses=("metrics.json:r2_overall",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": "0.481%", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "overall R2"}) != []
+
+    @pytest.mark.unit
+    def test_slide_cell_fraction_unit_claim_accepts_the_scaled_literal(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="overall R2",
+                addresses=("metrics.json:r2_overall",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": "48.1%", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "overall R2"}) == []
+
+    # --- slide title -----------------------------------------------------
+
+    @pytest.mark.unit
+    def test_slide_title_percent_unit_claim_matches_at_face_value(self, sources):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=50.0,
+                label="Excellent tier share",
+                addresses=("tiers.csv:tier=Excellent:rate_pct",),
+                unit="percent",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Excellent tier share is 50%",
+                    "cells": [
+                        {"value": 50.0, "claim": "c1", "label": "Excellent tier share"}
+                    ],
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c1": "Excellent tier share"}, sources=sources
+        )
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_slide_title_fraction_unit_claim_rejects_the_unscaled_literal(
+        self, sources
+    ):
+        """Codex's exact scenario: the title path still used
+        extract_numbers (no '%' at all) and skipped the scale check
+        entirely."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="maize R2",
+                addresses=("per_crop.csv:crop=maize:r2",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Maize R2 is 0.481%",
+                    "cells": [{"value": 0.481, "claim": "c1", "label": "maize R2"}],
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"}, sources=sources)
+        assert problems != []
+
+    @pytest.mark.unit
+    def test_slide_title_fraction_unit_claim_accepts_the_scaled_literal(self, sources):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="maize R2",
+                addresses=("per_crop.csv:crop=maize:r2",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Maize R2 is 48.1%",
+                    "cells": [{"value": 0.481, "claim": "c1", "label": "maize R2"}],
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"}, sources=sources)
+        assert problems == []
+
+    # --- unit inference itself --------------------------------------------
+
+    @pytest.mark.unit
+    def test_unit_is_inferred_as_percent_from_the_rate_pct_column_name(self):
+        c = Claim(
+            id="c1",
+            value=50.0,
+            label="x",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Excellent:rate_pct",
+        )
+        assert _inferred_claim_unit(c) == "percent"
+
+    @pytest.mark.unit
+    def test_unit_is_inferred_as_fraction_from_an_ordinary_column_name(self):
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="x",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        assert _inferred_claim_unit(c) == "fraction"
+
+    @pytest.mark.unit
+    def test_an_explicit_unit_declaration_overrides_inference(self):
+        """A claim can declare its own unit, overriding the column-name
+        guess entirely -- useful when a report states a rate_pct
+        value as a bare fraction instead of its staged percent scale."""
+        c = Claim(
+            id="c1",
+            value=0.5,
+            label="x",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Excellent:rate_pct",
+            unit="fraction",
+        )
+        assert _inferred_claim_unit(c) == "fraction"
+
+    @pytest.mark.unit
+    def test_unit_cannot_be_determined_with_no_source_column_at_all(self):
+        """A claim with no usable addressing (malformed, or a kind this
+        function does not read inputs/source for) must not default
+        to a guess."""
+        c = Claim(id="c1", value=1, label="x", kind="lookup")
+        assert _inferred_claim_unit(c) is None
