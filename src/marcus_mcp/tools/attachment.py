@@ -144,16 +144,12 @@ async def log_artifact(
                 }
 
         # Log info for non-standard artifact types (but still accept them!)
-        standard_types = [
-            "specification",
-            "api",
-            "design",
-            "architecture",
-            "documentation",
-            "reference",
-            "temporary",
-        ]
-        if artifact_type not in standard_types:
+        # ARTIFACT_PATHS's keys are this tool's own list of "standard"
+        # types -- also what handlers.py advertises as log_artifact's
+        # artifact_type enum. One list instead of a second, duplicate
+        # literal (issue #889: an advertised schema and the value list
+        # it was copied from drift apart when they're two literals).
+        if artifact_type not in ARTIFACT_PATHS:
             logger.info(
                 f"Using custom artifact type '{artifact_type}' for {filename}. "
                 f"Will store in docs/artifacts/ (use 'location' parameter to override)"
