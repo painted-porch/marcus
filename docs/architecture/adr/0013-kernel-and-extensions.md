@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05; K1, K3, K6 and K7 accepted 2026-11-06**; the other three remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05; K1, K3, K6, K7 and K10 (narrowly) accepted 2026-11-06**; the other two remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -237,9 +237,21 @@ That is the coordination tax, and it is the kernel's.
 
 ### K10 — Rules for mutating a live graph
 
-**Recommendation.** Any feature that rewires a running board obeys two rules: never rewire a leased task, and add and mark unclaimable rather than delete.
+**Accepted narrowly 2026-11-06 (Lawrence Gray, in the chief-of-staff channel: "Go with your recommendation about K10").**
+
+**Decision.** Runtime task creation may declare dependencies on existing board tasks, add-only, project-scoped, never touching a leased task.
+
+The full recommendation below is wider than this. Only the sentence above is accepted; the scorer-component registry half stays an open proposal.
+
+**Recommendation (full, for the open half).** Any feature that rewires a running board obeys two rules: never rewire a leased task, and add and mark unclaimable rather than delete.
 
 Two capabilities follow: a scorer-component registry with visible weights, and an explicit-task creation path at runtime, since `create_tasks` takes prose and `create_project(options.tasks)` is setup-only.
+
+**Evidence for the narrow accept.** Issue #841: `create_tasks(options.tasks)` (PR #820) resolved `depends_on` only against the same call's own batch, never against a task already on the board, so a runtime-created task could only ever depend on something created in the same breath. The Minecraft planner (`~/marcus-experiments/minecraft-plumbing/planner.py`) hit this immediately -- its first natural output depended on a task already on the board and had to drop the dependency, with its prompt instructed to emit only tasks whose prerequisites are already done.
+
+**Why narrow, not the whole proposal.** `depends_on` resolving against the board is exactly the add-only, never-rewire-a-leased-task shape K10 already states: a new task declaring an edge *into* an existing one touches nothing about that task, leased or not. The scorer-component registry is a separate, substantially larger capability with no concrete consumer yet, and accepting it now would be deciding it by accident rather than against its own evidence.
+
+**Confirmed with the first real consumer before implementation.** The Minecraft planner session confirmed the resolution order (in-batch names first, then the board, scoped strictly to the caller's project) and two specific behaviors before any code was written: an ambiguous name (two or more board tasks in the project sharing the exact name) must be refused naming every candidate id, never guessed, since nothing on the board forbids two tasks with the same name; and the dependency target's own status never matters -- a dependency on a DONE task is already satisfied, and on a BLOCKED or DECLINED one the new task is simply unclaimable until that changes, which is this same add-and-mark-unclaimable rule working as intended, not a reason to refuse the dependency.
 
 ### K11 — Verification is the first cut
 

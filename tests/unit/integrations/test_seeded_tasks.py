@@ -7,9 +7,11 @@ ids, name-resolved dependencies, ``source_type == "seeded"``) and refuse
 anything malformed with every problem named at once.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 
-from src.core.models import Priority, TaskStatus
+from src.core.models import Priority, Task, TaskStatus
 from src.integrations.seeded_tasks import (
     SEEDED_SOURCE_TYPE,
     SeedTaskError,
@@ -24,6 +26,23 @@ def _spec(**overrides):
     spec = {"name": "Implement add_one_plus_one", "labels": ["implement"]}
     spec.update(overrides)
     return spec
+
+
+def _board_task(task_id: str, name: str, status: TaskStatus = TaskStatus.TODO) -> Task:
+    """A minimal existing board task for #841's resolver tests."""
+    now = datetime.now(timezone.utc)
+    return Task(
+        id=task_id,
+        name=name,
+        description=name,
+        status=status,
+        priority=Priority.MEDIUM,
+        assigned_to=None,
+        created_at=now,
+        updated_at=now,
+        due_date=None,
+        estimated_hours=1.0,
+    )
 
 
 class TestBuildSeededTasks:
@@ -161,3 +180,143 @@ class TestValidatorEdges:
         )
         errors = validate_seed_specs([{"name": "A", "priority": {"x": 1}}])
         assert len(errors) == 1 and "priority must be one of" in errors[0]
+
+
+class TestDependsOnAnExistingBoardTask:
+    """Issue #841, ADR-0013 K10 accepted narrowly 2026-11-06: a runtime
+
+    task may depend on a task already on the board, by name or by
+    id, scoped to the caller's own project (the caller is responsible
+    for passing only that project's tasks as ``existing_tasks``).
+    In-batch names are always tried first; the board is only
+    consulted for a name the batch does not have.
+    """
+
+    def test_an_in_batch_name_still_wins_over_a_same_named_board_task(self) -> None:
+        """In-batch resolution is unchanged and takes priority."""
+        existing = [_board_task("board-1", "Wall")]
+
+        wall, torches = build_seeded_tasks(
+            [{"name": "Wall"}, {"name": "Torches", "depends_on": ["Wall"]}],
+            "camp",
+            existing_tasks=existing,
+        )
+
+        assert torches.dependencies == [wall.id]
+        assert wall.id != "board-1"
+
+    def test_a_board_task_is_found_by_exact_name(self) -> None:
+        existing = [_board_task("board-1", "Raise the north wall")]
+
+        (torches,) = build_seeded_tasks(
+            [{"name": "Torches", "depends_on": ["Raise the north wall"]}],
+            "camp",
+            existing_tasks=existing,
+        )
+
+        assert torches.dependencies == ["board-1"]
+
+    def test_a_board_task_is_found_by_id(self) -> None:
+        existing = [_board_task("board-1", "Raise the north wall")]
+
+        (torches,) = build_seeded_tasks(
+            [{"name": "Torches", "depends_on": ["board-1"]}],
+            "camp",
+            existing_tasks=existing,
+        )
+
+        assert torches.dependencies == ["board-1"]
+
+    def test_unknown_name_is_rejected_naming_both_places_checked(self) -> None:
+        errors = validate_seed_specs(
+            [{"name": "Torches", "depends_on": ["No such task"]}],
+            existing_tasks=[_board_task("board-1", "Wall")],
+        )
+
+        assert len(errors) == 1
+        assert "not in this list and not on the board" in errors[0]
+        assert "No such task" in errors[0]
+
+    def test_an_ambiguous_board_name_is_refused_not_guessed(self) -> None:
+        """Two board tasks sharing a name: refuse, naming both ids,
+
+        never picking one (the Minecraft planner's own ask: it would
+        rather drop a dependency than attach it to the wrong wall)."""
+        existing = [
+            _board_task("board-1", "Wall"),
+            _board_task("board-2", "Wall"),
+        ]
+
+        errors = validate_seed_specs(
+            [{"name": "Torches", "depends_on": ["Wall"]}],
+            existing_tasks=existing,
+        )
+
+        assert len(errors) == 1
+        assert "matches" in errors[0]
+        assert "board-1" in errors[0]
+        assert "board-2" in errors[0]
+
+    def test_an_ambiguous_name_resolves_cleanly_by_id_instead(self) -> None:
+        """The same ambiguous name, named by id, is unambiguous."""
+        existing = [
+            _board_task("board-1", "Wall"),
+            _board_task("board-2", "Wall"),
+        ]
+
+        (torches,) = build_seeded_tasks(
+            [{"name": "Torches", "depends_on": ["board-2"]}],
+            "camp",
+            existing_tasks=existing,
+        )
+
+        assert torches.dependencies == ["board-2"]
+
+    def test_no_existing_tasks_behaves_exactly_as_before_841(self) -> None:
+        """Omitting existing_tasks keeps the pre-#841 in-batch-only rule."""
+        errors = validate_seed_specs([{"name": "Torches", "depends_on": ["Wall"]}])
+
+        assert len(errors) == 1
+        assert "not in this list and not on the board" in errors[0]
+
+    def test_depending_on_a_leased_board_task_is_allowed(self) -> None:
+        """K10's rule is never REWIRE a leased task; depending ON one
+
+        declares a new edge INTO it and touches nothing about the
+        leased task itself, so it is within the rule as written."""
+        existing = [_board_task("board-1", "Wall", status=TaskStatus.IN_PROGRESS)]
+
+        (torches,) = build_seeded_tasks(
+            [{"name": "Torches", "depends_on": ["Wall"]}],
+            "camp",
+            existing_tasks=existing,
+        )
+
+        assert torches.dependencies == ["board-1"]
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            TaskStatus.TODO,
+            TaskStatus.IN_PROGRESS,
+            TaskStatus.DONE,
+            TaskStatus.BLOCKED,
+            TaskStatus.DECLINED,
+        ],
+    )
+    def test_the_targets_status_never_matters(self, status) -> None:
+        """Confirmed with the Minecraft planner session: a dependency
+
+        on a DONE task is already satisfied; on BLOCKED/DECLINED the
+        new task is simply unclaimable until that changes, which is
+        K10's own "add and mark unclaimable" rule working as
+        intended -- not a reason to refuse the dependency itself."""
+        existing = [_board_task("board-1", "Wall", status=status)]
+
+        (torches,) = build_seeded_tasks(
+            [{"name": "Torches", "depends_on": ["Wall"]}],
+            "camp",
+            existing_tasks=existing,
+        )
+
+        assert torches.dependencies == ["board-1"]

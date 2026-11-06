@@ -7,11 +7,12 @@ dependencies, integration task, README task), and no subtask splitting of
 the seeded tasks. Everything else the creator does is untouched.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from src.core.models import Task, TaskStatus
+from src.core.models import Priority, Task, TaskStatus
 
 pytestmark = pytest.mark.unit
 
@@ -213,3 +214,136 @@ class TestSeededGraphIsNotRewritten:
         assert [t.name for t in out] == ["Write the README"]
         sent = creator.kanban_client.create_task.call_args.args[0]
         assert sent.get("dependencies", []) == []
+
+
+class TestRemapDependenciesTrustsAnExistingBoardTask:
+    """Issue #841: a seeded task's ``depends_on`` may already be a
+
+    real, pre-existing board task id (resolved by
+    ``build_seeded_tasks`` before ``_remap_dependencies`` ever runs),
+    not a slug to remap and not part of this batch. Found live:
+    ``_remap_dependencies`` had no third case for this and silently
+    dropped it as "orphaned", which an existing unit test never
+    caught because nothing exercised a dependency outside the batch.
+    """
+
+    def _task(self, task_id, name, deps, source_type="seeded") -> Task:
+        now = datetime.now(timezone.utc)
+        return Task(
+            id=task_id,
+            name=name,
+            description=name,
+            status=TaskStatus.TODO,
+            priority=Priority.MEDIUM,
+            assigned_to=None,
+            created_at=now,
+            updated_at=now,
+            due_date=None,
+            estimated_hours=1.0,
+            dependencies=list(deps),
+            source_type=source_type,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_pre_existing_board_dependency_is_kept_not_orphaned(self) -> None:
+        creator = _creator()
+        board_task_id = "board-task-wall"
+        original = self._task("seed-1-torches", "Torches", deps=[board_task_id])
+        created = self._task("k-77", "Torches", deps=[board_task_id])
+
+        await creator._remap_dependencies([original], [created])
+
+        assert created.dependencies == [board_task_id]
+
+    @pytest.mark.asyncio
+    async def test_a_genuinely_unknown_dependency_on_a_non_seeded_task_is_still_dropped(
+        self,
+    ) -> None:
+        """The decomposed (non-seeded) path keeps its existing safety
+        net: an id matching neither a slug nor the batch is a real bug
+        there, not a valid cross-batch reference, so it is still
+        dropped with a warning."""
+        creator = _creator()
+        original = self._task(
+            "slug-a", "Implement", deps=["nonexistent"], source_type="implement"
+        )
+        created = self._task(
+            "k-1", "Implement", deps=["nonexistent"], source_type="implement"
+        )
+
+        await creator._remap_dependencies([original], [created])
+
+        assert created.dependencies == []
+
+    @pytest.mark.asyncio
+    async def test_survives_a_provider_that_echoes_back_no_source_type(self) -> None:
+        """Codex P2, round 2 on PR #855: on Planka,
+
+        ``KanbanClientWithCreate.create_task()`` returns a Task built
+        by ``_card_to_task``, which never sets ``source_type`` at
+        all -- so reading it from the CREATED task (what the earlier
+        version of this fix did) was always None for a real Planka
+        board, silently defeating the fix above for the one provider
+        it most needed to work on. Provenance must come from the
+        ORIGINAL task Marcus itself built, matched by name, not from
+        whatever the provider echoes back."""
+        creator = _creator()
+        board_task_id = "board-task-wall"
+        original = self._task(
+            "seed-1-torches", "Torches", deps=[board_task_id], source_type="seeded"
+        )
+        # The provider's own round-trip: no source_type at all.
+        created = self._task("k-77", "Torches", deps=[board_task_id], source_type=None)
+
+        await creator._remap_dependencies([original], [created])
+
+        assert created.dependencies == [board_task_id]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_in_batch_dependency_is_dropped_not_trusted(self) -> None:
+        """Codex P2, round 3 on PR #855: seeded task A ("Wall") fails
+
+        creation; seeded task B ("Torches") depends on it and
+        succeeds. B's dependency is still A's synthetic id
+        ("seed-1-wall") -- neither remapped (A was never created, so
+        there is no slug-to-UUID entry for it) nor a real existing
+        created id. It must not be trusted as a validated
+        existing-board reference just because B itself is seeded;
+        A's own synthetic id is a BATCH member's id, not a board id,
+        and that member failed. The edge must be dropped and
+        reported, not kept."""
+        creator = _creator()
+        wall = self._task("seed-1-wall", "Wall", deps=[], source_type="seeded")
+        torches = self._task(
+            "seed-2-torches", "Torches", deps=["seed-1-wall"], source_type="seeded"
+        )
+        # A ("Wall") failed creation: only B is in created_tasks.
+        created_torches = self._task(
+            "k-77", "Torches", deps=["seed-1-wall"], source_type="seeded"
+        )
+
+        dropped = await creator._remap_dependencies([wall, torches], [created_torches])
+
+        assert created_torches.dependencies == []
+        assert dropped == [{"task": "Torches", "missing_dependency": "Wall"}]
+
+    @pytest.mark.asyncio
+    async def test_the_existing_board_case_is_still_preserved(self) -> None:
+        """The fix above must not regress #841's own case: a
+
+        dependency that was never a batch member at all (a real,
+        pre-existing board task) is still trusted for a seeded task.
+        """
+        creator = _creator()
+        board_task_id = "board-task-wall-2"
+        original = self._task(
+            "seed-1-torches-b", "Torches B", deps=[board_task_id], source_type="seeded"
+        )
+        created = self._task(
+            "k-78", "Torches B", deps=[board_task_id], source_type="seeded"
+        )
+
+        dropped = await creator._remap_dependencies([original], [created])
+
+        assert created.dependencies == [board_task_id]
+        assert dropped == []

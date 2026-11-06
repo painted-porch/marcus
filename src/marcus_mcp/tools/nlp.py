@@ -10,7 +10,7 @@ import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.event_loop_utils import EventLoopLockManager
 from src.core.paths import marcus_db_path
@@ -602,7 +602,9 @@ async def create_project(
 
 
 def _validate_tasks_option(
-    options: Optional[Dict[str, Any]], project_name: str
+    options: Optional[Dict[str, Any]],
+    project_name: str,
+    existing_tasks: Optional[List[Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Reject a malformed ``options.tasks`` (a seeded board) before any state.
 
@@ -616,6 +618,11 @@ def _validate_tasks_option(
         The ``create_project`` options.
     project_name : str
         For the log line.
+    existing_tasks : Optional[List[Any]]
+        The caller's project's existing board tasks, for resolving a
+        ``depends_on`` entry the batch itself does not name (issue
+        #841, ``create_tasks`` only -- ``create_project`` always
+        mints a brand new board with nothing existing to depend on).
 
     Returns
     -------
@@ -627,7 +634,7 @@ def _validate_tasks_option(
         return None
     from src.integrations.seeded_tasks import validate_seed_specs
 
-    problems = validate_seed_specs(options.get("tasks"))
+    problems = validate_seed_specs(options.get("tasks"), existing_tasks)
     if not problems:
         return None
     logger.warning(
@@ -1802,13 +1809,6 @@ async def create_tasks(
 
     options = options or {}
 
-    # A seeded list (the runner-side curator's one task per corroborated
-    # subject) must reach the board as written or be refused whole, the
-    # same way create_project treats options.tasks.
-    _tasks_rejection = _validate_tasks_option(options, project_name or "active project")
-    if _tasks_rejection is not None:
-        return _tasks_rejection
-
     # create_tasks operates on an existing project — contract_first structural
     # scaffolding is not applicable.  Inject feature_based unless the caller
     # has already set a decomposer or supplied a project_root explicitly.
@@ -1850,6 +1850,28 @@ async def create_tasks(
             "success": False,
             "error": "No kanban client available",
         }
+
+    # A seeded list (the runner-side curator's one task per corroborated
+    # subject) must reach the board as written or be refused whole, the
+    # same way create_project treats options.tasks. Issue #841: a
+    # depends_on may also name a task already on this project's board,
+    # so the existing tasks are fetched before validating, not after --
+    # only when a seeded list is actually present, so an ordinary
+    # natural-language call never pays for a board fetch it has no use
+    # for.
+    existing_tasks: List[Any] = []
+    if isinstance(options.get("tasks"), list):
+        from src.core.project_registry import task_belongs_to_project
+
+        all_board_tasks = await kanban_client.get_all_tasks()
+        existing_tasks = [
+            t for t in all_board_tasks if task_belongs_to_project(t, current_project)
+        ]
+    _tasks_rejection = _validate_tasks_option(
+        options, project_name or "active project", existing_tasks=existing_tasks
+    )
+    if _tasks_rejection is not None:
+        return _tasks_rejection
 
     project_id = current_project.provider_config.get("project_id")
     board_id = current_project.provider_config.get("board_id")
@@ -1929,7 +1951,16 @@ async def create_tasks(
         if isinstance(seed_specs, list):
             from src.integrations.seeded_tasks import build_seeded_tasks
 
-            seeded = build_seeded_tasks(seed_specs, current_project.name or "project")
+            # Issue #841, ADR-0013 K10 accepted narrowly 2026-11-06: a
+            # depends_on the batch itself does not name may resolve
+            # against the project's own existing board tasks (fetched
+            # above, before validation, and scoped there to this
+            # project), add-only and never touching a leased one.
+            seeded = build_seeded_tasks(
+                seed_specs,
+                current_project.name or "project",
+                existing_tasks=existing_tasks,
+            )
             # task_metadata is stamped with the registry id the agents are
             # registered to, the same id create_project backfills.
             creator.active_project_id = current_project.id
@@ -1943,7 +1974,7 @@ async def create_tasks(
                     logger.warning(
                         f"create_tasks: refresh after seeding failed: {refresh_err}"
                     )
-            return {
+            response: Dict[str, Any] = {
                 "success": True,
                 "tasks_created": len(created),
                 "board": {
@@ -1957,6 +1988,16 @@ async def create_tasks(
                 ],
                 "seeded": True,
             }
+            # Codex P2, round 3 on PR #855: a dependency dropped
+            # because its in-batch target failed creation means the
+            # caller's graph is not what it asked for. Named here
+            # rather than only in a log line, so a caller that cares
+            # (a planner retrying, a human reviewing the result) can
+            # see exactly which edge was lost and why.
+            dropped = getattr(creator, "dependencies_dropped", None)
+            if dropped:
+                response["dependencies_dropped"] = dropped
+            return response
 
         # Use the creator to parse tasks from description
         result = await creator.create_project_from_description(

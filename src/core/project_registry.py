@@ -619,6 +619,54 @@ class ProjectRegistry:
         return await self.add_project(project)
 
 
+def task_belongs_to_project(task: Any, project: "ProjectConfig") -> bool:
+    """Decide whether a board task belongs to a given registered project.
+
+    Issue #855, Codex P2: the same identity gap PR #853 bridged in
+    ``_response_project_for_task`` (``src/marcus_mcp/tools/task.py``),
+    found again in a board-task filter (``create_tasks``'s
+    ``existing_tasks`` resolution, issue #841). For the SQLite path
+    (GH-306), a task's ``project_id`` and its owning registry entry's
+    ``id`` are the same string by construction. For Planka and
+    Linear, they are not: the task carries the *provider's* own
+    project id, while a registry entry created by
+    ``add_project``/``sync_projects`` carries an independently
+    generated UUID. A task belongs to the project if either matches.
+
+    Deliberately not disambiguating by board when one Planka project
+    id is shared by two registered boards (the sharper case PR #853's
+    round 2 found in ``get_project_by_provider_id``): ``Task`` carries
+    no board id of its own today, so there is nothing to match it
+    against here either. Tracked in issue #854's real fix (the
+    registry id stamped at kanban-client construction), which removes
+    the ambiguity by construction and lets this function, along with
+    ``get_project_by_provider_id``, be deleted.
+
+    Parameters
+    ----------
+        task
+            The candidate task (only ``project_id`` is read).
+        project
+            The registered project to test membership against.
+
+    Returns
+    -------
+        True when ``task.project_id`` matches the project's own
+        registry ``id`` or its provider's ``project_id``. False for a
+        task with no ``project_id`` at all -- this function answers
+        "does this task belong to THIS project," and a project-less
+        task's answer to that is no, unlike the board-scoping filter's
+        own "legacy tasks belong to every project" rule, which is a
+        different question asked for a different reason.
+    """
+    task_project_id = getattr(task, "project_id", None)
+    if not task_project_id:
+        return False
+    if task_project_id == project.id:
+        return True
+    return bool(task_project_id == project.provider_config.get("project_id"))
+
+
 async def register_sqlite_board(
     project_id: str, db_path: str, registry: Optional["ProjectRegistry"] = None
 ) -> str:
