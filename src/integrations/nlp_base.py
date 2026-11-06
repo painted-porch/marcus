@@ -453,13 +453,26 @@ class NaturalLanguageTaskCreator(ABC):
             deps = _get(task, "dependencies", [])
             if not deps:
                 continue
+            # Codex P2, round 2 on PR #855: never trust what the
+            # provider echoes back for this. KanbanClientWithCreate's
+            # create_task() on Planka returns a Task built by
+            # _card_to_task, which never sets source_type at all --
+            # so _get(task, "source_type") read here was always None
+            # for a real Planka board, silently defeating the #841
+            # fix below for the one provider it most needed to work
+            # on. Decide provenance from the ORIGINAL task Marcus
+            # itself built and handed to create_task, matched by
+            # name, the same lookup already used to build
+            # slug_to_uuid above.
+            original = orig_by_name.get(_get(task, "name", ""))
+            is_seeded = _get(original, "source_type") == "seeded"
             remapped: List[str] = []
             for dep_id in deps:
                 if dep_id in slug_to_uuid:
                     remapped.append(slug_to_uuid[dep_id])
                 elif dep_id in all_ids:
                     remapped.append(dep_id)
-                elif _get(task, "source_type") == "seeded":
+                elif is_seeded:
                     # Issue #841: a seeded task's depends_on may
                     # already be a real, pre-existing board task's
                     # id -- validated and resolved by

@@ -274,3 +274,27 @@ class TestRemapDependenciesTrustsAnExistingBoardTask:
         await creator._remap_dependencies([original], [created])
 
         assert created.dependencies == []
+
+    @pytest.mark.asyncio
+    async def test_survives_a_provider_that_echoes_back_no_source_type(self) -> None:
+        """Codex P2, round 2 on PR #855: on Planka,
+
+        ``KanbanClientWithCreate.create_task()`` returns a Task built
+        by ``_card_to_task``, which never sets ``source_type`` at
+        all -- so reading it from the CREATED task (what the earlier
+        version of this fix did) was always None for a real Planka
+        board, silently defeating the fix above for the one provider
+        it most needed to work on. Provenance must come from the
+        ORIGINAL task Marcus itself built, matched by name, not from
+        whatever the provider echoes back."""
+        creator = _creator()
+        board_task_id = "board-task-wall"
+        original = self._task(
+            "seed-1-torches", "Torches", deps=[board_task_id], source_type="seeded"
+        )
+        # The provider's own round-trip: no source_type at all.
+        created = self._task("k-77", "Torches", deps=[board_task_id], source_type=None)
+
+        await creator._remap_dependencies([original], [created])
+
+        assert created.dependencies == [board_task_id]
