@@ -126,6 +126,15 @@ class CaseRecord:
     cost_usd : float
         Model spend attributed to this case, zero for a no-model
         checker run.
+    figures_total : int
+        How many numeric figures the verifier found in the report
+        text, covered or not -- the denominator coverage is measured
+        against. Not the same as ``len(claims)``: that also counts
+        harness-required checks that never appear as a figure in the
+        text at all. Zero means unknown, not "no figures," so a case
+        loaded without this (a hand-built test record) drops out of
+        the coverage-rate denominator rather than silently claiming
+        a 100% or 0% coverage it never measured.
     """
 
     case_id: str
@@ -135,6 +144,7 @@ class CaseRecord:
     declined: bool = False
     verified_clean: bool = True
     cost_usd: float = 0.0
+    figures_total: int = 0
 
 
 def load_condition_b(
@@ -190,6 +200,7 @@ def load_condition_b(
                 rounds=rounds,
                 declined=outcome["verdict"] != VERDICT_VERIFIED and rounds >= 3,
                 verified_clean=outcome["verdict"] == VERDICT_VERIFIED,
+                figures_total=outcome["summary"]["figures_in_text"],
             )
         )
     return records
@@ -324,7 +335,14 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
         kept so the information is not lost, not merged into the
         headline count), ``false_declines`` (claims failed that were
         in fact correct), ``coverage_gaps`` (uncovered figures), and
-        ``traps_present`` echoed back for the catch-rate join.
+        ``traps_present`` echoed back for the catch-rate join,
+        ``figures_total`` (the verifier's own figure count, echoed
+        back so coverage can be weighted by report length rather
+        than averaged per case), and ``claims_checked`` (declared or
+        harness claims that actually got a verdict against a
+        resolved value -- coverage gaps excluded, since those were
+        never checked against one -- the denominator false declines
+        is measured against).
     """
     _verified_but_wrong = [
         c
@@ -381,6 +399,8 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
         "verified_clean": record.verified_clean,
         "declared_value_mismatches": declared_value_mismatches,
         "required_tiers_failed": required_tiers_failed,
+        "figures_total": record.figures_total,
+        "claims_checked": len(record.claims) - len(coverage_gaps),
     }
 
 
@@ -471,9 +491,13 @@ def compute_rates(
         ``wrong_figures_in_rejected_reports`` (the same kind of wrong
         claim, but in a case that was declined and so never actually
         reached a reader -- diagnostic, not part of the headline
-        figure), ``false_decline_rate``, ``coverage``,
-        ``trap_catch_rate`` (by trap name), ``mean_rounds``, and
-        ``declined_rate``.
+        figure), ``false_decline_rate`` (false declines over claims
+        actually checked, across the whole condition, not averaged
+        per case), ``coverage_gap_rate`` (uncovered figures over
+        total figures, across the whole condition, not averaged per
+        case -- a report twice as long is not twice as bad just for
+        having more figures to miss), ``trap_catch_rate`` (by trap
+        name), ``mean_rounds``, and ``declined_rate``.
     """
     report: Dict[str, Any] = {}
     for condition, cases in scored_by_condition.items():
@@ -488,6 +512,8 @@ def compute_rates(
         )
         false_declines = sum(len(c["false_declines"]) for c in cases)
         coverage_gaps = sum(len(c["coverage_gaps"]) for c in cases)
+        figures_total = sum(c.get("figures_total", 0) for c in cases)
+        claims_checked = sum(c.get("claims_checked", 0) for c in cases)
         declined = sum(1 for c in cases if c["declined"])
         rounds = sum(c.get("rounds", 1) for c in cases)
 
@@ -516,8 +542,12 @@ def compute_rates(
             "cases": n,
             "wrong_figures_shipped": wrong_shipped,
             "wrong_figures_in_rejected_reports": wrong_in_rejected,
-            "false_decline_rate": round(false_declines / n, 3),
-            "coverage_gap_rate": round(coverage_gaps / n, 3),
+            "false_decline_rate": (
+                round(false_declines / claims_checked, 3) if claims_checked else 0.0
+            ),
+            "coverage_gap_rate": (
+                round(coverage_gaps / figures_total, 3) if figures_total else 0.0
+            ),
             "declined_rate": round(declined / n, 3),
             "mean_rounds": round(rounds / n, 2),
             "trap_catch_rate": {

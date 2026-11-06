@@ -283,32 +283,6 @@ class TestRates:
     """The six rates, computed from scored cases."""
 
     @pytest.mark.unit
-    def test_false_decline_rate_is_per_case_not_per_claim(self):
-        """A rate is normalized by case count."""
-        cases = [
-            {
-                "wrong_shipped": [],
-                "false_declines": [1],
-                "coverage_gaps": [],
-                "traps_present": [],
-                "declined": False,
-                "verified_clean": True,
-                "rounds": 1,
-            },
-            {
-                "wrong_shipped": [],
-                "false_declines": [],
-                "coverage_gaps": [],
-                "traps_present": [],
-                "declined": False,
-                "verified_clean": True,
-                "rounds": 1,
-            },
-        ]
-        rates = compute_rates({CONDITION_B: cases})
-        assert rates[CONDITION_B]["false_decline_rate"] == 0.5
-
-    @pytest.mark.unit
     def test_trap_catch_rate_needs_an_opportunity(self):
         """A trap never planted contributes no opportunity to miss."""
         cases = [
@@ -780,3 +754,144 @@ class TestCodexFindingTrapCatchIsAttributedNotBlanket:
         rates = compute_rates({CONDITION_B: cases})
         assert rates[CONDITION_B]["trap_catch_rate"]["dropped_tier_rows"] == 1.0
         assert rates[CONDITION_B]["trap_catch_rate"]["rounding_ratio"] == 0.0
+
+
+class TestCodexFindingRatesUseFigureLevelDenominators:
+    """A per-figure or per-claim count divided by case count is not a rate.
+
+    coverage_gap_rate divided its count of uncovered figures by the
+    number of CASES, giving an average gap count per report rather
+    than the preregistered figure-coverage rate. Codex's example: one
+    report with 40 figures and 2 uncovered ones reported 2.0 instead
+    of 0.05, and adding more correctly-covered figures could never
+    improve the metric, so reports of different lengths were not
+    comparable on coverage at all.
+
+    false_decline_rate had the identical bug: false_declines is a
+    count of individual claims, also divided by the number of cases.
+    Both are now summed across the whole condition and divided by
+    the matching total -- figures_total (from the verifier's own
+    summary) for coverage, and claims actually checked (declared or
+    harness claims, excluding coverage gaps, which were never
+    checked against a resolved value) for false declines.
+    """
+
+    @pytest.mark.unit
+    def test_coverage_gap_rate_is_uncovered_over_total_figures(self):
+        """Codex's exact numbers: 40 figures, 2 uncovered, expect 0.05."""
+        cases = [
+            {
+                "wrong_shipped": [],
+                "false_declines": [],
+                "coverage_gaps": [1, 2],
+                "figures_total": 40,
+                "claims_checked": 38,
+                "traps_present": [],
+                "declined": False,
+                "verified_clean": True,
+                "rounds": 1,
+            },
+        ]
+        rates = compute_rates({CONDITION_B: cases})
+        assert rates[CONDITION_B]["coverage_gap_rate"] == 0.05
+
+    @pytest.mark.unit
+    def test_coverage_gap_rate_is_figure_weighted_not_case_averaged(self):
+        """Two reports of different lengths must not average their rates.
+
+        A 40-figure report with 2 gaps and a 10-figure report with no
+        gaps must combine to 2 gaps over 50 figures (0.04), not the
+        mean of each report's own rate ((0.05 + 0.0) / 2 = 0.025).
+        """
+        cases = [
+            {
+                "wrong_shipped": [],
+                "false_declines": [],
+                "coverage_gaps": [1, 2],
+                "figures_total": 40,
+                "claims_checked": 38,
+                "traps_present": [],
+                "declined": False,
+                "verified_clean": True,
+                "rounds": 1,
+            },
+            {
+                "wrong_shipped": [],
+                "false_declines": [],
+                "coverage_gaps": [],
+                "figures_total": 10,
+                "claims_checked": 10,
+                "traps_present": [],
+                "declined": False,
+                "verified_clean": True,
+                "rounds": 1,
+            },
+        ]
+        rates = compute_rates({CONDITION_B: cases})
+        assert rates[CONDITION_B]["coverage_gap_rate"] == 0.04
+
+    @pytest.mark.unit
+    def test_false_decline_rate_is_declines_over_claims_checked(self):
+        """A per-claim count must be a fraction of claims, not of cases."""
+        cases = [
+            {
+                "wrong_shipped": [],
+                "false_declines": [1],
+                "coverage_gaps": [],
+                "figures_total": 10,
+                "claims_checked": 10,
+                "traps_present": [],
+                "declined": False,
+                "verified_clean": True,
+                "rounds": 1,
+            },
+            {
+                "wrong_shipped": [],
+                "false_declines": [],
+                "coverage_gaps": [],
+                "figures_total": 2,
+                "claims_checked": 2,
+                "traps_present": [],
+                "declined": False,
+                "verified_clean": True,
+                "rounds": 1,
+            },
+        ]
+        rates = compute_rates({CONDITION_B: cases})
+        assert rates[CONDITION_B]["false_decline_rate"] == round(1 / 12, 3)
+
+    @pytest.mark.unit
+    def test_rates_with_no_figures_or_claims_do_not_divide_by_zero(self):
+        """An empty-but-present condition's rates must not crash or NaN."""
+        cases = [
+            {
+                "wrong_shipped": [],
+                "false_declines": [],
+                "coverage_gaps": [],
+                "figures_total": 0,
+                "claims_checked": 0,
+                "traps_present": [],
+                "declined": False,
+                "verified_clean": True,
+                "rounds": 1,
+            },
+        ]
+        rates = compute_rates({CONDITION_B: cases})
+        assert rates[CONDITION_B]["coverage_gap_rate"] == 0.0
+        assert rates[CONDITION_B]["false_decline_rate"] == 0.0
+
+    @pytest.mark.unit
+    def test_load_condition_b_carries_figures_total_from_the_verifier(self, tmp_path):
+        """The verifier's own figure count, not the grader's guess."""
+        case_dir = tmp_path / "case-001"
+        staged = case_dir / "staged"
+        staged.mkdir(parents=True)
+        (staged / "metrics.json").write_text('{"n_records": 10, "r2_overall": 0.9}')
+        _write_trusted_manifest(case_dir)
+        (case_dir / "report.md").write_text("R2 was 0.9 [c1].")
+        (case_dir / "claims.json").write_text(
+            '{"claims": [{"id": "c1", "value": 0.9, "label": "R2", '
+            '"kind": "lookup", "source": "metrics.json", "key": "r2_overall"}]}'
+        )
+        records = load_condition_b(tmp_path)
+        assert records[0].figures_total == 1
