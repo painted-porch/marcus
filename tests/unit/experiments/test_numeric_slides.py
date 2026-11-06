@@ -326,3 +326,27 @@ class TestCodexFindingSlideGenerationRequiresAVerifiedReport:
             )
 
         mock_run.assert_called_once()
+
+
+class TestCodexFindingSlidesTopLevelContainerShapeIsMechanical:
+    """slides.json's own top-level shape, swept the same way as claims.json.
+
+    Already safe (the existing ``isinstance(spec, dict)`` check
+    catches all of these), pinned here so the whole mechanical sweep
+    -- claims.json, slides.json, self_check.json -- lives as one
+    documented set rather than scattered findings.
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "bad_top_level", [None, 42, "a string", [1, 2, 3]], ids=repr
+    )
+    def test_a_non_object_top_level_document_is_reported_not_a_crash(
+        self, tmp_path, bad_top_level
+    ):
+        """None, a number, a string, or a bare list at the top level
+        -- none of these are the required object-with-"slides" shape."""
+        (tmp_path / "slides.json").write_text(json.dumps(bad_top_level))
+        spec = load_slide_spec(tmp_path)
+        assert spec["slides"] == []
+        assert "_problem" in spec

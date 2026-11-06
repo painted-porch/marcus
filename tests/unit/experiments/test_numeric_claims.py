@@ -2371,3 +2371,79 @@ class TestCodexFindingDerivedClaimsGetRowLabelProtectionToo:
         res = check_claims([c], sources)[0]
         assert res.verdict == "failed"
         assert res.reason == "label_mismatch"
+
+
+class TestCodexFindingOverflowAfterEvaluationStillUnresolvable:
+    """A result that evaluates fine can still overflow float conversion.
+
+    "a ** 1000" with a as a plain JSON integer (1200, not a float)
+    computes fine as a Python big int -- no exception at all, Python
+    ints have no fixed size. The crash came later: _within_tolerance
+    converts the result to float to compare it against the claim's
+    stated value, and that conversion is what raises OverflowError,
+    outside the exception handling wrapped around evaluation itself.
+    Converting right after evaluation, inside the same handler, means
+    an int result too large for float is caught at the same point an
+    already-too-large float result already was (round 19).
+
+    This round also tightened the exponent cap (1000 -> 100), so
+    Codex's own literal payload is now caught earlier, by the cap
+    itself, before evaluation ever runs. The conversion fix is
+    isolated in its own test below with a multiplication chain,
+    which the cap does not bound at all -- any operator can produce
+    an oversized integer, not just **.
+    """
+
+    @pytest.mark.unit
+    def test_codexs_literal_payload_is_now_caught_by_the_tightened_cap(self, sources):
+        """The exact reported payload still ends up unresolvable, now
+        via the cap rather than the conversion -- a cheaper rejection,
+        before any 1000-digit number is even computed."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="oversized integer result",
+            kind="derived",
+            expr="a ** 1000",
+            inputs={"a": "metrics.json:n_records"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_an_oversized_result_from_a_non_pow_operator_is_unresolvable(self, sources):
+        """The exponent cap only bounds **. A long multiplication
+        chain reaches the same oversized-integer outcome through a
+        different operator entirely, isolating the conversion fix
+        from the cap: 1200 multiplied by itself 100 times is far
+        larger than any float can hold, and the cap never saw it."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="oversized product",
+            kind="derived",
+            expr=" * ".join(["a"] * 101),
+            inputs={"a": "metrics.json:n_records"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_an_oversized_float_result_lands_on_the_same_verdict(self, sources):
+        """The float-base variant: overflows during the exponentiation
+        itself (already caught since round 19), not during a later
+        conversion -- a different path to the same user-visible
+        verdict, confirmed here so the two stay consistent."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="oversized float result",
+            kind="derived",
+            expr="a ** 1000",
+            inputs={"a": "metrics.json:mean_ape"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"

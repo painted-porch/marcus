@@ -161,7 +161,20 @@ _CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
 #: an ever-larger number, which can hang or exhaust memory long
 #: before any exception would fire. Checked before the operator runs,
 #: not after.
-_MAX_POW_EXPONENT = 1000
+#:
+#: Tightened from 1000: that bound alone did not keep an integer
+#: result inside float range. A base as small as 10 raised to 1000
+#: is a 1000-digit integer, computes instantly (no hang), and was
+#: still too large for the float conversion _within_tolerance always
+#: performs to compare it -- an OverflowError outside the handler
+#: wrapped around evaluation itself. 100 is comfortably outside this
+#: trial's actual range of exponents (ratios, percentages) while
+#: keeping the result's magnitude -- base^100, for any base this
+#: trial's staged data could plausibly produce -- within float
+#: range for the vast majority of cases. The float-conversion fix
+#: below is the actual guarantee for the rest; this cap is the first,
+#: cheap line of defense against a hang on a huge exponent.
+_MAX_POW_EXPONENT = 100
 
 _SAFE_BINOPS = {
     ast.Add: operator.add,
@@ -918,6 +931,18 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             )
         try:
             truth = _safe_eval(tree, names)
+            if isinstance(truth, (int, float)) and not isinstance(truth, bool):
+                # A result can evaluate fine -- no exception at all --
+                # and still be unusable: Python ints have no fixed
+                # size, so "a ** 1000" with a plain int base computes
+                # instantly but is far too large for the float
+                # conversion every later comparison performs.
+                # Converting here, inside the same handler already
+                # wrapped around evaluation, means that overflow is
+                # caught at the same point an already-too-large float
+                # result already was, instead of surfacing later in
+                # _within_tolerance, outside any handler at all.
+                truth = float(truth)
         except (
             ValueError,
             ZeroDivisionError,

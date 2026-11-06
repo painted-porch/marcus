@@ -245,3 +245,89 @@ class TestCodexFindingClaimFieldGateIsMechanical:
         )
         got = collect_output(tmp_path)
         assert any("duplicate" in p for p in got["problems"])
+
+
+class TestCodexFindingClaimsContainerShapeIsMechanical:
+    """The claims document's own container shape, swept the same way.
+
+    ``{"claims": 42}`` is valid JSON and passes the top-level
+    dict-or-list check, but ``list(raw.get("claims") or [])`` then
+    raises ``TypeError`` converting a plain int to a list -- before
+    any per-entry guard runs. ``run_condition_a_case`` calls
+    ``collect_output`` right after every writer pass, so this
+    aborted the case before the self-check or the bounded retry
+    could run.
+
+    Swept here against every container shape Codex asked for: None,
+    a number, a string, list-instead-of-object, object-instead-of-list
+    -- both for the document's own top level (already guarded) and
+    for the ``"claims"`` field specifically (the actual crash site).
+    """
+
+    #: None is excluded here: {"claims": null} is a legitimate way to
+    #: say "no claims," the same as omitting the key entirely, not a
+    #: malformed value -- it already resolves to [] with no crash.
+    BAD_CONTAINERS = [42, "a string", {"id": "c1"}]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_claims_field", BAD_CONTAINERS, ids=repr)
+    def test_a_malformed_claims_field_is_a_named_problem_not_a_crash(
+        self, tmp_path, bad_claims_field
+    ):
+        """Codex's exact field: "claims" must be a list before
+        anything converts it to one."""
+        write(
+            tmp_path,
+            report="x",
+            claims_raw=json.dumps({"claims": bad_claims_field}),
+        )
+        got = collect_output(tmp_path)
+        assert got["problems"] != []
+        assert got["claims"] == []
+
+    @pytest.mark.unit
+    def test_a_null_claims_field_is_not_a_problem(self, tmp_path):
+        """{"claims": null} means "no claims," the same as omitting
+        the key -- not malformed, and not a crash either way."""
+        write(tmp_path, report="x", claims_raw=json.dumps({"claims": None}))
+        got = collect_output(tmp_path)
+        assert got["claims"] == []
+
+    @pytest.mark.unit
+    def test_a_null_top_level_document_is_a_named_problem(self, tmp_path):
+        """Valid JSON `null` at the top level is not a decode error,
+        so it skipped every existing branch and silently reported no
+        problem at all -- indistinguishable from "nothing declared,
+        nothing wrong"."""
+        write(tmp_path, report="x", claims_raw="null")
+        got = collect_output(tmp_path)
+        assert got["problems"] != []
+        assert got["claims"] == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_top_level", [42, "a string"], ids=repr)
+    def test_a_non_container_top_level_document_is_a_named_problem(
+        self, tmp_path, bad_top_level
+    ):
+        """A number or a bare string at the top level is already
+        caught by the existing dict-or-list check -- pinned here
+        alongside the new cases so the whole sweep lives in one
+        place."""
+        write(tmp_path, report="x", claims_raw=json.dumps(bad_top_level))
+        got = collect_output(tmp_path)
+        assert got["problems"] != []
+        assert got["claims"] == []
+
+    @pytest.mark.unit
+    def test_well_formed_claims_are_still_unaffected(self, tmp_path):
+        """The fix must not disturb ordinary, valid claims."""
+        write(
+            tmp_path,
+            report="x",
+            claims_raw=json.dumps(
+                {"claims": [{"id": "c1", "value": 1, "label": "x", "kind": "lookup"}]}
+            ),
+        )
+        got = collect_output(tmp_path)
+        assert got["problems"] == []
+        assert len(got["claims"]) == 1

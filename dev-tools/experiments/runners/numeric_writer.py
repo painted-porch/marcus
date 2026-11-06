@@ -308,11 +308,29 @@ def collect_output(workspace: Path) -> Dict[str, Any]:
             problems.append(f"claims.json is not valid JSON: {exc}")
             raw = None
         if isinstance(raw, dict):
-            claims = list(raw.get("claims") or [])
+            raw_claims = raw.get("claims")
+            if raw_claims is None:
+                claims = []
+            elif isinstance(raw_claims, list):
+                claims = raw_claims
+            else:
+                # A number, a string, or an object here would not
+                # raise converting it to a list (a string silently
+                # becomes a list of its own characters; a dict
+                # becomes a list of its keys), but it is not claims
+                # either way -- reported instead of guessed at.
+                problems.append(f"claims.json's 'claims' is not a list: {raw_claims!r}")
         elif isinstance(raw, list):
             claims = raw
         elif raw is not None:
             problems.append("claims.json is neither an object nor a list")
+        else:
+            # Valid JSON `null` at the top level, not a decode error
+            # -- distinct from an object with a null "claims" field,
+            # which legitimately means "no claims." The whole
+            # document being null is the degenerate case every other
+            # branch here treats as a problem.
+            problems.append("claims.json is null")
 
     seen: Set[str] = set()
     for claim in claims:

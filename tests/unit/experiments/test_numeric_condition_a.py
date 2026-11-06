@@ -153,6 +153,15 @@ class TestCodexFindingNonObjectPayloadDoesNotCrash:
         result = read_self_check(tmp_path)
         assert result["verdict"] == "reject"
 
+    @pytest.mark.unit
+    def test_json_string_is_a_reject_not_a_crash(self, tmp_path):
+        """A bare string payload completes the container-shape sweep
+        (None, number, string, list-instead-of-object) alongside the
+        three cases above."""
+        (tmp_path / "self_check.json").write_text(json.dumps("a string"))
+        result = read_self_check(tmp_path)
+        assert result["verdict"] == "reject"
+
 
 class TestCodexFindingMalformedReasonsDoesNotCrash:
     """A reject verdict with malformed "reasons" crashed the retry prompt.
