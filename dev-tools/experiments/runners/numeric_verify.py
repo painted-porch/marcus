@@ -43,7 +43,10 @@ from runners.numeric_claims import (  # noqa: E402
     extract_numbers,
     load_sources,
 )
-from runners.numeric_writer import trusted_hashes_path  # noqa: E402
+from runners.numeric_writer import (  # noqa: E402
+    trusted_hashes_path,
+    trusted_units_path,
+)
 
 STAGED_SUBDIR = "staged"
 
@@ -180,6 +183,21 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
     sources = load_sources(staged, allowed_names=trusted_manifest.keys())
     report_text = report_path.read_text() if report_path.exists() else ""
 
+    # The units manifest is an accuracy aid, not a tamper-evidence
+    # boundary like the hashes above: a staged case written before
+    # this manifest existed, or whose build_workspace copy predates
+    # it, has none, and that must fall back to the column-name
+    # heuristic exactly as before -- never a hard verification failure.
+    units_manifest_path = trusted_units_path(workspace)
+    try:
+        units_manifest = (
+            json.loads(units_manifest_path.read_text())
+            if units_manifest_path.exists()
+            else {}
+        )
+    except json.JSONDecodeError:
+        units_manifest = {}
+
     declared: List[Claim] = []
     parse_error: Optional[str] = None
     if not report_path.exists():
@@ -198,7 +216,10 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
         parse_error = parse_error or "claims.json is missing"
 
     results: List[CheckResult] = check_report(
-        declared, sources, report_text=report_text if report_path.exists() else None
+        declared,
+        sources,
+        report_text=report_text if report_path.exists() else None,
+        units=units_manifest,
     )
 
     counts = Counter(r.verdict for r in results)

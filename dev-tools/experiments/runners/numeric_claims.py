@@ -864,7 +864,11 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
     return None
 
 
-def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
+def _check_one(
+    claim: Claim,
+    sources: Dict[str, Any],
+    units: Optional[Dict[str, Dict[str, str]]] = None,
+) -> CheckResult:
     """Resolve and judge a single claim.
 
     Parameters
@@ -873,6 +877,9 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         The claim to check.
     sources : Dict[str, Any]
         Output of :func:`load_sources`.
+    units : Optional[Dict[str, Dict[str, str]]]
+        The stager's own units manifest, passed to
+        :func:`_inferred_claim_unit`.
 
     Returns
     -------
@@ -888,7 +895,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         base = {
             **base,
             "addresses": (address,),
-            "unit": _inferred_claim_unit(claim),
+            "unit": _inferred_claim_unit(claim, units),
         }
         try:
             truth = resolve_address(address, sources)
@@ -939,7 +946,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             "addresses": tuple(
                 v for v in (claim.inputs or {}).values() if isinstance(v, str)
             ),
-            "unit": _inferred_claim_unit(claim),
+            "unit": _inferred_claim_unit(claim, units),
         }
         names: Dict[str, Any] = {}
         for var, address in (claim.inputs or {}).items():
@@ -1194,12 +1201,12 @@ def _is_percent_column(column: str) -> bool:
     return any(lowered.endswith(suffix) for suffix in _PERCENT_COLUMN_SUFFIXES)
 
 
-def _claim_source_columns(claim: Claim) -> List[str]:
-    """Collect the trailing column name of every address a claim reads.
+def _claim_addresses(claim: Claim) -> List[str]:
+    """Collect the full address of every source a claim reads.
 
-    An address is always ``<file>:<...>:<column>``, so the column is
-    whatever follows the last ``:``. Used only to infer a claim's
-    unit from its own addressing, never to resolve a value.
+    An address is always ``<file>:<...>:<column>``. Used to infer a
+    claim's unit from its own addressing (by column name, or against
+    a units manifest), never to resolve a value.
 
     Parameters
     ----------
@@ -1217,32 +1224,101 @@ def _claim_source_columns(claim: Claim) -> List[str]:
     if (
         claim.kind == "lookup"
         and isinstance(claim.source, str)
+        and claim.source
         and isinstance(claim.key, str)
+        and claim.key
     ):
-        addresses.append(claim.key)
+        addresses.append(f"{claim.source}:{claim.key}")
     elif claim.kind in ("derived", "consistency") and isinstance(claim.inputs, dict):
         addresses.extend(v for v in claim.inputs.values() if isinstance(v, str))
-    return [address.rsplit(":", 1)[-1] for address in addresses if address]
+    return [address for address in addresses if address]
 
 
-def _inferred_claim_unit(claim: Claim) -> Optional[str]:
-    """Decide whether a claim's own value is a fraction or a percent.
+def _claim_source_columns(claim: Claim) -> List[str]:
+    """Collect the trailing column name of every address a claim reads.
 
-    An explicit ``claim.unit`` always wins. Otherwise, the claim's
-    own source column name decides: every address it reads agreeing
-    on percent, or every one agreeing on not-percent, settles it;
-    reading some of each (a ratio mixing a percent column with a
-    non-percent one, which this trial does not actually do) or
-    reading no column at all is genuinely undetermined, not a
-    default -- a caller that needs the unit to resolve a '%'-suffixed
-    figure must treat ``None`` as a problem to report, not a reason
-    to guess "fraction" and risk silently over- or under-rejecting a
-    correct figure.
+    An address is always ``<file>:<...>:<column>``, so the column is
+    whatever follows the last ``:``.
 
     Parameters
     ----------
     claim : Claim
         The claim to inspect.
+
+    Returns
+    -------
+    List[str]
+        One entry per address the claim reads; empty when the claim
+        has no usable addressing at all.
+    """
+    return [address.rsplit(":", 1)[-1] for address in _claim_addresses(claim)]
+
+
+def _column_unit_from_manifest(
+    units: Optional[Dict[str, Dict[str, str]]], address: str
+) -> Optional[str]:
+    """Look up an address's unit in the stager's own units manifest.
+
+    The manifest is harness-authored ground truth (written by
+    ``numeric_stage.stage_case``, retained outside the writer's
+    workspace the same way the trusted hash manifest is), so it
+    takes priority over the column-name heuristic whenever it
+    declares an address's file and column.
+
+    Parameters
+    ----------
+    units : Optional[Dict[str, Dict[str, str]]]
+        ``{file: {column: "fraction"|"percent"}}``, or ``None``/empty
+        when no manifest is available.
+    address : str
+        A staged address, e.g. ``"metrics.json:median_ape"``.
+
+    Returns
+    -------
+    Optional[str]
+        ``"fraction"`` or ``"percent"`` when the manifest declares
+        this address's file and column, otherwise ``None``.
+    """
+    if not units or ":" not in address:
+        return None
+    file_name, _, rest = address.partition(":")
+    if not rest:
+        return None
+    column = rest.rsplit(":", 1)[-1]
+    file_units = units.get(file_name)
+    if not isinstance(file_units, dict):
+        return None
+    unit = file_units.get(column)
+    return unit if unit in ("fraction", "percent") else None
+
+
+def _inferred_claim_unit(
+    claim: Claim, units: Optional[Dict[str, Dict[str, str]]] = None
+) -> Optional[str]:
+    """Decide whether a claim's own value is a fraction or a percent.
+
+    An explicit ``claim.unit`` always wins. Otherwise, every address
+    the claim reads is resolved in turn -- against ``units`` (the
+    stager's own manifest) first, falling back to the column-name
+    heuristic only for an address the manifest does not cover -- and
+    every address agreeing on percent, or every one agreeing on
+    not-percent, settles it. Reading some of each (a ratio mixing a
+    percent column with a non-percent one, which this trial does not
+    actually do) or reading no column at all is genuinely
+    undetermined, not a default -- a caller that needs the unit to
+    resolve a '%'-suffixed figure must treat ``None`` as a problem to
+    report, not a reason to guess "fraction" and risk silently over-
+    or under-rejecting a correct figure.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim to inspect.
+    units : Optional[Dict[str, Dict[str, str]]]
+        The stager's own units manifest, from
+        :func:`numeric_verify.verify_workspace`'s trusted sibling
+        copy; ``None`` when none is available, which leaves every
+        address to the column-name heuristic exactly as before.
 
     Returns
     -------
@@ -1252,14 +1328,19 @@ def _inferred_claim_unit(claim: Claim) -> Optional[str]:
     """
     if claim.unit in ("fraction", "percent"):
         return claim.unit
-    columns = _claim_source_columns(claim)
-    if not columns:
+    addresses = _claim_addresses(claim)
+    if not addresses:
         return None
-    flags = {_is_percent_column(c) for c in columns}
-    if flags == {True}:
-        return "percent"
-    if flags == {False}:
-        return "fraction"
+    resolved = set()
+    for address in addresses:
+        manifest_unit = _column_unit_from_manifest(units, address)
+        if manifest_unit is not None:
+            resolved.add(manifest_unit)
+            continue
+        column = address.rsplit(":", 1)[-1]
+        resolved.add("percent" if _is_percent_column(column) else "fraction")
+    if len(resolved) == 1:
+        return resolved.pop()
     return None
 
 
@@ -1336,6 +1417,7 @@ def check_claims(
     sources: Dict[str, Any],
     report_text: Optional[str] = None,
     coverage_claims: Optional[Sequence[Claim]] = None,
+    units: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[CheckResult]:
     """Check every claim, and every number in the report text.
 
@@ -1356,6 +1438,9 @@ def check_claims(
         writer's own declared claims here, never the harness-injected
         required checks -- a required check is never something a
         writer could tag, since the writer never sees its id.
+    units : Optional[Dict[str, Dict[str, str]]]
+        The stager's own units manifest, passed to every
+        :func:`_inferred_claim_unit` call this function makes.
 
     Returns
     -------
@@ -1363,7 +1448,7 @@ def check_claims(
         One result per claim, followed by one per uncovered or
         wrongly-tagged figure.
     """
-    results = [_check_one(c, sources) for c in claims]
+    results = [_check_one(c, sources, units) for c in claims]
     if report_text is None:
         return results
 
@@ -1396,7 +1481,7 @@ def check_claims(
             )
             continue
         matched, unit_problem = _percent_aware_match(
-            figure, claim.value, _inferred_claim_unit(claim), claim.tolerance
+            figure, claim.value, _inferred_claim_unit(claim, units), claim.tolerance
         )
         if not matched:
             # A figure whose own tagged claim does not support it has
@@ -1518,6 +1603,7 @@ def check_report(
     claims: Sequence[Claim],
     sources: Dict[str, Any],
     report_text: Optional[str] = None,
+    units: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> List[CheckResult]:
     """Check a report: the harness's required claims, then the writer's.
 
@@ -1534,6 +1620,9 @@ def check_report(
     report_text : Optional[str]
         The finished report, so every figure in it can be required to
         carry a claim.
+    units : Optional[Dict[str, Dict[str, str]]]
+        The stager's own units manifest, passed through to
+        :func:`check_claims`.
 
     Returns
     -------
@@ -1547,6 +1636,7 @@ def check_report(
         sources,
         report_text=report_text,
         coverage_claims=claims,
+        units=units,
     )
 
 

@@ -2922,3 +2922,144 @@ class TestCodexFindingPercentUnitIsClaimAware:
         to a guess."""
         c = Claim(id="c1", value=1, label="x", kind="lookup")
         assert _inferred_claim_unit(c) is None
+
+
+class TestCodexFindingUnitsComeFromTheStagersOwnManifest:
+    """The stager's own units manifest is ground truth for a claim's
+    unit; the column-name heuristic is only a fallback for sources
+    the manifest does not cover.
+
+    fit_and_predict already scales APE by 100, and median_ape /
+    mean_ape carry that same 0-100 scale in metrics.json, per_crop.csv
+    and quartiles.csv -- but neither name ends in the _pct/percent
+    suffix the heuristic looks for, so it guessed "fraction". A
+    correct "4.4% [c1]" against a real median_ape of 4.4 was rejected,
+    and the wrong "440% [c1]" passed; a slide cell had the same error.
+    """
+
+    UNITS = {"metrics.json": {"median_ape": "percent"}}
+
+    @pytest.mark.unit
+    def test_inferred_claim_unit_prefers_the_manifest_over_the_name_heuristic(self):
+        c = Claim(
+            id="c1",
+            value=4.4,
+            label="median APE",
+            kind="lookup",
+            source="metrics.json",
+            key="median_ape",
+        )
+        assert _inferred_claim_unit(c) == "fraction"
+        assert _inferred_claim_unit(c, units=self.UNITS) == "percent"
+
+    @pytest.mark.unit
+    def test_prose_percent_figure_passes_with_the_manifested_unit(self, sources):
+        c = Claim(
+            id="c1",
+            value=4.4,
+            label="median APE",
+            kind="lookup",
+            source="metrics.json",
+            key="median_ape",
+        )
+        res = check_claims(
+            [c], sources, report_text="Median APE is 4.4% [c1].", units=self.UNITS
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_prose_the_unscaled_literal_is_still_caught(self, sources):
+        c = Claim(
+            id="c1",
+            value=4.4,
+            label="median APE",
+            kind="lookup",
+            source="metrics.json",
+            key="median_ape",
+        )
+        res = check_claims(
+            [c], sources, report_text="Median APE is 440% [c1].", units=self.UNITS
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_without_the_manifest_the_name_heuristic_still_over_rejects(self, sources):
+        """Pins Codex's exact scenario: with no manifest at all,
+        median_ape's name gives no percent hint, so the correct
+        "4.4%" is wrongly rejected -- the reason a manifest is needed
+        rather than a better name-matching heuristic."""
+        c = Claim(
+            id="c1",
+            value=4.4,
+            label="median APE",
+            kind="lookup",
+            source="metrics.json",
+            key="median_ape",
+        )
+        res = check_claims([c], sources, report_text="Median APE is 4.4% [c1].")
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_slide_cell_percent_figure_passes_with_the_manifested_unit(self, sources):
+        c = Claim(
+            id="c1",
+            value=4.4,
+            label="median APE",
+            kind="lookup",
+            source="metrics.json",
+            key="median_ape",
+        )
+        accepted = {r.claim_id: r for r in check_claims([c], sources, units=self.UNITS)}
+        spec = {
+            "slides": [
+                {"cells": [{"value": "4.4%", "claim": "c1", "label": "median APE"}]}
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "median APE"}) == []
+
+    @pytest.mark.unit
+    def test_slide_cell_the_unscaled_literal_is_still_caught(self, sources):
+        c = Claim(
+            id="c1",
+            value=4.4,
+            label="median APE",
+            kind="lookup",
+            source="metrics.json",
+            key="median_ape",
+        )
+        accepted = {r.claim_id: r for r in check_claims([c], sources, units=self.UNITS)}
+        spec = {
+            "slides": [
+                {"cells": [{"value": "440%", "claim": "c1", "label": "median APE"}]}
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "median APE"}) != []
+
+    @pytest.mark.unit
+    def test_rate_pct_still_resolves_via_the_manifest(self, sources):
+        """A column the old name-suffix heuristic already recognized
+        must resolve the same way when the manifest also declares it
+        -- the manifest does not have to re-litigate what already
+        worked."""
+        c = Claim(
+            id="c1",
+            value=55.0,
+            label="Excellent tier share",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Excellent:rate_pct",
+        )
+        units = {"tiers.csv": {"rate_pct": "percent"}}
+        res = check_claims([c], sources, report_text="Share is 55% [c1].", units=units)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_claim_with_no_addressing_still_cannot_be_determined_even_with_a_manifest(
+        self,
+    ):
+        """A manifest is consulted per address a claim actually reads;
+        a claim with no usable addressing at all has nothing for it
+        to cover, and must stay undetermined exactly as it did with
+        no manifest at all."""
+        c = Claim(id="c1", value=1, label="x", kind="lookup")
+        assert _inferred_claim_unit(c, units=self.UNITS) is None

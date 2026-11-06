@@ -9,7 +9,12 @@ import hashlib
 import json
 
 import pytest
-from runners.numeric_writer import build_workspace, collect_output, trusted_hashes_path
+from runners.numeric_writer import (
+    build_workspace,
+    collect_output,
+    trusted_hashes_path,
+    trusted_units_path,
+)
 
 
 def write(ws, report=None, claims_raw=None):
@@ -159,6 +164,68 @@ class TestCodexFindingTrustedHashesLiveOutsideTheWorkspace:
 
         manifest = json.loads(trusted_hashes_path(workspace).read_text())
         assert manifest["metrics.json"] == hashlib.sha256(content).hexdigest()
+
+
+class TestCodexFindingUnitsManifestLivesOutsideTheWorkspaceToo:
+    """The units manifest gets the same trust boundary the hashes do.
+
+    numeric_stage.stage_case writes UNITS.json beside the other
+    staged files, ground truth for whether a column is a fraction or
+    a percent. It must be retained the same way the hash manifest is
+    -- read from the original staged_dir before any copy exists, and
+    written to a sibling of the workspace, not inside it -- or a
+    writer's own workspace copy would be exactly as untrustworthy as
+    an in-workspace hash manifest was.
+    """
+
+    @pytest.mark.unit
+    def test_trusted_units_file_lives_outside_the_workspace(self, tmp_path):
+        staged_dir = tmp_path / "eval_20261103_120000"
+        staged_dir.mkdir()
+        (staged_dir / "metrics.json").write_text('{"median_ape": 4.4}')
+        (staged_dir / "UNITS.json").write_text(
+            json.dumps({"metrics.json": {"median_ape": "percent"}})
+        )
+        out_dir = tmp_path / "out"
+
+        workspace = build_workspace(staged_dir, out_dir)
+
+        manifest_path = trusted_units_path(workspace)
+        assert manifest_path.exists()
+        assert manifest_path.parent == workspace.parent
+        assert "staged" not in manifest_path.relative_to(workspace.parent).parts[1:]
+
+    @pytest.mark.unit
+    def test_trusted_units_match_the_original_staged_manifest(self, tmp_path):
+        staged_dir = tmp_path / "eval_20261103_120000"
+        staged_dir.mkdir()
+        (staged_dir / "metrics.json").write_text('{"median_ape": 4.4}')
+        (staged_dir / "UNITS.json").write_text(
+            json.dumps({"metrics.json": {"median_ape": "percent"}})
+        )
+        out_dir = tmp_path / "out"
+
+        workspace = build_workspace(staged_dir, out_dir)
+
+        manifest = json.loads(trusted_units_path(workspace).read_text())
+        assert manifest == {"metrics.json": {"median_ape": "percent"}}
+
+    @pytest.mark.unit
+    def test_a_staged_dir_with_no_units_file_gets_an_empty_trusted_manifest(
+        self, tmp_path
+    ):
+        """An older staged case with no UNITS.json must not crash
+        build_workspace -- it leaves every claim to the column-name
+        heuristic, exactly as before this manifest existed."""
+        staged_dir = tmp_path / "eval_20261103_120000"
+        staged_dir.mkdir()
+        (staged_dir / "metrics.json").write_text('{"r2_overall": 0.886}')
+        out_dir = tmp_path / "out"
+
+        workspace = build_workspace(staged_dir, out_dir)
+
+        manifest = json.loads(trusted_units_path(workspace).read_text())
+        assert manifest == {}
 
 
 class TestCodexFindingClaimFieldGateIsMechanical:

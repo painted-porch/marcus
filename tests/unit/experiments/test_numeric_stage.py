@@ -14,6 +14,7 @@ import pandas as pd
 import pytest
 from runners.numeric_stage import (
     CASE_CROP_MIX,
+    UNITS_BY_FILE,
     _bias_crop_ratio,
     _r2,
     _tier_for,
@@ -209,7 +210,39 @@ class TestStagedArtifacts:
             "tiers.csv",
             "quartiles.csv",
             "HASHES.json",
+            "UNITS.json",
         }
+
+    @pytest.mark.unit
+    def test_units_manifest_declares_every_percent_and_fraction_column(
+        self, evaluated, tmp_path
+    ):
+        """median_ape and mean_ape are percent-scale (fit_and_predict
+        already multiplies APE by 100), r2 is a fraction -- the
+        manifest must say so by name, not leave it to a column-name
+        guess that misses median_ape/mean_ape entirely."""
+        staged = stage_case(evaluated, tmp_path, "case-000")
+        units = json.loads((staged.staged_dir / "UNITS.json").read_text())
+        assert units["metrics.json"]["median_ape"] == "percent"
+        assert units["metrics.json"]["mean_ape"] == "percent"
+        assert units["metrics.json"]["r2_overall"] == "fraction"
+        assert units["per_crop.csv"]["median_ape"] == "percent"
+        assert units["per_crop.csv"]["mean_ape"] == "percent"
+        assert units["per_crop.csv"]["r2"] == "fraction"
+        assert units["tiers.csv"]["rate_pct"] == "percent"
+        assert units["quartiles.csv"]["median_ape"] == "percent"
+        assert units["per_record.csv"]["ape"] == "percent"
+
+    @pytest.mark.unit
+    def test_units_manifest_matches_the_module_level_constant(
+        self, evaluated, tmp_path
+    ):
+        """The written manifest is exactly UNITS_BY_FILE -- one place
+        declares every staged column's unit, and that is what gets
+        written, not a second copy that could drift from it."""
+        staged = stage_case(evaluated, tmp_path, "case-000")
+        units = json.loads((staged.staged_dir / "UNITS.json").read_text())
+        assert units == UNITS_BY_FILE
 
     @pytest.mark.unit
     def test_tier_total_equals_record_count_without_the_trap(self, evaluated, tmp_path):

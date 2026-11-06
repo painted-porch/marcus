@@ -77,6 +77,46 @@ TIER_EDGES = [
     (20.0, float("inf"), "Poor"),
 ]
 
+# Ground truth for every staged column's scale, not a guess from its
+# name: fit_and_predict already multiplies APE by 100 (see its own
+# docstring), so median_ape and mean_ape are percent-valued wherever
+# they appear, the same scale rate_pct already uses -- but neither
+# name ends in a percent-looking suffix, which is exactly what let a
+# correct "4.4% [c1]" against a real median_ape of 4.4 be rejected as
+# an over-rejection, and the wrong "440% [c1]" pass. numeric_claims's
+# column-name heuristic (_is_percent_column) remains a fallback, used
+# only for a source this manifest does not cover.
+UNITS_BY_FILE: Dict[str, Dict[str, str]] = {
+    "metrics.json": {
+        "r2_overall": "fraction",
+        "median_ape": "percent",
+        "mean_ape": "percent",
+        "n_records": "count",
+    },
+    "per_crop.csv": {
+        "r2": "fraction",
+        "median_ape": "percent",
+        "mean_ape": "percent",
+        "n_records": "count",
+    },
+    "per_record.csv": {
+        "ape": "percent",
+        "actual": "plain",
+        "predicted": "plain",
+        "area_value": "plain",
+        "year": "plain",
+    },
+    "tiers.csv": {
+        "rate_pct": "percent",
+        "n_records": "count",
+    },
+    "quartiles.csv": {
+        "median_ape": "percent",
+        "median_area_value": "plain",
+        "n_records": "count",
+    },
+}
+
 
 @dataclass
 class StagedCase:
@@ -513,6 +553,9 @@ def stage_case(
         per_crop.assign(r2=(per_crop["r2"] - 0.03).round(3)).to_csv(
             stale / "per_crop.csv", index=False
         )
+
+    # --- units --------------------------------------------------------
+    (eval_dir / "UNITS.json").write_text(json.dumps(UNITS_BY_FILE, indent=2))
 
     # --- hashes -----------------------------------------------------------
     hashes = {p.name: _sha256(p) for p in sorted(eval_dir.glob("*")) if p.is_file()}

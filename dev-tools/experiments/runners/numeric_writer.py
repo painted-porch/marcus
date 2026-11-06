@@ -133,6 +133,8 @@ Write report.md and claims.json now. Do not write any other file.
 
 STAGED_SUBDIR = "staged"
 TRUSTED_HASHES_SUFFIX = ".trusted_hashes.json"
+TRUSTED_UNITS_SUFFIX = ".trusted_units.json"
+UNITS_FILENAME = "UNITS.json"
 
 
 def trusted_hashes_path(workspace: Path) -> Path:
@@ -159,6 +161,27 @@ def trusted_hashes_path(workspace: Path) -> Path:
     return workspace.parent / f"{workspace.name}{TRUSTED_HASHES_SUFFIX}"
 
 
+def trusted_units_path(workspace: Path) -> Path:
+    """Where a workspace's harness-retained units manifest lives.
+
+    The same trust boundary :func:`trusted_hashes_path` draws, for
+    the same reason: a units manifest a writer's own workspace copy
+    could contain is one a writer (or a bug in one) could edit, which
+    is not ground truth at all.
+
+    Parameters
+    ----------
+    workspace : Path
+        The workspace (what :func:`build_workspace` returns).
+
+    Returns
+    -------
+    Path
+        The manifest's path, a sibling of ``workspace``.
+    """
+    return workspace.parent / f"{workspace.name}{TRUSTED_UNITS_SUFFIX}"
+
+
 def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
     """Lay out a clean workspace holding the staged evaluation.
 
@@ -174,7 +197,10 @@ def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
     A hash manifest of the original ``staged_dir``'s files, computed
     here before any copy exists, is written to
     :func:`trusted_hashes_path` -- outside this workspace, so nothing
-    the writer does inside it can touch that record.
+    the writer does inside it can touch that record. The units
+    manifest ``numeric_stage.stage_case`` wrote (``UNITS.json``, if
+    present -- an older staged case may have none) gets the same
+    treatment, read here and retained at :func:`trusted_units_path`.
 
     Parameters
     ----------
@@ -199,6 +225,12 @@ def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
         if p.is_file()
     }
 
+    units_file = staged_dir / UNITS_FILENAME
+    try:
+        units = json.loads(units_file.read_text()) if units_file.exists() else {}
+    except json.JSONDecodeError:
+        units = {}
+
     staged_copy = out_dir / STAGED_SUBDIR
     shutil.copytree(staged_dir, staged_copy)
 
@@ -208,6 +240,7 @@ def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
         shutil.copytree(sibling, out_dir / sibling.name)
 
     trusted_hashes_path(out_dir).write_text(json.dumps(hashes, indent=2))
+    trusted_units_path(out_dir).write_text(json.dumps(units, indent=2))
     return out_dir
 
 

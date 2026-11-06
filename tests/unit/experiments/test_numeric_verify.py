@@ -12,7 +12,7 @@ import json
 
 import pytest
 from runners.numeric_verify import verify_workspace
-from runners.numeric_writer import trusted_hashes_path
+from runners.numeric_writer import trusted_hashes_path, trusted_units_path
 
 
 def _write_trusted_manifest(workspace):
@@ -529,3 +529,96 @@ class TestCodexFindingMistaggedFiguresDoNotCorruptCoverage:
         write(workspace, "R2 is 0.8 [c1].", claims)
         out = verify_workspace(workspace)
         assert out["summary"]["claims_required"] == clean_required
+
+
+class TestCodexFindingUnitsManifestFeedsVerification:
+    """verify_workspace's own trusted units manifest, not just the
+    column-name heuristic, decides whether a '%' figure is already
+    on the right scale.
+
+    median_ape is percent-valued (fit_and_predict already multiplies
+    APE by 100) but its name gives the column-name heuristic no
+    percent hint, so without a units manifest a correct "4.4%" is
+    wrongly rejected and the wrong "440%" wrongly passes.
+    """
+
+    @pytest.mark.unit
+    def test_a_manifested_percent_column_matches_its_percent_literal(self, workspace):
+        (workspace / "staged" / "metrics.json").write_text(
+            json.dumps({"n_records": 100, "r2_overall": 0.9, "median_ape": 4.4})
+        )
+        _write_trusted_manifest(workspace)
+        trusted_units_path(workspace).write_text(
+            json.dumps({"metrics.json": {"median_ape": "percent"}})
+        )
+        write(
+            workspace,
+            "Median APE was 4.4% [c1].",
+            [
+                {
+                    "id": "c1",
+                    "value": 4.4,
+                    "label": "median APE",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "median_ape",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "verified"
+
+    @pytest.mark.unit
+    def test_the_unscaled_literal_is_still_caught(self, workspace):
+        (workspace / "staged" / "metrics.json").write_text(
+            json.dumps({"n_records": 100, "r2_overall": 0.9, "median_ape": 4.4})
+        )
+        _write_trusted_manifest(workspace)
+        trusted_units_path(workspace).write_text(
+            json.dumps({"metrics.json": {"median_ape": "percent"}})
+        )
+        write(
+            workspace,
+            "Median APE was 440% [c1].",
+            [
+                {
+                    "id": "c1",
+                    "value": 4.4,
+                    "label": "median APE",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "median_ape",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+
+    @pytest.mark.unit
+    def test_with_no_trusted_units_manifest_the_name_heuristic_still_over_rejects(
+        self, workspace
+    ):
+        """Pins why the manifest is needed: with no trusted units file
+        at all (an older workspace, or one build_workspace made from
+        a staged_dir with no UNITS.json), median_ape's own name gives
+        the heuristic no percent hint, so the correct figure fails."""
+        (workspace / "staged" / "metrics.json").write_text(
+            json.dumps({"n_records": 100, "r2_overall": 0.9, "median_ape": 4.4})
+        )
+        _write_trusted_manifest(workspace)
+        write(
+            workspace,
+            "Median APE was 4.4% [c1].",
+            [
+                {
+                    "id": "c1",
+                    "value": 4.4,
+                    "label": "median APE",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "median_ape",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
