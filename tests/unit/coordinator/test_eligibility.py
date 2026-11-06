@@ -235,6 +235,110 @@ class TestRegisteredVerifyShapedTypes:
         assert eligible is True
 
 
+async def _two_project_state(
+    tasks: List[Task],
+    workers: List[WorkerStatus],
+    registered_registrations: Dict[str, Dict[str, Any]],
+    active_project_id: str,
+) -> Mock:
+    """Build a state with two projects: "proj-a" (registered) and
+    "proj-b" (not), where ``active_project_id`` names whichever one is
+    the server's active project -- independent of which project each
+    task in ``tasks`` actually belongs to via its own ``project_id``.
+    """
+    registry = ProjectRegistry(Persistence(MemoryPersistence()))
+    now = datetime.now(timezone.utc)
+    await registry.add_project(
+        ProjectConfig(
+            id="proj-a",
+            name="project-a",
+            provider="sqlite",
+            provider_config={},
+            created_at=now,
+            last_used=now,
+            task_type_registrations=registered_registrations,
+        )
+    )
+    await registry.add_project(
+        ProjectConfig(
+            id="proj-b",
+            name="project-b",
+            provider="sqlite",
+            provider_config={},
+            created_at=now,
+            last_used=now,
+        )
+    )
+    await registry.set_active_project(active_project_id)
+    state = _make_state(tasks, workers)
+    state.project_registry = registry
+    return state
+
+
+class TestRegistrationIsScopedToTheCandidateTasksOwnProject:
+    """Codex P2 on PR #836.
+
+    A worker can request tasks for a project other than the server's
+    active one. Looking up the registration from whatever is active
+    applied the wrong project's rules to a candidate from a different
+    project.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_candidates_own_project_registration_applies(self) -> None:
+        """Project A registers check/write; project B (active) does
+        not. A candidate task belonging to A must still be gated by
+        A's registration, not B's absence of one."""
+        write = _make_task(
+            "write-1",
+            task_type="write",
+            status=TaskStatus.DONE,
+            assigned_to="author-1",
+        )
+        write.project_id = "proj-a"
+        check = _make_task("check-1", task_type="check", dependencies=["write-1"])
+        check.project_id = "proj-a"
+        author = _make_worker("author-1")
+        state = await _two_project_state(
+            [write, check],
+            [author],
+            {"check": {"verifies_task_type": "write"}},
+            active_project_id="proj-b",
+        )
+
+        eligible, reason = is_eligible(author, check, state)
+
+        assert eligible is False
+        assert "author" in reason
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_task_with_no_project_id_falls_back_to_active(
+        self,
+    ) -> None:
+        """A task with no project_id at all (pre-dates per-task project
+        scoping) still resolves against the active project, matching
+        pre-#836 behavior."""
+        write = _make_task(
+            "write-1",
+            task_type="write",
+            status=TaskStatus.DONE,
+            assigned_to="author-1",
+        )
+        check = _make_task("check-1", task_type="check", dependencies=["write-1"])
+        author = _make_worker("author-1")
+        state = await _two_project_state(
+            [write, check],
+            [author],
+            {"check": {"verifies_task_type": "write"}},
+            active_project_id="proj-a",
+        )
+
+        eligible, reason = is_eligible(author, check, state)
+
+        assert eligible is False
+        assert "author" in reason
+
+
 class TestVerifyEligibility:
     """Test suite for the verify-task rules: never author, never author's vendor."""
 

@@ -48,8 +48,22 @@ VERIFY_TYPE = "verify"
 FIND_TYPE = "find"
 
 
-def _task_type_registration(task_type: str, state: Any) -> Optional[Dict[str, Any]]:
-    """Return the active project's ADR-0013 K2 registration for a task type.
+def _task_type_registration(
+    task_type: str, state: Any, project_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Return a project's ADR-0013 K2 registration for a task type.
+
+    Codex P2 on PR #836: a worker can request tasks for a project other
+    than the server's active one (``_find_optimal_task_original_logic``
+    scopes candidates by ``state.agent_project_map``, not by what is
+    active), and a ``Task`` carries its own ``project_id``. Looking up
+    the registration from the active project regardless applied the
+    wrong project's rules -- project A's author stayed eligible for its
+    own ``check`` task whenever some other project B happened to be
+    active, since B's (non-existent) registration returned no producer
+    type. This resolves the candidate's own project first; the active
+    project is a fallback only for a legacy task with no ``project_id``
+    at all.
 
     Parameters
     ----------
@@ -61,23 +75,33 @@ def _task_type_registration(task_type: str, state: Any) -> Optional[Dict[str, An
         checks elsewhere in this module -- a bare ``Mock`` auto-creates
         a ``project_registry`` attribute that would otherwise look
         present without ever being one.
+    project_id : Optional[str]
+        The candidate task's own project id (``task.project_id``).
+        ``None`` falls back to the server's active project.
 
     Returns
     -------
     Optional[Dict[str, Any]]
         The registration dict, or ``None`` when there is no project
-        registry, no active project, or no registration for this type.
+        registry, no resolvable project, or no registration for this
+        type.
     """
     registry = getattr(state, "project_registry", None)
     if not isinstance(registry, ProjectRegistry):
         return None
-    project = registry.get_active_project_sync()
+    project = (
+        registry.get_project_sync(project_id)
+        if project_id
+        else registry.get_active_project_sync()
+    )
     if project is None:
         return None
     return project.task_type_registrations.get(task_type)
 
 
-def _verify_producer_type(task_type: str, state: Any) -> Optional[str]:
+def _verify_producer_type(
+    task_type: str, state: Any, project_id: Optional[str] = None
+) -> Optional[str]:
     """Return the task type whose completion ``task_type`` checks.
 
     Issue #830: the self-check exclusion (K12) and ``_claim_authors``
@@ -96,6 +120,10 @@ def _verify_producer_type(task_type: str, state: Any) -> Optional[str]:
         The candidate task's type.
     state : Any
         Marcus server state, passed through to the registration lookup.
+    project_id : Optional[str]
+        The candidate task's own project id, so the registration
+        resolved is that project's, not whichever project happens to
+        be active server-wide (Codex P2 on PR #836).
 
     Returns
     -------
@@ -103,7 +131,7 @@ def _verify_producer_type(task_type: str, state: Any) -> Optional[str]:
         The producer task type to protect against self-checking, or
         ``None`` when ``task_type`` is not a verify-shaped type at all.
     """
-    registration = _task_type_registration(task_type, state)
+    registration = _task_type_registration(task_type, state, project_id)
     producer = registration.get("verifies_task_type") if registration else None
     if producer:
         return str(producer)
@@ -186,7 +214,9 @@ def is_eligible(agent: WorkerStatus, task: Task, state: Any) -> Tuple[bool, str]
             "principal is offered approve tasks only",
         )
 
-    producer_type = _verify_producer_type(task.task_type, state)
+    producer_type = _verify_producer_type(
+        task.task_type, state, getattr(task, "project_id", None)
+    )
     if producer_type is not None:
         for author_id, author_vendor in _claim_authors(task, producer_type, state):
             if agent.worker_id == author_id:
