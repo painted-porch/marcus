@@ -712,6 +712,14 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
         the claim's fields are well-shaped enough to attempt
         resolving.
     """
+    if not isinstance(claim.label, str) or not claim.label.strip():
+        # A claim with no label is not a pass by omission: the
+        # slide-mapping check (check_slide_spec) exists specifically
+        # to catch a right number filed under the wrong row, and it
+        # can only do that when there is a label to contradict.
+        # Claim.from_dict defaults a missing "label" field to "",
+        # which must not quietly waive this.
+        return f"claim {claim.id!r} has no label"
     if claim.kind == "lookup":
         if not isinstance(claim.source, str) or not claim.source:
             return f"{claim.label}: lookup claim has no source file"
@@ -1288,17 +1296,39 @@ def check_slide_spec(
             # A missing or empty label is not a pass by omission: the
             # whole point of this check is that a figure stays under
             # its accepted label, and a cell that states no label at
-            # all makes that unverifiable, not satisfied.
-            if expected_label and not cell_label:
+            # all makes that unverifiable, not satisfied. Neither
+            # branch is gated on expected_label itself being truthy --
+            # an empty expected_label is exactly as unverifiable as a
+            # missing cell_label, not a reason to skip the check.
+            if not cell_label:
                 problems.append(
                     f"{where}: claim {claim_id} has no label on the "
-                    f"slide cell; expected '{expected_label}'"
+                    f"slide cell; expected {expected_label!r}"
                 )
-            elif expected_label and cell_label != expected_label:
+            elif cell_label != expected_label:
                 problems.append(
-                    f"{where}: claim {claim_id} is '{expected_label}' "
-                    f"but appears under '{cell_label}'"
+                    f"{where}: claim {claim_id} is {expected_label!r} "
+                    f"but appears under {cell_label!r}"
                 )
+            else:
+                # The label matched verbatim, but a figure embedded
+                # inside it (a confidence interval, a sample size) is
+                # not itself checked by that match -- "maize R2 (99%
+                # confidence)" matches its own expected label exactly
+                # regardless of what the 99 is. Every embedded figure
+                # must be backed by some accepted claim on this
+                # slide, the same bar a slide title's own figures
+                # already have to clear.
+                for figure in extract_numbers(cell_label):
+                    if not any(
+                        _within_tolerance(figure, backed, None)
+                        for backed in backed_values
+                    ):
+                        problems.append(
+                            f"{where}: label {cell_label!r} states "
+                            f"{figure}, which no accepted cell on "
+                            f"this slide backs"
+                        )
     return problems
 
 

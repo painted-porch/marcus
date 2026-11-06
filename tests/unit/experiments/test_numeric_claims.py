@@ -2157,3 +2157,133 @@ class TestCodexFindingMechanicalFieldSweep:
             tolerance=None,
         )
         assert check_claims([c], sources)[0].verdict == "verified"
+
+
+class TestCodexFindingEmptyClaimLabelDisablesWrongRowProtection:
+    """An omitted label let a right-number-wrong-row figure through.
+
+    Claim.from_dict defaults a missing label to "". Report
+    verification accepted such a claim, and check_slide_spec's own
+    label comparison skipped both its checks whenever expected_label
+    was falsy -- an empty label is exactly as falsy as a missing one.
+    Codex's demonstration: a verified maize R2 displayed on a slide
+    under "wheat R2," with a fully "verified" deck, because the
+    claim backing it was never given a label to contradict.
+    """
+
+    @pytest.mark.unit
+    def test_a_claim_with_no_label_is_unresolvable_not_verified(self, sources):
+        """A report claim must carry a nonempty label to be accepted
+        at all -- the same way every other field this gate checks is
+        required before resolution is attempted."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_check_slide_spec_never_skips_for_a_falsy_expected_label(self):
+        """Defense in depth: even if some future caller hands
+        check_slide_spec an empty expected label directly, a mismatched
+        cell label must still be caught, not waved through as "nothing
+        to compare"."""
+        accepted = {
+            "c1": CheckResult(claim_id="c1", verdict="verified", value=0.481, label="")
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": 0.481, "claim": "c1", "label": "wheat R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": ""})
+        assert problems
+
+    @pytest.mark.unit
+    def test_check_slide_spec_requires_a_cell_label_even_when_expected_is_empty(self):
+        """The missing-label case must also not be waved through when
+        expected_label itself happens to be empty."""
+        accepted = {
+            "c1": CheckResult(claim_id="c1", verdict="verified", value=0.481, label="")
+        }
+        spec = {"slides": [{"cells": [{"value": 0.481, "claim": "c1"}]}]}
+        problems = check_slide_spec(spec, accepted, {"c1": ""})
+        assert problems
+
+
+class TestCodexFindingFiguresEmbeddedInALabelAreUnverified:
+    """A figure hidden inside a cell's label text was never checked.
+
+    A label such as "maize R2 (99% confidence)" matches the expected
+    label verbatim (the "99" is just along for the ride), so a slide
+    copying it passed even though nothing supports the 99. The title
+    path already runs numeric coverage over its text; the cell-label
+    path did not.
+    """
+
+    @pytest.mark.unit
+    def test_an_unbacked_figure_inside_a_cell_label_is_caught(self):
+        """Codex's example: a confidence figure with no claim behind
+        it. The cell label matches the claim's own (verified-under)
+        label verbatim -- the identity check passes cleanly -- so
+        this pins specifically the embedded-figure coverage gap, not
+        a label mismatch."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.886,
+                label="maize R2 (99% confidence)",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": 0.886,
+                            "claim": "c1",
+                            "label": "maize R2 (99% confidence)",
+                        }
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2 (99% confidence)"})
+        assert any("99" in p for p in problems)
+
+    @pytest.mark.unit
+    def test_a_claim_backed_figure_inside_a_cell_label_still_passes(self):
+        """The fix must not reject a label whose extra figure is
+        itself backed by another accepted claim on the same slide."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.886,
+                label="maize R2 (99% confidence)",
+            ),
+            "c2": CheckResult(
+                claim_id="c2", verdict="verified", value=99, label="confidence"
+            ),
+        }
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": 0.886,
+                            "claim": "c1",
+                            "label": "maize R2 (99% confidence)",
+                        },
+                        {"value": 99, "claim": "c2", "label": "confidence"},
+                    ]
+                }
+            ]
+        }
+        labels = {"c1": "maize R2 (99% confidence)", "c2": "confidence"}
+        assert check_slide_spec(spec, accepted, labels) == []
