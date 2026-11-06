@@ -225,6 +225,198 @@ class TestReportBlockerReleasesCoordination:
         assert update_payload["assigned_to"] is None
 
 
+class TestReportTaskProgressBlockedReleasesCoordination:
+    """``report_task_progress(status="blocked")`` must release the
+    agent's assignment + lease, the same as ``report_blocker``'s
+    terminal path already does.
+
+    Issue #851: a task reported BLOCKED through ``report_task_progress``
+    (as opposed to ``report_blocker``) stayed in the agent's
+    ``current_tasks``, so every later ``request_next_task`` call from
+    that agent was refused with "You already have a task assigned" —
+    a message that was no longer true, since the task had already been
+    disclaimed. The board showed BLOCKED with no useful way for the
+    agent to get new work until its run ended and something else
+    cleaned up the stale assignment.
+    """
+
+    def _make_blocked_state(self, task: Task) -> Any:
+        state = MagicMock()
+        state.kanban_client = AsyncMock()
+        state.kanban_client.update_task = AsyncMock()
+        state.kanban_client.update_task_progress = AsyncMock()
+        state.kanban_client.add_comment = AsyncMock()
+        state.kanban_client.get_task_by_id = AsyncMock(return_value=task)
+        state.kanban_client.get_all_tasks = AsyncMock(return_value=[task])
+        state.kanban_client._load_workspace_state = MagicMock(return_value=None)
+        state.project_tasks = [task]
+
+        state.initialize_kanban = AsyncMock()
+        state.refresh_project_state = AsyncMock()
+
+        agent = MagicMock()
+        agent.current_tasks = [task]
+        state.agent_status = {"agent-1": agent}
+
+        assignment = MagicMock()
+        assignment.task_id = task.id
+        assignment.assigned_at = datetime.now(timezone.utc)
+        state.agent_tasks = {"agent-1": assignment}
+
+        state.assignment_persistence = AsyncMock()
+        state.assignment_persistence.remove_assignment = AsyncMock()
+
+        lease = MagicMock()
+        lease.agent_id = "agent-1"
+        state.lease_manager = MagicMock()
+        state.lease_manager.active_leases = {task.id: lease}
+        _wire_release_lease(state.lease_manager)
+        state.lease_manager.extend_for_validation = AsyncMock(return_value=None)
+
+        state.code_analyzer = None
+        state.provider = "sqlite"
+        state.subtask_manager = None
+        state.memory = None
+        state.context = None
+
+        return state
+
+    @pytest.mark.asyncio
+    async def test_blocked_clears_agent_current_tasks(self) -> None:
+        """After a blocked report, the agent's current_tasks is empty —
+        a subsequent request_next_task must not be refused on its
+        account."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = self._make_blocked_state(task)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=50,
+            message="Stuck on a dependency",
+            state=state,
+        )
+
+        assert state.agent_status["agent-1"].current_tasks == [], (
+            "report_task_progress(blocked) must clear current_tasks — "
+            "otherwise request_next_task's one-task-per-agent check "
+            "refuses every later call with a now-false message."
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocked_clears_agent_tasks_assignment(self) -> None:
+        """After a blocked report, agent_tasks no longer holds the task."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = self._make_blocked_state(task)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=50,
+            message="Stuck",
+            state=state,
+        )
+
+        assert "agent-1" not in state.agent_tasks
+
+    @pytest.mark.asyncio
+    async def test_blocked_clears_persistence(self) -> None:
+        """After a blocked report, the assignment is removed from persistence."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = self._make_blocked_state(task)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=50,
+            message="Stuck",
+            state=state,
+        )
+
+        state.assignment_persistence.remove_assignment.assert_awaited_once_with(
+            "agent-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocked_removes_lease(self) -> None:
+        """After a blocked report, the lease is no longer active."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = self._make_blocked_state(task)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=50,
+            message="Stuck",
+            state=state,
+        )
+
+        assert task.id not in state.lease_manager.active_leases
+
+    @pytest.mark.asyncio
+    async def test_blocked_board_write_unassigns_the_card(self) -> None:
+        """The kanban update for a blocked task clears assigned_to — the
+        card must not still show the agent that just disclaimed it."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = self._make_blocked_state(task)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=50,
+            message="Stuck",
+            state=state,
+        )
+
+        update_call = state.kanban_client.update_task.call_args
+        assert update_call is not None
+        update_payload = update_call[0][1]
+        assert update_payload["status"] == TaskStatus.BLOCKED
+        assert update_payload["assigned_to"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_new_task_request_is_no_longer_refused_after_blocking(
+        self,
+    ) -> None:
+        """End-to-end within the mocked state: request_next_task's
+        one-task-per-agent guard reads agent.current_tasks directly, so
+        once report_task_progress(blocked) clears it, that guard no
+        longer fires for this agent."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = self._make_blocked_state(task)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=50,
+            message="Stuck",
+            state=state,
+        )
+
+        # This is exactly the condition request_next_task's one-task-per-
+        # agent guard checks (src/marcus_mcp/tools/task.py, "if
+        # agent.current_tasks:") — it must now be falsy.
+        assert not state.agent_status["agent-1"].current_tasks
+
+
 class TestCompletionReleasesLeaseEvenOnMergeFailure:
     """``report_progress(status=completed)`` must release the lease even when
     the worktree merge subsequently fails.

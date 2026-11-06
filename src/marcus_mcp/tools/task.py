@@ -8410,6 +8410,10 @@ async def _record_progress(
                     }
 
             update_data["status"] = TaskStatus.BLOCKED
+            # Unassign on the board too (mirrors report_blocker's own
+            # kanban update): the agent's hold is being released below,
+            # so the card must not still show it as the assignee.
+            update_data["assigned_to"] = None
 
             # Record blocker in Memory if available
             if hasattr(state, "memory") and state.memory and message:
@@ -8433,6 +8437,27 @@ async def _record_progress(
                     actual_hours=actual_hours,
                     blockers=[message],
                 )
+
+            # Release coordination state — a blocked task is terminal for
+            # the current agent, exactly like DONE/DECLINED (issue #851).
+            # Without this, the agent's current_tasks/agent_tasks entry
+            # and lease all stay held, so request_next_task keeps refusing
+            # it with "You already have a task assigned" even though the
+            # task is sitting unassigned and BLOCKED on the board — until
+            # the agent's run ends and something else cleans it up
+            # externally. Mirrors the "completed" branch's release above.
+            if agent_id in state.agent_status:
+                agent = state.agent_status[agent_id]
+                agent.current_tasks = []
+                if agent_id in state.agent_tasks:
+                    del state.agent_tasks[agent_id]
+                await state.assignment_persistence.remove_assignment(agent_id)
+                if hasattr(state, "lease_manager") and state.lease_manager:
+                    if task_id in state.lease_manager.active_leases:
+                        await state.lease_manager.release_lease(
+                            task_id, reason="blocked"
+                        )
+                        logger.info(f"Removed lease for blocked task {task_id}")
 
         # Update Kanban card
         await state.kanban_client.update_task(task_id, update_data)
