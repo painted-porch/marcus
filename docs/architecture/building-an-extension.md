@@ -112,7 +112,7 @@ It runs a four-step chain of task types: `find` → `verify` → `approve` → `
 ```
 
 This is the registration step, today's version of it: the task type and its evidence shape are declared directly on the board, task by task, rather than once per project.
-(K2's own field on `ProjectConfig` is the planned replacement for doing this per-project instead of per-task — check ADR-0013's K2 section for its current status.)
+(K2's own field, `ProjectConfig.task_type_registrations` (#831), replaces doing this per-task with a single declaration per project — see "Today's state" above.)
 
 ### The worker's pull loop
 
@@ -173,7 +173,7 @@ This is enforced, where it applies, at the point the kernel decides what to offe
 
 ## How to verify your extension is built correctly
 
-1. Register your project's task types and evidence requirements through K2's mechanism (check ADR-0013's K2 section for whether that is a `ProjectConfig` field you write directly, or an MCP tool, as of when you read this).
+1. Register your project's task types and evidence requirements on `ProjectConfig.task_type_registrations` when you build your project's record, the same way the two existing extensions construct it directly today.
 2. Confirm your extension's worker calls `request_next_task` and never receives a task pushed to it outside that call.
 3. Confirm nothing under `src/marcus_mcp/` imports or calls a function defined in your extension's own code. If it does, you have built the kernel-calls-extension model this guide rules out.
 4. Confirm your verifier's check, if it has one, is declared at task-creation time (part of the contract), not authored by the same agent whose work it checks (ADR-0013 K4).
