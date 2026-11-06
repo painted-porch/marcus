@@ -19,6 +19,11 @@ from src.analysis.query_api import ProjectHistoryQuery
 
 logger = logging.getLogger(__name__)
 
+#: How many decision rows a kind-filtered read scans before paging. The
+#: store's own ceiling, so a filtered read sees everything an unfiltered
+#: one could (#881).
+_DECISION_SCAN_CAP = 10000
+
 
 async def query_project_history(
     project_id: str,
@@ -181,19 +186,57 @@ async def query_project_history(
             }
 
         elif query_type == "decisions":
+            # Opinions and the project primer are decision rows too
+            # (``kind="assessment"`` and ``kind="objective"``), so a reader
+            # that wants the crew's decisions alone asks for
+            # ``kind="decision"`` (#880). Rows written before ``kind``
+            # existed are decisions, the field's default. No ``kind``
+            # keeps the mixed listing.
+            wanted_kind = filters.get("kind")
+
+            def _of_wanted_kind(rows: list[Any]) -> list[Any]:
+                if wanted_kind is None:
+                    return rows
+                return [
+                    r for r in rows if getattr(r, "kind", "decision") == wanted_kind
+                ]
+
             # Check which filter is provided
             if "task_id" in filters:
-                decisions = await query_api.find_decisions_by_task(
-                    project_id, filters["task_id"]
+                decisions = _of_wanted_kind(
+                    await query_api.find_decisions_by_task(
+                        project_id, filters["task_id"]
+                    )
                 )
             elif "agent_id" in filters:
-                decisions = await query_api.find_decisions_by_agent(
-                    project_id, filters["agent_id"]
+                decisions = _of_wanted_kind(
+                    await query_api.find_decisions_by_agent(
+                        project_id, filters["agent_id"]
+                    )
                 )
             elif "affecting_task_id" in filters:
-                decisions = await query_api.find_decisions_affecting_task(
-                    project_id, filters["affecting_task_id"]
+                decisions = _of_wanted_kind(
+                    await query_api.find_decisions_affecting_task(
+                        project_id, filters["affecting_task_id"]
+                    )
                 )
+            elif wanted_kind is not None:
+                # The store paginates, so filtering the page it returns is
+                # not filtering: on a board busy with opinions the newest
+                # rows are assessments and a ten-row page of them filters
+                # down to nothing while decisions sit just behind it
+                # (Codex on PR #881). The kind predicate therefore runs
+                # over the whole history, within the 10000-row cap the
+                # store already enforces, and the page is cut from the
+                # matching rows, so an offset counts decisions rather than
+                # the opinions between them.
+                history = await query_api.get_project_history(
+                    project_id,
+                    decision_limit=_DECISION_SCAN_CAP,
+                    decision_offset=0,
+                )
+                matching = _of_wanted_kind(history.decisions)
+                decisions = matching[offset : offset + limit]
             else:
                 # No filter - get all decisions with pagination
                 history = await query_api.get_project_history(
@@ -202,20 +245,6 @@ async def query_project_history(
                     decision_offset=offset,
                 )
                 decisions = history.decisions
-
-            # Opinions and the project primer are decision rows too
-            # (``kind="assessment"`` and ``kind="objective"``), so a reader
-            # that wants the crew's decisions alone asks for
-            # ``kind="decision"`` (#880). Rows written before ``kind``
-            # existed are decisions, the field's default. No ``kind``
-            # keeps the mixed listing.
-            wanted_kind = filters.get("kind")
-            if wanted_kind is not None:
-                decisions = [
-                    d
-                    for d in decisions
-                    if getattr(d, "kind", "decision") == wanted_kind
-                ]
 
             return {
                 "success": True,

@@ -116,6 +116,92 @@ class TestDecisionsQueryKindFilter:
         assert [d["decision_id"] for d in result["data"]] == ["old"]
 
 
+class TestTheFilterRunsBeforePagination:
+    """Codex on PR #881: filtering a page is not filtering.
+
+    ``get_project_history`` paginates in the store, so filtering the page it
+    returns means ``kind="decision"`` with ``limit=10`` filters ten
+    already-chosen rows. On a board busy with opinions the newest ten rows
+    are assessments and the caller gets an empty list although decisions
+    exist, which is worse than a visible failure: the planner and every
+    agent read this with a limit, so the record would look like it works
+    and show nobody anything.
+    """
+
+    @staticmethod
+    def _paginating_api(rows: list[Any]) -> Mock:
+        """A query API that paginates in the store, as the real one does."""
+        api = Mock()
+
+        async def _history(
+            project_id: str,
+            decision_limit: int = 10000,
+            decision_offset: int = 0,
+            **_: Any,
+        ) -> Any:
+            page = rows[decision_offset : decision_offset + decision_limit]
+            return SimpleNamespace(decisions=page)
+
+        api.get_project_history = AsyncMock(side_effect=_history)
+        return api
+
+    @pytest.mark.asyncio
+    async def test_a_filtered_page_finds_decisions_behind_newer_opinions(self) -> None:
+        """Twelve opinions, then two decisions: a page of ten finds both."""
+        rows = [_row(f"op-{i}", "assessment") for i in range(12)]
+        rows += [_row("dec-eir", "decision"), _row("dec-cyn", "decision")]
+        api = self._paginating_api(rows)
+
+        p1, p2 = _patched(api)
+        with p1, p2:
+            result = await query_project_history(
+                "proj-1", "decisions", Mock(), kind="decision", limit=10
+            )
+
+        assert [d["decision_id"] for d in result["data"]] == ["dec-eir", "dec-cyn"]
+        assert result["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_the_offset_counts_matching_rows_only(self) -> None:
+        """Paging a filtered read skips decisions, never opinions.
+
+        Otherwise an offset counts non-matching rows and a consumer pages
+        straight past the records the filter exists to expose.
+        """
+        rows = [
+            _row("dec-1", "decision"),
+            _row("op-1", "assessment"),
+            _row("dec-2", "decision"),
+            _row("op-2", "assessment"),
+            _row("dec-3", "decision"),
+        ]
+        api = self._paginating_api(rows)
+
+        p1, p2 = _patched(api)
+        with p1, p2:
+            result = await query_project_history(
+                "proj-1", "decisions", Mock(), kind="decision", limit=2, offset=1
+            )
+
+        assert [d["decision_id"] for d in result["data"]] == ["dec-2", "dec-3"]
+
+    @pytest.mark.asyncio
+    async def test_an_unfiltered_read_still_paginates_in_the_store(self) -> None:
+        """Without a kind nothing changes: the store pages, as today."""
+        rows = [_row(f"r-{i}", "assessment") for i in range(5)]
+        api = self._paginating_api(rows)
+
+        p1, p2 = _patched(api)
+        with p1, p2:
+            await query_project_history(
+                "proj-1", "decisions", Mock(), limit=2, offset=1
+            )
+
+        kwargs = api.get_project_history.await_args.kwargs
+        assert kwargs["decision_limit"] == 2
+        assert kwargs["decision_offset"] == 1
+
+
 class TestTheWrapperForwardsKindForDecisions:
     """The HTTP wrapper already names ``kind``; it must reach this branch too."""
 
