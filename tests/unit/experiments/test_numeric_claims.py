@@ -1767,3 +1767,114 @@ class TestCodexFindingRoundingLeniencyIsBounded:
         res = check_claims([c], sources, report_text="Overall R2 is 0.6 [c1].")
         bad = [r for r in res if r.verdict in ("uncovered", "failed")]
         assert len(bad) >= 1
+
+
+class TestCodexFindingArithmeticBlowupsDoNotCrashTheRun:
+    """A derived claim with valid numeric operands can still blow up.
+
+    ``_safe_eval`` only caught ``ValueError``, ``ZeroDivisionError``
+    and ``TypeError``. ``a ** 1000`` with a well-formed float operand
+    raises ``OverflowError`` instead (Python's float ``**`` raises
+    when the result cannot be represented, where int ``**`` would
+    just keep computing), which escaped the handler and would have
+    aborted ``verify_workspace`` and the whole ``load_condition_b``
+    grading pass over one malformed claim. The whole arithmetic
+    family -- including exceptions a pathological expression can
+    raise even though every individual operand resolved fine -- is
+    now caught in one place.
+    """
+
+    @pytest.mark.unit
+    def test_an_overflowing_power_is_unresolvable_not_a_crash(self, sources):
+        """Codex's exact example: a ** 1000 with a well-formed float."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="blown-up power",
+            kind="derived",
+            expr="a ** 1000",
+            inputs={"a": "metrics.json:mean_ape"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_derived_division_by_a_staged_zero_is_unresolvable(self, sources):
+        """A staged value of zero as a denominator must not crash."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="division by a staged zero",
+            kind="derived",
+            expr="a / b",
+            inputs={
+                "a": "metrics.json:n_records",
+                "b": "tiers.csv:tier=Missing:n_records",
+            },
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_pathologically_nested_expression_is_unresolvable(self, sources):
+        """Thousands of nested unary minuses must not blow the Python
+        call stack out of this one claim's evaluation."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="pathologically nested",
+            kind="derived",
+            expr="-" * 5000 + "a",
+            inputs={"a": "metrics.json:n_records"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_an_exponent_past_the_safety_cap_is_unresolvable(self, sources):
+        """An exponent with no legitimate use in this trial is refused
+        before arbitrary-precision integer math has a chance to hang
+        or exhaust memory, rather than relying on an exception a huge
+        int power may never actually raise."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="exponent past the safety cap",
+            kind="derived",
+            expr="a ** 100000000",
+            inputs={"a": "metrics.json:n_records"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_memory_error_from_evaluation_is_unresolvable(self, sources, monkeypatch):
+        """A pathological expression that exhausts memory during
+        evaluation itself -- not merely a large exponent, which is
+        caught earlier -- must still fail that one claim gracefully.
+
+        Actually exhausting memory in a test would be slow and unsafe,
+        so this simulates the exception _safe_eval's own documentation
+        promises to raise under pathological input.
+        """
+        import runners.numeric_claims as numeric_claims_module
+
+        def _raise_memory_error(node, names):
+            raise MemoryError("simulated exhaustion")
+
+        monkeypatch.setattr(numeric_claims_module, "_safe_eval", _raise_memory_error)
+        c = Claim(
+            id="c1",
+            value=1,
+            label="simulated memory exhaustion",
+            kind="derived",
+            expr="a + 1",
+            inputs={"a": "metrics.json:n_records"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"

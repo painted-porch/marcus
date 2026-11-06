@@ -24,7 +24,7 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
@@ -48,7 +48,9 @@ from runners.numeric_writer import trusted_hashes_path  # noqa: E402
 STAGED_SUBDIR = "staged"
 
 
-def _check_staged_integrity(workspace: Path) -> Optional[str]:
+def _check_staged_integrity(
+    workspace: Path,
+) -> Tuple[Optional[str], Dict[str, str]]:
     """Catch a workspace's staged/ copy diverging from what was staged.
 
     The writer is handed its own copy of the staged evaluation
@@ -69,6 +71,14 @@ def _check_staged_integrity(workspace: Path) -> Optional[str]:
     means either staging was skipped entirely or the manifest itself
     was tampered with, and either way the data cannot be trusted.
 
+    The manifest is also the allowlist: a file sitting in ``staged/``
+    that the manifest never named was never hashed when the case was
+    staged, so it cannot be a staged artifact that got tampered with
+    -- it is something dropped in afterward, by a writer or a bug in
+    one, and ``load_sources`` must never be able to read it as if it
+    were real staged data (the manifest's keys are what the caller
+    passes it as its allowlist).
+
     Parameters
     ----------
     workspace : Path
@@ -78,30 +88,47 @@ def _check_staged_integrity(workspace: Path) -> Optional[str]:
 
     Returns
     -------
-    Optional[str]
-        A description of the problem, or ``None`` when the manifest
-        is present and every file it names still matches.
+    Tuple[Optional[str], Dict[str, str]]
+        A description of the problem (or ``None`` when every
+        manifested file matches and nothing unmanifested is present),
+        and the manifest itself (empty when it could not be read).
     """
     manifest_path = trusted_hashes_path(workspace)
     if not manifest_path.exists():
         return (
             f"no trusted hash manifest at {manifest_path} -- staged data "
-            f"cannot be verified"
+            f"cannot be verified",
+            {},
         )
     try:
         manifest = json.loads(manifest_path.read_text())
     except json.JSONDecodeError as exc:
-        return f"trusted hash manifest could not be read: {exc}"
+        return f"trusted hash manifest could not be read: {exc}", {}
 
     staged = workspace / STAGED_SUBDIR
     for name, expected in manifest.items():
         path = staged / name
         if not path.exists():
-            return f"staged/{name} is missing but was present when staged"
+            return f"staged/{name} is missing but was present when staged", manifest
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != expected:
-            return f"staged/{name} was modified after staging (hash mismatch)"
-    return None
+            return (
+                f"staged/{name} was modified after staging (hash mismatch)",
+                manifest,
+            )
+
+    unexpected = sorted(
+        path.name
+        for path in staged.glob("*")
+        if path.is_file() and path.name not in manifest
+    )
+    if unexpected:
+        return (
+            f"staged/{unexpected[0]} is present but was never part of the "
+            f"trusted manifest -- not a staged artifact",
+            manifest,
+        )
+    return None, manifest
 
 
 def verify_workspace(workspace: Path) -> Dict[str, Any]:
@@ -125,7 +152,7 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
     report_path = workspace / "report.md"
     claims_path = workspace / "claims.json"
 
-    integrity_error = _check_staged_integrity(workspace)
+    integrity_error, trusted_manifest = _check_staged_integrity(workspace)
     if integrity_error:
         return {
             "verdict": VERDICT_FAILED,
@@ -145,7 +172,7 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
             },
         }
 
-    sources = load_sources(staged)
+    sources = load_sources(staged, allowed_names=trusted_manifest.keys())
     report_text = report_path.read_text() if report_path.exists() else ""
 
     declared: List[Claim] = []

@@ -446,6 +446,32 @@ class TestCodexFindingStagedIntegrity:
         assert out["verdict"] == "failed"
         assert "metrics.json" in out["parse_error"]
 
+    @pytest.mark.unit
+    def test_an_unmanifested_source_file_is_not_trusted(self, workspace):
+        """Codex's demonstration: a planted file the manifest never
+        named must not become a source, even though its own values
+        are internally consistent and nothing original was touched."""
+        (workspace / "staged" / "invented.json").write_text(
+            json.dumps({"accuracy": 999})
+        )
+        write(
+            workspace,
+            "Accuracy is 999 [c1].",
+            [
+                {
+                    "id": "c1",
+                    "value": 999,
+                    "label": "accuracy",
+                    "kind": "lookup",
+                    "source": "invented.json",
+                    "key": "accuracy",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+        assert "invented.json" in out["parse_error"]
+
 
 class TestCodexFindingMistaggedFiguresDoNotCorruptCoverage:
     """A mistagged figure must count against coverage, not around it.

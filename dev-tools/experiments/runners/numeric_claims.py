@@ -45,6 +45,17 @@ _NUMBER_RE = re.compile(
 )
 _CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
 
+#: A derived claim's expression may use **, but no legitimate use in
+#: this trial (ratios, percentages, simple consistency checks) ever
+#: needs an exponent beyond this magnitude. Bounding it matters
+#: independently of catching exceptions below: Python ints have no
+#: fixed size, so a huge exponent on an int base does not raise
+#: OverflowError the way a float base does -- it just keeps computing
+#: an ever-larger number, which can hang or exhaust memory long
+#: before any exception would fire. Checked before the operator runs,
+#: not after.
+_MAX_POW_EXPONENT = 1000
+
 _SAFE_BINOPS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -165,13 +176,23 @@ class CheckResult:
     reason: str = ""
 
 
-def load_sources(staged_dir: Path) -> Dict[str, Any]:
+def load_sources(
+    staged_dir: Path, allowed_names: Optional[Iterable[str]] = None
+) -> Dict[str, Any]:
     """Read every staged artifact into a source map.
 
     Parameters
     ----------
     staged_dir : Path
         The evaluation directory a report is written from.
+    allowed_names : Optional[Iterable[str]]
+        When given, only files whose name is in this set are read.
+        ``verify_workspace`` passes the trusted hash manifest's own
+        keys here, so a file dropped into ``staged/`` after staging
+        -- never hashed, never part of what was trusted -- cannot
+        become a source just by sitting in the directory. ``None``
+        (the default) loads every file present, for callers that
+        have no manifest to check against (most unit tests).
 
     Returns
     -------
@@ -181,9 +202,12 @@ def load_sources(staged_dir: Path) -> Dict[str, Any]:
         included, so a claim naming a sibling evaluation directory is
         unresolvable rather than silently checked against stale data.
     """
+    allowed = set(allowed_names) if allowed_names is not None else None
     sources: Dict[str, Any] = {}
     for path in sorted(Path(staged_dir).glob("*")):
         if not path.is_file():
+            continue
+        if allowed is not None and path.name not in allowed:
             continue
         if path.suffix == ".json":
             try:
@@ -312,7 +336,16 @@ def _safe_eval(node: ast.AST, names: Dict[str, Any]) -> Any:
     Raises
     ------
     ValueError
-        When the expression uses an unsupported construct.
+        When the expression uses an unsupported construct, or a
+        ** exponent exceeds the safety cap.
+    OverflowError, ZeroDivisionError, TypeError
+        When the underlying arithmetic operator raises on
+        otherwise-valid operands -- a well-formed expression can
+        still fail this way, which the caller must treat as
+        unresolvable, not a crash.
+    RecursionError
+        When the expression nests deeply enough to exceed Python's
+        own call stack; this function recurses once per AST node.
     """
     if isinstance(node, ast.Expression):
         return _safe_eval(node.body, names)
@@ -325,9 +358,18 @@ def _safe_eval(node: ast.AST, names: Dict[str, Any]) -> Any:
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         return -_safe_eval(node.operand, names)
     if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_BINOPS:
-        return _SAFE_BINOPS[type(node.op)](
-            _safe_eval(node.left, names), _safe_eval(node.right, names)
-        )
+        left = _safe_eval(node.left, names)
+        right = _safe_eval(node.right, names)
+        if (
+            isinstance(node.op, ast.Pow)
+            and isinstance(right, (int, float))
+            and abs(right) > _MAX_POW_EXPONENT
+        ):
+            raise ValueError(
+                f"exponent magnitude {right} exceeds the safe evaluation "
+                f"limit of {_MAX_POW_EXPONENT}"
+            )
+        return _SAFE_BINOPS[type(node.op)](left, right)
     if isinstance(node, ast.Compare) and len(node.ops) == 1:
         op = type(node.ops[0])
         if op not in _SAFE_CMPOPS:
@@ -661,7 +703,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
                 )
         try:
             tree = ast.parse(claim.expr or "", mode="eval")
-        except SyntaxError as exc:
+        except (SyntaxError, RecursionError) as exc:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
         used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
         if not used & set(names):
@@ -682,7 +724,14 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             )
         try:
             truth = _safe_eval(tree, names)
-        except (ValueError, ZeroDivisionError, TypeError) as exc:
+        except (
+            ValueError,
+            ZeroDivisionError,
+            TypeError,
+            OverflowError,
+            RecursionError,
+            MemoryError,
+        ) as exc:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
         try:
             ok = _within_tolerance(claim.value, truth, claim.tolerance)
