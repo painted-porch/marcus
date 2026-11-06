@@ -1052,3 +1052,87 @@ class TestGuard3ColdCacheFallback:
 
         assert result["success"] is False
         assert result["status"] == "not_current_assignment"
+
+
+class TestConcurrentBlockedReportsDoNotDoubleRelease:
+    """Issue #858, Codex P2 round 4: the race version of round 1.
+
+    Guard 3 is checked BEFORE the await on ``update_task``, not after.
+    Two overlapping blocked reports for the same task A can both pass
+    Guard 3; while the second is suspended in ``update_task``, the
+    first finishes and the agent claims B. When the second resumes,
+    without a recheck it would release whatever the agent CURRENTLY
+    holds (B) a second time.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_report_that_resumes_after_b_is_claimed_releases_nothing(
+        self,
+    ) -> None:
+        import asyncio
+
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task_a = _make_task("task-a")
+        task_b = _make_task("task-b")
+        state = _make_blocked_state(task_a)
+        # Both overlapping reports see A as current when each one checks
+        # Guard 3 (before either has reached update_task).
+        state.agent_status["agent-1"].current_tasks = [task_a]
+
+        late_report_entered_write = asyncio.Event()
+        release_late_report = asyncio.Event()
+
+        async def fake_update_task(task_id: str, update_data: Any) -> None:
+            if task_id == "task-a":
+                # The "late" report: signal it has reached the write,
+                # then wait here until the test releases it -- this is
+                # the suspension window the race exploits.
+                late_report_entered_write.set()
+                await release_late_report.wait()
+            return None
+
+        state.kanban_client.update_task = AsyncMock(side_effect=fake_update_task)
+
+        late_report_task = asyncio.create_task(
+            report_task_progress(
+                agent_id="agent-1",
+                task_id="task-a",
+                status="blocked",
+                progress=30,
+                message="Late/duplicate report for A",
+                state=state,
+            )
+        )
+        await late_report_entered_write.wait()
+
+        # While the late report is suspended inside its own update_task
+        # call, the agent is reassigned to B through the normal flow:
+        # request_next_task claims B.
+        state.agent_status["agent-1"].current_tasks = [task_b]
+        assignment_b = MagicMock()
+        assignment_b.task_id = "task-b"
+        state.agent_tasks["agent-1"] = assignment_b
+        lease_b = MagicMock()
+        lease_b.agent_id = "agent-1"
+        state.lease_manager.active_leases["task-b"] = lease_b
+        # A's own lease was already released by the FIRST (non-late)
+        # report for A, which already ran to completion before this one
+        # resumes.
+        state.lease_manager.active_leases.pop("task-a", None)
+
+        release_late_report.set()
+        late_result = await late_report_task
+
+        assert late_result["success"] is True, (
+            "the board write for A still succeeded -- only the release "
+            "must be skipped"
+        )
+        assert state.agent_status["agent-1"].current_tasks == [task_b], (
+            "the late report's resumed release must not clear B, which "
+            "the agent claimed while this report was suspended"
+        )
+        assert "agent-1" in state.agent_tasks
+        assert state.agent_tasks["agent-1"].task_id == "task-b"
+        state.assignment_persistence.remove_assignment.assert_not_awaited()
+        assert "task-b" in state.lease_manager.active_leases

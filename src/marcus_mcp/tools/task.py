@@ -8607,10 +8607,33 @@ async def _record_progress(
             # the agent's run ends and something else cleans it up
             # externally. Mirrors the "completed" branch's release above.
             # Only reached once the board write above has succeeded.
-            if agent_id in state.agent_status:
+            #
+            # Issue #858, Codex P2 round 4: Guard 3 was checked BEFORE the
+            # await on update_task above, not after. Two overlapping
+            # blocked reports for the same task A can both pass Guard 3;
+            # while the second is suspended in that await, the first
+            # finishes and the agent claims B. When the second resumes,
+            # without this recheck it would release whatever the agent
+            # CURRENTLY holds (B) a second time, deleting B's assignment
+            # and persistence while B's lease stays active -- the exact
+            # race version of round 1's bug. Re-verifying ownership of
+            # task_id specifically, after the await, closes the window
+            # without a new lock: if ownership changed while this call
+            # was suspended, some other report for THIS task already
+            # released it, and there is nothing left for this call to
+            # release.
+            if agent_id in state.agent_status and (
+                _agent_still_holds_task(state, agent_id, task_id)
+                or _agent_holds_live_lease(state, agent_id, task_id)
+            ):
                 agent = state.agent_status[agent_id]
-                agent.current_tasks = []
-                if agent_id in state.agent_tasks:
+                agent.current_tasks = [
+                    t for t in agent.current_tasks if t.id != task_id
+                ]
+                if (
+                    agent_id in state.agent_tasks
+                    and getattr(state.agent_tasks[agent_id], "task_id", None) == task_id
+                ):
                     del state.agent_tasks[agent_id]
                 await state.assignment_persistence.remove_assignment(agent_id)
                 if hasattr(state, "lease_manager") and state.lease_manager:
@@ -8619,6 +8642,14 @@ async def _record_progress(
                             task_id, reason="blocked"
                         )
                         logger.info(f"Removed lease for blocked task {task_id}")
+            else:
+                logger.info(
+                    f"report_task_progress(blocked) board write for task "
+                    f"{task_id} succeeded, but {agent_id} no longer owns "
+                    "it as of the recheck after the write -- a concurrent "
+                    "report for this same task already released it. "
+                    "Nothing left to release."
+                )
 
         # Update Kanban card (the "blocked" branch already wrote it above,
         # before releasing coordination state -- issue #858 round 2).
