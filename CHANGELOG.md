@@ -5,6 +5,11 @@ All notable changes to Marcus will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.12] - 2026-11-06
+
+### Fixed
+- Four test-only fixes cherry-picked from `develop` so `main`'s nightly full-suite run means something again (#857, #873, #875, #879): the unit suite's network guard now blocks loopback too (not only non-loopback addresses it previously missed), two stale test fixtures that had never run against `main` or `develop` through a PR are fixed, a stale assertion in `test_inspector` catches up with the real call it tests, and `test_default_settings` no longer silently reads a developer's own untracked local config file. This bump carries no runtime code difference; every change here is to a test file, `tests/conftest.py`, or `pytest.ini` (registering a new opt-in marker for tests that legitimately own a real socket listener).
+
 ## [0.3.11] - 2026-11-06
 
 ### Fixed
