@@ -248,6 +248,66 @@ def syndication_label(record: AnswerRecord, truth: Dict[str, str]) -> Optional[s
     return None
 
 
+def categorize_v2(record: AnswerRecord, truth: Dict[str, str]) -> str:
+    """Apply the Tow categories WITH the board-decided republication rule.
+
+    Decision recorded on the Marcus Program board 2026-11-05 (OPTION
+    B, decided by Larry): a CONFIRMED known-network republication is
+    scored as a correct citation going forward in verifier v2. The
+    published full-200 result is explicitly left as-is -- this
+    function is a new, separate path, never a change to
+    :func:`categorize` itself, which stays byte-for-byte what it was
+    when the full-200 run was scored.
+
+    Only a ``known_republication:*`` syndication label is in scope.
+    "moved" and "dated_snapshot" are URL-structure artifacts the
+    board decision treats as a separate, smaller question and are
+    left exactly as :func:`categorize` scored them.
+
+    A network pairing on its own is not proof the CITED ARTICLE is
+    the right one (Codex P2 on PR #833): it only confirms the two
+    outlets have a documented relationship, which an engine could in
+    principle attach to a wrong or unrelated citation. The date field
+    is the one independently-checkable signal this zero-cost,
+    no-fetch function has to catch that: if the claim's date is
+    present and contradicts the truth (outside
+    :func:`date_within_tolerance`), that is real evidence the cited
+    article may not be the same event, and the promotion is refused.
+    A missing date is not treated as a contradiction. This still
+    cannot fully confirm article identity without a live fetch --
+    for Condition B specifically, every delivered (non-declined)
+    answer already passed the live verifier's excerpt-on-page fetch
+    check at scoring time, which is the real backing this rule
+    leans on; a condition with no such fetch (A, or the bolted-on
+    filter C) gets only the date check's weaker protection.
+
+    Parameters
+    ----------
+    record : AnswerRecord
+        The answer under grading.
+    truth : Dict[str, str]
+        Ground truth: publication, date, source_url.
+
+    Returns
+    -------
+    str
+        One of :data:`CATEGORIES`. ``"correct"`` when v1 scored the
+        answer wrong, a confirmed known-network match explains it,
+        and the claim's date (if present) does not contradict the
+        truth; otherwise identical to :func:`categorize`'s result.
+    """
+    category = categorize(record, truth)
+    if category not in ("partially incorrect", "completely incorrect"):
+        return category
+    label = syndication_label(record, truth)
+    if label is None or not label.startswith("known_republication:"):
+        return category
+    _, date_ok, _ = _attribute_states(record.answer or {}, truth)
+    if date_ok is False:
+        return category
+    return "correct"
+
+
 def url_is_fabricated(
     record: AnswerRecord,
     truth: Dict[str, str],
@@ -469,6 +529,7 @@ def grade(
     excerpts: Dict[str, str],
     fetcher: Optional[Any],
     seed: int,
+    scoring_version: str = "v1",
 ) -> Dict[str, Any]:
     """Score every record label-blind and compute per-condition rates.
 
@@ -484,6 +545,16 @@ def grade(
         The shared fetch cache; None skips the fabricated-URL rate.
     seed : int
         Blinding shuffle seed.
+    scoring_version : str, default="v1"
+        "v1" (the default, used when the argument is omitted) scores
+        with :func:`categorize`, byte-for-byte identical to this
+        function's behavior before issue #745's board decision
+        existed -- this is what reproduces the published full-200
+        result exactly. "v2" scores with :func:`categorize_v2`,
+        which additionally counts a confirmed known-network
+        republication as correct (board decision, 2026-11-05, OPTION
+        B). There is no other way to reach v2 scoring; the default
+        never changes.
 
     Returns
     -------
@@ -491,6 +562,7 @@ def grade(
         Rates per condition and per condition/engine pair, plus the
         blinded worksheet rows.
     """
+    score_fn = categorize_v2 if scoring_version == "v2" else categorize
     pool = blind_pool(records, seed=seed)
     scored_by_index: Dict[int, str] = {}
     worksheet: List[Dict[str, Any]] = []
@@ -504,7 +576,7 @@ def grade(
             declined=payload["declined"],
             robots_blocked=payload["robots_blocked"],
         )
-        category = categorize(record_view, truth)
+        category = score_fn(record_view, truth)
         scored_by_index[payload["_index"]] = category
         worksheet.append(
             {
@@ -588,6 +660,18 @@ def main() -> None:
     )
     parser.add_argument("--cache-dir", default=None, help="Shared fetch cache")
     parser.add_argument("--seed", type=int, default=737)
+    parser.add_argument(
+        "--scoring-version",
+        default="v1",
+        choices=["v1", "v2"],
+        help=(
+            "v1 (default): reproduces the published full-200 result "
+            "exactly. v2: applies the board-decided republication "
+            "rule (2026-11-05, OPTION B) on top of v1; a confirmed "
+            "known-network republication scores as correct. The "
+            "default never changes without passing this explicitly."
+        ),
+    )
     parser.add_argument("--out", required=True, help="Rates JSON output path")
     parser.add_argument("--worksheet", default=None, help="Blinded worksheet CSV path")
     args = parser.parse_args()
@@ -622,7 +706,14 @@ def main() -> None:
 
         fetcher = FetchCache(cache_dir=args.cache_dir)
 
-    results = grade(records, truths, excerpts, fetcher, seed=args.seed)
+    results = grade(
+        records,
+        truths,
+        excerpts,
+        fetcher,
+        seed=args.seed,
+        scoring_version=args.scoring_version,
+    )
 
     worksheet = results.pop("worksheet")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
