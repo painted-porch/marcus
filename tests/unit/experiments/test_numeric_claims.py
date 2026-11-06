@@ -1103,6 +1103,34 @@ class TestCodexFindingSumAddressMissingColumn:
         assert res[0].verdict == "unresolvable"
 
 
+class TestCodexFindingSumOfNonNumericColumnDoesNotCrash:
+    """A "sum" address selecting a nonnumeric column crashed the checker.
+
+    ``resolve_address``'s sum branch calls ``float(_coerce(row[column]))``
+    unconditionally. ``_coerce`` returns a string unchanged when it
+    cannot be parsed as a number, so summing a text column (e.g. the
+    "crop" column, "maize"/"cotton"/...) raised an uncaught
+    ``ValueError`` from ``float()`` instead of the ``KeyError`` every
+    other malformed address produces, taking down the whole run over
+    one bad claim.
+    """
+
+    @pytest.mark.unit
+    def test_summing_a_text_column_is_unresolvable_not_a_crash(self, sources):
+        """A sum address over a nonnumeric column fails gracefully."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="broken aggregate",
+            source="per_crop.csv",
+            key="sum:crop",
+            kind="lookup",
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+
 class TestCodexFindingBooleanNumericConfusion:
     """A boolean truth value could be matched by any nonzero number.
 

@@ -237,7 +237,7 @@ def collect_output(workspace: Path) -> Dict[str, Any]:
     if not report:
         problems.append("report.md missing or empty")
 
-    claims: List[Dict[str, Any]] = []
+    claims: List[Any] = []
     if not claims_path.exists():
         problems.append("claims.json missing")
     else:
@@ -255,6 +255,9 @@ def collect_output(workspace: Path) -> Dict[str, Any]:
 
     seen = set()
     for claim in claims:
+        if not isinstance(claim, dict):
+            problems.append(f"a claim entry is not an object: {claim!r}")
+            continue
         cid = claim.get("id")
         if not cid:
             problems.append("a claim has no id")

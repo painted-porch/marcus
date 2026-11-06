@@ -268,7 +268,13 @@ def resolve_address(address: str, sources: Dict[str, Any]) -> Any:
         for row in data:
             if column not in row:
                 raise KeyError(f"no such column: {column} in {filename}")
-            total += float(_coerce(row[column]))
+            try:
+                total += float(_coerce(row[column]))
+            except (TypeError, ValueError) as exc:
+                raise KeyError(
+                    f"column {column} in {filename} is not numeric, "
+                    f"cannot be summed"
+                ) from exc
         return total
     if rest[0] == "count":
         return float(len(data))
