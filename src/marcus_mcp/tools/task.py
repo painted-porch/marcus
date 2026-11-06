@@ -1591,6 +1591,19 @@ async def _response_project_for_task(task: Task, state: Any) -> Optional[Any]:
     with no ``project_id`` at all falls back to the active project,
     matching every other K2-keyed lookup's rule.
 
+    Issue #854: a plain ``get_project(task_project_id)`` lookup is
+    sufficient for every provider now, not just SQLite (GH-306).
+    Planka and Linear used to stamp ``Task.project_id`` from the
+    PROVIDER's own project id, which an earlier version of this
+    function bridged with a second lookup
+    (``get_project_by_provider_id``, PR #853); #854 retired that
+    bridge by making every kanban client carry its owning
+    ``ProjectConfig``'s registry id down at construction
+    (``project_context_manager._build_provider_config`` ->
+    ``registry_project_id`` -> ``KanbanClient``/``LinearKanban``), so
+    a task's ``project_id`` is always a registry key directly, the
+    same guarantee GH-306 already gave SQLite.
+
     Parameters
     ----------
     task : Task
@@ -1611,17 +1624,7 @@ async def _response_project_for_task(task: Task, state: Any) -> Optional[Any]:
     if not task_project_id:
         return await state.project_registry.get_active_project()
 
-    resolved = await state.project_registry.get_project(task_project_id)
-    if resolved is not None:
-        return resolved
-    # Codex P2 on PR #853: Planka and Linear stamp Task.project_id
-    # from the PROVIDER's own project id, not the registry's id --
-    # the SQLite path's GH-306 guarantee (the two are the same
-    # string) does not hold for these two. Bridge it here; see
-    # get_project_by_provider_id's own docstring and issue #854 for
-    # the real fix (stamping the registry id at kanban-client
-    # construction instead of resolving it after the fact).
-    return state.project_registry.get_project_by_provider_id(task_project_id)
+    return await state.project_registry.get_project(task_project_id)
 
 
 async def _planner_cost_context(

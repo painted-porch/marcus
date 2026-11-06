@@ -1,21 +1,23 @@
 """
-Unit tests for ``_response_project_for_task`` (issue #849, Codex P2 on PR #853).
+Unit tests for ``_response_project_for_task`` (issue #849).
 
 ``request_next_task``'s response stamps project_id/project_name on the
 task it hands out. It used to read the server's active project
 unconditionally (the same defect #805 found in ``log_decision`` and K6
 names); fixed in #849 to resolve from the task's own ``project_id``.
 
-That fix regressed Planka and Linear: both stamp ``Task.project_id``
-from the PROVIDER's own project id, while a registry entry created by
-``add_project``/``sync_projects`` carries an independently generated
-UUID as its own ``id`` -- unlike the SQLite path (GH-306), where the
-two are the same string by construction. A plain ``get_project``
-lookup by the provider's id therefore returned None where the old
-code (reading the active project unconditionally) used to return a
-value, even on an ordinary single-project server. These tests cover
-the Planka-shaped case, the Linear-shaped case, and the single-project
-case that regressed.
+A plain ``get_project(task_project_id)`` lookup is sufficient for
+every provider, including Planka and Linear: issue #854 made every
+kanban client carry its owning ``ProjectConfig``'s registry id down
+at construction, so a task's ``project_id`` is always a registry key
+directly (the same guarantee GH-306 already gave SQLite). PR #853's
+interim bridge for the two providers that did not yet have this
+guarantee (``get_project_by_provider_id``) is retired; Planka- and
+Linear-shaped construction tests now live where the id is actually
+stamped (``tests/unit/integrations/test_mcp_kanban_client_simple.py``,
+``tests/unit/integrations/test_linear_kanban_project_id.py``,
+``tests/unit/integrations/test_planka_registry_project_id.py``,
+``tests/unit/core/test_project_context_manager_provider_config.py``).
 """
 
 from datetime import datetime, timezone
@@ -83,56 +85,6 @@ class TestSingleProjectServer:
 
         assert resolved is not None
         assert resolved.id == "camp-1"
-
-
-class TestPlankaAndLinearProviderIdBridge:
-    """Codex P2 on PR #853: the provider-id fallback must fire."""
-
-    @pytest.mark.asyncio
-    async def test_a_planka_shaped_task_resolves_through_the_provider_id(
-        self,
-    ) -> None:
-        registry = await _registry()
-        now = datetime.now(timezone.utc)
-        await registry.add_project(
-            ProjectConfig(
-                id="uuid-registry-1",
-                name="Camp (Planka)",
-                provider="planka",
-                provider_config={"project_id": "planka-proj-77"},
-                created_at=now,
-                last_used=now,
-            )
-        )
-        state = SimpleNamespace(project_registry=registry)
-
-        resolved = await _response_project_for_task(_task("planka-proj-77"), state)
-
-        assert resolved is not None
-        assert resolved.id == "uuid-registry-1"
-
-    @pytest.mark.asyncio
-    async def test_a_linear_shaped_task_resolves_through_the_provider_id(
-        self,
-    ) -> None:
-        registry = await _registry()
-        now = datetime.now(timezone.utc)
-        await registry.add_project(
-            ProjectConfig(
-                id="uuid-registry-2",
-                name="Camp (Linear)",
-                provider="linear",
-                provider_config={"project_id": "linear-proj-9"},
-                created_at=now,
-                last_used=now,
-            )
-        )
-        state = SimpleNamespace(project_registry=registry)
-
-        resolved = await _response_project_for_task(_task("linear-proj-9"), state)
-
-        assert resolved is not None
-        assert resolved.id == "uuid-registry-2"
 
 
 class TestLegacyAndMultiProject:
