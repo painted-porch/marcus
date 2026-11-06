@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from src.config.config_path import resolve_config_candidates
 from src.core.paths import resolve_data_subdir
 
 logger = logging.getLogger(__name__)
@@ -880,8 +881,9 @@ def get_config() -> MarcusConfig:
     """
     global _config
     if _config is None:
-        # Try to load from MARCUS_CONFIG env var, else default
-        config_path = os.getenv("MARCUS_CONFIG", "config_marcus.json")
+        # resolve_config_candidates puts MARCUS_CONFIG first when set
+        # (issue #891), same as every other config-loading path.
+        config_path = str(resolve_config_candidates("config_marcus.json")[0])
         _config = MarcusConfig.from_file(config_path)
         _config.validate()
     return _config
@@ -904,7 +906,7 @@ def reload_config() -> MarcusConfig:
     >>> config = reload_config()  # Force fresh load from disk
     """
     global _config
-    config_path = os.getenv("MARCUS_CONFIG", "config_marcus.json")
+    config_path = str(resolve_config_candidates("config_marcus.json")[0])
     _config = MarcusConfig.from_file(config_path)
     _config.validate()
     return _config

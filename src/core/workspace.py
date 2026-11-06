@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
+from src.config.config_path import resolve_config_candidates
+
 
 class WorkspaceSecurityError(Exception):
     """
@@ -228,21 +230,33 @@ class WorkspaceManager:
         Try to load configuration from default locations.
 
         Searches in order:
-        1. XDG config directory (~/.config/marcus/config.json)
-        2. Local config in Marcus root
-        3. Path from MARCUS_CONFIG environment variable
+        1. ``MARCUS_CONFIG`` environment variable, if set (highest priority)
+        2. XDG config directory (~/.config/marcus/config.json)
+        3. Local config in Marcus root
+
+        Notes
+        -----
+        Issue #891: this used to check ``MARCUS_CONFIG`` LAST, after
+        the XDG and Marcus-root locations -- the opposite priority of
+        every other config-loading path in this codebase
+        (``MarcusConfig.get_config()``, the legacy ``ConfigLoader``,
+        ``KanbanClient._load_config``). An explicit override could
+        lose to an ambient repo-root file here even when both were
+        set.
         """
+        # resolve_config_candidates puts MARCUS_CONFIG first when set
+        # (issue #891); the rest of this list is this loader's own
+        # fallback order.
         config_locations = [
-            # XDG config directory (preferred)
-            os.path.expanduser("~/.config/marcus/config.json"),
-            # Local config in Marcus root
-            os.path.join(self.marcus_root, "config_marcus.json"),
-            # Environment variable
-            os.environ.get("MARCUS_CONFIG", ""),
+            str(p)
+            for p in resolve_config_candidates(
+                os.path.expanduser("~/.config/marcus/config.json"),
+                os.path.join(self.marcus_root, "config_marcus.json"),
+            )
         ]
 
         for location in config_locations:
-            if location and os.path.exists(location):
+            if os.path.exists(location):
                 try:
                     self.load_config(location)
                     print(f"Loaded workspace config from: {location}", file=sys.stderr)
