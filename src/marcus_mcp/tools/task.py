@@ -3417,6 +3417,64 @@ def _fire_cost_summary_for_project(project_id: str, store: Any) -> None:
         logger.debug("project_cost_summary not emitted for %s: %s", project_id, exc)
 
 
+async def _frontier_for_agent(agent_id: str, state: Any) -> Optional[Dict[str, int]]:
+    """Report the board's claimable-work count for the agent's project.
+
+    Issue #804: ``compute_board_drain`` used to run only when
+    ``request_next_task`` had no task to hand out, so the count of
+    claimable tasks — the frontier width, the measure of whether a plan
+    is actually parallel — was discarded exactly when the board is
+    healthy and nobody starves. A consumer could only see it collapse,
+    never see it wide; one session had to sample the board file from
+    outside Marcus and reimplement this function's own rules to get a
+    time series at all.
+
+    This is the single rule both callers share (compute_board_drain
+    itself), so the number here and the one on the no-work path never
+    diverge.
+
+    Resolved from the AGENT's own registration, never the server's
+    active project — the same source ``#805`` established for
+    decisions, and for the same reason: the active project need not be
+    the calling agent's on a multi-project server.
+
+    Parameters
+    ----------
+    agent_id : str
+        The agent whose project scopes the count.
+    state : Any
+        Marcus server state (``agent_project_map`` and whatever
+        ``compute_board_drain`` itself needs).
+
+    Returns
+    -------
+    Optional[Dict[str, int]]
+        ``tasks_claimable`` and ``tasks_in_flight``, or ``None`` when the
+        agent has no registered project or the count could not be
+        computed. Observational only: a failure here must never affect
+        whether the assignment itself succeeds.
+    """
+    project_id = (
+        state.agent_project_map.get(agent_id, "")
+        if hasattr(state, "agent_project_map")
+        else ""
+    )
+    if not project_id:
+        return None
+    try:
+        verdict = await compute_board_drain(state, project_id)
+    except Exception as error:  # noqa: BLE001 - observational, never blocking
+        logger.warning(
+            f"[#804] Frontier count failed for {agent_id} ({error}); "
+            "the caller proceeds without it."
+        )
+        return None
+    return {
+        "tasks_claimable": verdict.tasks_claimable,
+        "tasks_in_flight": verdict.tasks_in_flight,
+    }
+
+
 async def request_next_task(agent_id: str, state: Any) -> Any:
     """
     Agents call this to request their next optimal task.
@@ -3859,6 +3917,24 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
 
                 _mark("kanban_update")
 
+                # Codex P2 on PR #814: the board write above lands the
+                # assignment, but nothing synced this task's own in-memory
+                # object in ``state.project_tasks`` — it kept reading TODO,
+                # unassigned, until the next ``refresh_project_state``. The
+                # frontier this very request reports (``#804``, below) walks
+                # ``state.project_tasks`` through ``apply_board_wide_gates``,
+                # so a sibling task gated on "is an implementation task for
+                # this feature in progress" could be miscounted as claimable
+                # using THIS task's stale pre-assignment status. Same
+                # staleness shape fixed for completion (#816) and the
+                # handoff (#807) this session; the fix here is the same one
+                # ``request_task_redo`` already uses: the in-memory object
+                # is the source of truth going forward, so set it directly
+                # rather than waiting for a refresh that may not come before
+                # this reply is built.
+                optimal_task.status = TaskStatus.IN_PROGRESS
+                optimal_task.assigned_to = agent_id
+
                 # Sync subtask manager's assigned_to so Cato/analytics
                 # see attribution immediately on pickup, not only at
                 # completion. Without this, Subtask.assigned_to stays
@@ -4048,6 +4124,13 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         "output_schema": getattr(optimal_task, "output_schema", None),
                     },
                 }
+
+                # Frontier width on every reply, not only the no-work one
+                # (#804): see ``_frontier_for_agent``.
+                _frontier = await _frontier_for_agent(agent_id, state)
+                if _frontier is not None:
+                    response["frontier"] = _frontier
+                _mark("frontier")
 
                 # Add enhanced context if available
                 if dependency_awareness:
