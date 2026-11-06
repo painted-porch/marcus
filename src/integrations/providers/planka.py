@@ -99,6 +99,18 @@ class Planka(KanbanInterface):
         return self.client.board_id if self.client else None
 
     @property
+    def registry_project_id(self) -> Optional[str]:
+        """Get the registered project's registry id from the client.
+
+        Mirrors ``project_id``/``board_id`` -- exposed at the top level
+        (not just on ``self.client``) so callers that only hold a
+        ``Planka`` instance (e.g. ``AssignmentMonitor``) can resolve
+        this provider's own project scope the same way regardless of
+        provider (#856 round 4).
+        """
+        return self.client.registry_project_id if self.client else None
+
+    @property
     def project_id(self) -> Optional[str]:
         """Get project ID from the client."""
         return self.client.project_id if self.client else None

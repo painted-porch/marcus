@@ -154,6 +154,10 @@ class AssignmentReconciler:
                             ),
                             "estimated_hours": task.estimated_hours,
                             "restored_at": datetime.now(timezone.utc).isoformat(),
+                            # Issue #856 round 4: lets the assignment
+                            # monitor's reversion check scope "missing"
+                            # to this assignment's own project.
+                            "project_id": getattr(task, "project_id", None),
                         },
                     )
                     results["assignments_restored"] += 1

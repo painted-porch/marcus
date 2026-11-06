@@ -4154,6 +4154,12 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         "priority": optimal_task.priority.value,
                         "estimated_hours": optimal_task.estimated_hours,
                         "baseline_commit": assignment.baseline_commit,
+                        # Issue #856 round 4: without this, the assignment
+                        # monitor's reversion check can't tell "this task
+                        # isn't on the CURRENTLY bound board" from "this
+                        # task is genuinely gone" once the active project
+                        # changes after the assignment was made.
+                        "project_id": getattr(optimal_task, "project_id", None),
                     },
                 )
                 # And again keyed by TASK, in a store the completion does
