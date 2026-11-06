@@ -1861,11 +1861,20 @@ async def create_tasks(
     # for.
     existing_tasks: List[Any] = []
     if isinstance(options.get("tasks"), list):
-        from src.core.project_registry import task_belongs_to_project
-
+        # Issue #854: a plain project_id equality check is sufficient
+        # for every provider now, not just SQLite (GH-306). Planka
+        # and Linear used to stamp a task's project_id from the
+        # PROVIDER's own id, which needed a second-chance match
+        # against provider_config["project_id"]
+        # (task_belongs_to_project, PR #855); #854 retired that
+        # bridge by making every kanban client carry its owning
+        # ProjectConfig's registry id down at construction, so a
+        # task's project_id is always a registry key directly.
         all_board_tasks = await kanban_client.get_all_tasks()
         existing_tasks = [
-            t for t in all_board_tasks if task_belongs_to_project(t, current_project)
+            t
+            for t in all_board_tasks
+            if getattr(t, "project_id", None) == current_project.id
         ]
     _tasks_rejection = _validate_tasks_option(
         options, project_name or "active project", existing_tasks=existing_tasks

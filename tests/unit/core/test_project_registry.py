@@ -20,13 +20,11 @@ from typing import Any, Dict
 import pytest
 
 from src.core.error_framework import InvalidConfigurationError, StateConflictError
-from src.core.models import Priority, Task, TaskStatus
 from src.core.persistence import FilePersistence, MemoryPersistence, Persistence
 from src.core.project_registry import (
     ProjectConfig,
     ProjectRegistry,
     register_sqlite_board,
-    task_belongs_to_project,
 )
 
 pytestmark = pytest.mark.unit
@@ -465,77 +463,3 @@ class TestInjectedChecksAreValidatedAtRegistration:
                     }
                 },
             )
-
-
-def _task(task_id: str, project_id: Any) -> Task:
-    now = datetime.now(timezone.utc)
-    return Task(
-        id=task_id,
-        name="Wall",
-        description="",
-        status=TaskStatus.TODO,
-        priority=Priority.MEDIUM,
-        assigned_to=None,
-        created_at=now,
-        updated_at=now,
-        due_date=None,
-        estimated_hours=1.0,
-        project_id=project_id,
-    )
-
-
-class TestTaskBelongsToProject:
-    """Issue #855 round 1, Codex P2: the same identity gap #853
-
-    bridged in ``_response_project_for_task``, now in a board-task
-    filter. For Planka and Linear, ``Task.project_id`` is the
-    provider's own project id, not the registry id -- a task belongs
-    to a project if either matches.
-    """
-
-    def test_a_sqlite_shaped_task_matches_by_registry_id(self) -> None:
-        project = _config(id="camp-1", provider="sqlite", provider_config={})
-        task = _task("t1", project_id="camp-1")
-
-        assert task_belongs_to_project(task, project) is True
-
-    def test_a_planka_shaped_task_matches_by_provider_id(self) -> None:
-        project = _config(
-            id="uuid-registry-1",
-            provider="planka",
-            provider_config={"project_id": "planka-proj-77"},
-        )
-        task = _task("t1", project_id="planka-proj-77")
-
-        assert task_belongs_to_project(task, project) is True
-
-    def test_a_linear_shaped_task_matches_by_provider_id(self) -> None:
-        project = _config(
-            id="uuid-registry-2",
-            provider="linear",
-            provider_config={"project_id": "linear-proj-9"},
-        )
-        task = _task("t1", project_id="linear-proj-9")
-
-        assert task_belongs_to_project(task, project) is True
-
-    def test_a_task_from_a_different_project_does_not_match(self) -> None:
-        project = _config(
-            id="uuid-registry-1",
-            provider="planka",
-            provider_config={"project_id": "planka-proj-77"},
-        )
-        task = _task("t1", project_id="planka-proj-other")
-
-        assert task_belongs_to_project(task, project) is False
-
-    def test_a_task_with_no_project_id_does_not_match(self) -> None:
-        """Deliberately strict here, unlike the board-scoping filter's
-
-        own legacy rule: this predicate answers "does this task
-        belong to THIS project", and a project-less task's answer to
-        that is no, not "every project"."""
-        project = _config(id="camp-1", provider="sqlite", provider_config={})
-        task = _task("t1", project_id=None)
-
-        assert task_belongs_to_project(task, project) is False
