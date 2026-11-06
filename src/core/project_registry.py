@@ -56,6 +56,20 @@ class ProjectConfig:
         default for every existing registration and every
         unregistered project) behaves exactly as before K3: the gate
         still requires source files for a task that reaches it.
+    enforce_phase_order : bool
+        ADR-0013 K1/K3 (issue #852): phase order (design before
+        implementation before testing before documentation) is a
+        software-project convention, not a kernel default. ``False``
+        (the default, for every existing project and every project
+        that never sets this) means ``apply_board_wide_gates``
+        (``src/marcus_mcp/tools/task.py``) skips phase-based filtering
+        entirely -- a task is never held because Marcus *inferred* a
+        phase order the project never declared. ``True`` opts a
+        project into that convention explicitly. Keyword-based task
+        classification (``EnhancedTaskClassifier``) was misfiring on a
+        Minecraft board with no software phases at all, holding
+        claimable tasks on a false domain inference; this flag is the
+        declaration K1/K3 require instead of letting the kernel guess.
     """
 
     id: str
@@ -66,6 +80,7 @@ class ProjectConfig:
     last_used: datetime = field(default_factory=_utc_now)
     tags: List[str] = field(default_factory=list)
     task_type_registrations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    enforce_phase_order: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for persistence."""
@@ -87,6 +102,7 @@ class ProjectConfig:
             "last_used",
             "tags",
             "task_type_registrations",
+            "enforce_phase_order",
         }
         filtered_data = {k: v for k, v in data.items() if k in expected_fields}
 

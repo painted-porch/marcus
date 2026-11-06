@@ -103,7 +103,11 @@ def _subtasks_enabled(state: Any) -> bool:
 
 
 def _board_wide_gates(
-    candidates: List[Task], scoped: List[Task], tasks_by_id: Dict[str, Task], state: Any
+    candidates: List[Task],
+    scoped: List[Task],
+    tasks_by_id: Dict[str, Task],
+    state: Any,
+    project_id: str,
 ) -> List[Task]:
     """Apply the assignment filter's board-wide gates (README, phases)."""
     if not candidates:
@@ -111,7 +115,9 @@ def _board_wide_gates(
     # Imported here: tools.task imports this module.
     from src.marcus_mcp.tools.task import apply_board_wide_gates
 
-    return apply_board_wide_gates(list(candidates), scoped, tasks_by_id, state)
+    return apply_board_wide_gates(
+        list(candidates), scoped, tasks_by_id, state, project_id=project_id
+    )
 
 
 def _is_decomposed_parent(task: Task, state: Any, scoped: List[Task]) -> bool:
@@ -290,7 +296,7 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
                     continue
         candidates.append(task)
 
-    gated = _board_wide_gates(candidates, scoped, tasks_by_id, state)
+    gated = _board_wide_gates(candidates, scoped, tasks_by_id, state, project_id)
     claimable = subtask_claimable + len(gated)
     unclaimable += len(candidates) - len(gated)
 

@@ -3400,7 +3400,9 @@ def jittered_retry_seconds(base: int = RETRY_AFTER_SECONDS) -> int:
     return max(1, round(drawn))
 
 
-async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
+async def calculate_retry_after_seconds(
+    state: Any, project_id: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Calculate intelligent wait time before next task request.
 
@@ -3422,6 +3424,10 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
     ----------
     state : Any
         Marcus server state instance
+    project_id : Optional[str]
+        The calling agent's own registered project (issue #861). Used
+        only to look up that project's own recorded phase hold, if
+        any -- never another project's, even if this call races one.
 
     Returns
     -------
@@ -3432,6 +3438,31 @@ async def calculate_retry_after_seconds(state: Any) -> Dict[str, Any]:
         - reason: str (explanation for the wait time)
         - blocking_task: Optional[Dict] (task that's blocking progress)
     """
+    # Issue #852/#861: if the last apply_board_wide_gates call for THIS
+    # project actually held a task on a declared phase gate, say so --
+    # the agent was being told to wait for an unrelated in-progress
+    # task's ETA while the real reason (a phase gate) went unreported.
+    #
+    # Keyed by project_id (round 1, Codex P2 on PR #861): a single flat
+    # attribute on ``state`` is shared across every concurrent request
+    # the server is handling. A no-work request for project B could
+    # read project A's hold, recorded by a different request that
+    # happened to run first -- B never opted into phase enforcement at
+    # all. Each project's own entry is written only by that project's
+    # own apply_board_wide_gates call and read only here, by id.
+    _holds_by_project = getattr(state, "_last_phase_hold_by_project", None)
+    _phase_hold = (
+        _holds_by_project.get(project_id)
+        if isinstance(_holds_by_project, dict) and project_id is not None
+        else None
+    )
+    if isinstance(_phase_hold, dict) and _phase_hold.get("reason"):
+        return {
+            "retry_after_seconds": jittered_retry_seconds(),
+            "reason": _phase_hold["reason"],
+            "blocking_task": None,
+        }
+
     # Get all IN_PROGRESS tasks with their assignments
     in_progress_tasks = []
     for agent_id, assignment in state.agent_tasks.items():
@@ -4634,7 +4665,9 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                 logger.info("No TODO tasks remaining - project may be complete")
 
             # Calculate intelligent retry time
-            retry_info = await calculate_retry_after_seconds(state)
+            retry_info = await calculate_retry_after_seconds(
+                state, project_id=_drain_project_id or None
+            )
 
             conversation_logger.log_worker_message(
                 agent_id,
@@ -10330,6 +10363,7 @@ def apply_board_wide_gates(
     scoped_tasks: List[Task],
     tasks_by_id: Dict[str, Task],
     state: Any,
+    project_id: Optional[str] = None,
 ) -> List[Task]:
     """Apply the gates that depend on the board, not on the asking agent.
 
@@ -10352,12 +10386,37 @@ def apply_board_wide_gates(
         ``scoped_tasks`` indexed by id.
     state : Any
         Marcus server state; only its classification cache is touched.
+    project_id : Optional[str]
+        The project these tasks are scoped to (issue #852). ``None``
+        falls back to the server's active project when resolving
+        whether phase enforcement applies at all -- see
+        ``project_declares_phase_order``.
 
     Returns
     -------
     List[Task]
         The subset of ``available_tasks`` the board allows right now.
     """
+    # Issue #852/#861: the most recent phase hold THIS project's call
+    # recorded, read by calculate_retry_after_seconds so a held agent
+    # is told the real reason instead of an unrelated in-progress
+    # task's ETA. Keyed by project_id, never a flat attribute (round 1,
+    # Codex P2 on PR #861): a flat slot on ``state`` is shared across
+    # every concurrent request the server is handling, so a no-work
+    # request for a DIFFERENT project could read this project's hold.
+    # Reset only THIS project's own entry on every call, so a resolved
+    # hold never lingers into a later retry message for the SAME
+    # project; best-effort, like the classification cache below, so a
+    # test double without this attribute never raises.
+    try:
+        _holds_by_project = getattr(state, "_last_phase_hold_by_project", None)
+        if not isinstance(_holds_by_project, dict):
+            _holds_by_project = {}
+            state._last_phase_hold_by_project = _holds_by_project
+        _holds_by_project.pop(project_id, None)
+    except Exception:
+        pass
+
     # Special handling for README documentation
     # Calculate project completion percentage
     # Exclude README documentation tasks from the calculation since they should only
@@ -10405,7 +10464,23 @@ def apply_board_wide_gates(
                 f"{completion_percentage:.1f}% complete"
             )
 
-    # Apply phase-based task filtering
+    # Apply phase-based task filtering -- but only on a project that
+    # has actually declared it wants phase order enforced (issue #852,
+    # ADR-0013 K1/K3). Phase order (design before implementation before
+    # testing before documentation) is a software-project convention,
+    # not a kernel default; a Minecraft board with no such declaration
+    # held two claimable tasks for 25 minutes because a keyword
+    # classifier, built for software task text, read "document the
+    # target quantity" as a documentation task. Nothing here INFERS a
+    # phase policy from the board's content anymore -- it is read
+    # straight from the project's own K2 registration.
+    from src.marcus_mcp.coordinator.task_type_registration import (
+        project_declares_phase_order,
+    )
+
+    if not project_declares_phase_order(state, project_id):
+        return available_tasks
+
     from src.core.phase_dependency_enforcer import PhaseDependencyEnforcer
     from src.integrations.enhanced_task_classifier import EnhancedTaskClassifier
 
@@ -10470,12 +10545,30 @@ def apply_board_wide_gates(
                             # This task's phase should wait for
                             # in-progress phase
                             phase_allowed = False
-                            logger.debug(
-                                f"Task '{task.name}' "
-                                f"({task_phase.value}) blocked by "
-                                f"in-progress task '{ip_task.name}' "
-                                f"({ip_phase.value}) in same feature"
+                            _hold_reason = (
+                                f"Task '{task.name}' ({task_phase.value}) "
+                                f"blocked by in-progress task "
+                                f"'{ip_task.name}' ({ip_phase.value}) in "
+                                "same feature"
                             )
+                            # Issue #852: this used to be DEBUG-only, so
+                            # the only server-side trace of a phase hold
+                            # was the INFO-level count further down
+                            # ("Phase enforcement filtered tasks: N ->
+                            # M eligible") with no per-task reason next
+                            # to it. INFO here names the task, the
+                            # phase and the in-progress task it waits
+                            # for, matching the required-phase branch
+                            # below.
+                            logger.info(_hold_reason)
+                            try:
+                                state._last_phase_hold_by_project[project_id] = {
+                                    "task_name": task.name,
+                                    "task_phase": task_phase.value,
+                                    "reason": _hold_reason,
+                                }
+                            except Exception:
+                                pass
                             break
 
         # Also check if all required earlier phases have been completed
@@ -10529,14 +10622,22 @@ def apply_board_wide_gates(
 
                         if phase_exists:
                             phase_allowed = False
-                            logger.info(
-                                f"Task '{task.name}' "
-                                f"({task_phase.value}) blocked - waiting "
-                                f"for {req_phase.name} phase to complete "
-                                f"in same feature. Task labels: "
-                                f"{task.labels}, Required phase: "
+                            _hold_reason = (
+                                f"Task '{task.name}' ({task_phase.value}) "
+                                f"blocked - waiting for {req_phase.name} "
+                                "phase to complete in same feature. Task "
+                                f"labels: {task.labels}, Required phase: "
                                 f"{req_phase.name}"
                             )
+                            logger.info(_hold_reason)
+                            try:
+                                state._last_phase_hold_by_project[project_id] = {
+                                    "task_name": task.name,
+                                    "task_phase": task_phase.value,
+                                    "reason": _hold_reason,
+                                }
+                            except Exception:
+                                pass
                             break
 
         if phase_allowed:
@@ -10796,7 +10897,11 @@ async def _find_optimal_task_original_logic(
             available_tasks.append(t)
 
         available_tasks = apply_board_wide_gates(
-            available_tasks, scoped_tasks, tasks_by_id, state
+            available_tasks,
+            scoped_tasks,
+            tasks_by_id,
+            state,
+            project_id=agent_project_id,
         )
 
         # Further filter to deprioritize deployment tasks
