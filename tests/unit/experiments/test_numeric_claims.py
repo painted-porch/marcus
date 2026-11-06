@@ -5052,3 +5052,102 @@ class TestCodexFindingSlideCellWhitespaceDoesNotHidePercentScale:
         }
         problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
         assert problems == []
+
+
+class TestCodexFindingSlideCellValueMustBeExactlyOneFigure:
+    """Taking the first figure the shared extractor found out of a
+    slide cell's own literal silently accepted "0.481 (99%
+    confidence)" and "0.481 / 999" under the correct label, with the
+    extra figures -- 99% and 999 -- carrying no claim of their own
+    and sitting unverified in the deck. A cell is supposed to carry
+    exactly one number; prose belongs in its label, which already
+    has its own embedded-figure check. A string cell value must now
+    be exactly one numeric literal after trimming, or it is a named
+    problem, never a partial match on whichever figure came first.
+    """
+
+    ACCEPTED = {
+        "c1": CheckResult(
+            claim_id="c1",
+            verdict="verified",
+            value=0.481,
+            label="overall R2",
+            addresses=("metrics.json:r2_overall",),
+            unit="fraction",
+        )
+    }
+
+    @pytest.mark.unit
+    def test_a_parenthetical_confidence_figure_is_rejected(self):
+        """Codex's first exact scenario: a second figure riding along
+        in the same cell literal, carrying no claim of its own."""
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": "0.481 (99% confidence)",
+                            "claim": "c1",
+                            "label": "overall R2",
+                        }
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_slash_separated_second_figure_is_rejected(self):
+        """Codex's second exact scenario."""
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {"value": "0.481 / 999", "claim": "c1", "label": "overall R2"}
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_bare_figure_still_passes(self):
+        spec = {
+            "slides": [
+                {"cells": [{"value": "0.481", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_a_bare_percent_figure_still_passes(self):
+        spec = {
+            "slides": [
+                {"cells": [{"value": "48.1%", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_a_sole_negative_figure_with_the_unicode_minus_still_passes(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=-0.481,
+                label="overall R2",
+                addresses=("metrics.json:r2_overall",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": "−0.481", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "overall R2"})
+        assert problems == []

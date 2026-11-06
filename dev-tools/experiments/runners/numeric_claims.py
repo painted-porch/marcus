@@ -2807,6 +2807,45 @@ def _extract_figures_with_percent(text: str) -> List[str]:
     return figures
 
 
+def _as_sole_figure(value: Any) -> Tuple[Any, Optional[str]]:
+    """Read a slide cell's own value as exactly one numeric literal.
+
+    A slide cell is supposed to carry one number; prose belongs in
+    its label, which already has its own embedded-figure check.
+    Taking the first figure the shared extractor finds silently
+    accepted "0.481 (99% confidence)" and "0.481 / 999" under the
+    correct label, with the extra figures carrying no claim of their
+    own and sitting unverified in the deck. A string cell value must
+    now be exactly one number -- an optional sign, an optional
+    percent suffix, nothing else -- after trimming surrounding
+    whitespace; anything else is a named problem, never a partial
+    match on whichever figure happened to come first.
+
+    Parameters
+    ----------
+    value : Any
+        The cell's own ``"value"``, as written in the slide spec.
+
+    Returns
+    -------
+    Tuple[Any, Optional[str]]
+        ``(figure, problem)``. For a non-string value, ``figure`` is
+        ``value`` unchanged and ``problem`` is ``None``. For a string
+        that is exactly one numeric literal, ``figure`` is that
+        literal (with its own trailing ``'%'`` if it has one) and
+        ``problem`` is ``None``. Otherwise ``figure`` is ``None`` and
+        ``problem`` names why.
+    """
+    if not isinstance(value, str):
+        return value, None
+    stripped = value.strip()
+    normalized = _normalize_numeric_text(stripped)
+    figures = _extract_figures_with_percent(normalized)
+    if len(figures) != 1 or normalized.strip() != figures[0]:
+        return None, f"cell value {value!r} is not a single figure"
+    return figures[0], None
+
+
 def check_slide_spec(
     spec: Dict[str, Any],
     accepted: Dict[str, CheckResult],
@@ -2910,18 +2949,6 @@ def check_slide_spec(
                 )
         for cell in slide.get("cells", []):
             value = cell.get("value")
-            # A literal carrying surrounding whitespace ("0.481% ")
-            # must not silently skip percent handling just because
-            # the bare string no longer ends with '%' -- stripped and
-            # routed through the same figure extractor a slide title
-            # and a tagged prose sentence use to detect a percent
-            # sign however it is spaced, rather than a second,
-            # narrower endswith check of its own.
-            stated = value
-            if isinstance(value, str):
-                extracted = _extract_figures_with_percent(value.strip())
-                if extracted:
-                    stated = extracted[0]
             claim_id = cell.get("claim")
             where = where_slide
             if claim_id is not None and not isinstance(claim_id, str):
@@ -2938,6 +2965,15 @@ def check_slide_spec(
                 problems.append(
                     f"{where}: claim {claim_id} did not pass " f"({result.verdict})"
                 )
+                continue
+            # A cell is supposed to carry exactly one number; prose
+            # belongs in its label, which already has its own
+            # embedded-figure check. Reading only the first figure a
+            # literal contains ("0.481 (99% confidence)", "0.481 /
+            # 999") let the rest through with no claim of their own.
+            stated, figure_problem = _as_sole_figure(value)
+            if figure_problem:
+                problems.append(f"{where}: {figure_problem}")
                 continue
             matched, unit_problem = _percent_aware_match(
                 stated, result.value, result.unit, None, compare=_within_tolerance
