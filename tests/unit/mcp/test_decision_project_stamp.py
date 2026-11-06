@@ -72,20 +72,26 @@ class TestTheAgentsProjectIsTheSource:
     """A decision belongs to the project its author is registered to."""
 
     def test_the_helper_reads_the_registration(self) -> None:
-        """``_project_for_agent`` is the one source, as for opinions."""
-        from src.marcus_mcp.tools.context import _project_for_agent
+        """``project_for_agent`` is the one source, as for opinions.
+
+        ADR-0013 K6: factored out of ``context.py`` into
+        ``src.marcus_mcp.coordinator.agent_project`` so every write
+        site (``log_decision``, ``give_opinion``,
+        ``get_project_board_context``) shares the identical rule.
+        """
+        from src.marcus_mcp.coordinator.agent_project import project_for_agent
 
         state = _state(active="project-Y", agent_projects={"alpha": "project-X"})
 
-        assert _project_for_agent("alpha", state) == "project-X"
+        assert project_for_agent("alpha", state) == "project-X"
 
     def test_the_active_project_is_not_a_fallback(self) -> None:
         """An unregistered caller resolves to nothing, not to the server's."""
-        from src.marcus_mcp.tools.context import _project_for_agent
+        from src.marcus_mcp.coordinator.agent_project import project_for_agent
 
         state = _state(active="project-Y", agent_projects={})
 
-        assert _project_for_agent("stranger", state) is None
+        assert project_for_agent("stranger", state) is None
 
 
 class TestPersistingRequiresAnExplicitProject:

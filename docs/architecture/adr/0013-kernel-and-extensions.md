@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05; K3 accepted 2026-11-06**; the other six remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05; K3, K6 and K7 accepted 2026-11-06**; the other four remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -161,20 +161,33 @@ The numerical verifier sets dependents to BLOCKED, which reads as a worker repor
 
 ### K6 — Every board write is stamped from the agent's registration
 
-**Recommendation.** The agent's registration is the only source of the project for any write. Multi-project is a first-class case, not an edge.
+**Accepted 2026-11-06 (Lawrence Gray: "Accept K6 and K7 together", following K3).**
 
-**Evidence.** #805: `log_decision` files a decision under the server's active project, so on a multi-project server a decision lands under the wrong project, and on a server with no active project it is dropped with a debug line.
-`give_opinion` was fixed in PR #800 and the reasoning is already written in `_project_for_agent`'s docstring.
+**Decision.** The agent's registration is the only source of the project for any write. Multi-project is a first-class case, not an edge. The server's active project — whichever project a human last switched to — is never a fallback: it is `None` before any project is selected and need not be the agent's on a multi-project server, so sourcing a write from it can file the write under the wrong project, or drop it silently.
+
+**Evidence.** #805: `log_decision` filed a decision under the server's active project, so on a multi-project server a decision landed under the wrong project, and on a server with no active project it was dropped with a debug line.
+`give_opinion` was fixed for the same defect in PR #800, and `log_decision` in PR #813.
+Both built the identical lookup (`state.agent_project_map`) independently.
+
+**What accepting K6 found, and fixed.** `get_project_board_context` (`src/marcus_mcp/tools/task.py`), which tags every conversation-log line an agent's request produces — `request_next_task`, `report_task_progress`, `report_blocker`, `unassign_task` — carried the same defect: it read the server's active project, not the calling agent's own registration, at all four call sites.
+Fixed in the same PR that accepts this decision: the lookup PR #800 and PR #813 each built privately is factored out once, as `project_for_agent` (`src/marcus_mcp/coordinator/agent_project.py`), and all four call sites now pass their own `agent_id` through it.
+`log_decision` and `give_opinion` now import the shared helper instead of each keeping (or, in `log_decision`'s case, having kept) a private copy.
 
 ### K7 — A re-open clears what the previous close handed off
 
-**Recommendation.** The kernel's re-open paths clear the handed-off inputs the re-opened task contributed, or the handoff becomes idempotent per upstream task.
+**Accepted 2026-11-06 (Lawrence Gray: "Accept K6 and K7 together", following K3).**
+
+**Decision.** The kernel's re-open paths clear the handed-off inputs the re-opened task contributed, or the handoff becomes idempotent per upstream task.
 
 **Evidence.** #803. The existing security rule, that a claim author must never overwrite a dependent's board-seeded inputs, is correct and must stay.
 Its stated assumption is what breaks.
 
 **Why the kernel and not the extension.** An extension can work around this only by reaching into the handoff contract to undo it, which is what the numerical verifier currently does.
 Both this and K4 are cases where an extension needs a kernel guarantee *modified*, and that is the sharpest test this ADR has for what belongs in the kernel.
+
+**Already shipped, no code change needed.** `_apply_handoff_to_dependent` (`src/marcus_mcp/tools/task.py`), redesigned in PR #807 and its Codex review rounds, already implements the idempotent-per-upstream-task shape the recommendation above describes: a closing task clears only the keys it itself contributed on a prior close, board-seeded keys and another upstream task's contribution are untouched, and the replacement is backed by a durable provenance record (`record_input_provenance`/`get_input_provenance`) rather than only the in-memory task.
+K13 (accepted 2026-11-05) supports the same correctness property from the other side: a caller reading `state.project_tasks` immediately after a write sees that write, which is what keeps the handoff's critical section (one lock per dependent, `_handoff_lock`) from racing against a stale in-memory read.
+Confirmed by reading the current implementation and its three Codex review rounds (narrow provenance only after the board write lands; roll back the in-memory copy when the board write fails; serialize handoffs into one dependent) against #803's own verification steps; no new test was needed because `tests/unit/marcus_mcp/test_handoff_set_replacement.py` already exercises this exact path.
 
 ### K8 — Runtime neutrality
 
