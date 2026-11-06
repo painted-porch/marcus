@@ -17,15 +17,20 @@ Ground truth lives in the staging manifest, which never touches the
 board; this grader is the only consumer of it outside the trap
 generator itself.
 
-Known limitation: ``trap_catch_rate`` cannot yet distinguish "the
-checker missed the planted defect" from "the writer never created
-the opportunity the trap relies on." The rounding-ratio trap only
-bites if the report states a ratio at all; a writer that states none
-registers as 0.0 catch rate here, identical to a checker that failed
-to catch a stated one. Resolving this needs inspecting the writer's
-own claims for the specific assertion each trap targets, which is
-left for a later pass; readers of this grader's output should treat
-a low catch rate as "investigate," not "the checker is weak."
+Known limitation: ``trap_catch_rate`` attributes a catch to the
+signal that corresponds to each trap (``score_case``'s
+``declared_value_mismatches`` and ``required_tiers_failed``), not to
+"the case failed for any reason," but ``rounding_ratio`` and
+``stale_sibling`` still share one signal (any declared value
+mismatch) and so cannot be distinguished from each other, or from an
+unrelated writer mistake, when more than one is present in the same
+case. The rounding-ratio trap also only bites if the report states a
+ratio at all; a writer that states none registers as 0.0 catch rate
+here, identical to a checker that failed to catch a stated one.
+Resolving either needs inspecting the writer's own claims for the
+specific assertion each trap targets, which is left for a later
+pass; readers of this grader's output should treat a low catch rate
+as "investigate," not "the checker is weak."
 """
 
 from __future__ import annotations
@@ -333,6 +338,26 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
         and not _materially_different(c.stated, c.resolved)
     ]
     coverage_gaps = [c for c in record.claims if c.verdict == VERDICT_UNCOVERED]
+
+    # Signals for trap-catch attribution (compute_rates). A writer-
+    # dependent trap (rounding_ratio, stale_sibling) can only have
+    # been caught if the writer actually declared a claim that
+    # turned out wrong -- a case with no declared claims at all gave
+    # it no opportunity to be caught, whatever the overall verdict
+    # says. A harness-side check (dropped_tier_rows) catches
+    # independently of the writer, so it has its own signal instead.
+    declared_value_mismatches = sum(
+        1
+        for c in record.claims
+        if c.kind == "declared"
+        and c.verdict == VERDICT_FAILED
+        and c.reason == "value_mismatch"
+    )
+    required_tiers_failed = any(
+        c.kind == "harness" and c.verdict == VERDICT_FAILED and "tiers" in c.claim_id
+        for c in record.claims
+    )
+
     return {
         "wrong_shipped": wrong_shipped,
         "false_declines": false_declines,
@@ -340,6 +365,8 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
         "traps_present": _trap_names(truth.get("traps", [])),
         "declined": record.declined,
         "verified_clean": record.verified_clean,
+        "declared_value_mismatches": declared_value_mismatches,
+        "required_tiers_failed": required_tiers_failed,
     }
 
 
@@ -443,17 +470,25 @@ def compute_rates(
         declined = sum(1 for c in cases if c["declined"])
         rounds = sum(c.get("rounds", 1) for c in cases)
 
-        # A trap is caught when the checker's overall verdict was not
-        # clean: either it failed outright, or it was declined after
-        # exhausting retries. wrong_shipped is the opposite signal
-        # (a trap that slipped through verified) and must never be
-        # counted toward a catch.
+        # A trap is caught by the signal that corresponds to it, not
+        # by "the case failed for any reason" -- a case that failed
+        # only because of an unrelated problem (or produced nothing
+        # at all) must not credit every trap present with a catch.
+        # dropped_tier_rows is a harness-side check: it catches
+        # independently of whether the writer participated.
+        # rounding_ratio and stale_sibling are writer-dependent: they
+        # can only have been caught if the writer actually declared
+        # a claim that turned out wrong.
         trap_opportunities: Counter[str] = Counter()
         trap_caught: Counter[str] = Counter()
         for c in cases:
             for trap in c["traps_present"]:
                 trap_opportunities[trap] += 1
-                if not c["verified_clean"] or c["declined"]:
+                if trap == "dropped_tier_rows":
+                    caught = c.get("required_tiers_failed", False)
+                else:
+                    caught = c.get("declared_value_mismatches", 0) > 0
+                if caught:
                     trap_caught[trap] += 1
 
         report[condition] = {

@@ -210,7 +210,7 @@ class TestRates:
 
     @pytest.mark.unit
     def test_caught_trap_counts_against_its_own_opportunity(self):
-        """A planted trap that produced a decline is caught."""
+        """A planted trap whose own signal fired is caught."""
         cases = [
             {
                 "wrong_shipped": [],
@@ -219,6 +219,7 @@ class TestRates:
                 "traps_present": ["dropped_tier_rows"],
                 "declined": False,
                 "verified_clean": False,
+                "required_tiers_failed": True,
                 "rounds": 1,
             },
             {
@@ -228,6 +229,7 @@ class TestRates:
                 "traps_present": ["dropped_tier_rows"],
                 "declined": False,
                 "verified_clean": True,
+                "required_tiers_failed": False,
                 "rounds": 1,
             },
         ]
@@ -561,3 +563,102 @@ class TestCodexFindingIncompleteCasesAreNotSilentlyDropped:
         records = load_condition_b(tmp_path)
         assert len(records) == 1
         assert records[0].verified_clean is True
+
+
+class TestCodexFindingTrapCatchIsAttributedNotBlanket:
+    """A trap is caught by its own signal, not "the case failed somehow."
+
+    The old predicate credited every planted trap as caught whenever
+    the case's overall verdict was non-clean, for any reason. A case
+    containing only staged/ (no report, no claims at all) reported a
+    100% catch rate for every trap present, though the writer never
+    created an opportunity for any of them to be caught. Likewise,
+    one harness-side catch (dropped_tier_rows) credited every other
+    trap present in the same case, whether or not it had anything to
+    do with that catch.
+    """
+
+    @pytest.mark.unit
+    def test_score_case_reports_no_declared_mismatches_for_an_empty_case(self):
+        """A case with no declared claims has nothing to attribute."""
+        record = make_record("case-000", CONDITION_B, claims=[])
+        out = score_case(record, {"traps": ["stale_sibling", "rounding_ratio"]})
+        assert out["declared_value_mismatches"] == 0
+        assert out["required_tiers_failed"] is False
+
+    @pytest.mark.unit
+    def test_score_case_counts_a_declared_value_mismatch(self):
+        """A declared claim that turned out wrong is the writer-dependent
+        trap signal."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="failed",
+                stated=23.0,
+                resolved=22.1,
+                reason="value_mismatch",
+            ),
+        ]
+        record = make_record("case-000", CONDITION_B, claims=claims)
+        out = score_case(record, {"traps": ["rounding_ratio"]})
+        assert out["declared_value_mismatches"] == 1
+
+    @pytest.mark.unit
+    def test_score_case_detects_a_failed_tiers_required_check(self):
+        """A failed required tiers check is the harness-side trap signal."""
+        claims = [
+            ClaimRecord(
+                claim_id="required:tiers-total",
+                kind="harness",
+                verdict="failed",
+                stated=True,
+                resolved=False,
+            ),
+        ]
+        record = make_record("case-000", CONDITION_B, claims=claims)
+        out = score_case(record, {"traps": ["dropped_tier_rows"]})
+        assert out["required_tiers_failed"] is True
+
+    @pytest.mark.unit
+    def test_an_empty_case_credits_no_writer_dependent_trap(self):
+        """Codex's exact example: a staged/-only case with no report or
+        claims must not report a 100% catch rate for a writer-dependent
+        trap."""
+        cases = [
+            {
+                "wrong_shipped": [],
+                "false_declines": [],
+                "coverage_gaps": [],
+                "traps_present": ["stale_sibling", "rounding_ratio"],
+                "declined": False,
+                "verified_clean": False,
+                "required_tiers_failed": False,
+                "declared_value_mismatches": 0,
+                "rounds": 1,
+            },
+        ]
+        rates = compute_rates({CONDITION_B: cases})
+        assert rates[CONDITION_B]["trap_catch_rate"]["stale_sibling"] == 0.0
+        assert rates[CONDITION_B]["trap_catch_rate"]["rounding_ratio"] == 0.0
+
+    @pytest.mark.unit
+    def test_a_dropped_tier_rows_catch_does_not_credit_other_traps(self):
+        """Catching one trap must not inflate the catch rate of an
+        unrelated trap present in the same case."""
+        cases = [
+            {
+                "wrong_shipped": [],
+                "false_declines": [],
+                "coverage_gaps": [],
+                "traps_present": ["dropped_tier_rows", "rounding_ratio"],
+                "declined": False,
+                "verified_clean": False,
+                "required_tiers_failed": True,
+                "declared_value_mismatches": 0,
+                "rounds": 1,
+            },
+        ]
+        rates = compute_rates({CONDITION_B: cases})
+        assert rates[CONDITION_B]["trap_catch_rate"]["dropped_tier_rows"] == 1.0
+        assert rates[CONDITION_B]["trap_catch_rate"]["rounding_ratio"] == 0.0
