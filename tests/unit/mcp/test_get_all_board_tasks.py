@@ -9,7 +9,7 @@ connect and returned success: false with an empty list.
 """
 
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any, List, Optional
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -20,7 +20,7 @@ from src.marcus_mcp.tools.task import get_all_board_tasks
 pytestmark = pytest.mark.unit
 
 
-def _task(task_id: str, project_id: str) -> Task:
+def _task(task_id: str, project_id: Optional[str]) -> Task:
     now = datetime.now(timezone.utc)
     return Task(
         id=task_id,
@@ -99,6 +99,50 @@ class TestGetAllBoardTasksReadsThroughTheConfiguredProvider:
         assert result["success"] is True
         assert result["count"] == 0
         state.kanban_client.get_all_tasks.assert_awaited_once()
+
+
+class TestProjectIdFilterAgainstRealProviderShapes:
+    """Codex P1, round 1 on PR #842.
+
+    The new project_id filter discarded every task and returned a
+    successful *empty* board on Planka and Linear, because those
+    providers' card/issue-to-Task conversion never populated
+    Task.project_id -- it stayed None, contrary to the docstring. The
+    live check (SQLite) could not catch this: SQLite stamps
+    project_id. Fixed at the provider level (KanbanClient._card_to_task,
+    LinearKanban._linear_issue_to_task) rather than here; this covers
+    the caller-side consequence directly, with tasks shaped the way
+    those two providers actually produced them before that fix.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_none_project_id_is_excluded_by_an_explicit_filter(self) -> None:
+        """Without the provider-level fix, every Planka/Linear task
+        has project_id=None, so any project_id filter wiped the whole
+        board -- this is that failure mode, still correct behavior
+        for a task that genuinely carries no project id."""
+        tasks = [_task("t1", project_id=None), _task("t2", project_id=None)]
+        state = _make_state(tasks)
+
+        result = await get_all_board_tasks(
+            board_id=None, project_id="proj-a", state=state
+        )
+
+        assert result["success"] is True
+        assert result["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_no_filter_still_returns_project_id_none_tasks(self) -> None:
+        """The empty-board regression specifically: omitting the
+        filter must still return every task regardless of its
+        project_id."""
+        tasks = [_task("t1", project_id=None), _task("t2", project_id=None)]
+        state = _make_state(tasks)
+
+        result = await get_all_board_tasks(board_id=None, project_id="", state=state)
+
+        assert result["success"] is True
+        assert result["count"] == 2
 
 
 def test_no_direct_planka_construction_in_task_module() -> None:

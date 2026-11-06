@@ -197,6 +197,13 @@ class LinearKanban(KanbanInterface):
             created_at=created_at,
             updated_at=updated_at,
             due_date=None,
+            # Codex P1, round 1 on PR #842: an issue carries no project
+            # id of its own in the fields this provider reads -- the
+            # client already scopes its own queries by self.project_id
+            # (the configured project), which is the single source of
+            # truth every K2 lookup already assumes. Previously left
+            # None, silently breaking any project_id-scoped filter.
+            project_id=self.project_id,
         )
 
     async def get_task_by_id(self, task_id: str) -> Optional[Task]:
