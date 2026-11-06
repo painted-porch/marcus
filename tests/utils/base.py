@@ -223,6 +223,16 @@ class BaseTestCase:
             }
         )
         client.update_task_progress = AsyncMock()
+        # Issue #884 group B: the real _load_workspace_state
+        # (src/integrations/providers/sqlite_kanban.py) is a plain,
+        # synchronous method -- request_next_task calls it with no
+        # await. The base AsyncMock() this client is built from
+        # returns a coroutine for any attribute not explicitly
+        # overridden, so an unawaited call here raised "argument of
+        # type 'coroutine' is not iterable" instead of reading a
+        # workspace state dict. A plain Mock matches the real,
+        # synchronous call shape.
+        client._load_workspace_state = Mock(return_value=None)
         return client
 
     def create_mock_ai_engine(self) -> AsyncMock:

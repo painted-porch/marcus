@@ -60,18 +60,21 @@ class TestAgentRegistrationAndTaskAssignment(BaseTestCase):
         agents = [
             {
                 "agent_id": "backend-1",
+                "project_id": "test-project",
                 "name": "Alice",
                 "role": "Backend Developer",
                 "skills": ["python", "django", "postgres", "api", "testing"],
             },
             {
                 "agent_id": "frontend-1",
+                "project_id": "test-project",
                 "name": "Bob",
                 "role": "Frontend Developer",
                 "skills": ["javascript", "react", "css", "ui", "testing"],
             },
             {
                 "agent_id": "devops-1",
+                "project_id": "test-project",
                 "name": "Charlie",
                 "role": "DevOps Engineer",
                 "skills": ["docker", "kubernetes", "aws", "monitoring", "ci/cd"],
@@ -151,18 +154,21 @@ class TestAgentRegistrationAndTaskAssignment(BaseTestCase):
         agents = [
             {
                 "agent_id": "backend-dev",
+                "project_id": "test-project",
                 "name": "Alice",
                 "role": "Backend Developer",
                 "skills": ["python", "api", "django", "backend"],
             },
             {
                 "agent_id": "frontend-dev",
+                "project_id": "test-project",
                 "name": "Bob",
                 "role": "Frontend Developer",
                 "skills": ["javascript", "react", "css", "frontend"],
             },
             {
                 "agent_id": "devops-eng",
+                "project_id": "test-project",
                 "name": "Charlie",
                 "role": "DevOps Engineer",
                 "skills": ["kubernetes", "docker", "aws", "infrastructure"],
@@ -221,6 +227,7 @@ class TestAgentRegistrationAndTaskAssignment(BaseTestCase):
                 "register_agent",
                 {
                     "agent_id": agent.worker_id,
+                    "project_id": "test-project",
                     "name": agent.name,
                     "role": agent.role,
                     "skills": agent.skills,
@@ -265,10 +272,13 @@ class TestAgentRegistrationAndTaskAssignment(BaseTestCase):
 
         # Mock config loading
         with patch("src.marcus_mcp.server.get_config") as mock_config:
-            mock_config.return_value = {
-                "kanban": {"provider": "planka"},
-                "project_name": "Test Project",
-            }
+            # Issue #884 group C: server.py reads self.config.kanban.provider
+            # (attribute access, since the centralized-config-with-validation
+            # commit e529a44), not dict.get("kanban") -- a plain dict here
+            # raised AttributeError before the server even finished
+            # constructing. self.create_mock_config() is the already-correct
+            # pattern other test files use.
+            mock_config.return_value = self.create_mock_config()
 
             server = MarcusServer()
 
@@ -284,6 +294,24 @@ class TestAgentRegistrationAndTaskAssignment(BaseTestCase):
 
         # Don't start assignment monitor in tests
         server.assignment_monitor = None
+
+        # Issue #884 group C: handle_tool_call gates every tool by
+        # client type (src/marcus_mcp/handlers.py), and an unregistered
+        # client only gets ["ping", "authenticate"] -- every
+        # register_agent/request_next_task call here was silently
+        # refused with KeyError('success') once the config-dict bug
+        # above stopped masking it. Registering an admin client
+        # directly, the same shortcut test_complete_agent_lifecycle.py
+        # already uses, grants full access without an extra
+        # authenticate round-trip per test.
+        server._current_client_id = "test-client"
+        server._registered_clients = {
+            "test-client": {
+                "client_type": "admin",
+                "role": "test_admin",
+                "metadata": {},
+            }
+        }
 
         return server
 
@@ -416,10 +444,13 @@ class TestProjectCreationAndTaskGeneration(BaseTestCase):
         os.environ["KANBAN_PROVIDER"] = "planka"
 
         with patch("src.marcus_mcp.server.get_config") as mock_config:
-            mock_config.return_value = {
-                "kanban": {"provider": "planka"},
-                "project_name": "Test Project",
-            }
+            # Issue #884 group C: server.py reads self.config.kanban.provider
+            # (attribute access, since the centralized-config-with-validation
+            # commit e529a44), not dict.get("kanban") -- a plain dict here
+            # raised AttributeError before the server even finished
+            # constructing. self.create_mock_config() is the already-correct
+            # pattern other test files use.
+            mock_config.return_value = self.create_mock_config()
 
             server = MarcusServer()
 
@@ -430,6 +461,24 @@ class TestProjectCreationAndTaskGeneration(BaseTestCase):
         server.ai_engine = self.create_mock_ai_engine()
 
         server.assignment_monitor = None
+
+        # Issue #884 group C: handle_tool_call gates every tool by
+        # client type (src/marcus_mcp/handlers.py), and an unregistered
+        # client only gets ["ping", "authenticate"] -- every
+        # register_agent/request_next_task call here was silently
+        # refused with KeyError('success') once the config-dict bug
+        # above stopped masking it. Registering an admin client
+        # directly, the same shortcut test_complete_agent_lifecycle.py
+        # already uses, grants full access without an extra
+        # authenticate round-trip per test.
+        server._current_client_id = "test-client"
+        server._registered_clients = {
+            "test-client": {
+                "client_type": "admin",
+                "role": "test_admin",
+                "metadata": {},
+            }
+        }
 
         return server
 
@@ -468,6 +517,7 @@ class TestBlockerReportingAndResolution(BaseTestCase):
             "register_agent",
             {
                 "agent_id": agent_id,
+                "project_id": "test-project",
                 "name": "Alice",
                 "role": "Backend Developer",
                 "skills": ["python", "django", "postgres"],
@@ -533,12 +583,18 @@ class TestBlockerReportingAndResolution(BaseTestCase):
         assert "Alternative Approach" in data["suggestions"]
         assert "Stripe" in data["suggestions"]
 
-        # Verify task status update
+        # Verify task status update. Issue #884 group C: a single
+        # report_blocker no longer marks the task BLOCKED directly --
+        # PR #722/#769 ("the missing middle rung") requeues a terminal
+        # give-up to the board (status TODO, unassigned) so a FRESH
+        # agent can attempt it; only after MAX_BLOCKER_REPAIR_ATTEMPTS
+        # independent give-ups is the lane recorded as genuinely dead.
         mock_kanban = cast(AsyncMock, server.kanban_client)
         mock_kanban.update_task.assert_called_with(
             "TASK-001",
             {
-                "status": TaskStatus.BLOCKED,
+                "status": TaskStatus.TODO,
+                "assigned_to": None,
                 "blocker": "Cannot integrate payment gateway - missing API documentation",
             },
         )
@@ -567,6 +623,7 @@ class TestBlockerReportingAndResolution(BaseTestCase):
             "register_agent",
             {
                 "agent_id": agent_id,
+                "project_id": "test-project",
                 "name": "Charlie",
                 "role": "DevOps Engineer",
                 "skills": ["kubernetes", "aws", "monitoring"],
@@ -644,16 +701,37 @@ class TestBlockerReportingAndResolution(BaseTestCase):
         os.environ["KANBAN_PROVIDER"] = "planka"
 
         with patch("src.marcus_mcp.server.get_config") as mock_config:
-            mock_config.return_value = {
-                "kanban": {"provider": "planka"},
-                "project_name": "Test Project",
-            }
+            # Issue #884 group C: server.py reads self.config.kanban.provider
+            # (attribute access, since the centralized-config-with-validation
+            # commit e529a44), not dict.get("kanban") -- a plain dict here
+            # raised AttributeError before the server even finished
+            # constructing. self.create_mock_config() is the already-correct
+            # pattern other test files use.
+            mock_config.return_value = self.create_mock_config()
 
             server = MarcusServer()
 
         server.kanban_client = self.create_mock_kanban_client()
         server.ai_engine = self.create_mock_ai_engine()
         server.assignment_monitor = None
+
+        # Issue #884 group C: handle_tool_call gates every tool by
+        # client type (src/marcus_mcp/handlers.py), and an unregistered
+        # client only gets ["ping", "authenticate"] -- every
+        # register_agent/request_next_task call here was silently
+        # refused with KeyError('success') once the config-dict bug
+        # above stopped masking it. Registering an admin client
+        # directly, the same shortcut test_complete_agent_lifecycle.py
+        # already uses, grants full access without an extra
+        # authenticate round-trip per test.
+        server._current_client_id = "test-client"
+        server._registered_clients = {
+            "test-client": {
+                "client_type": "admin",
+                "role": "test_admin",
+                "metadata": {},
+            }
+        }
 
         return server
 
@@ -691,6 +769,7 @@ class TestProgressTrackingAndCompletion(BaseTestCase):
             "register_agent",
             {
                 "agent_id": agent_id,
+                "project_id": "test-project",
                 "name": "Dana",
                 "role": "Fullstack Developer",
                 "skills": ["python", "javascript", "testing"],
@@ -799,18 +878,21 @@ class TestProgressTrackingAndCompletion(BaseTestCase):
         agents = [
             {
                 "agent_id": "be-dev",
+                "project_id": "test-project",
                 "name": "Alice",
                 "role": "Backend Dev",
                 "skills": ["backend", "api"],
             },
             {
                 "agent_id": "fe-dev",
+                "project_id": "test-project",
                 "name": "Bob",
                 "role": "Frontend Dev",
                 "skills": ["frontend", "css"],
             },
             {
                 "agent_id": "qa-eng",
+                "project_id": "test-project",
                 "name": "Carol",
                 "role": "QA Engineer",
                 "skills": ["testing"],
@@ -862,16 +944,37 @@ class TestProgressTrackingAndCompletion(BaseTestCase):
         os.environ["KANBAN_PROVIDER"] = "planka"
 
         with patch("src.marcus_mcp.server.get_config") as mock_config:
-            mock_config.return_value = {
-                "kanban": {"provider": "planka"},
-                "project_name": "Test Project",
-            }
+            # Issue #884 group C: server.py reads self.config.kanban.provider
+            # (attribute access, since the centralized-config-with-validation
+            # commit e529a44), not dict.get("kanban") -- a plain dict here
+            # raised AttributeError before the server even finished
+            # constructing. self.create_mock_config() is the already-correct
+            # pattern other test files use.
+            mock_config.return_value = self.create_mock_config()
 
             server = MarcusServer()
 
         server.kanban_client = self.create_mock_kanban_client()
         server.ai_engine = self.create_mock_ai_engine()
         server.assignment_monitor = None
+
+        # Issue #884 group C: handle_tool_call gates every tool by
+        # client type (src/marcus_mcp/handlers.py), and an unregistered
+        # client only gets ["ping", "authenticate"] -- every
+        # register_agent/request_next_task call here was silently
+        # refused with KeyError('success') once the config-dict bug
+        # above stopped masking it. Registering an admin client
+        # directly, the same shortcut test_complete_agent_lifecycle.py
+        # already uses, grants full access without an extra
+        # authenticate round-trip per test.
+        server._current_client_id = "test-client"
+        server._registered_clients = {
+            "test-client": {
+                "client_type": "admin",
+                "role": "test_admin",
+                "metadata": {},
+            }
+        }
 
         # Mock project state refresh
         server.project_state = ProjectStateFactory.create()
@@ -911,6 +1014,7 @@ class TestErrorRecoveryAndResilience(BaseTestCase):
             "register_agent",
             {
                 "agent_id": "test-agent",
+                "project_id": "test-project",
                 "name": "Test Agent",
                 "role": "Developer",
                 "skills": ["python"],
@@ -965,11 +1069,16 @@ class TestErrorRecoveryAndResilience(BaseTestCase):
         3. Helpful error messages
         """
         # Test missing configuration
+        # Issue #884 group C2: MarcusBaseError.__init__ only ever
+        # accepted message/error_code/context/remediation/severity/
+        # retryable/cause (src/core/error_framework.py:86) -- this
+        # test was written against keyword arguments
+        # (service_name/config_type/missing_field) that never existed
+        # on it.
         with patch("src.marcus_mcp.server.get_config") as mock_config:
             mock_config.side_effect = ConfigurationError(
-                service_name="Marcus",
-                config_type="config_marcus.json",
-                missing_field="kanban.provider",
+                "Missing required configuration field 'kanban.provider' "
+                "in config_marcus.json for Marcus",
                 context=ErrorContext(operation="server_init"),
             )
 
@@ -995,6 +1104,7 @@ class TestErrorRecoveryAndResilience(BaseTestCase):
             "register_agent",
             {
                 "agent_id": agent_id,
+                "project_id": "test-project",
                 "name": "Persistent Agent",
                 "role": "Developer",
                 "skills": ["python", "testing"],
@@ -1050,6 +1160,7 @@ class TestErrorRecoveryAndResilience(BaseTestCase):
                 "register_agent",
                 {
                     "agent_id": agent_id,
+                    "project_id": "test-project",
                     "name": f"Agent {agent_id}",
                     "role": "Developer",
                     "skills": ["python"],
@@ -1097,16 +1208,37 @@ class TestErrorRecoveryAndResilience(BaseTestCase):
         os.environ["KANBAN_PROVIDER"] = "planka"
 
         with patch("src.marcus_mcp.server.get_config") as mock_config:
-            mock_config.return_value = {
-                "kanban": {"provider": "planka"},
-                "project_name": "Test Project",
-            }
+            # Issue #884 group C: server.py reads self.config.kanban.provider
+            # (attribute access, since the centralized-config-with-validation
+            # commit e529a44), not dict.get("kanban") -- a plain dict here
+            # raised AttributeError before the server even finished
+            # constructing. self.create_mock_config() is the already-correct
+            # pattern other test files use.
+            mock_config.return_value = self.create_mock_config()
 
             server = MarcusServer()
 
         server.kanban_client = self.create_mock_kanban_client()
         server.ai_engine = self.create_mock_ai_engine()
         server.assignment_monitor = None
+
+        # Issue #884 group C: handle_tool_call gates every tool by
+        # client type (src/marcus_mcp/handlers.py), and an unregistered
+        # client only gets ["ping", "authenticate"] -- every
+        # register_agent/request_next_task call here was silently
+        # refused with KeyError('success') once the config-dict bug
+        # above stopped masking it. Registering an admin client
+        # directly, the same shortcut test_complete_agent_lifecycle.py
+        # already uses, grants full access without an extra
+        # authenticate round-trip per test.
+        server._current_client_id = "test-client"
+        server._registered_clients = {
+            "test-client": {
+                "client_type": "admin",
+                "role": "test_admin",
+                "metadata": {},
+            }
+        }
 
         return server
 
@@ -1143,6 +1275,7 @@ class TestSystemHealthAndMonitoring(BaseTestCase):
             "register_agent",
             {
                 "agent_id": "health-agent",
+                "project_id": "test-project",
                 "name": "Health Test Agent",
                 "role": "Developer",
                 "skills": ["monitoring"],
@@ -1204,6 +1337,7 @@ class TestSystemHealthAndMonitoring(BaseTestCase):
                 "register_agent",
                 {
                     "agent_id": f"perf-agent-{i}",
+                    "project_id": "test-project",
                     "name": f"Performance Agent {i}",
                     "role": "Developer",
                     "skills": ["python", "testing"],
@@ -1249,16 +1383,37 @@ class TestSystemHealthAndMonitoring(BaseTestCase):
         os.environ["KANBAN_PROVIDER"] = "planka"
 
         with patch("src.marcus_mcp.server.get_config") as mock_config:
-            mock_config.return_value = {
-                "kanban": {"provider": "planka"},
-                "project_name": "Test Project",
-            }
+            # Issue #884 group C: server.py reads self.config.kanban.provider
+            # (attribute access, since the centralized-config-with-validation
+            # commit e529a44), not dict.get("kanban") -- a plain dict here
+            # raised AttributeError before the server even finished
+            # constructing. self.create_mock_config() is the already-correct
+            # pattern other test files use.
+            mock_config.return_value = self.create_mock_config()
 
             server = MarcusServer()
 
         server.kanban_client = self.create_mock_kanban_client()
         server.ai_engine = self.create_mock_ai_engine()
         server.assignment_monitor = None
+
+        # Issue #884 group C: handle_tool_call gates every tool by
+        # client type (src/marcus_mcp/handlers.py), and an unregistered
+        # client only gets ["ping", "authenticate"] -- every
+        # register_agent/request_next_task call here was silently
+        # refused with KeyError('success') once the config-dict bug
+        # above stopped masking it. Registering an admin client
+        # directly, the same shortcut test_complete_agent_lifecycle.py
+        # already uses, grants full access without an extra
+        # authenticate round-trip per test.
+        server._current_client_id = "test-client"
+        server._registered_clients = {
+            "test-client": {
+                "client_type": "admin",
+                "role": "test_admin",
+                "metadata": {},
+            }
+        }
 
         return server
 
