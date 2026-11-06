@@ -36,6 +36,7 @@ things that shape insisted on, each for a concrete reason:
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
@@ -180,18 +181,61 @@ def _request_id(record: UsageRecord) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def _parse_timestamp(raw: Optional[str]) -> Optional[datetime]:
+def _parse_timestamp(raw: str) -> Optional[datetime]:
     """Parse an ISO-8601 timestamp, tolerating a trailing 'Z'.
 
-    Returns ``None`` when ``raw`` is empty or unparseable, letting the
-    store fall back to its own default timestamp expression.
+    Returns ``None`` when ``raw`` is unparseable. Callers must reject
+    the record in that case rather than let the store's own "now"
+    default silently stand in for a bad or missing timestamp (Codex
+    review, round 1 on PR #867) -- a replayed ledger with a corrupt
+    timestamp would otherwise be recorded at the wrong time and still
+    count as accepted.
     """
-    if not raw:
-        return None
     try:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _invalid_token_count(value: object, field_name: str) -> Optional[str]:
+    """Validate one required token-count field.
+
+    Must be a non-negative ``int``, never a ``bool`` (a ``bool`` is an
+    ``int`` subclass in Python, so ``True``/``False`` would otherwise
+    silently pass as 1/0) and never a ``float`` or ``None``.
+
+    Returns
+    -------
+    Optional[str]
+        A rejection reason naming the field, or ``None`` when valid.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return f"{field_name} must be a non-negative int, got {value!r}"
+    return None
+
+
+def _invalid_optional_token_count(value: object, field_name: str) -> Optional[str]:
+    """Validate an optional token-count field.
+
+    Same as :func:`_invalid_token_count`, but ``None`` is valid.
+    """
+    if value is None:
+        return None
+    return _invalid_token_count(value, field_name)
+
+
+def _invalid_usd(value: object) -> Optional[str]:
+    """Validate the optional ``usd`` field.
+
+    Must be ``None``, or a finite, non-negative, non-bool number.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return f"usd must be a finite non-negative number, got {value!r}"
+    if not math.isfinite(value) or value < 0:
+        return f"usd must be a finite non-negative number, got {value!r}"
+    return None
 
 
 def ingest_usage_records(
@@ -255,6 +299,31 @@ def ingest_usage_records(
             )
             continue
 
+        timestamp = _parse_timestamp(record.at)
+        if timestamp is None:
+            rejected.append(RejectedRecord(index, f"invalid timestamp: {record.at!r}"))
+            continue
+
+        count_error = (
+            _invalid_token_count(record.input_tokens, "input_tokens")
+            or _invalid_token_count(record.output_tokens, "output_tokens")
+            or _invalid_token_count(record.cache_read_tokens, "cache_read_tokens")
+            or _invalid_token_count(
+                record.cache_creation_tokens, "cache_creation_tokens"
+            )
+            or _invalid_optional_token_count(
+                record.reasoning_tokens, "reasoning_tokens"
+            )
+        )
+        if count_error is not None:
+            rejected.append(RejectedRecord(index, count_error))
+            continue
+
+        usd_error = _invalid_usd(record.usd)
+        if usd_error is not None:
+            rejected.append(RejectedRecord(index, usd_error))
+            continue
+
         # "between_tasks" and "controller" spend can never be a task's,
         # regardless of what a caller supplies -- Minecraft's own
         # stated rule on #742 ("the planner's calls are a controller
@@ -293,7 +362,7 @@ def ingest_usage_records(
             reported_usd=record.usd,
             priced_by=record.priced_by,
             reasoning_tokens=record.reasoning_tokens,
-            timestamp=_parse_timestamp(record.at),
+            timestamp=timestamp,
         )
         store.record_event(event)
 

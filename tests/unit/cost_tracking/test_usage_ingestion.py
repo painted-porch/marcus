@@ -210,6 +210,133 @@ class TestIngestUsageRecords:
         assert row[0] is None
 
 
+class TestRejectsMalformedInputByName:
+    """Codex review (round 1 on #867): reject malformed input instead
+    of defaulting it. A bad timestamp must not silently stamp "now"
+    and still count as accepted, and a bad token count must not
+    silently become 0 or crash the SQL layer -- both reject the
+    record, by name, so a caller can see exactly what was wrong."""
+
+    def test_empty_at_is_rejected(self, tmp_path: Path) -> None:
+        """An empty timestamp must not fall through to the store's
+        own "now" default and still be counted as accepted -- a
+        replayed ledger with a bad timestamp would be recorded at the
+        wrong time."""
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ack = ingest_usage_records(store, "project-A", [_record(at="")])
+
+        assert ack.accepted == 0
+        assert len(ack.rejected) == 1
+        assert "timestamp" in ack.rejected[0].reason
+        count = store.conn.execute("SELECT COUNT(*) FROM token_events").fetchone()[0]
+        assert count == 0
+
+    def test_unparseable_at_is_rejected(self, tmp_path: Path) -> None:
+        """A timestamp that doesn't parse as ISO-8601 is rejected the
+        same way an empty one is."""
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ack = ingest_usage_records(store, "project-A", [_record(at="not-a-timestamp")])
+
+        assert ack.accepted == 0
+        assert len(ack.rejected) == 1
+        assert "timestamp" in ack.rejected[0].reason
+
+    @pytest.mark.parametrize(
+        "field,bad_value",
+        [
+            ("input_tokens", -1),
+            ("input_tokens", True),
+            ("input_tokens", 1.5),
+            ("input_tokens", None),
+            ("output_tokens", -1),
+            ("output_tokens", True),
+            ("output_tokens", 1.5),
+            ("output_tokens", None),
+            ("cache_read_tokens", -1),
+            ("cache_read_tokens", True),
+            ("cache_read_tokens", 1.5),
+            ("cache_read_tokens", None),
+            ("cache_creation_tokens", -1),
+            ("cache_creation_tokens", True),
+            ("cache_creation_tokens", 1.5),
+            ("cache_creation_tokens", None),
+            ("reasoning_tokens", -1),
+            ("reasoning_tokens", True),
+            ("reasoning_tokens", 1.5),
+        ],
+    )
+    def test_a_bad_token_count_is_rejected(
+        self, tmp_path: Path, field: str, bad_value: object
+    ) -> None:
+        """Every token-count field must be a non-negative int -- not a
+        bool (Python's bool is an int subclass, so True/False would
+        otherwise silently pass as 1/0), not a float, and (for the
+        four required counts) never None."""
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ack = ingest_usage_records(store, "project-A", [_record(**{field: bad_value})])
+
+        assert ack.accepted == 0
+        assert len(ack.rejected) == 1
+        assert field in ack.rejected[0].reason
+        count = store.conn.execute("SELECT COUNT(*) FROM token_events").fetchone()[0]
+        assert count == 0
+
+    @pytest.mark.parametrize(
+        "bad_usd",
+        [-0.01, float("nan"), float("inf"), float("-inf"), True],
+    )
+    def test_a_bad_usd_is_rejected(self, tmp_path: Path, bad_usd: object) -> None:
+        """usd, when present, must be a finite non-negative float."""
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ack = ingest_usage_records(store, "project-A", [_record(usd=bad_usd)])
+
+        assert ack.accepted == 0
+        assert len(ack.rejected) == 1
+        assert "usd" in ack.rejected[0].reason
+
+    def test_usd_none_is_still_fine(self, tmp_path: Path) -> None:
+        """None stays a legitimate "no vendor price" value, not a
+        rejection -- only a present-but-invalid usd is rejected."""
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ack = ingest_usage_records(store, "project-A", [_record(usd=None)])
+
+        assert ack.accepted == 1
+        assert ack.rejected == []
+
+
+class TestHeldWithNoTaskIdYet:
+    """A harness that has not yet attributed a call to a task (board-
+    call-log attribution runs after the fact) still has a legitimate
+    "held" record with no task_id -- distinct from "between_tasks" or
+    "controller", which force task_id to None regardless of input."""
+
+    def test_held_with_no_task_id_is_accepted_and_only_in_by_agent(
+        self, tmp_path: Path
+    ) -> None:
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ack = ingest_usage_records(
+            store, "project-A", [_record(attribution="held", task_id=None)]
+        )
+
+        assert ack.accepted == 1
+        row = store.conn.execute(
+            "SELECT task_id, attribution FROM token_events WHERE run_id = ?",
+            ("20261105T213906",),
+        ).fetchone()
+        assert row[0] is None
+        assert row[1] == "held"
+
+        ledger = read_run_ledger(store, "20261105T213906")
+        assert ledger["by_agent"]["Bly_2139"]["calls"] == 1
+        assert ledger["by_task"] == {}
+
+
 class TestReadRunLedger:
     """Test suite for read_run_ledger."""
 
