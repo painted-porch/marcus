@@ -25,6 +25,9 @@ from src.ai.validation.validation_models import (
 )
 from src.core.error_framework import ErrorContext, ProjectRootNotFoundError
 from src.core.resilience import RetryConfig, with_retry
+from src.marcus_mcp.coordinator.task_type_registration import (
+    task_type_registration,
+)
 from src.marcus_mcp.tools.context import get_task_context
 
 logger = logging.getLogger(__name__)
@@ -223,8 +226,41 @@ class WorkAnalyzer:
         # different agent after task recovery.
         evidence = await self.gather_evidence(task, state, agent_id=agent_id)
 
-        # Check if no source files discovered (immediate failure)
+        # Check if no source files discovered (immediate failure) --
+        # unless the project's own ADR-0013 K2 registration declares
+        # this task type as not requiring a source tree at all
+        # (K3, issue #798): a board-only project (Minecraft, an ops
+        # runbook) has no source files by design, which is a different
+        # situation from an agent that wrote nothing. The vocabulary
+        # that used to decide "is this implementation" (should_validate_task's
+        # label set) never had a way to say "and this project has no
+        # code," so a declared project was the only fix that did not
+        # repeat that mistake one layer down. Validated-elsewhere
+        # evidence (artifacts, decisions, an extension's own in-world
+        # check) is not this gate's concern; it passes without
+        # attempting the code-centric pipeline below, which assumes
+        # files to review.
         if not evidence.has_source_files():
+            registration = task_type_registration(
+                getattr(task, "task_type", None) or "",
+                state,
+                getattr(task, "project_id", None),
+            )
+            if registration and registration.get("requires_source_tree") is False:
+                logger.info(
+                    f"Task {task.id} ({getattr(task, 'task_type', None)!r}) is "
+                    "registered as not requiring a source tree (ADR-0013 K3, "
+                    "issue #798); skipping the source-file gate."
+                )
+                return ValidationResult(
+                    passed=True,
+                    issues=[],
+                    ai_reasoning=(
+                        "No source tree required for this registered task "
+                        "type (ADR-0013 K3); not a code-producing task."
+                    ),
+                    validation_time=datetime.utcnow(),
+                )
             duration_ms = int((time.time() - start_time) * 1000)
             logger.warning(
                 f"No source files found for task {task.id} in {evidence.project_root}"

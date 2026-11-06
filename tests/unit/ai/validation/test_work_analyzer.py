@@ -19,6 +19,8 @@ from src.ai.validation.validation_models import (
 )
 from src.ai.validation.work_analyzer import WorkAnalyzer
 
+pytestmark = pytest.mark.unit
+
 
 class TestWorkAnalyzer:
     """Test suite for WorkAnalyzer."""
@@ -513,6 +515,148 @@ The implementation is complete and functional.
             assert len(result.issues) >= 1
             assert "no source files" in result.issues[0].issue.lower()
             # Should fail immediately without calling AI
+
+
+class TestNoSourceTreeRegistration:
+    """ADR-0013 K3 (issue #798): a project can declare a task type as
+    not requiring a source tree, so "no source files" is not read as
+    "the agent wrote nothing" for a board-only project (a Minecraft
+    build, an ops runbook).
+    """
+
+    @pytest.fixture
+    def analyzer(self) -> WorkAnalyzer:
+        with patch("src.ai.validation.work_analyzer.LLMAbstraction"):
+            return WorkAnalyzer()
+
+    async def _registered_state(self, task_type_registrations: dict) -> Mock:
+        from src.core.persistence import MemoryPersistence, Persistence
+        from src.core.project_registry import ProjectConfig, ProjectRegistry
+
+        registry = ProjectRegistry(Persistence(MemoryPersistence()))
+        now = datetime.utcnow()
+        await registry.add_project(
+            ProjectConfig(
+                id="proj-mc",
+                name="minecraft-build",
+                provider="sqlite",
+                provider_config={},
+                created_at=now,
+                last_used=now,
+                task_type_registrations=task_type_registrations,
+            )
+        )
+        state = Mock()
+        state.task_artifacts = {}
+        state.project_registry = registry
+        return state
+
+    def _task(self, task_type: str, project_id: str) -> Mock:
+        task = Mock()
+        task.id = "mc-task-1"
+        task.name = "Build the wall"
+        task.type = task_type
+        task.task_type = task_type
+        task.project_id = project_id
+        task.assigned_to = None
+        return task
+
+    @pytest.mark.asyncio
+    async def test_a_registered_no_source_tree_type_passes_without_source_files(
+        self, analyzer: WorkAnalyzer
+    ) -> None:
+        task = self._task("build", "proj-mc")
+        state = await self._registered_state({"build": {"requires_source_tree": False}})
+        mock_evidence = WorkEvidence(
+            source_files=[],
+            design_artifacts=[],
+            decisions=[],
+            project_root="/fake/minecraft/root",
+        )
+
+        with patch.object(analyzer, "gather_evidence", return_value=mock_evidence):
+            result = await analyzer.validate_implementation_task(task, state)
+
+        assert result.passed is True
+        assert result.issues == []
+
+    @pytest.mark.asyncio
+    async def test_an_unregistered_project_still_fails_as_before(
+        self, analyzer: WorkAnalyzer
+    ) -> None:
+        """No regression: a project that registers nothing keeps the
+        existing fail-on-no-source-files behavior."""
+        task = self._task("build", "proj-mc")
+        state = await self._registered_state({})
+        mock_evidence = WorkEvidence(
+            source_files=[],
+            design_artifacts=[],
+            decisions=[],
+            project_root="/fake/project/root",
+        )
+
+        with patch.object(analyzer, "gather_evidence", return_value=mock_evidence):
+            result = await analyzer.validate_implementation_task(task, state)
+
+        assert result.passed is False
+        assert "no source files" in result.issues[0].issue.lower()
+
+    @pytest.mark.asyncio
+    async def test_a_registered_type_without_the_flag_still_fails(
+        self, analyzer: WorkAnalyzer
+    ) -> None:
+        """A registration that exists but doesn't declare
+        requires_source_tree must not change behavior."""
+        task = self._task("build", "proj-mc")
+        state = await self._registered_state(
+            {"build": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+        mock_evidence = WorkEvidence(
+            source_files=[],
+            design_artifacts=[],
+            decisions=[],
+            project_root="/fake/project/root",
+        )
+
+        with patch.object(analyzer, "gather_evidence", return_value=mock_evidence):
+            result = await analyzer.validate_implementation_task(task, state)
+
+        assert result.passed is False
+
+    @pytest.mark.asyncio
+    async def test_source_files_present_still_run_the_normal_pipeline(
+        self, analyzer: WorkAnalyzer
+    ) -> None:
+        """A registered no-source-tree type with ACTUAL source files
+        (e.g. a mixed project) is unaffected -- the early-return only
+        fires when there are none."""
+        task = self._task("build", "proj-mc")
+        state = await self._registered_state({"build": {"requires_source_tree": False}})
+        mock_evidence = WorkEvidence(
+            source_files=[
+                SourceFile(
+                    path="/fake/project/root/src/app.py",
+                    relative_path="src/app.py",
+                    size_bytes=10,
+                    content="def main(): pass",
+                    has_placeholders=False,
+                    extension=".py",
+                    modified_time=datetime.utcnow(),
+                )
+            ],
+            design_artifacts=[],
+            decisions=[],
+            project_root="/fake/project/root",
+        )
+        mock_ai_response = '{"passed": true, "issues": []}'
+
+        with patch.object(analyzer, "gather_evidence", return_value=mock_evidence):
+            with patch.object(
+                analyzer, "_validate_with_ai", return_value=mock_ai_response
+            ):
+                result = await analyzer.validate_implementation_task(task, state)
+
+        assert result.passed is True
 
 
 class TestGitDeltaEvidence:

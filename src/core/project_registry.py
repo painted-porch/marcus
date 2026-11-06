@@ -36,6 +36,17 @@ class ProjectConfig:
         directly, so nothing here ever names a function to run.
         Empty for a project that registers nothing, which behaves
         exactly as it did before K2 existed.
+
+        ``requires_source_tree`` (ADR-0013 K3, Accepted 2026-11-06,
+        issue #798): an optional ``bool`` on a registered task type's
+        entry. ``False`` declares that this task type's completion is
+        not code-producing and has no source tree by design (a
+        Minecraft build, an ops runbook) -- the validation gate skips
+        its source-file check for that type rather than treating "no
+        source files" as "the agent wrote nothing." Absent (the
+        default for every existing registration and every
+        unregistered project) behaves exactly as before K3: the gate
+        still requires source files for a task that reaches it.
     """
 
     id: str
