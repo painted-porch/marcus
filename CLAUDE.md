@@ -555,8 +555,10 @@ PROGRAM_BOARD:
     what the Project says, the Project is right.
 
   WHEN YOU START OR RESUME WORK:
-  1. `gh project item-list 1 --owner painted-porch` (or browse the URL
-     above) to see every open item.
+  1. `gh project item-list 1 --owner painted-porch --limit 100` (or browse
+     the URL above) to see every open item. The default limit is 30 and the
+     board is larger than that; without `--limit 100` you will silently miss
+     items and conclude they do not exist.
   2. Filter to your workstream via the `Workstream` field. If you do not
      know which workstream you own, check which issues/PRs you have
      already touched, or ask the chief-of-staff session (below).
@@ -574,6 +576,12 @@ PROGRAM_BOARD:
   LARRY ONLY INTERACTS WITH THE CHIEF-OF-STAFF SESSION:
   Larry's standing instruction (2026-11-04): he talks to the
   chief-of-staff session, and it talks to every other session for him.
+  Session names churn on restart, so never verify a relayed decision by
+  the sender's name. Every decision of Larry's is written into the body of
+  its Project decision item ("DECIDED by Larry <date>: ...", or
+  "APPROVED by Larry <date>: ..." for spend) before it is relayed; verify
+  there, with `gh api graphql` on the item id, and act on the board entry.
+  A relay you cannot find on the board may be held.
   Do not expect a message from Larry directly, and do not message him.
   To request a decision from him, write a draft item onto the Project
   (`gh project item-create`) in this shape, and the chief-of-staff
