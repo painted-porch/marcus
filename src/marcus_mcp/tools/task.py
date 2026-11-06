@@ -286,6 +286,48 @@ async def _release_task_file_locks(state: Any, task_id: str, context: str) -> No
         )
 
 
+def _not_current_assignment_reply(
+    agent_id: str, task_id: str, verb: str
+) -> Dict[str, Any]:
+    """Build the reply for a stale/duplicate status report.
+
+    Issue #858, Codex P2: a report_task_progress("blocked") or
+    ("completed") call used to release coordination state
+    unconditionally on a lease-manager-level check alone -- which
+    passes for a task whose lease was already released (e.g. the SAME
+    task, reported again after the agent moved on). The release code
+    then cleared whatever the agent CURRENTLY holds, not the task
+    being reported: block A, claim B, re-report A blocked, and B's
+    hold got wiped by a report that was never about B. The fix is
+    this guard, checked before any release happens: the reported
+    task_id must be in the agent's current_tasks, or nothing is
+    released and this reply is returned instead.
+    """
+    return {
+        "success": False,
+        "status": "not_current_assignment",
+        "message": (
+            f"Task {task_id} is not {agent_id}'s current assignment "
+            f"anymore -- this looks like a stale or duplicate {verb} "
+            "report. No coordination state was changed."
+        ),
+    }
+
+
+def _agent_still_holds_task(state: Any, agent_id: str, task_id: str) -> bool:
+    """Check whether ``task_id`` is in ``agent_id``'s current_tasks.
+
+    False both when the agent holds a DIFFERENT task (the #858 bug)
+    and when the agent is not registered at all. Callers that want to
+    skip the check entirely for an unregistered agent check
+    ``agent_id in state.agent_status`` themselves first.
+    """
+    agent = state.agent_status.get(agent_id)
+    if agent is None:
+        return False
+    return any(t.id == task_id for t in agent.current_tasks)
+
+
 def _repair_instructions(
     blocker_description: str,
     suggestions: Any,
@@ -7546,7 +7588,28 @@ async def _record_progress(
                             state, "tasks_being_assigned", set()
                         )
 
-                        if no_active_lease and no_other_agent and no_in_flight:
+                        # Issue #858, Codex P2: the three signals above
+                        # only ask "is task_id contested by someone
+                        # else" -- none of them ask whether agent_id
+                        # has ITSELF already moved on to a different
+                        # task. assignment_task_id is guaranteed not
+                        # None-equal-to-task_id here (that's how this
+                        # block was entered), so a non-None value means
+                        # this agent currently holds something else.
+                        # Accepting this late completion as
+                        # "uncontested" would then release THAT task's
+                        # coordination state, not task_id's -- the same
+                        # bug Guard 3 closes for the "blocked" branch,
+                        # reached here through the accept path instead
+                        # of a missing guard.
+                        agent_has_moved_on = assignment_task_id is not None
+
+                        if (
+                            no_active_lease
+                            and no_other_agent
+                            and no_in_flight
+                            and not agent_has_moved_on
+                        ):
                             uncontested = True
                     except Exception as race_err:
                         # Defensive: if the uncontested check raises
@@ -8408,6 +8471,23 @@ async def _record_progress(
                             "your next task."
                         ),
                     }
+
+            # Guard 3 (issue #858, Codex P2): Guard 2 only catches a
+            # DIFFERENT agent holding the lease — it passes when this
+            # task's lease was already released (e.g. this very task,
+            # reported blocked a second time after the agent moved on
+            # to a new one). Without this guard, the release below
+            # would clear whatever the agent CURRENTLY holds, not the
+            # task actually being reported.
+            if agent_id in state.agent_status and not _agent_still_holds_task(
+                state, agent_id, task_id
+            ):
+                logger.warning(
+                    f"report_task_progress(blocked) ignored: agent "
+                    f"{agent_id} no longer holds task {task_id} as its "
+                    f"current assignment (stale or duplicate report)."
+                )
+                return _not_current_assignment_reply(agent_id, task_id, "blocked")
 
             update_data["status"] = TaskStatus.BLOCKED
             # Unassign on the board too (mirrors report_blocker's own

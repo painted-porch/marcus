@@ -495,6 +495,50 @@ class TestTransactionalLateCompletionAccept:
         state.kanban_client.update_task.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_rejects_late_completion_when_agent_has_moved_on_to_a_new_task(
+        self,
+    ) -> None:
+        """Issue #858, Codex P2: the task is uncontested by every OTHER
+        signal (no replacement lease, no other agent, nothing in
+        flight), but the reporting agent itself has since been
+        assigned a different task. Accepting this late completion as
+        "uncontested" would release the NEW task's coordination state
+        instead of the one actually being reported — Fix 2's
+        uncontested-accept must not be fooled by this.
+
+        This is the scenario Fix 2's own existing checks don't cover:
+        block/complete task A releases A, the agent claims B, then a
+        stale/duplicate ``completed`` report for A arrives. Every
+        "is A contested by someone else" signal says no — but A is
+        not uncontested from the agent's own point of view, because
+        the agent has moved on.
+        """
+        state = _make_state_with_assignment("agent-001", task_id="task-B")
+        state.lease_manager = Mock()
+        state.lease_manager.extend_for_validation = AsyncMock(return_value=None)
+        # A's lease was already released -- no entry for task-A.
+        state.lease_manager.active_leases = {}
+        # No OTHER agent references task-A either (the only entry in
+        # agent_tasks is agent-001's own, pointing at task-B).
+        # No in-flight assignment.
+        state.tasks_being_assigned = set()
+
+        result = await report_task_progress(
+            agent_id="agent-001",
+            task_id="task-A",
+            status="completed",
+            progress=100,
+            message="stale/duplicate completion for a task already moved past",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "stale_completion"
+        state.kanban_client.update_task.assert_not_called()
+        # B's hold must survive untouched.
+        assert state.agent_tasks["agent-001"].task_id == "task-B"
+
+    @pytest.mark.asyncio
     async def test_rejects_late_completion_when_in_flight_assignment_exists(
         self,
     ) -> None:

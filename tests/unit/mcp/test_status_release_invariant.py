@@ -417,6 +417,173 @@ class TestReportTaskProgressBlockedReleasesCoordination:
         assert not state.agent_status["agent-1"].current_tasks
 
 
+class TestStaleBlockedReportDoesNotClearACurrentTask:
+    """Issue #858, Codex P2: a stale or duplicate ``blocked`` report for
+    a task the agent no longer holds must not clear whatever task the
+    agent has moved on to.
+
+    Sequence: agent blocks task A (releases A's hold, as fixed above),
+    claims task B (current_tasks=[B]), then a retried or delayed
+    ``blocked`` report for A arrives. A has no active lease and is
+    already BLOCKED, so neither existing guard rejects it -- Guard 3
+    is what catches it.
+    """
+
+    def _make_two_task_state(self, task_a: Task, task_b: Task) -> Any:
+        state = MagicMock()
+        state.kanban_client = AsyncMock()
+        state.kanban_client.update_task = AsyncMock()
+        state.kanban_client.add_comment = AsyncMock()
+        state.kanban_client.get_task_by_id = AsyncMock(return_value=task_a)
+        state.project_tasks = [task_a, task_b]
+
+        state.initialize_kanban = AsyncMock()
+
+        # Agent has already moved on: holds B, not A.
+        agent = MagicMock()
+        agent.current_tasks = [task_b]
+        state.agent_status = {"agent-1": agent}
+
+        assignment_b = MagicMock()
+        assignment_b.task_id = task_b.id
+        state.agent_tasks = {"agent-1": assignment_b}
+
+        state.assignment_persistence = AsyncMock()
+        state.assignment_persistence.remove_assignment = AsyncMock()
+
+        lease_b = MagicMock()
+        lease_b.agent_id = "agent-1"
+        state.lease_manager = MagicMock()
+        # A's lease was already released when A was first blocked; only
+        # B's lease is active.
+        state.lease_manager.active_leases = {task_b.id: lease_b}
+        _wire_release_lease(state.lease_manager)
+
+        state.code_analyzer = None
+        state.provider = "sqlite"
+        state.subtask_manager = None
+        state.memory = None
+        state.context = None
+
+        return state
+
+    @pytest.mark.asyncio
+    async def test_a_stale_blocked_report_for_a_does_not_clear_bs_hold(self) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task_a = _make_task("task-a")
+        task_a.status = TaskStatus.BLOCKED  # already blocked from the first report
+        task_b = _make_task("task-b")
+        state = self._make_two_task_state(task_a, task_b)
+
+        result = await report_task_progress(
+            agent_id="agent-1",
+            task_id="task-a",
+            status="blocked",
+            progress=30,
+            message="Stale retry of the first blocked report",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "not_current_assignment"
+        assert state.agent_status["agent-1"].current_tasks == [task_b], (
+            "A stale blocked report for A must not clear B from "
+            "current_tasks -- B is what the agent actually holds now."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_stale_blocked_report_for_a_does_not_clear_bs_agent_tasks(
+        self,
+    ) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task_a = _make_task("task-a")
+        task_a.status = TaskStatus.BLOCKED
+        task_b = _make_task("task-b")
+        state = self._make_two_task_state(task_a, task_b)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id="task-a",
+            status="blocked",
+            progress=30,
+            message="Stale retry",
+            state=state,
+        )
+
+        assert "agent-1" in state.agent_tasks
+        assert state.agent_tasks["agent-1"].task_id == "task-b"
+
+    @pytest.mark.asyncio
+    async def test_a_stale_blocked_report_for_a_does_not_touch_persistence(
+        self,
+    ) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task_a = _make_task("task-a")
+        task_a.status = TaskStatus.BLOCKED
+        task_b = _make_task("task-b")
+        state = self._make_two_task_state(task_a, task_b)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id="task-a",
+            status="blocked",
+            progress=30,
+            message="Stale retry",
+            state=state,
+        )
+
+        state.assignment_persistence.remove_assignment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_stale_blocked_report_for_a_does_not_touch_bs_lease(self) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task_a = _make_task("task-a")
+        task_a.status = TaskStatus.BLOCKED
+        task_b = _make_task("task-b")
+        state = self._make_two_task_state(task_a, task_b)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id="task-a",
+            status="blocked",
+            progress=30,
+            message="Stale retry",
+            state=state,
+        )
+
+        assert "task-b" in state.lease_manager.active_leases
+
+    @pytest.mark.asyncio
+    async def test_the_one_task_per_agent_guard_still_refuses_a_second_pull(
+        self,
+    ) -> None:
+        """End-to-end within the mocked state: after the stale report,
+        current_tasks is unchanged ([task_b]), so request_next_task's
+        own guard (`if agent.current_tasks:`) is still truthy and would
+        still refuse a second pull -- the exact bypass Codex named."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task_a = _make_task("task-a")
+        task_a.status = TaskStatus.BLOCKED
+        task_b = _make_task("task-b")
+        state = self._make_two_task_state(task_a, task_b)
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id="task-a",
+            status="blocked",
+            progress=30,
+            message="Stale retry",
+            state=state,
+        )
+
+        assert bool(state.agent_status["agent-1"].current_tasks) is True
+
+
 class TestCompletionReleasesLeaseEvenOnMergeFailure:
     """``report_progress(status=completed)`` must release the lease even when
     the worktree merge subsequently fails.
@@ -570,3 +737,72 @@ class TestCompletionReleasesLeaseEvenOnMergeFailure:
             "completed_tasks_count must be 1 after a failed merge — "
             "the agent completed the work even though the git merge failed."
         )
+
+
+class TestStaleCompletedReportDoesNotClearACurrentTask:
+    """Issue #858, Codex P2: the same rule the ``blocked`` branch's
+    Guard 3 follows, applied to ``completed`` -- it had the identical
+    gap (no check that the reported task matches what the agent
+    currently holds before releasing coordination state)."""
+
+    @pytest.mark.asyncio
+    async def test_a_stale_completed_report_for_a_does_not_clear_bs_hold(
+        self,
+    ) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task_a = _make_task("task-a")
+        task_b = _make_task("task-b")
+
+        state = MagicMock()
+        state.kanban_client = AsyncMock()
+        state.kanban_client.update_task = AsyncMock()
+        state.kanban_client.get_task_by_id = AsyncMock(return_value=task_a)
+        state.project_tasks = [task_a, task_b]
+        state.initialize_kanban = AsyncMock()
+
+        # Agent has moved on: holds B, not A.
+        agent = MagicMock()
+        agent.current_tasks = [task_b]
+        state.agent_status = {"agent-1": agent}
+
+        assignment_b = MagicMock()
+        assignment_b.task_id = "task-b"
+        state.agent_tasks = {"agent-1": assignment_b}
+
+        state.assignment_persistence = AsyncMock()
+        state.assignment_persistence.remove_assignment = AsyncMock()
+
+        lease_b = MagicMock()
+        state.lease_manager = MagicMock()
+        state.lease_manager.active_leases = {"task-b": lease_b}
+        _wire_release_lease(state.lease_manager)
+
+        state.code_analyzer = None
+        state.provider = "sqlite"
+        state.subtask_manager = None
+        state.memory = None
+        state.context = None
+
+        result = await report_task_progress(
+            agent_id="agent-1",
+            task_id="task-a",
+            status="completed",
+            progress=100,
+            message="Stale/duplicate completion for a task already moved past",
+            state=state,
+        )
+
+        # Rejected by the existing stale-completion gate (issue #343 /
+        # #667 Fix 2) -- the "uncontested late completion" acceptance
+        # now also requires that the agent has NOT moved on to a
+        # different current assignment, so it correctly falls through
+        # to the pre-existing stale_completion rejection instead of
+        # accepting and wiping B's hold.
+        assert result["success"] is False
+        assert result["status"] == "stale_completion"
+        assert state.agent_status["agent-1"].current_tasks == [task_b]
+        assert "agent-1" in state.agent_tasks
+        assert state.agent_tasks["agent-1"].task_id == "task-b"
+        state.assignment_persistence.remove_assignment.assert_not_awaited()
+        assert "task-b" in state.lease_manager.active_leases
