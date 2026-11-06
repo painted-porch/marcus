@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K12 and K13 accepted 2026-11-05**; the other nine remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05**; the other seven remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -71,7 +71,9 @@ Cheaper now, and it leaves the software assumptions in the core where three of f
 
 ### K2 — How an extension registers
 
-**Recommendation.** An extension declares, per project, a named set of task types it serves and, for each, the evidence it requires and whether checks may be injected.
+**Accepted 2026-11-05 (Lawrence Gray).**
+
+**Decision.** An extension declares, per project, a named set of task types it serves and, for each, the evidence it requires and whether checks may be injected.
 Dispatch is pull, not call: the kernel never invokes an extension's code directly; it gates a task of the declared type and offers it on the board, and the extension's own agent, scoped to its project by the registration, claims it through `request_next_task` like any other agent and reports its verdict as evidence.
 Registration is board state, not configuration, so the record of what verified a project is in the project.
 
@@ -125,7 +127,9 @@ An opinion is a dated observation, not a claim about a deliverable.
 
 ### K5 — A terminal declined outcome
 
-**Recommendation.** The kernel gains a terminal state for "this could not be verified", distinct from done, from failed, and from worker-reported blocked.
+**Accepted 2026-11-05 (Lawrence Gray).**
+
+**Decision.** The kernel gains a terminal state for "this could not be verified", distinct from done, from failed, and from worker-reported blocked.
 
 **Evidence.** Two consumers need it and neither can express it.
 The citation verifier has `unverifiable` with a `decline_reason`, which "counts as declined, never as correct", inside its own evidence vocabulary only.
