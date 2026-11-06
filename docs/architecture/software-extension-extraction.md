@@ -227,6 +227,8 @@ This document's cost-tracking concern scoped the *same deliverable* plus two add
 Adding K8's full 6-8-day total (covering all three consequences) to this document's estimate therefore counted the shipped transport twice.
 Fixed here by stating this concern's remaining 3-5 days as what is left *after* PR #867, and by not re-adding K8 consequence 3's own days separately in the summary below — see the corrected total.
 
+**Not part of this concern, found while investigating issue #883:** `_store_config_snapshot` (`src/marcus_mcp/tools/nlp.py:179`) also writes to `marcus.db`, but into its own unrelated `project_config` collection (project-creation-time AI/model/provider metadata, not `token_events`), lives outside `src/cost_tracking/` entirely, and is provider-agnostic (captures `cfg.ai.provider`/`model`/`temperature` as data, with no hardcoded vendor parsing) — so it changes none of this section's estimates or its vendor-coupling table, it just completes the "what lives where" picture for whoever starts this extraction.
+
 ---
 
 ## 5. Complete kernel/extension marking of `task.py`
