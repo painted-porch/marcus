@@ -244,6 +244,58 @@ class TestCategorizeV2:
 
         assert categorize(record, TRUTH) == categorize_v2(record, TRUTH)
 
+    def test_network_match_with_a_wrong_date_is_not_promoted(self) -> None:
+        """Codex P2 on PR #833: a known network pairing is not proof by itself.
+
+        A publisher-name match on the known-network table only
+        confirms the TWO OUTLETS have a documented relationship; it
+        says nothing about whether THIS specific cited article is
+        the right one. An engine could cite a real sister-site
+        outlet while naming a wrong, unrelated article -- the date
+        field is the one independently-checkable signal that catches
+        that: a genuine republication of the same event does not
+        carry a contradicted date. If the date is present and wrong,
+        v2 must not promote; it stays exactly as v1 scored it.
+        """
+        record = _record(
+            {
+                "publisher": "South Dakota Searchlight",
+                "date": "1990-01-01",
+                "url": "https://example.com/nonexistent-unrelated-article",
+            }
+        )
+        truth = {
+            "publication": "Missouri Independent",
+            "date": "2024-05-29",
+            "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+        }
+
+        v1 = categorize(record, truth)
+        assert v1 in ("partially incorrect", "completely incorrect")
+        assert categorize_v2(record, truth) == v1
+
+    def test_network_match_with_no_claimed_date_is_still_promoted(self) -> None:
+        """A missing date is not a contradicted date.
+
+        Many engines simply omit the date field; that is not
+        evidence of a wrong article, so it must not block the
+        promotion the way an explicitly wrong date does.
+        """
+        record = _record(
+            {
+                "publisher": "South Dakota Searchlight",
+                "date": "",
+                "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+            }
+        )
+        truth = {
+            "publication": "Missouri Independent",
+            "date": "2024-05-29",
+            "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+        }
+
+        assert categorize_v2(record, truth) == "correct"
+
     def test_correct_and_declined_records_are_unaffected(self) -> None:
         """v2 cannot change an answer that v1 already scored correct or declined."""
         correct_record = _record(

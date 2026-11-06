@@ -16,8 +16,8 @@ The live study, case by case, is at https://marcus-ai.dev/on-the-record/.
 | C | The verifier bolted onto A as a post-hoc filter, no board | about 9.5% | 0% | about 83% |
 
 **Dated note, 2026-11-05:** the table above is left exactly as published, scored under the rule in force when it was run.
-A board decision that day (Marcus Program, OPTION B) adopted a new rule for verifier v2 going forward: a citation confirmed as a faithful republication on a documented sister-site or wire-syndication network now scores as correct, not wrong.
-Re-scoring row B's result under that new rule would move it from about 12.1% to about 8.5% (5 of the 141 delivered answers), not from any change to the published numbers themselves.
+A board decision that day (Marcus Program, OPTION B) adopted a new rule for verifier v2 going forward: a citation confirmed as a faithful republication on a documented sister-site or wire-syndication network now scores as correct, not wrong, provided the claim's own date does not independently contradict the truth (a network match is not proof the cited article is the right one, so a wrong date still fails it).
+Re-scoring row B's result under that new rule would move it from about 12.1% to about 9.2% (4 of the 141 delivered answers), not from any change to the published numbers themselves.
 Run `tow_grader.py` with `--scoring-version v2` to see the new rule applied; the default (`v1`, what produced the table above) never changes.
 
 The wrong-answer rates are among answers actually delivered.

@@ -264,6 +264,23 @@ def categorize_v2(record: AnswerRecord, truth: Dict[str, str]) -> str:
     board decision treats as a separate, smaller question and are
     left exactly as :func:`categorize` scored them.
 
+    A network pairing on its own is not proof the CITED ARTICLE is
+    the right one (Codex P2 on PR #833): it only confirms the two
+    outlets have a documented relationship, which an engine could in
+    principle attach to a wrong or unrelated citation. The date field
+    is the one independently-checkable signal this zero-cost,
+    no-fetch function has to catch that: if the claim's date is
+    present and contradicts the truth (outside
+    :func:`date_within_tolerance`), that is real evidence the cited
+    article may not be the same event, and the promotion is refused.
+    A missing date is not treated as a contradiction. This still
+    cannot fully confirm article identity without a live fetch --
+    for Condition B specifically, every delivered (non-declined)
+    answer already passed the live verifier's excerpt-on-page fetch
+    check at scoring time, which is the real backing this rule
+    leans on; a condition with no such fetch (A, or the bolted-on
+    filter C) gets only the date check's weaker protection.
+
     Parameters
     ----------
     record : AnswerRecord
@@ -275,16 +292,20 @@ def categorize_v2(record: AnswerRecord, truth: Dict[str, str]) -> str:
     -------
     str
         One of :data:`CATEGORIES`. ``"correct"`` when v1 scored the
-        answer wrong AND a confirmed known-network match explains
-        it; otherwise identical to :func:`categorize`'s result.
+        answer wrong, a confirmed known-network match explains it,
+        and the claim's date (if present) does not contradict the
+        truth; otherwise identical to :func:`categorize`'s result.
     """
     category = categorize(record, truth)
     if category not in ("partially incorrect", "completely incorrect"):
         return category
     label = syndication_label(record, truth)
-    if label is not None and label.startswith("known_republication:"):
-        return "correct"
-    return category
+    if label is None or not label.startswith("known_republication:"):
+        return category
+    _, date_ok, _ = _attribute_states(record.answer or {}, truth)
+    if date_ok is False:
+        return category
+    return "correct"
 
 
 def url_is_fabricated(
