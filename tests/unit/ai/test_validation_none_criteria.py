@@ -16,8 +16,20 @@ class TestValidationNoneCriteria:
 
     @pytest.fixture
     def work_analyzer(self):
-        """Create WorkAnalyzer instance."""
-        return WorkAnalyzer()
+        """Create WorkAnalyzer instance.
+
+        WorkAnalyzer.__init__ unconditionally constructs a real
+        LLMAbstraction(), which calls get_config() and raises if no
+        config_marcus.json or CLAUDE_API_KEY is present -- a real
+        filesystem/environment dependency this "unit" test must not
+        have (the #857 class of bug in a different costume: Codex
+        review on PR #874 caught this passing only because a config
+        file or an earlier test's cached config happened to be
+        present, order-dependent and worktree-dependent). Patched the
+        same way test_work_analyzer.py's own fixtures already do.
+        """
+        with patch("src.ai.validation.work_analyzer.LLMAbstraction"):
+            return WorkAnalyzer()
 
     @pytest.fixture
     def task_with_none_criteria(self):
