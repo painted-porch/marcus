@@ -85,7 +85,7 @@ class TestCoverage:
         """Every figure declared gives complete coverage."""
         write(
             workspace,
-            "The overall score was 0.9.",
+            "The overall score was 0.9 [c1].",
             [
                 {
                     "id": "c1",
@@ -106,7 +106,7 @@ class TestCoverage:
         """A number with no claim is a failure of the report."""
         write(
             workspace,
-            "The overall score was 0.9, and cotton reached 0.44.",
+            "The overall score was 0.9 [c1], and cotton reached 0.44.",
             [
                 {
                     "id": "c1",
@@ -271,7 +271,7 @@ class TestCodexFindingStagedIntegrity:
         _stage_hashes(workspace)
         write(
             workspace,
-            "The overall score was 0.9.",
+            "The overall score was 0.9 [c1].",
             [
                 {
                     "id": "c1",
@@ -328,7 +328,7 @@ class TestCodexFindingStagedIntegrity:
         verify normally -- there is nothing to check tampering against."""
         write(
             workspace,
-            "The overall score was 0.9.",
+            "The overall score was 0.9 [c1].",
             [
                 {
                     "id": "c1",

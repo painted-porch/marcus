@@ -375,7 +375,7 @@ class TestCoverage:
             key="r2_overall",
             kind="lookup",
         )
-        report = "R2 was 0.858 and the hidden figure is 0.999."
+        report = "R2 was 0.858 [c1] and the hidden figure is 0.999."
         res = check_claims([c], sources, report_text=report)
         uncovered = [r for r in res if r.verdict == "uncovered"]
         assert len(uncovered) == 1
@@ -854,7 +854,7 @@ class TestCodexFindingNegativeSigns:
             kind="lookup",
             tolerance={"type": "abs", "value": 1.0},
         )
-        res = check_claims([c], sources, report_text="The bias was -0.5.")
+        res = check_claims([c], sources, report_text="The bias was -0.5 [c1].")
         uncovered = [r for r in res if r.verdict == "uncovered"]
         assert uncovered == []
 
@@ -905,7 +905,7 @@ class TestCodexFindingRequiredClaimsDontGrantCoverage:
             key="r2_overall",
             kind="lookup",
         )
-        res = check_report([c], sources, report_text="R2 was 0.858.")
+        res = check_report([c], sources, report_text="R2 was 0.858 [c1].")
         uncovered = [r for r in res if r.verdict == "uncovered"]
         assert uncovered == []
 
@@ -1025,7 +1025,9 @@ class TestHaikuSmokeFindingRoundedRestatement:
             key="crop=maize:r2",
             kind="lookup",
         )
-        res = check_claims([c], sources, report_text="Maize R2 exceeds 0.48 overall.")
+        res = check_claims(
+            [c], sources, report_text="Maize R2 exceeds 0.48 [c8] overall."
+        )
         assert [r for r in res if r.verdict == "uncovered"] == []
 
 
@@ -1294,3 +1296,125 @@ class TestCodexFindingSlideTitleFiguresAreChecked:
             ]
         }
         assert check_slide_spec(spec, accepted, {"c1": "overall R2"}) == []
+
+
+class TestMandatoryClaimTagBinding:
+    """Coverage binds to the claim a figure is explicitly tagged with.
+
+    #827: value-only coverage let a figure borrow any claim sharing
+    its number, including the wrong one (a correct maize R2 covering
+    a false claim about cotton's R2, if the two happen to share a
+    value). WRITER_INSTRUCTIONS now requires every figure to carry a
+    [cN] tag naming its own claim; coverage resolves that tag to a
+    specific claim and checks the figure against only that claim's
+    value, not the whole claimed-value set.
+    """
+
+    @pytest.mark.unit
+    def test_untagged_figure_is_uncovered_even_with_a_matching_claim(self, sources):
+        """A figure with no tag fails, even if some claim has its value."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        res = check_claims([c], sources, report_text="R2 was 0.858.")
+        uncovered = [r for r in res if r.verdict == "uncovered"]
+        assert len(uncovered) == 1
+        assert "no claim tag" in uncovered[0].detail
+
+    @pytest.mark.unit
+    def test_tag_naming_a_nonexistent_claim_is_uncovered(self, sources):
+        """A tag that doesn't resolve to any declared claim fails."""
+        res = check_claims([], sources, report_text="R2 was 0.858 [c9].")
+        uncovered = [r for r in res if r.verdict == "uncovered"]
+        assert len(uncovered) == 1
+        assert "c9" in uncovered[0].detail
+
+    @pytest.mark.unit
+    def test_wrong_number_under_the_right_tag_is_a_value_mismatch(self, sources):
+        """A stated figure that disagrees with its own tagged claim fails.
+
+        This is the half of #827 that tag-binding alone closes: the
+        figure's value must match the value of the specific claim it
+        is tagged with, not any claim sharing that number. Catching a
+        number that is correct in VALUE but attributed to the wrong
+        LABEL in the surrounding prose (the full maize/cotton example
+        in #827) is the harder, separately-tracked second half.
+        """
+        c = Claim(
+            id="c1",
+            value=0.585,
+            label="cotton R2",
+            source="per_crop.csv",
+            key="crop=cotton:r2",
+            kind="lookup",
+        )
+        res = check_claims([c], sources, report_text="Cotton's R2 is 0.886 [c1].")
+        failed = [r for r in res if r.verdict == "failed"]
+        assert len(failed) == 1
+        assert failed[0].reason == "value_mismatch"
+        assert failed[0].expected == 0.585
+
+    @pytest.mark.unit
+    def test_a_claim_value_elsewhere_does_not_rescue_a_mistagged_figure(self, sources):
+        """A wrong figure cannot be excused by a different, correct claim
+        happening to share the same tag's expected value elsewhere."""
+        maize = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+            kind="lookup",
+        )
+        cotton = Claim(
+            id="c2",
+            value=0.585,
+            label="cotton R2",
+            source="per_crop.csv",
+            key="crop=cotton:r2",
+            kind="lookup",
+        )
+        report = "Maize R2 is 0.886 [c1]. Cotton's R2 is 0.886 [c2]."
+        res = check_claims([maize, cotton], sources, report_text=report)
+        failed = [
+            r for r in res if r.verdict == "failed" and r.reason == "value_mismatch"
+        ]
+        assert len(failed) == 1
+        assert failed[0].claim_id == "c2"
+
+    @pytest.mark.unit
+    def test_correctly_tagged_figure_is_covered(self, sources):
+        """The ordinary case: a figure tagged with its own, matching claim."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        res = check_claims([c], sources, report_text="R2 was 0.858 [c1].")
+        assert [r for r in res if r.verdict in ("uncovered", "failed")] == []
+
+    @pytest.mark.unit
+    def test_an_orphan_tag_with_no_preceding_number_is_ignored(self, sources):
+        """A stray [cN] with no number before it binds to nothing."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        res = check_claims(
+            [c],
+            sources,
+            report_text="See claim [c1] for the overall R2 of 0.858 [c1].",
+        )
+        assert [r for r in res if r.verdict in ("uncovered", "failed")] == []

@@ -57,11 +57,18 @@ Write for a reader who will act on it. Use the units the data gives:
 different crops are reported in different units and the per_crop table
 states which. Do not invent context the data does not support.
 
+EVERY number in report.md must be followed immediately by the tag of
+the claim that backs it, in brackets: "0.481 [c1]". This is how a
+number in the prose is checked against the right claim, not just any
+claim that happens to share its value. Put the tag right after the
+number, before any punctuation: "maize R2 is 0.481 [c1]."
+
 == 2. claims.json ==
 
 EVERY number appearing in report.md must have a claim here. A number in
-the report with no claim behind it is a failure of the report, so keep
-the two in step as you write. Do not state a number you cannot address.
+the report with no claim behind it, or with no [cN] tag next to it in
+the text, is a failure of the report, so keep the two in step as you
+write. Do not state a number you cannot address.
 
 The file is a JSON object: {"claims": [ ... ]}
 
@@ -92,13 +99,15 @@ ADDRESSES
 
 WORKED EXAMPLES
 
-  A figure read straight from a file:
+  A figure read straight from a file. In report.md: "Maize R2 is
+  0.481 [c1]." In claims.json:
 
     {"id": "c1", "value": 0.481, "label": "maize R2",
      "kind": "lookup", "source": "per_crop.csv", "key": "crop=maize:r2"}
 
   A figure you worked out yourself. State the tolerance you intend,
-  because a rounded figure is checked against the exact recomputation:
+  because a rounded figure is checked against the exact recomputation.
+  In report.md: "Maize outnumbers cotton 19.9x [c2]." In claims.json:
 
     {"id": "c2", "value": 19.9, "label": "maize to cotton record ratio",
      "kind": "derived", "expr": "a / b",
@@ -108,7 +117,8 @@ WORKED EXAMPLES
 
 RULES
 
-  - Every number in report.md has exactly one claim.
+  - Every number in report.md has exactly one claim, tagged inline
+    with that claim's id in brackets right after the number.
   - Any figure you compute, round, or combine is "derived", never
     "lookup". Rounding a value makes it derived, and it needs a
     tolerance wide enough to cover the rounding you did.

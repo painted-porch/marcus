@@ -28,7 +28,7 @@ import operator
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 VERDICT_VERIFIED = "verified"
 VERDICT_FAILED = "failed"
@@ -648,6 +648,86 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
     )
 
 
+def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
+    """Pair each figure in report prose with the claim id tagged after it.
+
+    A number is bound to the next ``[cN]`` tag that appears before any
+    other number, which is how a writer tags a figure immediately
+    after stating it ("0.481 [c1]"). A number with no tag before the
+    next number, or before the text ends, is untagged.
+
+    Parameters
+    ----------
+    text : str
+        Report prose.
+
+    Returns
+    -------
+    List[Tuple[str, Optional[str]]]
+        ``(figure, claim_id)`` pairs in order of appearance;
+        ``claim_id`` is ``None`` when the figure carries no tag.
+    """
+    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", text or "")
+    tokens: List[Tuple[int, str, str]] = []
+    for m in _NUMBER_RE.finditer(cleaned):
+        tokens.append((m.start(), "num", m.group(1)))
+    for m in _CLAIM_REF_RE.finditer(cleaned):
+        tokens.append((m.start(), "ref", m.group(1)))
+    tokens.sort(key=lambda t: t[0])
+
+    pairs: List[Tuple[str, Optional[str]]] = []
+    pending_value: Optional[str] = None
+    for _, kind, val in tokens:
+        if kind == "num":
+            if pending_value is not None:
+                pairs.append((pending_value, None))
+            pending_value = val
+        elif pending_value is not None:
+            pairs.append((pending_value, val))
+            pending_value = None
+        # else: a tag with no preceding unbound number -- ignore it.
+    if pending_value is not None:
+        pairs.append((pending_value, None))
+    return pairs
+
+
+def _figure_matches_claim_value(figure: str, value: Any) -> bool:
+    """Check a report figure against one claim's value, rounding-tolerant.
+
+    Parameters
+    ----------
+    figure : str
+        The figure exactly as it appears in the report text.
+    value : Any
+        The claim's declared value.
+
+    Returns
+    -------
+    bool
+        True when the figure is the same number as the claim's value,
+        allowing for prose restating it at coarser rounding (0.481
+        written as "0.48" later is still the same figure).
+    """
+    candidates = {str(value)}
+    coerced = _coerce(value)
+    if isinstance(coerced, float):
+        candidates.add(f"{coerced:g}")
+        if coerced.is_integer():
+            candidates.add(str(int(coerced)))
+            candidates.add(f"{int(coerced):,}")
+        else:
+            for places in range(4):
+                candidates.add(f"{round(coerced, places):g}")
+    normalized = figure.replace(",", "")
+    if figure in candidates or normalized in candidates:
+        return True
+    try:
+        as_float = float(normalized)
+    except ValueError:
+        return False
+    return f"{as_float:g}" in candidates
+
+
 def check_claims(
     claims: Sequence[Claim],
     sources: Dict[str, Any],
@@ -663,62 +743,69 @@ def check_claims(
     sources : Dict[str, Any]
         Output of :func:`load_sources`.
     report_text : Optional[str]
-        When given, every figure in the text must be covered by a
-        claim; uncovered figures are returned as their own results.
+        When given, every figure in the text must carry a ``[cN]`` tag
+        naming the claim that backs it, and that claim's value must
+        match; uncovered and mismatched figures are returned as their
+        own results.
     coverage_claims : Optional[Sequence[Claim]]
-        Which claims may grant coverage of a figure in the text.
-        Defaults to ``claims`` itself. :func:`check_report` passes
-        only the writer's own declared claims here, never the
-        harness-injected required checks: a required check sharing a
-        value with a bare figure in the prose (e.g. a consistency
-        claim of ``100`` and a report saying "100%") must not let a
-        writer skip declaring that figure as its own claim.
+        Which claims a figure's tag may reference. Defaults to
+        ``claims`` itself. :func:`check_report` passes only the
+        writer's own declared claims here, never the harness-injected
+        required checks -- a required check is never something a
+        writer could tag, since the writer never sees its id.
 
     Returns
     -------
     List[CheckResult]
-        One result per claim, followed by one per uncovered figure.
+        One result per claim, followed by one per uncovered or
+        wrongly-tagged figure.
     """
     results = [_check_one(c, sources) for c in claims]
     if report_text is None:
         return results
 
-    stated = set()
-    for c in coverage_claims if coverage_claims is not None else claims:
-        stated.add(str(c.value))
-        coerced = _coerce(c.value)
-        if isinstance(coerced, float):
-            stated.add(f"{coerced:g}")
-            if coerced.is_integer():
-                stated.add(str(int(coerced)))
-                stated.add(f"{int(coerced):,}")
-            else:
-                # A claim may be restated in prose at coarser
-                # rounding than it was declared at -- 0.481 written
-                # as "0.48" in a later section is still the same
-                # figure, not a new, unclaimed one. Covers rounding
-                # to 0-3 decimal places, which spans the precision
-                # these reports actually use.
-                for places in range(4):
-                    stated.add(f"{round(coerced, places):g}")
-    for figure in extract_numbers(report_text):
-        normalized = figure.replace(",", "")
-        if figure in stated or normalized in stated:
-            continue
-        try:
-            as_float = float(normalized)
-        except ValueError:
-            continue
-        if f"{as_float:g}" in stated:
-            continue
-        results.append(
-            CheckResult(
-                claim_id=f"uncovered:{figure}",
-                verdict=VERDICT_UNCOVERED,
-                value=figure,
-                detail=f"figure {figure} appears in the report with no claim",
+    coverage_lookup = {
+        c.id: c for c in (coverage_claims if coverage_claims is not None else claims)
+    }
+    for figure, ref_id in _tag_figures(report_text):
+        if ref_id is None:
+            results.append(
+                CheckResult(
+                    claim_id=f"uncovered:{figure}",
+                    verdict=VERDICT_UNCOVERED,
+                    value=figure,
+                    detail=f"figure {figure} appears in the report with no claim tag",
+                )
             )
-        )
+            continue
+        claim = coverage_lookup.get(ref_id)
+        if claim is None:
+            results.append(
+                CheckResult(
+                    claim_id=f"uncovered:{figure}",
+                    verdict=VERDICT_UNCOVERED,
+                    value=figure,
+                    detail=(
+                        f"figure {figure} is tagged [{ref_id}], which is not "
+                        f"a declared claim"
+                    ),
+                )
+            )
+            continue
+        if not _figure_matches_claim_value(figure, claim.value):
+            results.append(
+                CheckResult(
+                    claim_id=ref_id,
+                    verdict=VERDICT_FAILED,
+                    value=figure,
+                    expected=claim.value,
+                    reason="value_mismatch",
+                    detail=(
+                        f"figure {figure} is tagged [{ref_id}], but that "
+                        f"claim's value is {claim.value}"
+                    ),
+                )
+            )
     return results
 
 
