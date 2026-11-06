@@ -1878,3 +1878,176 @@ class TestCodexFindingArithmeticBlowupsDoNotCrashTheRun:
         res = check_claims([c], sources)
         assert len(res) == 1
         assert res[0].verdict == "unresolvable"
+
+
+class TestCodexFindingUnicodeNumericForms:
+    """A model can write a number's sign, digits, or grouping in
+    several Unicode forms the ASCII-only extractor missed entirely.
+
+    Codex's exact demonstration: "Overall R2 is -0.481 [c1]." written
+    with the Unicode MINUS SIGN (U+2212), not the ASCII hyphen,
+    against a claim and source value of 0.481. The old extractor
+    never recognized U+2212 as part of a number at all, so the
+    figure it saw was the unsigned "0.481" -- a match, full coverage,
+    no mismatch -- even though the report states the opposite sign.
+    The same extractor backs slide-title checking through
+    ``extract_numbers``, so the same bug let a wrong-signed title
+    figure through there too.
+
+    Swept in the same change, since this is the first finding about
+    the text layer rather than the JSON layer: every other Unicode
+    form a model might write a number in, with a decision recorded
+    for each.
+
+    - U+2212 minus, U+FE63 small hyphen-minus, U+FF0D fullwidth
+      hyphen-minus: always a sign, normalized to ASCII '-'.
+    - U+2013 en dash, U+2014 em dash: normalized to '-' only when
+      immediately before a digit, so "10-20" (prose range) still
+      reads as two figures and is not swallowed as a negative one --
+      the existing extractor's own word-boundary rule already
+      guarantees this once the dash becomes a hyphen.
+    - Fullwidth digits (U+FF10-U+FF19): normalized to ASCII digits,
+      so a fullwidth-written figure's captured text is consistent
+      with everything downstream that treats it as a plain string.
+    - Thousands grouping with U+00A0 (no-break space) or U+202F
+      (narrow no-break space) between digit groups: normalized to a
+      comma, joining the groups the same way the existing
+      comma-grouped pattern already does.
+    - Per-mille (U+2030): already tokenizes correctly with no change,
+      the same way '%' already does -- neither is a word character,
+      so the existing word-boundary lookahead already excludes it
+      from the figure.
+    - Superscript digits (category "No", not "Nd"): deliberately NOT
+      normalized to plain digits. Python's \\d already excludes them,
+      and normalizing "10²" (ten squared) into the literal digit
+      string "102" would silently fabricate a wrong figure -- worse
+      than the status quo of not recognizing exponent notation at
+      all, which this trial's writer does not use.
+    - A European decimal comma ("0,481" meaning 0.481): explicitly
+      NOT handled. This trial's writer prompt and staged data are
+      English/US-formatted (period decimal, comma thousands), and
+      distinguishing a decimal comma from the existing comma-grouped
+      thousands pattern from text shape alone is not reliable --
+      attempting it risks corrupting the comma-grouping case that is
+      already in real use. A known, accepted limitation, not a bug
+      this change fixes.
+    """
+
+    @pytest.mark.unit
+    def test_unicode_minus_sign_is_extracted_with_its_sign(self):
+        """Codex's own character: U+2212, not the ASCII hyphen."""
+        assert extract_numbers("R2 is −0.481.") == ["-0.481"]
+
+    @pytest.mark.unit
+    def test_a_sign_flip_under_a_unicode_minus_is_caught_end_to_end(self, staged):
+        """Codex's full sentence, against a real source and claim."""
+        (staged / "metrics.json").write_text(
+            json.dumps({"n_records": 1200, "r2_overall": 0.481})
+        )
+        sources = load_sources(staged)
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        res = check_claims([c], sources, report_text="Overall R2 is −0.481 [c1].")
+        bad = [r for r in res if r.verdict in ("failed", "uncovered")]
+        assert bad != []
+
+    @pytest.mark.unit
+    def test_a_sign_flip_in_a_slide_title_is_caught(self):
+        """The same bug through the slide-title path: a positive
+        claim does not back a negative-signed title figure."""
+        spec = {
+            "slides": [
+                {
+                    "title": "Bias is −0.481",
+                    "cells": [{"value": 0.481, "claim": "c1", "label": "bias"}],
+                }
+            ]
+        }
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.481, label="bias"
+            )
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "bias"})
+        assert any("title states -0.481" in p for p in problems)
+
+    @pytest.mark.unit
+    def test_small_hyphen_minus_is_normalized(self):
+        """U+FE63, a compatibility form, is also always a sign."""
+        assert extract_numbers("Bias is ﹣0.5.") == ["-0.5"]
+
+    @pytest.mark.unit
+    def test_fullwidth_hyphen_minus_is_normalized(self):
+        """U+FF0D, a compatibility form, is also always a sign."""
+        assert extract_numbers("Bias is －0.5.") == ["-0.5"]
+
+    @pytest.mark.unit
+    def test_en_dash_immediately_before_a_digit_is_a_minus_sign(self):
+        """U+2013 before a digit, with a word boundary before it."""
+        assert extract_numbers("Bias is –0.5.") == ["-0.5"]
+
+    @pytest.mark.unit
+    def test_em_dash_immediately_before_a_digit_is_a_minus_sign(self):
+        """U+2014 before a digit, with a word boundary before it."""
+        assert extract_numbers("Bias is —0.5.") == ["-0.5"]
+
+    @pytest.mark.unit
+    def test_an_en_dash_range_is_not_misread_as_a_negative_number(self):
+        """ "10-20" (a prose range) must still read as two figures,
+        not one figure and a sign error, because the dash in a range
+        is never at a number's own word boundary."""
+        assert extract_numbers("Values ranged 10–20 overall.") == [
+            "10",
+            "20",
+        ]
+
+    @pytest.mark.unit
+    def test_fullwidth_digits_are_normalized_to_ascii(self):
+        """A figure written entirely in fullwidth digits is still one
+        recognizable, ASCII-stringed figure."""
+        assert extract_numbers("Accuracy is ０.９９.") == ["0.99"]
+
+    @pytest.mark.unit
+    def test_a_nbsp_grouped_thousands_figure_is_joined(self):
+        """U+00A0 between digit groups is a thousands separator, the
+        same convention the existing comma-grouped pattern serves.
+
+        Built with chr() rather than a literal character: a
+        no-break space is invisible in a diff, so spelling out its
+        codepoint is the only way a reviewer can tell what is
+        actually there.
+        """
+        nbsp = chr(0x00A0)
+        assert extract_numbers(f"Record count: 1{nbsp}200 was used.") == ["1,200"]
+
+    @pytest.mark.unit
+    def test_a_narrow_nbsp_grouped_thousands_figure_is_joined(self):
+        """U+202F, the SI-recommended grouping space, is also joined."""
+        narrow_nbsp = chr(0x202F)
+        assert extract_numbers(f"Record count: 1{narrow_nbsp}200 was used.") == [
+            "1,200"
+        ]
+
+    @pytest.mark.unit
+    def test_a_multi_group_nbsp_thousands_figure_is_joined(self):
+        """More than one grouping space in the same figure."""
+        narrow_nbsp = chr(0x202F)
+        text = f"Population: 1{narrow_nbsp}200{narrow_nbsp}000 people."
+        assert extract_numbers(text) == ["1,200,000"]
+
+    @pytest.mark.unit
+    def test_per_mille_already_tokenizes_without_change(self):
+        """Decision: no normalization needed, the same as '%' already."""
+        assert extract_numbers("Rate is 95‰ overall.") == ["95"]
+
+    @pytest.mark.unit
+    def test_superscript_exponent_is_not_merged_into_the_base_figure(self):
+        """Decision: reject, not normalize -- "10 squared" must not
+        become the fabricated literal figure 102."""
+        assert extract_numbers("The area is 10² units.") == ["10"]

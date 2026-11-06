@@ -43,6 +43,113 @@ _NUMBER_RE = re.compile(
     r"-?\.\d+" + _EXPONENT + r")"
     r"[xX]?(?![\w])"
 )
+
+#: Codepoints named explicitly rather than written as literal glyphs:
+#: several of the characters below (no-break spaces especially) are
+#: invisible or near-identical to their ASCII look-alikes, which
+#: makes them easy to miscopy, hard to review, and -- for the spaces
+#: -- a risk of being silently stripped by whitespace-trimming
+#: tooling if they ever appeared as literal characters in source.
+_MINUS_SIGN = chr(0x2212)  # MINUS SIGN
+_SMALL_HYPHEN_MINUS = chr(0xFE63)  # SMALL HYPHEN-MINUS
+_FULLWIDTH_HYPHEN_MINUS = chr(0xFF0D)  # FULLWIDTH HYPHEN-MINUS
+_EN_DASH = chr(0x2013)
+_EM_DASH = chr(0x2014)
+_NO_BREAK_SPACE = chr(0x00A0)
+_NARROW_NO_BREAK_SPACE = chr(0x202F)
+_SUPERSCRIPT_TWO = chr(0x00B2)
+_SUPERSCRIPT_THREE = chr(0x00B3)
+_SUPERSCRIPT_ONE = chr(0x00B9)
+_SUPERSCRIPT_ZERO = chr(0x2070)
+_SUPERSCRIPT_FOUR_TO_NINE = chr(0x2074) + "-" + chr(0x2079)
+_SUPERSCRIPT_PLUS = chr(0x207A)
+_SUPERSCRIPT_MINUS = chr(0x207B)
+
+#: Characters a model may write as a minus sign that are never
+#: anything else in this trial's prose: Unicode MINUS SIGN, and the
+#: small and fullwidth compatibility forms of hyphen-minus.
+_ALWAYS_MINUS_RE = re.compile(
+    "[" + _MINUS_SIGN + _SMALL_HYPHEN_MINUS + _FULLWIDTH_HYPHEN_MINUS + "]"
+)
+
+#: En dash and em dash are ordinary punctuation most of the time (a
+#: range, a parenthetical), so only treat one as a sign when it sits
+#: immediately before a digit -- the extractor's own word-boundary
+#: rule then decides whether that makes it the start of a new number
+#: (a word character right before the dash, as in a range like
+#: "10-20", still blocks it from being read as a sign, exactly as it
+#: already does for an ASCII hyphen).
+_DASH_BEFORE_DIGIT_RE = re.compile("[" + _EN_DASH + _EM_DASH + r"](?=\d)")
+
+#: Fullwidth digits (category Nd, used in CJK typesetting) are
+#: numerals, never exponents or anything else -- normalizing them to
+#: ASCII keeps the captured figure's own text consistent with
+#: everything downstream that treats it as a plain string.
+_FULLWIDTH_DIGIT_TRANSLATION = str.maketrans(
+    {chr(0xFF10 + i): str(i) for i in range(10)}
+)
+
+#: A no-break space or narrow no-break space (SI/ISO's recommended
+#: thousands separator) between exactly three digits and a non-digit
+#: is a grouping separator, joined the same way the existing
+#: comma-grouped pattern already is. An ordinary ASCII space is
+#: deliberately excluded: this trial's writer has no reason to put a
+#: plain space inside a number, so normalizing one would risk
+#: merging two unrelated figures that happen to sit next to each
+#: other in prose.
+_GROUPING_SPACE_RE = re.compile(
+    r"(?<=\d)[" + _NO_BREAK_SPACE + _NARROW_NO_BREAK_SPACE + r"](?=\d{3}(?!\d))"
+)
+
+#: Superscript digits and signs (category "No", not "Nd" -- Python's
+#: \d and \w already treat them as alphanumeric, which is exactly the
+#: problem) are erased rather than normalized to plain digits.
+#: Converting a superscript-two exponent (ten squared, written
+#: inline) into the literal string "102" would fabricate a wrong
+#: figure; erasing the superscript instead lets the base number "10"
+#: still be read on its own, with the exponent simply unrecognized --
+#: this trial's writer does not use exponent notation, so there is
+#: no meaning to preserve here.
+_SUPERSCRIPT_RE = re.compile(
+    "["
+    + _SUPERSCRIPT_TWO
+    + _SUPERSCRIPT_THREE
+    + _SUPERSCRIPT_ONE
+    + _SUPERSCRIPT_ZERO
+    + _SUPERSCRIPT_FOUR_TO_NINE
+    + _SUPERSCRIPT_PLUS
+    + _SUPERSCRIPT_MINUS
+    + "]"
+)
+
+
+def _normalize_numeric_text(text: str) -> str:
+    """Normalize the Unicode forms a model may write a number in.
+
+    Applied once, before any other extraction step, so every caller
+    of :func:`extract_numbers` or :func:`_tag_figures` sees the same
+    normalized text -- including slide-title checking, which calls
+    :func:`extract_numbers` directly.
+
+    Parameters
+    ----------
+    text : str
+        Raw report or slide-title text.
+
+    Returns
+    -------
+    str
+        Text with sign, digit and grouping variants folded to the
+        ASCII forms ``_NUMBER_RE`` already understands.
+    """
+    text = _ALWAYS_MINUS_RE.sub("-", text)
+    text = _DASH_BEFORE_DIGIT_RE.sub("-", text)
+    text = text.translate(_FULLWIDTH_DIGIT_TRANSLATION)
+    text = _GROUPING_SPACE_RE.sub(",", text)
+    text = _SUPERSCRIPT_RE.sub(" ", text)
+    return text
+
+
 _CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
 
 #: A derived claim's expression may use **, but no legitimate use in
@@ -449,7 +556,8 @@ def extract_numbers(text: str) -> List[str]:
     List[str]
         Figures as they appear, in order of appearance.
     """
-    cleaned = _CLAIM_REF_RE.sub(" ", text or "")
+    cleaned = _normalize_numeric_text(text or "")
+    cleaned = _CLAIM_REF_RE.sub(" ", cleaned)
     cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
     return [m.group(1) for m in _NUMBER_RE.finditer(cleaned)]
 
@@ -794,7 +902,8 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
         ``(figure, claim_id)`` pairs in order of appearance;
         ``claim_id`` is ``None`` when the figure carries no tag.
     """
-    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", text or "")
+    cleaned = _normalize_numeric_text(text or "")
+    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
     tokens: List[Tuple[int, str, str]] = []
     for m in _NUMBER_RE.finditer(cleaned):
         tokens.append((m.start(), "num", m.group(1)))
