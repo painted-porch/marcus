@@ -206,6 +206,19 @@ def load_slide_spec(workspace: Path) -> Dict[str, Any]:
         return {"slides": [], "_problem": f"slides.json is not valid JSON: {exc}"}
     if not isinstance(spec, dict) or "slides" not in spec:
         return {"slides": [], "_problem": "slides.json has no 'slides' key"}
+    slides = spec["slides"]
+    if not isinstance(slides, list) or not all(isinstance(s, dict) for s in slides):
+        return {
+            "slides": [],
+            "_problem": "slides.json's 'slides' is not a list of objects",
+        }
+    for slide in slides:
+        cells = slide.get("cells", [])
+        if not isinstance(cells, list) or not all(isinstance(c, dict) for c in cells):
+            return {
+                "slides": [],
+                "_problem": "a slide's 'cells' is not a list of objects",
+            }
     return spec
 
 

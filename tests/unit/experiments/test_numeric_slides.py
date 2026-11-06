@@ -169,3 +169,37 @@ class TestLoadSlideSpec:
         (tmp_path / "slides.json").write_text('{"decks": []}')
         spec = load_slide_spec(tmp_path)
         assert "_problem" in spec
+
+    @pytest.mark.unit
+    def test_null_slides_value_is_reported_not_a_crash(self, tmp_path):
+        """A null "slides" value is caught before it reaches verification."""
+        (tmp_path / "slides.json").write_text('{"slides": null}')
+        spec = load_slide_spec(tmp_path)
+        assert spec["slides"] == []
+        assert "_problem" in spec
+
+    @pytest.mark.unit
+    def test_a_null_slide_in_the_list_is_reported_not_a_crash(self, tmp_path):
+        """A null entry inside an otherwise valid slides list is caught."""
+        (tmp_path / "slides.json").write_text('{"slides": [null]}')
+        spec = load_slide_spec(tmp_path)
+        assert spec["slides"] == []
+        assert "_problem" in spec
+
+    @pytest.mark.unit
+    def test_non_list_cells_is_reported_not_a_crash(self, tmp_path):
+        """A slide whose cells is not a list is caught before verification."""
+        (tmp_path / "slides.json").write_text('{"slides": [{"cells": null}]}')
+        spec = load_slide_spec(tmp_path)
+        assert spec["slides"] == []
+        assert "_problem" in spec
+
+    @pytest.mark.unit
+    def test_well_formed_spec_passes_through_unchanged(self, tmp_path):
+        """The fix must not disturb an ordinary, valid slide spec."""
+        (tmp_path / "slides.json").write_text(
+            '{"slides": [{"title": "x", "cells": [{"value": "1", "claim": "c1"}]}]}'
+        )
+        spec = load_slide_spec(tmp_path)
+        assert "_problem" not in spec
+        assert len(spec["slides"]) == 1

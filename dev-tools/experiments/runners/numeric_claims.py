@@ -35,9 +35,12 @@ VERDICT_FAILED = "failed"
 VERDICT_UNRESOLVABLE = "unresolvable"
 VERDICT_UNCOVERED = "uncovered"
 
+_EXPONENT = r"(?:[eE][+-]?\d+)?"
 _NUMBER_RE = re.compile(
     r"(?<![\w.])"
-    r"(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?|-?\.\d+)"
+    r"(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?" + _EXPONENT + r"|"
+    r"-?\d+(?:\.\d+)?" + _EXPONENT + r"|"
+    r"-?\.\d+" + _EXPONENT + r")"
     r"[xX]?(?![\w])"
 )
 _CLAIM_REF_RE = re.compile(r"\[(c\d+)\]")
@@ -550,7 +553,14 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             truth = resolve_address(address, sources)
         except KeyError as exc:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
-        ok = _within_tolerance(claim.value, truth, claim.tolerance)
+        try:
+            ok = _within_tolerance(claim.value, truth, claim.tolerance)
+        except (TypeError, ValueError) as exc:
+            return CheckResult(
+                verdict=VERDICT_UNRESOLVABLE,
+                detail=f"malformed tolerance: {exc}",
+                **base,
+            )
         if not ok:
             # A wrong number is the more useful message of the two,
             # so it is reported before any label problem.
@@ -596,7 +606,14 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
             truth = _safe_eval(tree, names)
         except (SyntaxError, ValueError, ZeroDivisionError, TypeError) as exc:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
-        ok = _within_tolerance(claim.value, truth, claim.tolerance)
+        try:
+            ok = _within_tolerance(claim.value, truth, claim.tolerance)
+        except (TypeError, ValueError) as exc:
+            return CheckResult(
+                verdict=VERDICT_UNRESOLVABLE,
+                detail=f"malformed tolerance: {exc}",
+                **base,
+            )
         inputs_detail = ", ".join(f"{k}={v}" for k, v in names.items())
         if ok:
             # A pass shows its working too: a verdict nobody can

@@ -560,7 +560,11 @@ def sample_case(
         if pool.empty:
             continue
         jitter = float(rng.uniform(0.9, 1.1))
-        want = max(5, min(len(pool), int(round(size * share * jitter))))
+        # The population cap applies last: a crop with fewer than 5
+        # held-out rows must still be sampleable (its whole pool, not
+        # a forced minimum of 5 that pandas can't satisfy without
+        # replacement) rather than aborting staging for every case.
+        want = min(len(pool), max(5, int(round(size * share * jitter))))
         parts.append(pool.sample(n=want, random_state=int(rng.integers(0, 1000000))))
     if not parts:
         return evaluated

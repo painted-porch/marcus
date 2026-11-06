@@ -113,6 +113,39 @@ class TestCaseSampling:
         assert 10 < counts.iloc[0] / counts.iloc[-1] < 40
 
 
+class TestCodexFindingSmallPoolSampling:
+    """A crop with fewer than 5 held-out rows aborted every case.
+
+    ``want = max(5, min(len(pool), computed))`` applies the minimum
+    of 5 *after* the population cap, so the cap is overridden back up
+    to 5 even when the pool has only 1-4 rows -- requesting more rows
+    than exist without replacement, which pandas refuses.
+    """
+
+    @pytest.mark.unit
+    def test_a_crop_with_fewer_than_five_rows_does_not_crash(self):
+        """A tiny pool is sampled whole, not forced up past its size."""
+        rng = np.random.default_rng(0)
+        rows = []
+        for crop, n in [("maize", 600), ("cotton", 2)]:
+            for i in range(n):
+                rows.append(
+                    {
+                        "crop": crop,
+                        "area": f"{crop}-land-{i}",
+                        "year": 2020,
+                        "yield_value": 1000.0,
+                        "predicted": 1000.0,
+                        "area_value": 1000.0,
+                        "unit": "BU / ACRE",
+                        "ape": 1.0,
+                    }
+                )
+        tiny = pd.DataFrame(rows)
+        case = sample_case(tiny, 1000, rng)
+        assert (case["crop"] == "cotton").sum() <= 2
+
+
 class TestRoundingRatioTrap:
     """The trap guarantees a ratio where rounding up is wrong."""
 

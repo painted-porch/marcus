@@ -199,6 +199,49 @@ class TestTolerance:
         assert check_claims([c], sources)[0].verdict == "failed"
 
 
+class TestCodexFindingMalformedToleranceDoesNotCrash:
+    """A malformed tolerance value crashed the whole checker.
+
+    ``{"type": "abs", "value": None}`` or ``{"type": "abs", "value":
+    "0.01%"}`` are syntactically valid claim JSON, but
+    ``float(tolerance["value"])`` raises uncaught, escaping
+    ``_check_one`` and aborting ``verify_workspace`` and the whole
+    ``load_condition_b`` grading pass over one bad claim.
+    """
+
+    @pytest.mark.unit
+    def test_null_tolerance_value_is_unresolvable_not_a_crash(self, sources):
+        """A None tolerance amount fails gracefully."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+            tolerance={"type": "abs", "value": None},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_non_numeric_tolerance_value_is_unresolvable_not_a_crash(self, sources):
+        """A string tolerance amount fails gracefully."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+            tolerance={"type": "abs", "value": "0.01%"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+
 class TestDerivedClaims:
     """A derived claim is recomputed, never taken on trust."""
 
@@ -1128,6 +1171,33 @@ class TestCodexFindingLeadingDecimalFigures:
     def test_an_uncovered_leading_decimal_figure_is_caught(self, sources):
         """End to end: a bare ".99" with no claim is a coverage gap."""
         res = check_claims([], sources, report_text="Accuracy is .99.")
+        assert [r for r in res if r.verdict == "uncovered"] != []
+
+
+class TestCodexFindingScientificNotation:
+    """A figure in scientific notation was missed or split into fragments.
+
+    The old regex had no exponent support, so "1e3" matched nothing
+    at all (the trailing lookahead treated "e" as a disqualifying
+    word character) and "1.2e-3" fragmented into the unrelated bare
+    figures "1" and "3". Either direction lets a figure bypass claim
+    coverage or reports a spurious one.
+    """
+
+    @pytest.mark.unit
+    def test_integer_exponent_is_extracted_whole(self):
+        """ "1e3" is extracted as one figure, not missed entirely."""
+        assert extract_numbers("The evaluation has 1e3 records.") == ["1e3"]
+
+    @pytest.mark.unit
+    def test_negative_exponent_decimal_is_extracted_whole(self):
+        """ "1.2e-3" is extracted whole, not fragmented into 1 and 3."""
+        assert extract_numbers("Error rate is 1.2e-3 overall.") == ["1.2e-3"]
+
+    @pytest.mark.unit
+    def test_an_uncovered_scientific_figure_is_caught(self, sources):
+        """End to end: a bare "1e3" with no claim is a coverage gap."""
+        res = check_claims([], sources, report_text="The evaluation has 1e3 records.")
         assert [r for r in res if r.verdict == "uncovered"] != []
 
 

@@ -17,6 +17,7 @@ from runners.numeric_grader import (
     compute_rates,
     grade,
     load_condition_a,
+    load_condition_b,
     load_condition_c,
     score_case,
 )
@@ -455,3 +456,108 @@ class TestCodexFindingLabelRejectionNotAFalseDecline:
         ]
         out = score_case(make_record("case-1", CONDITION_B, claims), {})
         assert len(out["false_declines"]) == 1
+
+
+class TestCodexFindingMaterialityScalesToTheMetric:
+    """A flat 0.1 absolute allowance swallowed real errors in small metrics.
+
+    0.1 is calibrated to percentage-scale figures (roughly stated as
+    whole numbers near 0-100). Applied to a fractional metric like
+    R2 (bounded 0-1), it is enormous: a stated 0.58 against a real
+    0.481 is a ~20% relative error, the shape of a genuine wrong
+    figure, but the flat allowance treated it as ordinary rounding.
+    score_case incorrectly excluded it from wrong_shipped, and when
+    a checker correctly rejected it, incorrectly counted that
+    rejection as a false decline.
+    """
+
+    @pytest.mark.unit
+    def test_a_materially_wrong_r2_is_not_hidden_by_the_flat_allowance(self):
+        """0.58 stated against a real 0.481 is a wrong figure shipped."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="verified",
+                stated=0.58,
+                resolved=0.481,
+            ),
+        ]
+        out = score_case(make_record("case-1", CONDITION_B, claims), {})
+        assert len(out["wrong_shipped"]) == 1
+
+    @pytest.mark.unit
+    def test_rejecting_that_wrong_r2_is_not_a_false_decline(self):
+        """Correctly rejecting 0.58-vs-0.481 must not count against the checker."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="failed",
+                stated=0.58,
+                resolved=0.481,
+            ),
+        ]
+        out = score_case(make_record("case-1", CONDITION_B, claims), {})
+        assert out["false_declines"] == []
+
+    @pytest.mark.unit
+    def test_ordinary_rounding_on_a_small_metric_is_still_tolerated(self):
+        """A genuinely rounded R2 (0.481 stated as 0.48) is not an error."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="verified",
+                stated=0.48,
+                resolved=0.481,
+            ),
+        ]
+        out = score_case(make_record("case-1", CONDITION_B, claims), {})
+        assert out["wrong_shipped"] == []
+
+
+class TestCodexFindingIncompleteCasesAreNotSilentlyDropped:
+    """A writer that produced no claims.json vanished from grading.
+
+    load_condition_b skipped any case directory lacking claims.json,
+    so an unsuccessful writer session disappeared from the case count
+    and every rate's denominator instead of contributing its failure
+    -- biasing every reported rate toward successful runs. A case
+    directory is identified by having a staged/ subdirectory (which
+    build_workspace always creates), not by whether the writer
+    finished.
+    """
+
+    @pytest.mark.unit
+    def test_a_case_with_no_claims_json_is_still_loaded_as_a_failure(self, tmp_path):
+        """An incomplete writer session counts, not vanishes."""
+        case_dir = tmp_path / "case-000"
+        (case_dir / "staged").mkdir(parents=True)
+        records = load_condition_b(tmp_path)
+        assert len(records) == 1
+        assert records[0].case_id == "case-000"
+        assert records[0].verified_clean is False
+
+    @pytest.mark.unit
+    def test_a_case_with_no_staged_dir_at_all_is_not_a_case(self, tmp_path):
+        """A directory that was never a workspace is correctly excluded."""
+        (tmp_path / "not_a_case").mkdir()
+        records = load_condition_b(tmp_path)
+        assert records == []
+
+    @pytest.mark.unit
+    def test_a_complete_case_still_loads_normally(self, tmp_path):
+        """The fix must not change behavior for a case that did finish."""
+        case_dir = tmp_path / "case-001"
+        staged = case_dir / "staged"
+        staged.mkdir(parents=True)
+        (staged / "metrics.json").write_text('{"n_records": 10, "r2_overall": 0.9}')
+        (case_dir / "report.md").write_text("R2 was 0.9 [c1].")
+        (case_dir / "claims.json").write_text(
+            '{"claims": [{"id": "c1", "value": 0.9, "label": "R2", '
+            '"kind": "lookup", "source": "metrics.json", "key": "r2_overall"}]}'
+        )
+        records = load_condition_b(tmp_path)
+        assert len(records) == 1
+        assert records[0].verified_clean is True

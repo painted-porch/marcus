@@ -157,7 +157,12 @@ def load_condition_b(
     rounds_by_case = rounds_by_case or {}
     records: List[CaseRecord] = []
     for case_dir in sorted(Path(rehearsal_root).expanduser().iterdir()):
-        if not case_dir.is_dir() or not (case_dir / "claims.json").exists():
+        # A case is identified by having a workspace at all (staged/,
+        # which build_workspace always creates), not by whether the
+        # writer went on to produce claims.json -- a writer that
+        # failed to produce output is a real, gradeable outcome, not
+        # a reason to drop the case from every rate's denominator.
+        if not case_dir.is_dir() or not (case_dir / "staged").exists():
             continue
         outcome = verify_workspace(case_dir)
         claims = [
@@ -338,14 +343,23 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-#: A stated figure within this distance of the truth is ordinary
-#: rounding, not an error. Reports state numbers to a couple of
-#: decimals, and a checker correctly honoring a declared tolerance
-#: will often leave ``stated != resolved`` by a tiny margin; grading
-#: on bit-exact equality would flag every one of those as a wrong
-#: figure shipped, which they are not.
-MATERIAL_ABS_TOLERANCE = 0.1
+#: A stated figure within this fraction of the truth's own magnitude
+#: is ordinary rounding, not an error. Reports state numbers to a
+#: couple of decimals, and a checker correctly honoring a declared
+#: tolerance will often leave ``stated != resolved`` by a tiny
+#: margin; grading on bit-exact equality would flag every one of
+#: those as a wrong figure shipped, which they are not. Scaled to
+#: the truth's magnitude rather than a flat amount: a flat 0.1, large
+#: enough to be reasonable rounding noise for a percentage-scale
+#: figure (94.0 vs 93.97), is roughly 20% of a fractional metric like
+#: R2 (bounded 0-1) and would hide a genuine wrong figure (0.58
+#: stated against a real 0.481) as if it were rounding.
 MATERIAL_REL_TOLERANCE = 0.01
+
+#: Floor under the scaled allowance, so a truth of (or near) zero
+#: still tolerates ordinary floating-point noise rather than
+#: demanding bit-exact equality.
+MATERIAL_ABS_FLOOR = 1e-6
 
 
 def _materially_different(stated: Any, resolved: Any) -> bool:
@@ -368,9 +382,8 @@ def _materially_different(stated: Any, resolved: Any) -> bool:
     except (TypeError, ValueError):
         return str(stated) != str(resolved)
     gap = abs(s - t)
-    if gap <= MATERIAL_ABS_TOLERANCE:
-        return False
-    return gap > abs(t) * MATERIAL_REL_TOLERANCE
+    allowance = max(MATERIAL_ABS_FLOOR, abs(t) * MATERIAL_REL_TOLERANCE)
+    return gap > allowance
 
 
 def _trap_names(traps: List[Any]) -> List[str]:
