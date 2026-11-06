@@ -4279,3 +4279,112 @@ class TestCodexFindingRowCountAddressIsIntrinsicallyCountValued:
             report_text="Evaluated record count is 60 [c1].",
         )
         assert [r for r in res if r.verdict == "uncovered"] == []
+
+
+class TestCodexFindingMetricTokenizerUnderstandsRSquaredNotation:
+    """The metric tokenizer must recognize "R2" however a report
+    spells it -- "R²" (superscript), "R^2", "R-squared", "R
+    squared" -- the same way the column name "r2" itself tokenizes.
+
+    Without this, the round-20 figure-extraction rule (erase a
+    superscript, since there it marks an exponent on a number) was
+    the only rule in play, and it erases the very thing that would
+    have let "R²" match the column name "r2": "Maize has 60 [c1]
+    records with R² of 0.481 [c2]." tokenized to no r2 word at all,
+    so the sentence's "records" token (a real sibling of r2 in this
+    table) looked like an unexcused sibling mention, and c2 was
+    wrongly rejected as uncovered.
+    """
+
+    SUPERSCRIPT_TWO = chr(0x00B2)
+
+    PER_CROP_SOURCES = {
+        "per_crop.csv": [
+            {"crop": "maize", "n_records": 60, "r2": 0.481},
+            {"crop": "cotton", "n_records": 37, "r2": 0.585},
+        ]
+    }
+
+    def _claims(self):
+        c1 = Claim(
+            id="c1",
+            value=60,
+            label="maize record count",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:n_records",
+        )
+        c2 = Claim(
+            id="c2",
+            value=0.481,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        return [c1, c2]
+
+    @pytest.mark.unit
+    def test_codexs_sentence_with_a_true_superscript_passes(self):
+        text = (
+            f"Maize has 60 [c1] records with R{self.SUPERSCRIPT_TWO} " "of 0.481 [c2]."
+        )
+        res = check_claims(self._claims(), self.PER_CROP_SOURCES, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_the_caret_notation_passes(self):
+        text = "Maize has 60 [c1] records with R^2 of 0.481 [c2]."
+        res = check_claims(self._claims(), self.PER_CROP_SOURCES, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_the_hyphenated_squared_notation_passes(self):
+        text = "Maize has 60 [c1] records with R-squared of 0.481 [c2]."
+        res = check_claims(self._claims(), self.PER_CROP_SOURCES, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_the_spelled_out_squared_notation_passes(self):
+        text = "Maize has 60 [c1] records with R squared of 0.481 [c2]."
+        res = check_claims(self._claims(), self.PER_CROP_SOURCES, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_the_plain_r2_notation_still_passes(self):
+        """The control: the notation the column name itself already
+        matches was never broken."""
+        text = "Maize has 60 [c1] records with R2 of 0.481 [c2]."
+        res = check_claims(self._claims(), self.PER_CROP_SOURCES, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_slide_title_with_a_true_superscript_still_matches_its_row(self):
+        accepted = {
+            "c2": CheckResult(
+                claim_id="c2",
+                verdict="verified",
+                value=0.481,
+                label="maize R2",
+                addresses=("per_crop.csv:crop=maize:r2",),
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": f"Maize R{self.SUPERSCRIPT_TWO} is 0.481",
+                    "cells": [{"value": 0.481, "claim": "c2", "label": "maize R2"}],
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c2": "maize R2"}, sources=self.PER_CROP_SOURCES
+        )
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_the_round_20_figure_extraction_rule_is_unaffected(self):
+        """The superscript-erasure rule for a number's own exponent
+        (figure extraction, not metric tokenizing) must still reject
+        merging a true exponent into the base figure."""
+        assert extract_numbers("The area is 10² units.") == ["10"]

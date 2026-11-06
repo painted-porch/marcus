@@ -146,6 +146,22 @@ def _normalize_numeric_text(text: str) -> str:
     text = _DASH_BEFORE_DIGIT_RE.sub("-", text)
     text = text.translate(_FULLWIDTH_DIGIT_TRANSLATION)
     text = _GROUPING_SPACE_RE.sub(",", text)
+    # A superscript (or "^2", or "-squared") following a LETTER names
+    # a metric ("R²"), not an exponent on a number -- fold it to a
+    # plain digit before round 20's own rule (just below) erases a
+    # superscript that follows a DIGIT, which is genuinely an
+    # exponent ("10²") and must still not be merged into the base
+    # figure. The two contexts are mutually exclusive by construction
+    # (a character cannot simultaneously follow a letter and a
+    # digit), so folding one first never changes what the other
+    # erases. This also keeps figure extraction's own lookbehind
+    # correctly blocking "2" in "R²"/"R^2" from ever being read as
+    # its own bare figure, the same way it already blocks "R2".
+    text = _SUPERSCRIPT_AFTER_LETTER_RE.sub(
+        lambda m: _SUPERSCRIPT_TO_DIGIT[m.group(0)], text
+    )
+    text = _R_CARET_TWO_RE.sub("R2", text)
+    text = _R_SQUARED_RE.sub("R2", text)
     text = _SUPERSCRIPT_RE.sub(" ", text)
     return text
 
@@ -697,6 +713,65 @@ def _metric_tokens(column: str) -> Set[str]:
     return {_METRIC_TOKEN_ALIASES.get(p, p) for p in column.lower().split("_") if p}
 
 
+#: A superscript digit maps to its ASCII digit when it follows a
+#: letter, so "R²" tokenizes to "r2" -- the same token the column
+#: name "r2" produces -- rather than losing the exponent entirely.
+#: This is the opposite of round 20's rule for figure extraction
+#: (_SUPERSCRIPT_RE, which *erases* a superscript because there it
+#: marks an exponent on a number, not a metric's own name): the same
+#: characters mean two different things in the two contexts, so each
+#: gets its own rule rather than sharing one that is wrong for half
+#: of what it is applied to.
+_SUPERSCRIPT_TO_DIGIT: Dict[str, str] = {
+    _SUPERSCRIPT_ZERO: "0",
+    _SUPERSCRIPT_ONE: "1",
+    _SUPERSCRIPT_TWO: "2",
+    _SUPERSCRIPT_THREE: "3",
+    chr(0x2074): "4",
+    chr(0x2075): "5",
+    chr(0x2076): "6",
+    chr(0x2077): "7",
+    chr(0x2078): "8",
+    chr(0x2079): "9",
+}
+_SUPERSCRIPT_AFTER_LETTER_RE = re.compile(
+    "(?<=[A-Za-z])[" + "".join(_SUPERSCRIPT_TO_DIGIT) + "]"
+)
+_R_CARET_TWO_RE = re.compile(r"(?i)R\^2")
+_R_SQUARED_RE = re.compile(r"(?i)R[- ]squared")
+
+
+def _normalize_metric_notation(text: str) -> str:
+    """Fold a metric's alternate notations to its plain-digit form.
+
+    Scoped to metric-identity tokenizing only -- never applied to
+    figure extraction, label words in general, or anything else
+    :func:`_words_in` is used for elsewhere. "R²", "R^2", "R-squared"
+    and "R squared" all become "R2", the same text the column name
+    "r2" itself tokenizes to; a future column using another notation
+    (MAPE, RMSE, MAE, ...) would get the same treatment here if a
+    report ever wrote it a way its own column name's tokens do not
+    already cover.
+
+    Parameters
+    ----------
+    text : str
+        Raw text (a label, a sentence, a slide title) before
+        :func:`_words_in` tokenizes it.
+
+    Returns
+    -------
+    str
+        The same text with metric notation folded to plain digits.
+    """
+    text = _SUPERSCRIPT_AFTER_LETTER_RE.sub(
+        lambda m: _SUPERSCRIPT_TO_DIGIT[m.group(0)], text
+    )
+    text = _R_CARET_TWO_RE.sub("R2", text)
+    text = _R_SQUARED_RE.sub("R2", text)
+    return text
+
+
 def _metric_contradiction(
     label_words: Set[str], own_column: str, row: Dict[str, Any]
 ) -> Optional[str]:
@@ -790,7 +865,9 @@ def _metric_contradiction_for_addresses(
     # as naming a sibling "metric" called "tier".
     sel_col = parts[1].split("=", 1)[0]
     row = {column: v for column, v in rows[0].items() if column != sel_col}
-    return _metric_contradiction(_words_in(text), parts[-1], row)
+    return _metric_contradiction(
+        _words_in(_normalize_metric_notation(text)), parts[-1], row
+    )
 
 
 #: A closing or opening quotation mark a writer's model might use,
