@@ -150,6 +150,7 @@ K12's decision is general: a verification extension needs the kernel to exclude 
 
 If your extension's task types are named anything else — `"check"` instead of `"verify"`, say, or a producer type other than `"find"` — **this guarantee does not apply to you today**, even though K12 itself does not depend on those specific names.
 Until the implementation generalizes, either reuse the `find`/`verify` names, or treat this as still your own responsibility and say so explicitly in your own extension's documentation.
+Tracked as [#830](https://github.com/painted-porch/marcus/issues/830), sequenced after K2's registration mechanism lands, since the fix should key off which task types your project's own registration marks as the verify-shaped and find-shaped ones, rather than a second pair of hardcoded names.
 This is enforced, where it applies, at the point the kernel decides what to offer (`filter_eligible_tasks`) — not something your extension calls — and the refusal is silent, so a worker cannot probe around it.
 
 ## Where the kernel/extension boundary sits in the code
