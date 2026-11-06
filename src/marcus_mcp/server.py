@@ -445,17 +445,41 @@ class MarcusServer:
         replacement propagates to every holder with nothing to
         remember. If a future service captures the client the same
         way, it must be rebound here too.
+
+        Issue #896 review: every tool that reassigns this attribute
+        after startup (``select_project``, ``add_project``,
+        ``update_project``, and others in
+        ``src/marcus_mcp/tools/project_management.py``) does so with
+        the raw client ``project_manager.get_kanban_client()``
+        returns, which has no idea the K13 sync wrapper
+        (``TaskSyncingKanbanClient``) exists. Only this module's own
+        startup code remembered to wrap it with ``sync_on_write``
+        before assigning; every tool-level reassignment silently
+        stripped it back off, so a task write after any project
+        switch stopped syncing ``self.project_tasks`` -- a task could
+        be marked blocked on the board while the cache still read
+        in progress. Wrapping here, once, instead of trusting every
+        current and future caller to remember, is what actually keeps
+        the invariant this setter already exists for: ``sync_on_write``
+        is idempotent (an already-wrapped client, or ``None``, passes
+        through unchanged), so this is safe even for the startup call
+        sites that already wrap before assigning.
         """
-        self._kanban_client = client
+        wrapped = sync_on_write(client, lambda: self.project_tasks)
+        self._kanban_client = wrapped
+        # Every rebound holder gets the SAME wrapped object the server
+        # itself now reads back, not the raw pre-wrap argument -- a
+        # holder that ever calls update_task on its captured reference
+        # must get the same sync guarantee server.kanban_client does.
         monitor = getattr(self, "assignment_monitor", None)
         if monitor is not None:
-            monitor.kanban_client = client
+            monitor.kanban_client = wrapped
             reconciler = getattr(monitor, "reconciler", None)
             if reconciler is not None:
-                reconciler.kanban_client = client
+                reconciler.kanban_client = wrapped
         lease_manager = getattr(self, "lease_manager", None)
         if lease_manager is not None:
-            lease_manager.kanban_client = client
+            lease_manager.kanban_client = wrapped
 
     @property
     def current_project_id(self) -> Optional[str]:

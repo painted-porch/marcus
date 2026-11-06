@@ -605,7 +605,15 @@ class TestBlockerReportingAndResolution(BaseTestCase):
         # give-up to the board (status TODO, unassigned) so a FRESH
         # agent can attempt it; only after MAX_BLOCKER_REPAIR_ATTEMPTS
         # independent give-ups is the lane recorded as genuinely dead.
-        mock_kanban = cast(AsyncMock, server.kanban_client)
+        #
+        # Issue #896 review: server.kanban_client is now always wrapped
+        # in TaskSyncingKanbanClient (K13), which defines its own
+        # update_task method rather than delegating it through
+        # __getattr__ -- reading .update_task off the wrapper returns
+        # that real method, not the mock's call history.
+        # _create_test_server kept the raw mock on the server for
+        # exactly this: asserting against it directly.
+        mock_kanban = cast(AsyncMock, server._test_raw_kanban_client)
         mock_kanban.update_task.assert_called_with(
             "TASK-001",
             {
@@ -727,7 +735,16 @@ class TestBlockerReportingAndResolution(BaseTestCase):
 
             server = MarcusServer()
 
-        server.kanban_client = self.create_mock_kanban_client()
+        # Issue #896 review: server.kanban_client's setter now always
+        # wraps the assigned client in TaskSyncingKanbanClient (K13),
+        # so reading server.kanban_client back no longer returns this
+        # exact mock object -- it returns the wrapper. Tests in this
+        # class assert directly against the mock's own call history
+        # (update_task.assert_called_with(...)), so the raw mock is
+        # kept here rather than re-read through the wrapper.
+        raw_kanban_client = self.create_mock_kanban_client()
+        server.kanban_client = raw_kanban_client
+        server._test_raw_kanban_client = raw_kanban_client
         server.ai_engine = self.create_mock_ai_engine()
         server.assignment_monitor = None
 
@@ -843,8 +860,13 @@ class TestProgressTrackingAndCompletion(BaseTestCase):
 
             # Verify kanban updates
             if progress == 100:
-                # Check that task was marked as done
-                mock_kanban = cast(AsyncMock, server.kanban_client)
+                # Check that task was marked as done. Issue #896
+                # review: server.kanban_client is now always wrapped
+                # in TaskSyncingKanbanClient, which defines its own
+                # update_task rather than delegating it.
+                # _create_test_server kept the raw mock on the server
+                # for exactly this: asserting against it directly.
+                mock_kanban = cast(AsyncMock, server._test_raw_kanban_client)
                 update_calls = [
                     call
                     for call in mock_kanban.update_task.call_args_list
@@ -980,7 +1002,16 @@ class TestProgressTrackingAndCompletion(BaseTestCase):
 
             server = MarcusServer()
 
-        server.kanban_client = self.create_mock_kanban_client()
+        # Issue #896 review: server.kanban_client's setter now always
+        # wraps the assigned client in TaskSyncingKanbanClient (K13),
+        # so reading server.kanban_client back no longer returns this
+        # exact mock object -- it returns the wrapper. Tests in this
+        # class assert directly against the mock's own call history
+        # (update_task.call_args_list), so the raw mock is kept here
+        # rather than re-read through the wrapper.
+        raw_kanban_client = self.create_mock_kanban_client()
+        server.kanban_client = raw_kanban_client
+        server._test_raw_kanban_client = raw_kanban_client
         server.ai_engine = self.create_mock_ai_engine()
         server.assignment_monitor = None
 
