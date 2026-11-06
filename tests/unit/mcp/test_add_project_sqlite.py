@@ -12,7 +12,7 @@ sqlite.
 """
 
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -84,6 +84,7 @@ class TestAddProjectSqlite:
 
         server = Mock()
         server.project_registry = _file_backed_registry(tmp_path)
+        server.project_manager = AsyncMock()
 
         result = await add_project(
             server,
@@ -168,3 +169,75 @@ class TestAddProjectSqlite:
             },
         )
         assert second["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_re_registering_with_a_new_project_root_reaches_an_already_loaded_client(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-registering with a new project_root must reach a client
+        that already has a cached context (issue #886, Codex review
+        round 3).
+
+        ProjectContextManager._get_or_create_context returns an
+        already-cached context unchanged, so a registry update to
+        provider_config was persisted but never reached an
+        already-loaded client -- switch_project on its own does not
+        rebuild one. A test that only re-reads the registry row would
+        pass while this bug stands (that is exactly what the
+        round-2 test did); this one reads the value back through
+        SQLiteKanban's own workspace state, the path that actually
+        serves it to the smoke gate, after a real ProjectContextManager
+        has already built and cached a client for this project once.
+        """
+        from unittest.mock import patch
+
+        from src.core.project_context_manager import ProjectContextManager
+
+        db_path = tmp_path / "board.db"
+
+        with patch("src.core.project_context_manager.get_config", return_value=Mock()):
+            manager = ProjectContextManager(registry=_file_backed_registry(tmp_path))
+
+        server = Mock()
+        server.project_registry = manager.registry
+        server.project_manager = manager
+
+        # First registration: no project_root yet, make_active=True so
+        # a real context gets built and cached.
+        first = await add_project(
+            server,
+            {
+                "name": "sqlite-project",
+                "provider": "sqlite",
+                "config": {"project_id": "proj-sqlite-4", "db_path": str(db_path)},
+                "make_active": True,
+            },
+        )
+        assert first["success"] is True
+        server.kanban_client = await manager.get_kanban_client()
+        assert server.kanban_client._project_root is None
+
+        # Re-registration: same board, now with a project_root. The
+        # context for proj-sqlite-4 is already cached at this point.
+        new_root = tmp_path / "existing-board-workspace"
+        new_root.mkdir()
+        second = await add_project(
+            server,
+            {
+                "name": "sqlite-project",
+                "provider": "sqlite",
+                "config": {
+                    "project_id": "proj-sqlite-4",
+                    "db_path": str(db_path),
+                    "project_root": str(new_root),
+                },
+                "make_active": True,
+            },
+        )
+        assert second["success"] is True
+
+        # Read back through the path that actually serves it to the
+        # smoke gate, not the registry row.
+        client = await manager.get_kanban_client()
+        assert client is not None
+        assert client._project_root == str(new_root)

@@ -297,6 +297,16 @@ async def add_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 await server.project_registry.update_project(
                     project_id, {"provider_config": merged_provider_config}
                 )
+                # The registry write above is pointless if a context
+                # for this project is already cached: switch_project
+                # returns the cached context unchanged, so the
+                # running client would keep serving its old (or
+                # missing) project_root until the server restarts or
+                # the LRU cache evicts it on its own schedule.
+                # Evicting here makes the next switch_project rebuild
+                # fresh from the just-updated provider_config.
+                if hasattr(server, "project_manager"):
+                    await server.project_manager.invalidate_context(project_id)
 
         conversation_logger.log_pm_decision(
             decision=f"Registered sqlite project '{project_id}'",

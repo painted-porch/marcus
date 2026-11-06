@@ -544,6 +544,27 @@ class ProjectContextManager:
         for project_id in to_remove:
             await self._remove_context(project_id)
 
+    async def invalidate_context(self, project_id: str) -> None:
+        """Evict a cached context so the next switch rebuilds it fresh.
+
+        Issue #886 (Codex review round 3): ``_get_or_create_context``
+        returns an already-cached context unchanged, so a registry
+        update to a project's ``provider_config`` (e.g. re-registering
+        a sqlite board with a new ``project_root``) is persisted but
+        never reaches an already-loaded client -- ``switch_project``
+        on its own does not rebuild one. A caller that mutates a
+        registered project's ``provider_config`` after the fact must
+        call this first, or the running client keeps serving its old
+        configuration until the server restarts or the LRU cache
+        evicts it on its own schedule.
+
+        A thin public wrapper over ``_remove_context``: this is the
+        intentional way to call it from outside this module, not a
+        duplicate of its cleanup logic.
+        """
+        async with self.lock:
+            await self._remove_context(project_id)
+
     async def _remove_context(self, project_id: str) -> None:
         """Remove and cleanup a project context."""
         context = self.contexts.get(project_id)
