@@ -459,6 +459,18 @@ class NaturalLanguageTaskCreator(ABC):
                     remapped.append(slug_to_uuid[dep_id])
                 elif dep_id in all_ids:
                     remapped.append(dep_id)
+                elif _get(task, "source_type") == "seeded":
+                    # Issue #841: a seeded task's depends_on may
+                    # already be a real, pre-existing board task's
+                    # id -- validated and resolved by
+                    # build_seeded_tasks before this ever runs, not a
+                    # slug to remap and not part of this batch, so
+                    # neither map above recognizes it. Trust it
+                    # rather than orphaning it; only a seeded task
+                    # can carry one, so a genuinely bad id from the
+                    # decomposed (non-seeded) path is still caught
+                    # below.
+                    remapped.append(dep_id)
                 else:
                     logger.warning(
                         f"Orphaned dependency '{dep_id}' "

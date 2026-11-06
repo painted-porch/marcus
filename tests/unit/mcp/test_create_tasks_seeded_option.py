@@ -39,7 +39,9 @@ def _state() -> MagicMock:
         "board_name": "Main",
     }
     state.project_registry.get_active_project = AsyncMock(return_value=project)
-    state.project_manager.get_kanban_client = AsyncMock(return_value=MagicMock())
+    kanban_client = MagicMock()
+    kanban_client.get_all_tasks = AsyncMock(return_value=[])
+    state.project_manager.get_kanban_client = AsyncMock(return_value=kanban_client)
     state.subtask_manager = None
     state.ai_engine = MagicMock()
     state.refresh_project_state = AsyncMock()
@@ -100,3 +102,55 @@ class TestCreateTasksSeeded:
         # task_metadata is stamped with the project the agents are registered to.
         assert creator.active_project_id == "proj-registry-1"
         state.refresh_project_state.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_depends_on_resolves_against_an_existing_board_task(self) -> None:
+        """Issue #841: a runtime task may depend on a task already on
+
+        the board, scoped to the caller's own project -- confirmed
+        with the Minecraft planner session, the first real consumer.
+        """
+        from src.marcus_mcp.tools import nlp as nlp_module
+
+        state = _state()
+        existing = MagicMock()
+        existing.id = "board-task-1"
+        existing.name = "Raise the north wall"
+        existing.project_id = "proj-registry-1"
+        other_project_task = MagicMock()
+        other_project_task.id = "board-task-2"
+        other_project_task.name = "Raise the north wall"
+        other_project_task.project_id = "some-other-project"
+        kanban_client = await state.project_manager.get_kanban_client()
+        kanban_client.get_all_tasks = AsyncMock(
+            return_value=[existing, other_project_task]
+        )
+
+        created_task = MagicMock()
+        created_task.id = "k-78"
+        created_task.name = "Torches on the north wall"
+        creator = MagicMock()
+        creator.create_tasks_on_board = AsyncMock(return_value=[created_task])
+        with patch(
+            "src.integrations.nlp_tools.NaturalLanguageProjectCreator",
+            return_value=creator,
+        ):
+            result = await nlp_module.create_tasks(
+                task_description="curated",
+                options={
+                    "tasks": [
+                        {
+                            "name": "Torches on the north wall",
+                            "depends_on": ["Raise the north wall"],
+                        }
+                    ]
+                },
+                state=state,
+            )
+
+        assert result["success"] is True
+        tasks = creator.create_tasks_on_board.call_args.args[0]
+        (torches,) = tasks
+        # Resolved to the SAME project's task, never the other
+        # project's same-named one.
+        assert torches.dependencies == ["board-task-1"]

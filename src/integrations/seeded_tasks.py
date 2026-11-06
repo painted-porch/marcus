@@ -19,16 +19,21 @@ A seed spec is a list of mappings::
       estimated_hours: 0.5
       priority: medium
 
-Only ``name`` is required. ``depends_on`` names other seeded tasks; the
-builder resolves names to the synthetic ids the board creator later remaps
-to kanban ids by name.
+Only ``name`` is required. ``depends_on`` names another seeded task in the
+same call, by name, or -- issue #841, ADR-0013 K10 accepted narrowly
+2026-11-06 -- an existing task already on the board, by name or by id,
+scoped to the caller's project. The in-batch name is always tried first;
+the board is only consulted for a name the batch does not have. This is
+add-only: a dependency on an existing task declares a new edge into it and
+never rewires or otherwise touches that task, so a leased task can be
+depended on exactly as freely as a ``todo`` one.
 """
 
 from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.core.models import Priority, Task, TaskStatus
 
@@ -52,7 +57,50 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "task"
 
 
-def validate_seed_specs(specs: Any) -> List[str]:
+def _resolve_against_board(
+    dep: str, existing_tasks: List[Task]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve one ``depends_on`` entry against the board's existing tasks.
+
+    Called only for a name the current batch does not have. Tries an
+    exact id match first (ids are unique by construction, so this can
+    never be ambiguous), then an exact name match.
+
+    Parameters
+    ----------
+    dep : str
+        The dependency as named in the seed spec, already stripped.
+    existing_tasks : List[Task]
+        The caller's own project's existing board tasks (issue #841:
+        the caller is responsible for scoping this list to its
+        project before calling).
+
+    Returns
+    -------
+    Tuple[Optional[str], Optional[str]]
+        ``(resolved_id, None)`` on a clean match; ``(None, None)``
+        when nothing on the board matches either way; ``(None,
+        error)`` when the name matches more than one existing task
+        and the caller must not guess which one was meant.
+    """
+    for task in existing_tasks:
+        if task.id == dep:
+            return dep, None
+    name_matches = [task for task in existing_tasks if task.name == dep]
+    if len(name_matches) > 1:
+        ambiguous_ids = ", ".join(str(task.id) for task in name_matches)
+        return None, (
+            f"{dep!r} matches {len(name_matches)} existing board tasks by "
+            f"name ({ambiguous_ids}); name the task by id instead"
+        )
+    if len(name_matches) == 1:
+        return str(name_matches[0].id), None
+    return None, None
+
+
+def validate_seed_specs(
+    specs: Any, existing_tasks: Optional[List[Task]] = None
+) -> List[str]:
     """Return every problem with ``specs``, or an empty list when it is valid.
 
     Parameters
@@ -60,9 +108,15 @@ def validate_seed_specs(specs: Any) -> List[str]:
     specs : Any
         The ``tasks`` option as received: must be a non-empty list of
         mappings with a unique, non-empty ``name`` each, ``depends_on``
-        naming only other seeded tasks, string lists for ``labels`` and
+        naming only other seeded tasks or an existing board task (by
+        name or id), string lists for ``labels`` and
         ``completion_criteria``, a positive ``estimated_hours``, and a
         ``priority`` from :class:`Priority`.
+    existing_tasks : Optional[List[Task]]
+        The caller's project's existing board tasks, consulted only
+        for a ``depends_on`` name the batch itself does not have
+        (issue #841). ``None`` or empty keeps the pre-#841 behavior:
+        every dependency must be in the same batch.
 
     Returns
     -------
@@ -114,14 +168,25 @@ def validate_seed_specs(specs: Any) -> List[str]:
         for dep in deps:
             if not isinstance(dep, str):
                 continue  # already reported
-            if dep.strip() not in names:
-                errors.append(
-                    f"tasks[{index}].depends_on names an unknown task {dep!r}"
-                )
-            elif dep.strip() == own:
+            dep_name = dep.strip()
+            if dep_name == own:
                 errors.append(f"tasks[{index}] depends on itself")
+            elif dep_name in names:
+                # In-batch: only these edges can form a cycle -- a new
+                # task's edge into an existing board task cannot, since
+                # that task's own dependencies are already fixed.
+                edges.setdefault(own, []).append(dep_name)
             else:
-                edges.setdefault(own, []).append(dep.strip())
+                resolved_id, board_error = _resolve_against_board(
+                    dep_name, existing_tasks or []
+                )
+                if board_error:
+                    errors.append(f"tasks[{index}].depends_on {dep!r}: {board_error}")
+                elif resolved_id is None:
+                    errors.append(
+                        f"tasks[{index}].depends_on names an unknown task "
+                        f"{dep!r}: not in this list and not on the board"
+                    )
     cycle = _find_cycle(edges)
     if cycle:
         errors.append("tasks form a dependency cycle: " + " -> ".join(cycle))
@@ -160,7 +225,11 @@ def _find_cycle(edges: Dict[str, List[str]]) -> List[str]:
     return []
 
 
-def build_seeded_tasks(specs: List[Dict[str, Any]], project_name: str) -> List[Task]:
+def build_seeded_tasks(
+    specs: List[Dict[str, Any]],
+    project_name: str,
+    existing_tasks: Optional[List[Task]] = None,
+) -> List[Task]:
     """Turn validated seed specs into Task objects ready for the board.
 
     Parameters
@@ -169,28 +238,47 @@ def build_seeded_tasks(specs: List[Dict[str, Any]], project_name: str) -> List[T
         Seed specs; see :func:`validate_seed_specs`.
     project_name : str
         Stamped on each task's ``project_name``.
+    existing_tasks : Optional[List[Task]]
+        The caller's project's existing board tasks, for resolving a
+        ``depends_on`` entry the batch itself does not name (issue
+        #841). Passed straight through to :func:`validate_seed_specs`.
 
     Returns
     -------
     List[Task]
-        TODO tasks with synthetic ids ``seed-<n>-<slug>`` and dependencies
-        resolved from names to those ids. ``source_type`` is
-        ``"seeded"``, which is how the rest of the pipeline knows to leave
-        them exactly as given.
+        TODO tasks with synthetic ids ``seed-<n>-<slug>``. A
+        ``depends_on`` naming another task in this batch resolves to
+        that synthetic id; one naming an existing board task resolves
+        to that task's real, already-assigned id -- no rewrite is
+        needed because it was never synthetic. ``source_type`` is
+        ``"seeded"``, which is how the rest of the pipeline knows to
+        leave them exactly as given.
 
     Raises
     ------
     SeedTaskError
         When the specs are malformed; every problem is in the message.
     """
-    errors = validate_seed_specs(specs)
+    errors = validate_seed_specs(specs, existing_tasks)
     if errors:
         raise SeedTaskError("; ".join(errors))
+    existing_tasks = existing_tasks or []
     now = datetime.now(timezone.utc)
     ids = {
         spec["name"].strip(): f"seed-{i + 1}-{_slug(spec['name'])}"
         for i, spec in enumerate(specs)
     }
+
+    def _resolve(dep: str) -> str:
+        dep_name = dep.strip()
+        if dep_name in ids:
+            return ids[dep_name]
+        # validate_seed_specs above already guaranteed this resolves
+        # cleanly against the board when it is not in-batch.
+        resolved_id, _ = _resolve_against_board(dep_name, existing_tasks)
+        assert resolved_id is not None
+        return resolved_id
+
     tasks: List[Task] = []
     for spec in specs:
         name = spec["name"].strip()
@@ -206,7 +294,7 @@ def build_seeded_tasks(specs: List[Dict[str, Any]], project_name: str) -> List[T
                 updated_at=now,
                 due_date=None,
                 estimated_hours=float(spec.get("estimated_hours", 1.0)),
-                dependencies=[ids[d.strip()] for d in spec.get("depends_on", []) or []],
+                dependencies=[_resolve(d) for d in spec.get("depends_on", []) or []],
                 labels=list(spec.get("labels", []) or []),
                 project_name=project_name,
                 source_type=SEEDED_SOURCE_TYPE,
