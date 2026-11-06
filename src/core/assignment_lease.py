@@ -23,6 +23,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 from src.core.assignment_persistence import AssignmentPersistence
 from src.core.event_loop_utils import EventLoopLockManager
+from src.core.kanban_project_scope import bound_project_id
 from src.core.lease_invariants import (
     DEFAULT_CHECKPOINT_CADENCE_MINUTES,
     DEFAULT_SILENCE_TIMEOUT_MINUTES,
@@ -105,6 +106,12 @@ class AssignmentLease:
     # (silence) and never extends past this. None on rows persisted
     # before D3, which are governed by silence alone.
     budget_deadline: Optional[datetime] = None
+    # Issue #859: the project this lease's task belongs to, stamped
+    # from the task at creation. None for a lease persisted before
+    # this field existed, or for a task with no project_id of its own
+    # -- in both cases should_recover_expired_lease's project-scoping
+    # guard is a no-op and the pre-#859 behavior is unchanged.
+    project_id: Optional[str] = None
 
     @property
     def effective_expiry(self) -> datetime:
@@ -532,6 +539,11 @@ class AssignmentLeaseManager:
                 ),
                 lease_epoch=epoch,
                 budget_deadline=budget_deadline,
+                # Issue #859: stamped from the task itself, not re-
+                # derived later -- the same "decide identity from the
+                # object Marcus built, not a provider round-trip"
+                # rule #854/#855 already established.
+                project_id=getattr(task, "project_id", None),
             )
 
             # Store lease
@@ -2002,6 +2014,9 @@ class AssignmentLeaseManager:
                     if lease.budget_deadline is not None
                     else None
                 ),
+                # Issue #859: lets should_recover_expired_lease tell a
+                # project mismatch from a genuinely missing task.
+                "project_id": lease.project_id,
             },
             create_if_absent=is_live,
         )
@@ -2086,6 +2101,11 @@ class AssignmentLeaseManager:
                     if assignment.get("budget_deadline")
                     else None
                 ),
+                # Issue #859: absent on an assignment persisted before
+                # this field existed, which correctly restores to None
+                # -- should_recover_expired_lease's scoping guard is a
+                # no-op for that lease, same as pre-#859 behavior.
+                project_id=assignment.get("project_id"),
             )
 
             # Seed the per-task high-water mark so the next claim of this
@@ -2156,7 +2176,36 @@ class AssignmentLeaseManager:
         bool
             True to recover, False when the task is already terminal.
         """
-        if hasattr(self.kanban_client, "get_task_by_id"):
+        # Issue #859: the kanban client is bound to exactly one
+        # project's board at a time, but a single server can be
+        # juggling several registered projects (the sibling bug
+        # #856's round 4 fixed in AssignmentMonitor). If this lease's
+        # task belongs to a DIFFERENT project than the one the client
+        # is currently bound to, a lookup here would query the wrong
+        # board -- "not found" would then mean "wrong board", not
+        # "not terminal", and the code below treats every "not found"
+        # as license to recover. Skip the lookup entirely when both
+        # ids are known and disagree; fall through to the ordinary
+        # time-based decision exactly as if no terminal-status check
+        # applied. Either id missing (an old lease, or a provider
+        # that doesn't expose a bound project id) keeps today's exact
+        # behavior -- this is a scoping guard, not a new requirement.
+        _lease_project_id = lease.project_id
+        _bound = bound_project_id(self.kanban_client)
+        _project_mismatch = (
+            _lease_project_id is not None
+            and _bound is not None
+            and _lease_project_id != _bound
+        )
+        if _project_mismatch:
+            logger.info(
+                f"Task {lease.task_id}: lease belongs to project "
+                f"{_lease_project_id!r} but the kanban client is bound "
+                f"to {_bound!r}; skipping the terminal-status lookup "
+                "to avoid querying the wrong board."
+            )
+
+        if not _project_mismatch and hasattr(self.kanban_client, "get_task_by_id"):
             try:
                 task_obj = await self.kanban_client.get_task_by_id(lease.task_id)
                 if task_obj is not None:

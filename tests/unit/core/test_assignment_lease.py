@@ -373,6 +373,251 @@ class TestK13ClosesTheLeaseExpiryStatusGap:
         assert task.status == TaskStatus.TODO  # the gap K13 closes
 
 
+class TestShouldRecoverExpiredLeaseProjectScoping:
+    """Issue #859: the terminal-status check must not query the wrong
+    project's board.
+
+    A kanban client is bound to exactly one project at a time, but a
+    single server can be juggling several registered projects (the
+    sibling bug #856's round 4 fixed in ``AssignmentMonitor``). If a
+    lease's own task belongs to a DIFFERENT project than the one the
+    client is currently bound to, ``get_task_by_id`` would query the
+    wrong board -- "not found" then means "wrong board", not "not
+    terminal", and the pre-#859 code treated every "not found" as
+    license to recover.
+    """
+
+    def _manager(self, kanban_client: Mock) -> AssignmentLeaseManager:
+        persistence = Mock()
+        persistence.remove_assignment = AsyncMock()
+        persistence.record_task_epoch = AsyncMock()
+        persistence.update_assignment_fields = AsyncMock()
+        return AssignmentLeaseManager(
+            kanban_client, persistence, default_lease_hours=4.0, task_list=[]
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_mismatched_project_skips_the_lookup_and_recovers(self) -> None:
+        """The lease belongs to project A; the client is bound to B,
+        whose board (correctly) has no task by this id. Before #859
+        this returns False (wrongly treats "not found" as terminal);
+        after #859 the lookup is skipped and the lease is recovered on
+        the ordinary time-based decision."""
+        kanban_client = Mock()
+        kanban_client.project_id = "project-B"
+        kanban_client.registry_project_id = None
+        kanban_client.get_task_by_id = AsyncMock(return_value=None)
+        manager = self._manager(kanban_client)
+
+        lease = AssignmentLease(
+            task_id="task-1",
+            agent_id="agent-1",
+            assigned_at=datetime.now(timezone.utc) - timedelta(hours=5),
+            lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
+            last_renewed=datetime.now(timezone.utc) - timedelta(hours=5),
+            project_id="project-A",
+        )
+
+        result = await manager.should_recover_expired_lease(lease)
+
+        assert result is True
+        kanban_client.get_task_by_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_matching_projects_still_run_the_terminal_check(self) -> None:
+        """The common case, unaffected by this fix: lease and client
+        agree on the project, so a terminal task is still correctly
+        skipped."""
+        done_task = Mock()
+        done_task.status = TaskStatus.DONE
+        kanban_client = Mock()
+        kanban_client.project_id = "project-A"
+        kanban_client.registry_project_id = None
+        kanban_client.get_task_by_id = AsyncMock(return_value=done_task)
+        manager = self._manager(kanban_client)
+
+        lease = AssignmentLease(
+            task_id="task-1",
+            agent_id="agent-1",
+            assigned_at=datetime.now(timezone.utc) - timedelta(hours=5),
+            lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
+            last_renewed=datetime.now(timezone.utc) - timedelta(hours=5),
+            project_id="project-A",
+        )
+
+        result = await manager.should_recover_expired_lease(lease)
+
+        assert result is False
+        kanban_client.get_task_by_id.assert_awaited_once_with("task-1")
+
+    @pytest.mark.asyncio
+    async def test_matching_projects_still_recover_a_live_task(self) -> None:
+        """Matching projects, task genuinely not terminal -> recovered,
+        exactly as before this fix."""
+        live_task = Mock()
+        live_task.status = TaskStatus.IN_PROGRESS
+        kanban_client = Mock()
+        kanban_client.project_id = "project-A"
+        kanban_client.registry_project_id = None
+        kanban_client.get_task_by_id = AsyncMock(return_value=live_task)
+        manager = self._manager(kanban_client)
+
+        lease = AssignmentLease(
+            task_id="task-1",
+            agent_id="agent-1",
+            assigned_at=datetime.now(timezone.utc) - timedelta(hours=5),
+            lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
+            last_renewed=datetime.now(timezone.utc) - timedelta(hours=5),
+            project_id="project-A",
+        )
+
+        result = await manager.should_recover_expired_lease(lease)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_lease_with_no_project_id_keeps_old_behavior(self) -> None:
+        """A lease persisted before this field existed has
+        project_id=None -- the scoping guard is a no-op, and the
+        terminal-status check runs exactly as it did before #859."""
+        done_task = Mock()
+        done_task.status = TaskStatus.DONE
+        kanban_client = Mock()
+        kanban_client.project_id = "project-B"
+        kanban_client.registry_project_id = None
+        kanban_client.get_task_by_id = AsyncMock(return_value=done_task)
+        manager = self._manager(kanban_client)
+
+        lease = AssignmentLease(
+            task_id="task-1",
+            agent_id="agent-1",
+            assigned_at=datetime.now(timezone.utc) - timedelta(hours=5),
+            lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
+            last_renewed=datetime.now(timezone.utc) - timedelta(hours=5),
+            # project_id omitted -> None, the pre-#859 default
+        )
+
+        result = await manager.should_recover_expired_lease(lease)
+
+        assert result is False
+        kanban_client.get_task_by_id.assert_awaited_once_with("task-1")
+
+    @pytest.mark.asyncio
+    async def test_a_client_with_no_bound_project_id_keeps_old_behavior(self) -> None:
+        """The client exposes neither registry_project_id nor
+        project_id (e.g. a bare test double) -- the scoping guard is a
+        no-op without something to scope by."""
+        done_task = Mock()
+        done_task.status = TaskStatus.DONE
+        kanban_client = Mock(spec=["get_task_by_id"])
+        kanban_client.get_task_by_id = AsyncMock(return_value=done_task)
+        manager = self._manager(kanban_client)
+
+        lease = AssignmentLease(
+            task_id="task-1",
+            agent_id="agent-1",
+            assigned_at=datetime.now(timezone.utc) - timedelta(hours=5),
+            lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
+            last_renewed=datetime.now(timezone.utc) - timedelta(hours=5),
+            project_id="project-A",
+        )
+
+        result = await manager.should_recover_expired_lease(lease)
+
+        assert result is False
+        kanban_client.get_task_by_id.assert_awaited_once_with("task-1")
+
+    @pytest.mark.asyncio
+    async def test_create_lease_stamps_the_tasks_project_id(self) -> None:
+        """create_lease stamps project_id from the task itself, not
+        re-derived later -- the #854/#855 "decide identity from the
+        object Marcus built" rule."""
+        kanban_client = Mock()
+        kanban_client.project_id = "project-A"
+        kanban_client.registry_project_id = None
+        manager = self._manager(kanban_client)
+
+        task = Task(
+            id="task-1",
+            name="Test Task",
+            description="",
+            status=TaskStatus.TODO,
+            priority=Priority.MEDIUM,
+            estimated_hours=1.0,
+            dependencies=[],
+            labels=[],
+            assigned_to=None,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            due_date=None,
+            project_id="project-A",
+        )
+
+        lease = await manager.create_lease("task-1", "agent-1", task=task)
+
+        assert lease.project_id == "project-A"
+
+    @pytest.mark.asyncio
+    async def test_load_active_leases_restores_project_id(self) -> None:
+        """A persisted assignment's project_id round-trips through
+        load_active_leases."""
+        kanban_client = Mock()
+        kanban_client.project_id = "project-A"
+        kanban_client.registry_project_id = None
+        persistence = Mock()
+        persistence.remove_assignment = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
+        now = datetime.now(timezone.utc)
+        persistence.load_assignments = AsyncMock(
+            return_value={
+                "agent-1": {
+                    "task_id": "task-1",
+                    "assigned_at": now.isoformat(),
+                    "lease_expires": now.isoformat(),
+                    "lease_renewed_at": now.isoformat(),
+                    "project_id": "project-A",
+                }
+            }
+        )
+        manager = AssignmentLeaseManager(
+            kanban_client, persistence, default_lease_hours=4.0, task_list=[]
+        )
+
+        await manager.load_active_leases()
+
+        assert manager.active_leases["task-1"].project_id == "project-A"
+
+    @pytest.mark.asyncio
+    async def test_load_active_leases_defaults_missing_project_id_to_none(
+        self,
+    ) -> None:
+        """A legacy assignment persisted before this field existed
+        restores to project_id=None, not a crash or a false value."""
+        kanban_client = Mock()
+        persistence = Mock()
+        persistence.remove_assignment = AsyncMock()
+        persistence.load_task_epochs = AsyncMock(return_value={})
+        now = datetime.now(timezone.utc)
+        persistence.load_assignments = AsyncMock(
+            return_value={
+                "agent-1": {
+                    "task_id": "task-1",
+                    "assigned_at": now.isoformat(),
+                    "lease_expires": now.isoformat(),
+                    "lease_renewed_at": now.isoformat(),
+                    # project_id intentionally omitted
+                }
+            }
+        )
+        manager = AssignmentLeaseManager(
+            kanban_client, persistence, default_lease_hours=4.0, task_list=[]
+        )
+
+        await manager.load_active_leases()
+
+        assert manager.active_leases["task-1"].project_id is None
+
+
 class TestLeaseMonitor:
     """Test suite for LeaseMonitor."""
 
