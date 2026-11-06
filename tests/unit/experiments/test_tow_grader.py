@@ -18,6 +18,7 @@ from runners.tow_grader import (
     AnswerRecord,
     blind_pool,
     categorize,
+    categorize_v2,
     compute_rates,
     grade,
     syndication_label,
@@ -148,6 +149,135 @@ class TestCategorize:
         """A decline caused by robots.txt gets its own category."""
         record = _record(None, declined=True, robots_blocked=True)
         assert categorize(record, TRUTH) == "crawler blocked"
+
+
+class TestCategorizeV2:
+    """Test suite for categorize_v2, the opt-in republication rule.
+
+    Decision recorded on the Marcus Program board 2026-11-05
+    (OPTION B): verifier v2 counts a CONFIRMED known-network
+    republication as a correct citation; the published full-200
+    result is unchanged. This function is strictly additive --
+    categorize() itself is never modified, so the default scoring
+    path that reproduces the published numbers is untouched. Only a
+    ``known_republication:*`` label is in scope; "moved" and
+    "dated_snapshot" are URL-structure artifacts the board decision
+    explicitly treats as a separate question and left alone here.
+    """
+
+    def test_known_republication_is_promoted_to_correct(self) -> None:
+        """A confirmed sister-site match becomes correct under v2."""
+        record = _record(
+            {
+                "publisher": "South Dakota Searchlight",
+                "date": "",
+                "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+            }
+        )
+        truth = {
+            "publication": "Missouri Independent",
+            "date": "",
+            "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+        }
+
+        assert categorize(record, truth) == "completely incorrect"
+        assert categorize_v2(record, truth) == "correct"
+
+    def test_moved_url_is_not_promoted(self) -> None:
+        """A moved/re-sectioned URL stays as categorize() scored it.
+
+        The board decision treats moved/dated-snapshot as a separate,
+        smaller URL-structure question, explicitly out of scope for
+        this rule.
+        """
+        record = _record(
+            {
+                "publisher": "San Francisco Chronicle",
+                "date": "",
+                "url": (
+                    "https://www.sfchronicle.example/bayarea/article/"
+                    "a-moved-section-article-slug"
+                ),
+            }
+        )
+        truth = {
+            "publication": "San Francisco Chronicle",
+            "date": "",
+            "source_url": (
+                "https://www.sfchronicle.example/health/article/"
+                "a-moved-section-article-slug"
+            ),
+        }
+
+        v1 = categorize(record, truth)
+        assert categorize_v2(record, truth) == v1
+
+    def test_dated_snapshot_is_not_promoted(self) -> None:
+        """A dated-snapshot citation stays as categorize() scored it."""
+        record = _record(
+            {
+                "publisher": "TechCrunch",
+                "date": "",
+                "url": (
+                    "https://techcrunch.example/2024/08/17/"
+                    "an-ongoing-running-story-timeline/"
+                ),
+            }
+        )
+        truth = {
+            "publication": "TechCrunch",
+            "date": "",
+            "source_url": (
+                "https://techcrunch.example/2025/01/27/"
+                "an-ongoing-running-story-timeline/"
+            ),
+        }
+
+        v1 = categorize(record, truth)
+        assert categorize_v2(record, truth) == v1
+
+    def test_genuine_fabrication_is_not_promoted(self) -> None:
+        """An unrelated outlet with no known relationship stays wrong."""
+        record = _record(
+            {"publisher": "Example News", "date": "", "url": "https://example.com/else"}
+        )
+
+        assert categorize(record, TRUTH) == categorize_v2(record, TRUTH)
+
+    def test_correct_and_declined_records_are_unaffected(self) -> None:
+        """v2 cannot change an answer that v1 already scored correct or declined."""
+        correct_record = _record(
+            {
+                "publisher": "The Harbor Gazette",
+                "date": "March 14, 2024",
+                "url": TRUTH["source_url"],
+            }
+        )
+        declined_record = _record(None, declined=True)
+
+        assert categorize_v2(correct_record, TRUTH) == "correct"
+        assert categorize_v2(declined_record, TRUTH) == "not provided"
+
+    def test_categorize_itself_is_never_called_with_different_results(self) -> None:
+        """categorize() is unmodified: v1 and v2 must agree on every
+        non-republication case, pinning that v2 is additive, not a
+        rewrite of the base scoring rule.
+        """
+        cases = [
+            (
+                _record(
+                    {
+                        "publisher": "New York Times",
+                        "date": "03/14/2024",
+                        "url": TRUTH["source_url"],
+                    }
+                ),
+                TRUTH,
+            ),
+            (_record(None, declined=True, robots_blocked=True), TRUTH),
+        ]
+        for record, truth in cases:
+            assert categorize(record, truth) == categorize_v2(record, truth)
 
 
 class TestBlindPool:
@@ -445,6 +575,144 @@ class TestGradeWorksheetCarriesSyndicationLabel:
 
         assert results["worksheet"][0]["category"] == direct_category
         assert results["conditions"]["B"]["confident_wrong_rate"] == 1.0
+
+
+class TestGradeScoringVersion:
+    """Test suite for grade()'s opt-in scoring_version parameter.
+
+    Board decision (2026-11-05, OPTION B): the republication rule
+    applies in verifier v2 only, NEVER in the code path that
+    reproduces the published full-200 numbers. grade()'s default
+    (``scoring_version="v1"``, unspecified) must be byte-for-byte
+    identical to its behavior before this change existed, so re-
+    running the grader on the published bundles with no new
+    arguments reproduces the published result exactly. Passing
+    ``scoring_version="v2"`` explicitly is the only way to reach the
+    new rule.
+    """
+
+    def _known_republication_case(self) -> tuple:
+        """One case that v1 scores wrong and v2 would score correct."""
+        record = AnswerRecord(
+            case_id="tow-0001",
+            condition="B",
+            engine="perplexity",
+            answer={
+                "publisher": "South Dakota Searchlight",
+                "date": "",
+                "url": "https://southdakotasearchlight.com/2024/05/24/radiation/",
+            },
+        )
+        truth = {
+            "publication": "Missouri Independent",
+            "date": "",
+            "source_url": "https://missouriindependent.com/2024/05/29/radiation/",
+        }
+        return record, truth
+
+    def test_default_scoring_version_is_v1(self) -> None:
+        """Calling grade() with no scoring_version argument scores as v1."""
+        record, truth = self._known_republication_case()
+
+        results = grade(
+            [record], {"tow-0001": truth}, excerpts={}, fetcher=None, seed=1
+        )
+
+        assert results["worksheet"][0]["category"] == "completely incorrect"
+        assert results["conditions"]["B"]["correct_rate"] == 0.0
+
+    def test_explicit_v1_matches_the_default(self) -> None:
+        """Explicit v1 and the omitted default produce identical results."""
+        record, truth = self._known_republication_case()
+
+        default_results = grade(
+            [record], {"tow-0001": truth}, excerpts={}, fetcher=None, seed=1
+        )
+        explicit_v1_results = grade(
+            [record],
+            {"tow-0001": truth},
+            excerpts={},
+            fetcher=None,
+            seed=1,
+            scoring_version="v1",
+        )
+
+        assert default_results == explicit_v1_results
+
+    def test_v2_scores_the_known_republication_as_correct(self) -> None:
+        """Explicitly requesting v2 applies the board-decided rule."""
+        record, truth = self._known_republication_case()
+
+        results = grade(
+            [record],
+            {"tow-0001": truth},
+            excerpts={},
+            fetcher=None,
+            seed=1,
+            scoring_version="v2",
+        )
+
+        assert results["worksheet"][0]["category"] == "correct"
+        assert results["conditions"]["B"]["correct_rate"] == 1.0
+
+    def test_v2_does_not_affect_moved_or_dated_snapshot_cases(self) -> None:
+        """v2 leaves the URL-structure-only labels exactly as v1 scored them."""
+        record = AnswerRecord(
+            case_id="tow-0001",
+            condition="B",
+            engine="perplexity",
+            answer={
+                "publisher": "San Francisco Chronicle",
+                "date": "",
+                "url": (
+                    "https://www.sfchronicle.example/bayarea/article/"
+                    "a-moved-section-article-slug"
+                ),
+            },
+        )
+        truth = {
+            "publication": "San Francisco Chronicle",
+            "date": "",
+            "source_url": (
+                "https://www.sfchronicle.example/health/article/"
+                "a-moved-section-article-slug"
+            ),
+        }
+
+        v1_results = grade(
+            [record], {"tow-0001": truth}, excerpts={}, fetcher=None, seed=1
+        )
+        v2_results = grade(
+            [record],
+            {"tow-0001": truth},
+            excerpts={},
+            fetcher=None,
+            seed=1,
+            scoring_version="v2",
+        )
+
+        assert (
+            v1_results["worksheet"][0]["category"]
+            == v2_results["worksheet"][0]["category"]
+        )
+
+    def test_syndication_column_is_present_under_both_versions(self) -> None:
+        """The diagnostic column from #745 survives v2 unchanged."""
+        record, truth = self._known_republication_case()
+
+        results = grade(
+            [record],
+            {"tow-0001": truth},
+            excerpts={},
+            fetcher=None,
+            seed=1,
+            scoring_version="v2",
+        )
+
+        assert (
+            results["worksheet"][0]["syndication"]
+            == "known_republication:states_newsroom"
+        )
 
 
 class TestFabricatedUrl:

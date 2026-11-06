@@ -37,6 +37,12 @@ Two honest refinements of the headline, both from the category data below:
 
 Gemini is the clearest single demonstration: it fabricated the most links when alone (65.6%) and delivered **zero** fabricated links through Marcus, at an 11.1% wrong-delivered rate.
 
+**A scoring-rule change, dated 2026-11-05, does not move the number above.**
+On 2026-11-05 a board decision (Marcus Program, OPTION B, decided by Larry) adopted a new rule for verifier v2 going forward: a citation confirmed as a faithful republication on a documented sister-site or wire-syndication network counts as correct, not wrong.
+The number in this readout is left exactly as published, under the rule that scored it at the time.
+Re-scoring this same full-200 run under the new rule would move the pooled Condition B confident-wrong rate from 12.1% to about 8.5%, about 3.5 percentage points (5 of the 141 delivered answers), because 5 of the 17 wrong-delivered answers are confirmed republications under the new rule's test.
+This is a methodology change stated honestly, not a quiet restatement of a published figure; `dev-tools/experiments/runners/tow_grader.py`'s `grade()` keeps reproducing the number above by default (`scoring_version="v1"`) and only applies the new rule when a caller explicitly asks for `scoring_version="v2"`.
+
 ## Condition A — engines alone (complete, all four engines)
 
 | Engine | Wrong among delivered | Fabricated links | Decline rate |
