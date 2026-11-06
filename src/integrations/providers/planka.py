@@ -159,12 +159,17 @@ class Planka(KanbanInterface):
                     f"[Planka] Status update requested: {status} (type: {type(status)})"
                 )
 
-                # Map TaskStatus to column names
+                # Map TaskStatus to column names. DECLINED (ADR-0013 K5,
+                # Codex P2 on PR #834) moves to a "declined" list the same
+                # best-effort way BLOCKED does: if the board has no such
+                # list, move_task_to_column logs and returns False rather
+                # than raising, matching every other unmapped column.
                 status_to_column = {
                     TaskStatus.TODO: "backlog",
                     TaskStatus.IN_PROGRESS: "in progress",
                     TaskStatus.DONE: "done",
                     TaskStatus.BLOCKED: "blocked",
+                    TaskStatus.DECLINED: "declined",
                 }
 
                 # Move to appropriate column if status changed
@@ -238,6 +243,7 @@ class Planka(KanbanInterface):
                 "blocked": "blocked",
                 "done": "done",
                 "completed": "done",
+                "declined": "declined",
             }
 
             status = column_to_status.get(column_name.lower(), column_name.lower())

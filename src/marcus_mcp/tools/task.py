@@ -8992,27 +8992,43 @@ async def request_task_decline(
             "message": f"Task {task_id} not found in the current project.",
         }
 
-    # Guard: only the task's current holder may decline it (mirrors
-    # report_blocker's Guard 2) -- a lease-expired agent must not
-    # terminate work the recovery holder has since taken over.
+    # Guard: a decline requires positive ownership of a claimable-held
+    # task (ADR-0013 K12's "no one acts on work they don't hold",
+    # applied to decline -- Codex P1 on PR #834). Only IN_PROGRESS is
+    # claimable-held: an unclaimed TODO has no holder to decline it,
+    # and a DONE/BLOCKED/already-DECLINED task is settled and must not
+    # be overwritten. A lease-manager miss is never a pass-through --
+    # it means no one currently holds this task, not "check assigned_to
+    # instead".
+    if task.status != TaskStatus.IN_PROGRESS:
+        return {
+            "success": False,
+            "error": "task_not_held",
+            "message": (
+                f"Task {task_id} is {task.status.value}, not in progress "
+                "— only a task currently being worked on can be declined."
+            ),
+        }
+
     if hasattr(state, "lease_manager") and state.lease_manager:
         active_lease = state.lease_manager.active_leases.get(task_id)
-        if active_lease is not None and active_lease.agent_id != agent_id:
+        if active_lease is None or active_lease.agent_id != agent_id:
+            holder = active_lease.agent_id if active_lease is not None else "no one"
             return {
                 "success": False,
                 "error": "not_task_holder",
                 "message": (
-                    f"Task {task_id} is held by {active_lease.agent_id}, "
-                    f"not {agent_id}. Your lease expired — request your "
-                    "next task to continue contributing."
+                    f"Task {task_id} is held by {holder}, not {agent_id}. "
+                    "Request your next task to continue contributing."
                 ),
             }
-    elif task.assigned_to and task.assigned_to != agent_id:
+    elif not task.assigned_to or task.assigned_to != agent_id:
         return {
             "success": False,
             "error": "not_task_holder",
             "message": (
-                f"Task {task_id} is assigned to {task.assigned_to}, not " f"{agent_id}."
+                f"Task {task_id} is assigned to "
+                f"{task.assigned_to or 'no one'}, not {agent_id}."
             ),
         }
 

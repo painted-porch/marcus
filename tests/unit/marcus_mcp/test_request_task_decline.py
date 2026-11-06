@@ -10,6 +10,7 @@ marks the task DECLINED: terminal, and never claimable again.
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -41,8 +42,17 @@ def _make_task(
     )
 
 
-def _make_state(task: Task, caller_id: str = "verifier-1") -> Mock:
-    """Create a mock Marcus server state holding one task."""
+def _make_state(
+    task: Task, caller_id: str = "verifier-1", holder_id: Optional[str] = "verifier-1"
+) -> Mock:
+    """Create a mock Marcus server state holding one task.
+
+    ``holder_id`` seeds an active lease for the task, matching
+    production: a lease is created when a task is claimed and exists
+    for as long as it is IN_PROGRESS. Pass ``None`` to simulate a task
+    with no active lease at all (an unclaimed TODO, or a lease that
+    already expired with nothing recovering it).
+    """
     state = Mock()
     state.project_tasks = [task]
     state.agent_status = {caller_id: Mock(current_tasks=[task])}
@@ -54,6 +64,10 @@ def _make_state(task: Task, caller_id: str = "verifier-1") -> Mock:
     state.assignment_persistence.remove_assignment = AsyncMock()
     state.lease_manager = Mock()
     state.lease_manager.active_leases = {}
+    if holder_id is not None:
+        lease = Mock()
+        lease.agent_id = holder_id
+        state.lease_manager.active_leases[task.id] = lease
     state.lease_manager.release_lease = AsyncMock()
     return state
 
@@ -200,6 +214,101 @@ class TestRequestTaskDeclineRejections:
 
         result = await request_task_decline(
             agent_id="verifier-1",
+            task_id="verify-1",
+            reason="wrong",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "not_task_holder"
+        assert task.status == TaskStatus.IN_PROGRESS
+
+    @pytest.mark.asyncio
+    async def test_an_unclaimed_todo_task_is_rejected(self) -> None:
+        """A TODO task has no holder at all -- declining it is nonsense,
+        not just unauthorized (Codex P1 on PR #834)."""
+        task = _make_task(status=TaskStatus.TODO, assigned_to=None)
+        state = _make_state(task, holder_id=None)
+
+        result = await request_task_decline(
+            agent_id="verifier-1",
+            task_id="verify-1",
+            reason="wrong",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "task_not_held"
+        assert task.status == TaskStatus.TODO
+
+    @pytest.mark.asyncio
+    async def test_a_done_task_is_rejected(self) -> None:
+        """A settled DONE task must never be overwritten by a decline
+        (Codex P1 on PR #834)."""
+        task = _make_task(status=TaskStatus.DONE)
+        state = _make_state(task)
+
+        result = await request_task_decline(
+            agent_id="verifier-1",
+            task_id="verify-1",
+            reason="wrong",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "task_not_held"
+        assert task.status == TaskStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_no_active_lease_at_all_is_rejected_not_a_pass_through(
+        self,
+    ) -> None:
+        """A lease manager with no lease recorded for this task must
+        refuse, not fall back to task.assigned_to (Codex P1 on PR
+        #834) -- a lease miss means no one currently holds the task."""
+        task = _make_task(assigned_to="verifier-1")
+        state = _make_state(task, holder_id=None)
+
+        result = await request_task_decline(
+            agent_id="verifier-1",
+            task_id="verify-1",
+            reason="wrong",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "not_task_holder"
+        assert task.status == TaskStatus.IN_PROGRESS
+
+    @pytest.mark.asyncio
+    async def test_the_holder_succeeds_with_no_lease_manager_configured(
+        self,
+    ) -> None:
+        """Without a lease manager at all, the recorded assignee may
+        still decline -- the fallback path Codex's fix preserves."""
+        task = _make_task(assigned_to="verifier-1")
+        state = _make_state(task)
+        state.lease_manager = None
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert task.status == TaskStatus.DECLINED
+
+    @pytest.mark.asyncio
+    async def test_a_non_assignee_is_rejected_with_no_lease_manager(self) -> None:
+        task = _make_task(assigned_to="verifier-1")
+        state = _make_state(task)
+        state.lease_manager = None
+
+        result = await request_task_decline(
+            agent_id="verifier-2",
             task_id="verify-1",
             reason="wrong",
             state=state,
