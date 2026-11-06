@@ -474,6 +474,26 @@ class SQLitePersistence(PersistenceBackend):
                 CREATE INDEX IF NOT EXISTS idx_stored_at
                 ON persistence(stored_at)
             """)
+            # Issue #890: _load_project_rows / load_decisions filter on
+            # project_id and kind (both json_extract expressions, since
+            # the decisions collection shares one table with every
+            # opinion on the board) and order by stored_at. Neither
+            # filter could use an index before this, so a kind-filtered
+            # read on a board whose newest rows are mostly a different
+            # kind walked almost the whole project's history on every
+            # agent pull (#880 made this a per-cycle read). This
+            # composite expression index covers the exact shape that
+            # query issues, with stored_at as its trailing column so
+            # the existing ORDER BY stored_at DESC is also served by it.
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_persistence_project_kind
+                ON persistence(
+                    collection,
+                    json_extract(data, '$.project_id'),
+                    json_extract(data, '$.kind'),
+                    stored_at DESC
+                )
+            """)
             conn.commit()
 
     async def store(self, collection: str, key: str, data: Dict[str, Any]) -> None:
