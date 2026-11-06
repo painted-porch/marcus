@@ -3412,6 +3412,13 @@ class TestCodexFindingSegmentationSurvivesMaskingAndOpeningMarkers:
     capital letter, but not an *opening* marker sitting between the
     whitespace and that same capital letter.
 
+    Round 5 (paragraph-break-or-heading gap): a blank-line paragraph
+    break or a Markdown heading is not itself a boundary when the
+    paragraph before it has no terminal punctuation -- "Maize R2:
+    0.886 [c1]\n\nCotton R2: 0.886 [c1]" merges two paragraphs into
+    one, and "# Maize\n\nCotton R2 is 0.886 [c1]." merges a heading
+    into the paragraph after it, through the same gap.
+
     Every case below reuses the maize claim's own tag [c1] on a
     sentence about cotton -- a right number under the wrong row is
     exactly what the sibling-row check exists to catch, and it can
@@ -3454,7 +3461,39 @@ class TestCodexFindingSegmentationSurvivesMaskingAndOpeningMarkers:
         bad = [r for r in res if r.verdict == "uncovered"]
         assert len(bad) == 1
 
-    LINE_FORMS = ("none", "bullet", "ordered", "table")
+    @pytest.mark.unit
+    def test_a_blank_line_paragraph_break_still_splits_with_no_punctuation(
+        self, sources
+    ):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Maize R2: 0.886 [c1]\n\nCotton R2: 0.886 [c1]"
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_a_heading_still_splits_the_paragraph_after_it(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "# Maize\n\nCotton R2 is 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    LINE_FORMS = ("none", "bullet", "ordered", "table", "paragraph", "heading")
     MARKERS = {
         "none": ("", ""),
         "bold": ("**", "**"),
@@ -3488,6 +3527,10 @@ class TestCodexFindingSegmentationSurvivesMaskingAndOpeningMarkers:
             return f"1. {maize}\n2. {cotton}"
         if line_form == "table":
             return f"| Crop | R2 |\n| Maize | {maize} |\n| Cotton | {cotton} |"
+        if line_form == "paragraph":
+            return f"{maize}\n\n{cotton}"
+        if line_form == "heading":
+            return f"{maize}\n# Note\n{cotton}"
         raise ValueError(line_form)
 
     @pytest.mark.unit
@@ -3497,7 +3540,7 @@ class TestCodexFindingSegmentationSurvivesMaskingAndOpeningMarkers:
     def test_cottons_mistagged_sentence_is_still_caught(
         self, sources, line_form, marker, trap
     ):
-        """4 line forms x 5 marker styles x 3 in-sentence traps = 60
+        """6 line forms x 5 marker styles x 3 in-sentence traps = 90
         cases. Every one must still catch cotton's sentence wrongly
         wearing the maize claim's tag -- regardless of how the two
         rows are formatted or what sits inside the maize sentence --

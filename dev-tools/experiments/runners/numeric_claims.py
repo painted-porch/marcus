@@ -750,14 +750,33 @@ def _ends_with_abbreviation(prefix: str) -> bool:
 #: were also every other item's own row.
 _LIST_OR_TABLE_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]\s|\d+\.\s|\|)", re.MULTILINE)
 
+#: A markdown heading line ("# Maize", "## Results") is its own
+#: unit, start to end -- a writer does not end a heading with a
+#: period, and the paragraph after it does not inherit the
+#: heading's own words just because nothing else separates them.
+#: Both the heading's start (ending whatever came before it) and its
+#: end (ending the heading itself) are boundaries.
+_HEADING_LINE_RE = re.compile(r"^#{1,6}[ \t][^\n]*", re.MULTILINE)
+
+#: One or more blank (empty or whitespace-only) lines end the
+#: paragraph before them -- a writer separates paragraphs this way
+#: far more often than with terminal punctuation on the last
+#: sentence of one before the first word of the next. The boundary
+#: is the position right after the blank-line run, where the next
+#: paragraph's own content begins.
+_PARAGRAPH_BREAK_RE = re.compile(r"(?:\n[ \t]*){2,}")
+
 
 def _line_boundaries(text: str) -> Set[int]:
-    """Stage 1: positions where a markdown list item or table row begins.
+    """Stage 1: positions where a markdown block begins or ends.
 
-    Operates on ``text`` before any ordered-list-marker masking, since
-    masking blanks the digits an ordered marker needs to match at all
-    -- a caller that masks first, then segments, never finds this
-    boundary for a numbered list.
+    Covers a list item or table row's own line start, a heading
+    line's start and end, and the start of the paragraph following
+    one or more blank lines -- every Markdown block type besides an
+    ordinary sentence. Operates on ``text`` before any ordered-list-
+    marker masking, since masking blanks the digits an ordered
+    marker needs to match at all -- a caller that masks first, then
+    segments, never finds that boundary for a numbered list.
 
     Parameters
     ----------
@@ -767,9 +786,14 @@ def _line_boundaries(text: str) -> Set[int]:
     Returns
     -------
     Set[int]
-        One offset per list item or table row start.
+        One offset per block boundary found.
     """
-    return {m.start() for m in _LIST_OR_TABLE_LINE_RE.finditer(text)}
+    boundaries = {m.start() for m in _LIST_OR_TABLE_LINE_RE.finditer(text)}
+    for m in _HEADING_LINE_RE.finditer(text):
+        boundaries.add(m.start())
+        boundaries.add(m.end())
+    boundaries |= {m.end() for m in _PARAGRAPH_BREAK_RE.finditer(text)}
+    return boundaries
 
 
 def _punctuation_boundaries(text: str) -> Set[int]:
