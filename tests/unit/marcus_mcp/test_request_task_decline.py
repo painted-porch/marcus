@@ -1,0 +1,210 @@
+"""
+Unit tests for the request_task_decline MCP tool (ADR-0013 K5).
+
+A verification task's holder needs a way to say "this cannot be
+verified" that is distinct from DONE, from a worker-reported BLOCKED,
+and from report_blocker's repair-rung requeue, which sends the task
+back for another attempt on a budget separate from any redo bound --
+silently defeating it for exactly this case. request_task_decline
+marks the task DECLINED: terminal, and never claimable again.
+"""
+
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
+
+from src.core.models import Priority, Task, TaskStatus
+from src.marcus_mcp.tools.task import request_task_decline
+
+pytestmark = pytest.mark.unit
+
+
+def _make_task(
+    task_id: str = "verify-1",
+    status: TaskStatus = TaskStatus.IN_PROGRESS,
+    assigned_to: str = "verifier-1",
+) -> Task:
+    """Create a minimal Task in the given status."""
+    now = datetime(2026, 11, 6, 12, 0, 0, tzinfo=timezone.utc)
+    return Task(
+        id=task_id,
+        name="Verify the claim",
+        description="",
+        status=status,
+        priority=Priority.MEDIUM,
+        assigned_to=assigned_to,
+        created_at=now,
+        updated_at=now,
+        due_date=None,
+        estimated_hours=1.0,
+    )
+
+
+def _make_state(task: Task, caller_id: str = "verifier-1") -> Mock:
+    """Create a mock Marcus server state holding one task."""
+    state = Mock()
+    state.project_tasks = [task]
+    state.agent_status = {caller_id: Mock(current_tasks=[task])}
+    state.agent_tasks = {caller_id: Mock()}
+    state.kanban_client = Mock()
+    state.kanban_client.update_task = AsyncMock()
+    state.kanban_client.add_comment = AsyncMock()
+    state.assignment_persistence = Mock()
+    state.assignment_persistence.remove_assignment = AsyncMock()
+    state.lease_manager = Mock()
+    state.lease_manager.active_leases = {}
+    state.lease_manager.release_lease = AsyncMock()
+    return state
+
+
+class TestRequestTaskDeclineHappyPath:
+    """A task's current holder can decline it, terminally."""
+
+    @pytest.mark.asyncio
+    async def test_the_task_is_marked_declined(self) -> None:
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="the summary count doesn't match the bucket table",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert result["status"] == "declined"
+        assert task.status == TaskStatus.DECLINED
+        assert task.assigned_to is None
+
+    @pytest.mark.asyncio
+    async def test_the_board_write_carries_the_same_status(self) -> None:
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        state.kanban_client.update_task.assert_awaited_once_with(
+            "verify-1", {"status": TaskStatus.DECLINED, "assigned_to": None}
+        )
+
+    @pytest.mark.asyncio
+    async def test_coordination_state_is_released(self) -> None:
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert "verifier-1" not in state.agent_tasks
+        state.assignment_persistence.remove_assignment.assert_awaited_once_with(
+            "verifier-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_emits_task_declined_event(self) -> None:
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event") as mock_event:
+            await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        mock_event.assert_called_once()
+        event_name, payload = mock_event.call_args[0]
+        assert event_name == "task_declined"
+        assert payload["task_id"] == "verify-1"
+        assert payload["declined_by"] == "verifier-1"
+        assert payload["reason"] == "wrong"
+
+    @pytest.mark.asyncio
+    async def test_survives_a_kanban_write_failure(self) -> None:
+        """A board write failure must not fail the decline -- the task
+        model is the source of truth, matching request_task_redo."""
+        task = _make_task()
+        state = _make_state(task)
+        state.kanban_client.update_task = AsyncMock(side_effect=RuntimeError("down"))
+        state.kanban_client.add_comment = AsyncMock(side_effect=RuntimeError("down"))
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert task.status == TaskStatus.DECLINED
+
+
+class TestRequestTaskDeclineRejections:
+    """Every validation failure returns success=False without mutating the task."""
+
+    @pytest.mark.asyncio
+    async def test_empty_reason_is_rejected(self) -> None:
+        task = _make_task()
+        state = _make_state(task)
+
+        result = await request_task_decline(
+            agent_id="verifier-1",
+            task_id="verify-1",
+            reason="   ",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "reason_required"
+        assert task.status == TaskStatus.IN_PROGRESS
+
+    @pytest.mark.asyncio
+    async def test_unknown_task_is_rejected(self) -> None:
+        state = _make_state(_make_task())
+
+        result = await request_task_decline(
+            agent_id="verifier-1",
+            task_id="no-such-task",
+            reason="wrong",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "task_not_found"
+
+    @pytest.mark.asyncio
+    async def test_a_non_holder_is_rejected(self) -> None:
+        """A lease-expired agent cannot decline work the recovery
+        holder has since taken over (mirrors report_blocker Guard 2)."""
+        task = _make_task(assigned_to="verifier-1")
+        state = _make_state(task)
+        lease = Mock()
+        lease.agent_id = "verifier-2"
+        state.lease_manager.active_leases["verify-1"] = lease
+
+        result = await request_task_decline(
+            agent_id="verifier-1",
+            task_id="verify-1",
+            reason="wrong",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "not_task_holder"
+        assert task.status == TaskStatus.IN_PROGRESS

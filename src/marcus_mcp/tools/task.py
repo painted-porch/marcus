@@ -8926,6 +8926,164 @@ async def request_task_redo(
     }
 
 
+async def request_task_decline(
+    agent_id: str,
+    task_id: str,
+    reason: str,
+    state: Any,
+) -> Dict[str, Any]:
+    """
+    Mark a task DECLINED: this could not be verified, terminally.
+
+    ADR-0013 K5 (Accepted 2026-11-05): a verifier that concludes a
+    claim cannot be verified needs a way to say so that is distinct
+    from DONE (the check did not pass), from a worker-reported BLOCKED
+    (no worker is stuck; the check concluded), and from the implicit
+    "try again" of ``report_blocker``'s repair-rung requeue, which
+    sends the task back for another attempt on a budget separate from
+    any redo bound — silently defeating it for exactly this case.
+
+    DECLINED is terminal on the board (``deps_allow_claim``'s strict
+    gate for ordinary tasks only ever accepts DONE, so a declined
+    upstream's dependents stay unclaimable forever) and settled for an
+    integration task's best-effort claim, the same way BLOCKED already
+    is (``SETTLED_FOR_BEST_EFFORT``, ``src/core/task_claimability.py``).
+
+    Parameters
+    ----------
+    agent_id : str
+        The declining agent's ID. Must currently hold the task's
+        active lease — the same requirement ``report_blocker``'s
+        Guard 2 places on who may act on a task, so a lease-expired
+        agent cannot decline work the recovery holder has since taken.
+    task_id : str
+        ID of the task to decline.
+    reason : str
+        Non-empty: why this could not be verified.
+    state : Any
+        Marcus server state instance.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``{"success": True, "task_id", "status": "declined"}`` on
+        success; ``{"success": False, "error": ...}`` with error codes
+        ``reason_required`` / ``task_not_found`` / ``not_task_holder``
+        otherwise.
+    """
+    if not reason or not reason.strip():
+        return {
+            "success": False,
+            "error": "reason_required",
+            "message": (
+                "A non-empty reason is required — the record needs a "
+                "diagnostic for why this could not be verified."
+            ),
+        }
+
+    task = next(
+        (t for t in (getattr(state, "project_tasks", None) or []) if t.id == task_id),
+        None,
+    )
+    if task is None:
+        return {
+            "success": False,
+            "error": "task_not_found",
+            "message": f"Task {task_id} not found in the current project.",
+        }
+
+    # Guard: only the task's current holder may decline it (mirrors
+    # report_blocker's Guard 2) -- a lease-expired agent must not
+    # terminate work the recovery holder has since taken over.
+    if hasattr(state, "lease_manager") and state.lease_manager:
+        active_lease = state.lease_manager.active_leases.get(task_id)
+        if active_lease is not None and active_lease.agent_id != agent_id:
+            return {
+                "success": False,
+                "error": "not_task_holder",
+                "message": (
+                    f"Task {task_id} is held by {active_lease.agent_id}, "
+                    f"not {agent_id}. Your lease expired — request your "
+                    "next task to continue contributing."
+                ),
+            }
+    elif task.assigned_to and task.assigned_to != agent_id:
+        return {
+            "success": False,
+            "error": "not_task_holder",
+            "message": (
+                f"Task {task_id} is assigned to {task.assigned_to}, not " f"{agent_id}."
+            ),
+        }
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Task model is the source of truth (mirrors request_task_redo
+    # and lease-expiry recovery).
+    task.status = TaskStatus.DECLINED
+    task.assigned_to = None
+    task.updated_at = now
+
+    # 2. Board dual-write, best-effort: the model update above is what
+    # deps_allow_claim and compute_board_drain read; a kanban miss must
+    # not strand the declining agent.
+    try:
+        await state.kanban_client.update_task(
+            task_id,
+            {"status": TaskStatus.DECLINED, "assigned_to": None},
+        )
+    except Exception as e:
+        logger.warning(
+            "request_task_decline: kanban update failed for %s: %s", task_id, e
+        )
+    try:
+        await state.kanban_client.add_comment(
+            task_id,
+            f"\N{CROSS MARK} DECLINED by {agent_id}: could not be "
+            f"verified.\n\nReason: {reason}",
+        )
+    except Exception as e:
+        logger.warning(
+            "request_task_decline: kanban comment failed for %s: %s", task_id, e
+        )
+
+    # 3. Release coordination state -- a declined task is terminal for
+    # the current agent, the same decoupling report_blocker's BLOCKED
+    # path and request_task_redo's TODO path both already apply
+    # (status changes must release coordination state independently of
+    # anything else, Simon decision 011b3fad).
+    if hasattr(state, "agent_status") and agent_id in state.agent_status:
+        agent = state.agent_status[agent_id]
+        agent.current_tasks = []
+        if hasattr(state, "agent_tasks") and agent_id in state.agent_tasks:
+            del state.agent_tasks[agent_id]
+        if hasattr(state, "assignment_persistence"):
+            await state.assignment_persistence.remove_assignment(agent_id)
+        if hasattr(state, "lease_manager") and state.lease_manager:
+            if task_id in state.lease_manager.active_leases:
+                await state.lease_manager.release_lease(task_id, reason="declined")
+
+    log_agent_event(
+        "task_declined",
+        {
+            "task_id": task_id,
+            "declined_by": agent_id,
+            "reason": reason,
+        },
+    )
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "status": "declined",
+        "message": (
+            f"Task {task_id} is marked DECLINED — terminal, not "
+            "claimable again. Request your next task to continue "
+            "contributing."
+        ),
+    }
+
+
 async def report_blocker(
     agent_id: str,
     task_id: str,

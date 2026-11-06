@@ -33,6 +33,7 @@ from .tools import (  # Agent tools; Task tools; Project tools; System tools; NL
     report_blocker,
     report_task_progress,
     request_next_task,
+    request_task_decline,
     request_task_redo,
 )
 from .tools.analytics import (  # Analytics tools
@@ -429,6 +430,40 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "a future repair path to use."
                         ),
                         "default": "implementation_gap",
+                    },
+                },
+                "required": ["agent_id", "task_id", "reason"],
+            },
+        ),
+        types.Tool(
+            name="request_task_decline",
+            description=(
+                "Decline a task you currently hold, terminally. Use when "
+                "you have concluded the claim this task checks cannot be "
+                "verified — distinct from report_blocker's high-severity "
+                "path (which assumes the work could still succeed later) "
+                "and from request_task_redo (which sends DONE work back "
+                "for another attempt). Marcus marks the task DECLINED: "
+                "settled, like BLOCKED, but never claimable again "
+                "(ADR-0013 K5)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Your agent ID (must hold the task)",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the task to decline",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Why this cannot be verified — recorded as the "
+                            "board comment and the task_declined event"
+                        ),
                     },
                 },
                 "required": ["agent_id", "task_id", "reason"],
@@ -1509,6 +1544,21 @@ async def handle_tool_call(
                     reason=reason,
                     state=state,
                     defect_type=defect_type,
+                )
+
+        elif name == "request_task_decline":
+            agent_id = arguments.get("agent_id") if arguments else None
+            task_id = arguments.get("task_id") if arguments else None
+            reason = arguments.get("reason") if arguments else None
+
+            if not agent_id or not task_id or not reason:
+                result = {"error": "agent_id, task_id, and reason are required"}
+            else:
+                result = await request_task_decline(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    reason=reason,
+                    state=state,
                 )
 
         # Project monitoring tools

@@ -244,6 +244,24 @@ class TestVerdictWhenDrained:
         assert verdict.tasks_unclaimable == 1
 
     @pytest.mark.asyncio
+    async def test_declined_lane_with_dependents_is_blocked(self) -> None:
+        """ADR-0013 K5: a DECLINED upstream behaves exactly like BLOCKED
+        here -- terminal, never in flight, and its dependent can never
+        become claimable. Before DECLINED existed, compute_board_drain's
+        own code comment asserted TaskStatus had exactly four members;
+        a fifth value falling through that assumption would have been
+        misclassified rather than counted as blocked."""
+        state = _state([_task("a", TaskStatus.DECLINED), _task("b", deps=["a"])])
+
+        verdict = await compute_board_drain(state, PROJECT)
+
+        assert verdict.drained is True
+        assert verdict.reason == "blocked"
+        assert verdict.tasks_blocked == 1
+        assert verdict.tasks_unclaimable == 1
+        assert verdict.tasks_in_flight == 0
+
+    @pytest.mark.asyncio
     async def test_lease_on_a_task_of_another_project_does_not_count(self) -> None:
         """Drain is per project; another project's live work is irrelevant."""
         tasks = [

@@ -1948,6 +1948,39 @@ class MarcusServer:
 
                 return result
 
+        if "request_task_decline" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def request_task_decline(
+                agent_id: str,
+                task_id: str,
+                reason: str,
+            ) -> Dict[str, Any]:
+                """Decline a held task, terminally (ADR-0013 K5)."""
+                from src.logging.mcp_tool_logger import log_mcp_tool_response
+
+                from .tools.task import request_task_decline as impl
+
+                result = await impl(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    reason=reason,
+                    state=server,
+                )
+
+                # Log MCP tool response
+                log_mcp_tool_response(
+                    tool_name="request_task_decline",
+                    arguments={
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                        "reason": reason,
+                    },
+                    response=result,
+                )
+
+                return result
+
         if "unassign_task" in allowed_tools:
 
             @app.tool()  # type: ignore[misc]

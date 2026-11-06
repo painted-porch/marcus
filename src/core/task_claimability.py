@@ -27,7 +27,7 @@ from src.core.models import Task, TaskStatus
 # gridlock paths own that case.
 BEST_EFFORT_MIN_DONE_FRACTION = 0.8
 
-SETTLED_FOR_BEST_EFFORT = {TaskStatus.DONE, TaskStatus.BLOCKED}
+SETTLED_FOR_BEST_EFFORT = {TaskStatus.DONE, TaskStatus.BLOCKED, TaskStatus.DECLINED}
 
 
 def is_integration_task(task: Task) -> bool:
