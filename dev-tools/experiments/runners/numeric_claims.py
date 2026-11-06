@@ -578,6 +578,36 @@ def _within_tolerance(
 _ORDERED_LIST_MARKER_RE = re.compile(r"^\s*\d+\.\s", re.MULTILINE)
 
 
+def _mask_ordered_list_markers(text: str) -> str:
+    """Blank an ordered-list marker to same-width spaces, not one space.
+
+    Collapsing a marker to a single space (the old behavior) shortens
+    the text by the marker's own length minus one -- harmless for a
+    caller that only wants the figures, since nothing downstream of
+    that caller cares about character offsets, but every offset
+    computed on the shortened text drifts out of alignment with the
+    caller's original ``text`` from that point on. A ten-item list
+    has a four-character marker ("10. ") where every earlier item had
+    a three-character one ("1. ", "2. ", ...), so the drift is
+    cumulative and position-dependent: :func:`_tag_figures` needs its
+    positions to stay valid against callers that extract a sentence
+    around one, so this masks markers without ever changing the
+    text's own length.
+
+    Parameters
+    ----------
+    text : str
+        Report text, already run through :func:`_normalize_numeric_text`.
+
+    Returns
+    -------
+    str
+        The same text with every marker's characters replaced by
+        spaces, one for one.
+    """
+    return _ORDERED_LIST_MARKER_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+
 def extract_numbers(text: str) -> List[str]:
     """Pull every figure out of report prose.
 
@@ -618,6 +648,303 @@ def _words_in(text: str) -> Set[str]:
         Lowercased alphanumeric tokens.
     """
     return set(re.findall(r"[a-z0-9/]+", (text or "").lower()))
+
+
+#: A closing or opening quotation mark a writer's model might use,
+#: named by codepoint rather than written as a literal glyph -- see
+#: the Unicode block above for why.
+_RIGHT_DOUBLE_QUOTE = chr(0x201D)
+_RIGHT_SINGLE_QUOTE = chr(0x2019)
+_LEFT_DOUBLE_QUOTE = chr(0x201C)
+_LEFT_SINGLE_QUOTE = chr(0x2018)
+
+#: Markers that can close one sentence's own formatting before the
+#: whitespace that follows it ("0.886 [c1].**" -- the "**" sits
+#: between the period and the next sentence's capital letter).
+_CLOSING_MARKERS_RE = (
+    r'(?:\*\*|\*|_|"|' + _RIGHT_DOUBLE_QUOTE + "|" + _RIGHT_SINGLE_QUOTE + r"|\)|\])*"
+)
+
+#: Markers that can open the *next* sentence's own formatting after
+#: the whitespace ("0.886 [c1]. **Cotton..." -- the "**" sits between
+#: the whitespace and that sentence's capital letter). The mirror of
+#: :data:`_CLOSING_MARKERS_RE`, checked in a lookahead rather than
+#: consumed, since the next sentence's own boundary-finding pass
+#: still needs to see these characters.
+_OPENING_MARKERS_RE = (
+    r'(?:\*\*|\*|_|"|' + _LEFT_DOUBLE_QUOTE + "|" + _LEFT_SINGLE_QUOTE + r"|\(|\[)*"
+)
+
+#: Sentence-ending punctuation, then any closing markdown or
+#: quotation marks, then either end of text or whitespace, any
+#: opening markdown or quotation marks on the *next* sentence, and
+#: finally a token that actually starts a new sentence: a capital
+#: letter, a digit, or a list marker. Splitting on bare "punctuation
+#: then whitespace" (the original rule) both over-rejected ("vs.
+#: cotton" split at the abbreviation, because nothing checked what
+#: followed) and under-rejected a closing marker on the first
+#: sentence ("**Maize's R2 is 0.886 [c1].** Cotton's...") or an
+#: opening marker on the second ("Maize's R2 is 0.886 [c1].
+#: **Cotton's..."). Requiring a sentence-starting token after the
+#: whitespace fixes the first; looking past closing and opening
+#: markers on either side fixes the other two. This is a heuristic,
+#: not a parser: it is good enough to isolate one sentence from its
+#: neighbors, which is all this check needs.
+_SENTENCE_END_RE = re.compile(
+    r"[.!?]"
+    + _CLOSING_MARKERS_RE
+    + r"(?:\s+(?="
+    + _OPENING_MARKERS_RE
+    + r"(?:[A-Z0-9]|[-*+]\s|\|))|\Z)"
+)
+
+#: A fixed list of abbreviations whose period is never a sentence
+#: boundary, even when it happens to be followed by whitespace and a
+#: capitalized word ("e.g. Maize", "Fig. 3", "et al. Smith") -- cases
+#: the capital-letter requirement above cannot rule out by itself.
+#: Matched case-insensitively against the text immediately before
+#: the period, with a word-boundary check so "e.g" cannot match
+#: inside some unrelated longer word.
+_ABBREVIATION_ENDINGS = (
+    "vs",
+    "e.g",
+    "i.e",
+    "cf",
+    "et al",
+    "fig",
+    "no",
+    "approx",
+    "ca",
+)
+
+
+def _ends_with_abbreviation(prefix: str) -> bool:
+    """Decide whether text immediately preceding a period is an abbreviation.
+
+    Parameters
+    ----------
+    prefix : str
+        The text before the period being considered as a boundary.
+
+    Returns
+    -------
+    bool
+        True when ``prefix`` ends with one of :data:`_ABBREVIATION_ENDINGS`,
+        at a word boundary.
+    """
+    lowered = prefix.lower()
+    for abbr in _ABBREVIATION_ENDINGS:
+        if lowered.endswith(abbr):
+            before = lowered[: len(lowered) - len(abbr)]
+            if not before or not before[-1].isalnum():
+                return True
+    return False
+
+
+#: The start of a markdown list item ("- ", "* ", "+ ", "10. ") or a
+#: table row ("|") is a sentence boundary even with no terminal
+#: punctuation at all -- a writer does not end "- Maize R2: 0.886
+#: [c1]" with a period, so without this, consecutive list items or
+#: table rows merge into one "sentence" spanning the whole list, and
+#: the row-provenance check above sees every item's row as if it
+#: were also every other item's own row.
+_LIST_OR_TABLE_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]\s|\d+\.\s|\|)", re.MULTILINE)
+
+#: A markdown heading line ("# Maize", "## Results") is its own
+#: unit, start to end -- a writer does not end a heading with a
+#: period, and the paragraph after it does not inherit the
+#: heading's own words just because nothing else separates them.
+#: Both the heading's start (ending whatever came before it) and its
+#: end (ending the heading itself) are boundaries.
+_HEADING_LINE_RE = re.compile(r"^#{1,6}[ \t][^\n]*", re.MULTILINE)
+
+#: One or more blank (empty or whitespace-only) lines end the
+#: paragraph before them -- a writer separates paragraphs this way
+#: far more often than with terminal punctuation on the last
+#: sentence of one before the first word of the next. The boundary
+#: is the position right after the blank-line run, where the next
+#: paragraph's own content begins.
+_PARAGRAPH_BREAK_RE = re.compile(r"(?:\n[ \t]*){2,}")
+
+
+def _line_boundaries(text: str) -> Set[int]:
+    """Stage 1: positions where a markdown block begins or ends.
+
+    Covers a list item or table row's own line start, a heading
+    line's start and end, and the start of the paragraph following
+    one or more blank lines -- every Markdown block type besides an
+    ordinary sentence. Operates on ``text`` before any ordered-list-
+    marker masking, since masking blanks the digits an ordered
+    marker needs to match at all -- a caller that masks first, then
+    segments, never finds that boundary for a numbered list.
+
+    Parameters
+    ----------
+    text : str
+        The text to scan, not yet masked.
+
+    Returns
+    -------
+    Set[int]
+        One offset per block boundary found.
+    """
+    boundaries = {m.start() for m in _LIST_OR_TABLE_LINE_RE.finditer(text)}
+    for m in _HEADING_LINE_RE.finditer(text):
+        boundaries.add(m.start())
+        boundaries.add(m.end())
+    boundaries |= {m.end() for m in _PARAGRAPH_BREAK_RE.finditer(text)}
+    return boundaries
+
+
+def _punctuation_boundaries(text: str) -> Set[int]:
+    """Stage 2: positions where sentence-ending punctuation closes a sentence.
+
+    Parameters
+    ----------
+    text : str
+        The text to scan.
+
+    Returns
+    -------
+    Set[int]
+        One offset per sentence-ending match, after the abbreviation
+        list has ruled out a false one.
+    """
+    boundaries = set()
+    for m in _SENTENCE_END_RE.finditer(text):
+        if text[m.start()] == "." and _ends_with_abbreviation(text[: m.start()]):
+            continue
+        boundaries.add(m.end())
+    return boundaries
+
+
+def _sentence_boundaries(text: str) -> List[int]:
+    """Collect every position in text that starts or ends a "sentence".
+
+    The union of both stages: a list item or table row with no
+    terminal punctuation at all still ends where the next one begins
+    (stage 1), and an ordinary sentence still ends at its own
+    punctuation (stage 2) -- the two are independent passes over the
+    same unmasked text, so neither stage needs to know where the
+    other found a boundary.
+
+    Parameters
+    ----------
+    text : str
+        The text to scan, not yet masked -- masking a figure's
+        ordered-list marker must happen only inside number
+        extraction, never before this.
+
+    Returns
+    -------
+    List[int]
+        Sorted character offsets, always including ``0`` and
+        ``len(text)``.
+    """
+    boundaries = {0, len(text)} | _line_boundaries(text) | _punctuation_boundaries(text)
+    return sorted(boundaries)
+
+
+def _sentence_at(text: str, position: int) -> str:
+    """Return the sentence enclosing a character position in text.
+
+    Parameters
+    ----------
+    text : str
+        The text to search.
+    position : int
+        A character offset into ``text``.
+
+    Returns
+    -------
+    str
+        The sentence containing ``position`` -- from the end of the
+        previous boundary (sentence-ending punctuation, or the start
+        of a list item or table row) to the next one.
+    """
+    boundaries = _sentence_boundaries(text)
+    start = max(b for b in boundaries if b <= position)
+    end = min((b for b in boundaries if b > start), default=len(text))
+    return text[start:end]
+
+
+def _prose_label_contradiction(
+    claim: Claim, sentence: str, sources: Dict[str, Any]
+) -> Optional[str]:
+    """Report a sentence that contradicts the row a tagged claim reads.
+
+    :func:`label_contradiction` catches a claim whose own ``label``
+    names the wrong row. Neither it nor the derived-claim equivalent
+    catches a report sentence that names the wrong row while tagging
+    a claim whose own label is perfectly correct: "Cotton's R2 is
+    0.886 [c1]." where ``c1`` correctly reads and labels maize's own
+    0.886. The claim is right; the sentence lies, and nothing before
+    this checked the sentence's own words at all.
+
+    Generalizes the same sibling-row rule :func:`label_contradiction`
+    and the derived-claim version use, applied to the sentence
+    surrounding a tagged figure instead of the claim's own label, and
+    covering both a lookup claim's single row and a derived or
+    consistency claim's inputs.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim a figure in ``sentence`` is tagged with.
+    sentence : str
+        The sentence enclosing the tagged figure (see
+        :func:`_sentence_at`).
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the contradiction, or ``None``.
+    """
+    addresses: List[str] = []
+    if (
+        claim.kind == "lookup"
+        and isinstance(claim.source, str)
+        and isinstance(claim.key, str)
+    ):
+        addresses.append(f"{claim.source}:{claim.key}")
+    elif claim.kind in ("derived", "consistency") and isinstance(claim.inputs, dict):
+        addresses.extend(v for v in claim.inputs.values() if isinstance(v, str))
+
+    owned_by_column: Dict[Tuple[str, str], Set[str]] = {}
+    for address in addresses:
+        parts = address.split(":")
+        if len(parts) < 2 or "=" not in parts[1]:
+            continue
+        source_file = parts[0]
+        sel_col, sel_val = parts[1].split("=", 1)
+        owned_by_column.setdefault((source_file, sel_col), set()).add(sel_val)
+
+    sentence_words = _words_in(sentence)
+    for (source_file, sel_col), owned in owned_by_column.items():
+        rows = sources.get(source_file)
+        if not isinstance(rows, list) or not rows:
+            continue
+        # Naming every row the claim actually reads earns the
+        # sentence the right to mention others, the same allowance
+        # label_contradiction and its derived-claim equivalent give a
+        # label -- naming only some of them is not covered by it.
+        names_every_owned_row = all(v.lower() in sentence_words for v in owned)
+        if names_every_owned_row:
+            continue
+        siblings = {
+            str(row.get(sel_col, "")).strip()
+            for row in rows
+            if str(row.get(sel_col, "")).strip() not in owned
+        }
+        for other in siblings:
+            if other and other.lower() in sentence_words:
+                return (
+                    f"sentence says {other!r} but the tagged claim reads "
+                    f"{sel_col}={sorted(owned)!r}"
+                )
+    return None
 
 
 def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
@@ -1054,7 +1381,7 @@ def _check_one(
     )
 
 
-def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
+def _tag_figures(text: str) -> List[Tuple[str, Optional[str], int]]:
     """Pair each figure in report prose with the claim id tagged after it.
 
     A number is bound to the next ``[cN]`` tag that appears before any
@@ -1069,12 +1396,17 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
 
     Returns
     -------
-    List[Tuple[str, Optional[str]]]
-        ``(figure, claim_id)`` pairs in order of appearance;
+    List[Tuple[str, Optional[str], int]]
+        ``(figure, claim_id, position)`` in order of appearance;
         ``claim_id`` is ``None`` when the figure carries no tag.
+        ``position`` is the figure's own character offset in
+        ``_mask_ordered_list_markers(_normalize_numeric_text(text))``
+        -- every substitution either function makes preserves
+        character length, so the offset is valid against the
+        caller's own ``text`` too, and against that same prepared
+        text if the caller needs to extract a sentence around it.
     """
-    cleaned = _normalize_numeric_text(text or "")
-    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
+    cleaned = _mask_ordered_list_markers(_normalize_numeric_text(text or ""))
     tokens: List[Tuple[int, str, str]] = []
     for m in _NUMBER_RE.finditer(cleaned):
         figure = m.group(1)
@@ -1093,19 +1425,21 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
         tokens.append((m.start(), "ref", m.group(1)))
     tokens.sort(key=lambda t: t[0])
 
-    pairs: List[Tuple[str, Optional[str]]] = []
+    pairs: List[Tuple[str, Optional[str], int]] = []
     pending_value: Optional[str] = None
-    for _, kind, val in tokens:
+    pending_position = 0
+    for position, kind, val in tokens:
         if kind == "num":
             if pending_value is not None:
-                pairs.append((pending_value, None))
+                pairs.append((pending_value, None, pending_position))
             pending_value = val
+            pending_position = position
         elif pending_value is not None:
-            pairs.append((pending_value, val))
+            pairs.append((pending_value, val, pending_position))
             pending_value = None
         # else: a tag with no preceding unbound number -- ignore it.
     if pending_value is not None:
-        pairs.append((pending_value, None))
+        pairs.append((pending_value, None, pending_position))
     return pairs
 
 
@@ -1455,7 +1789,15 @@ def check_claims(
     coverage_lookup = {
         c.id: c for c in (coverage_claims if coverage_claims is not None else claims)
     }
-    for figure, ref_id in _tag_figures(report_text):
+    # Deliberately NOT masked: _tag_figures masks an ordered-list
+    # marker only for its own number-extraction pass, and that
+    # masking preserves every character's position, so the figure
+    # positions it returns are equally valid against this unmasked
+    # text. _sentence_at needs the marker's digits intact -- masked,
+    # _line_boundaries could never match a numbered list item's own
+    # line start, and a numbered list would merge into one sentence.
+    normalized_text = _normalize_numeric_text(report_text)
+    for figure, ref_id, position in _tag_figures(report_text):
         if ref_id is None:
             results.append(
                 CheckResult(
@@ -1504,6 +1846,26 @@ def check_claims(
                             f"figure {figure} is tagged [{ref_id}], but that "
                             f"claim's value is {claim.value}"
                         )
+                    ),
+                )
+            )
+            continue
+        # The tag and value both check out, but the sentence stating
+        # the figure is the writer's own prose, and nothing above
+        # reads it: #827 step 2 -- a right number under a correct
+        # claim can still sit in a sentence that names the wrong row.
+        sentence = _sentence_at(normalized_text, position)
+        contradiction = _prose_label_contradiction(claim, sentence, sources)
+        if contradiction:
+            results.append(
+                CheckResult(
+                    claim_id=f"uncovered:{figure}",
+                    verdict=VERDICT_UNCOVERED,
+                    value=figure,
+                    expected=claim.value,
+                    detail=(
+                        f"figure {figure} is tagged [{ref_id}], but its own "
+                        f"sentence contradicts that claim: {contradiction}"
                     ),
                 )
             )
