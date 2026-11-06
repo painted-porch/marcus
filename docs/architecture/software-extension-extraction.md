@@ -7,7 +7,7 @@ Nothing here changes behavior.
 
 ## Summary
 
-**Total estimate: 37-51 engineer-days** across four concerns, not counting one prerequisite that is its own separate decision with its own sizing:
+**Total estimate: 31-43 engineer-days** across four concerns, not counting one prerequisite that is its own separate decision with its own sizing. (Revised from an earlier 37-51: Codex review on PR #866 found the decomposer's "hard half" needed no new kernel capability — down 4-5 days — and that combining this document's cost-tracking estimate with ADR-0013's own K8 consequence-3 sizing double-counted the transport PR #867 has since shipped — down roughly 2-3 days net of what's left to do.)
 
 - Full pull-mode dispatch for the validation gate (a "deferred-completion" mechanism that does not exist anywhere in Marcus today) — +8-12 days on top of the validation gate's own 12-18, if attempted in this pass rather than deferred behind a shim.
 
@@ -17,24 +17,24 @@ That migration is folded into concern #3's own 8-day estimate below, not a separ
 
 | # | Concern | Engineer-days | Blocked on |
 | --- | --- | --- | --- |
-| 1 | Cost tracking (`src/cost_tracking/`) | 5-8 | Nothing — can start immediately |
+| 1 | Cost tracking (`src/cost_tracking/`) | 3-5 remaining | Nothing — the generic transport shipped in PR #867; what's left is moving the two vendor-coupled modules and deciding the legacy duplicate's fate |
 | 2 | Decomposition & planning, clean half (`src/integrations/nlp_task_utils.py`) | 1 | Nothing — can start immediately |
 | 3 | Product smoke gate (`_run_product_smoke_gate` and its callers) | 8 | Nothing — K5 is already built; the ~1 day to migrate the escalation path onto it is folded into this estimate |
 | 4 | Validation gate (`src/ai/validation/`) | 12-18 | Shares `report_task_progress`'s completion path with #3; do not run concurrently with #3 on parallel branches |
-| 5 | Decomposition & planning, hard half (`nlp.py`, `nlp_base.py`) | 11-16 | K10's "explicit-task creation path at runtime," named as open in ADR-0013 but not yet built |
+| 5 | Decomposition & planning, hard half (`nlp.py`, `nlp_base.py`) | 7-11 | Nothing — the seeded `create_tasks` graph-authoring path already exists (K10 narrow accept); remaining work is schema extension, not new kernel capability |
 
 **Recommended order, and why:**
 
-1. **Cost tracking first.** It is the cheapest, the most independent (the vendor-coupled half has zero `src/` callers today), and it builds the generic ingestion-API pattern that K8 consequence 3 needs anyway — doing it first buys a worked example of "registration plus ingestion" at the lowest risk in the whole set.
+1. **Cost tracking first.** The generic transport is now built (PR #867); what's left (moving the two vendor-coupled modules, deciding the legacy duplicate's fate) is the cheapest and most independent remaining work — the vendor-coupled half has zero `src/` callers today — so there is no reason to defer it.
 2. **The decomposer's clean half in parallel.** `nlp_task_utils.py` touches no kernel state at all and can move almost mechanically; there is no reason to wait for anything else.
 3. **The smoke gate.**
    Nothing blocks it today: migrate `_terminalize_escalated_smoke_task` onto the existing `DECLINED` status and its release sequence first (roughly a day, folded into the 8-day estimate above), then extract the rest of the gate.
 4. **The validation gate, after the smoke gate, not concurrently with it.**
    Both gates are concentrated in the same roughly 240-line region of `report_task_progress` (`src/marcus_mcp/tools/task.py:7867-8110`).
    Attempting both on parallel branches will produce conflicting rewrites of that region.
-5. **The decomposer's hard half last, and only as a first cut.**
-   `nlp_base.py`'s `_remap_dependencies` writes the task-dependency graph by raw SQL through a private SQLite-only method (`self.kanban_client._with_connection`), bypassing `KanbanInterface` entirely — this is K10's own "explicit-task creation path at runtime," named in ADR-0013 as still open.
-   Sizing this concern today is a first cut against a mechanism that has to be designed as part of doing it, not an estimate against known work.
+5. **The decomposer's hard half last.**
+   The graph-authoring mechanism it needs (the seeded `create_tasks` path) already exists, so this is ordinary extension work — extending the seed schema and routing writes through the existing tool — not a first cut against an undesigned mechanism.
+   Last in the order regardless, since it is still the largest remaining single piece and benefits from the other four's patterns (registration, migration shape, dual-gate sequencing) already being proven.
 
 **Assumptions behind every number below:** one engineer already familiar with this codebase; Python only, no Cato (the dashboard) front-end work; existing tests updated, no new test infrastructure built; "done" means the concern lives behind a registration mechanism with the existing test suites green and no behavior change for the software-building consumer; K2's `ProjectConfig.task_type_registrations` field is already landed and is not re-counted.
 
@@ -58,11 +58,12 @@ That migration is folded into concern #3's own 8-day estimate below, not a separ
 
 **Files:** `src/marcus_mcp/tools/nlp.py` (2032 lines), `src/integrations/nlp_base.py` (1090 lines), `src/integrations/nlp_task_utils.py` (540 lines).
 **MCP-reachable entry points (3):** `create_project` (`nlp.py:387`), `add_feature` (`nlp.py:1694`), `create_tasks` (`nlp.py:1728`).
-**Sizing: 12-17 engineer-days total**, split as:
+**Sizing: 8-12 engineer-days total** (revised down from an earlier 12-17 draft — Codex review on PR #866 found the seeded `create_tasks` path already provides the graph-authoring mechanism this document previously described as missing; see below), split as:
 
 - **1 day** — `nlp_task_utils.py` (`TaskClassifier`, `TaskBuilder`, `SafetyChecker`, `TaskType`): touches no server state at all, and can move almost mechanically.
-- **7-11 days** — `nlp_base.py`'s `NaturalLanguageTaskCreator`, chiefly `_remap_dependencies` (`nlp_base.py:399-580`), which writes the task-dependency graph through raw SQL against a private SQLite-only method rather than any `KanbanInterface` method.
-  This is the one piece of this scope that requires building new kernel capability (K10's still-open graph-authoring mechanism) rather than just moving existing code.
+- **4-6 days** — `nlp_base.py`'s `NaturalLanguageTaskCreator`.
+  The graph-authoring mechanism itself (the seeded `create_tasks` path, `nlp.py:1951-1976`) already exists and needs no new kernel capability; the work is extending its seed-spec schema to carry what an external decomposer needs beyond name/dependencies (`acceptance_criteria`, `completion_criteria`, `source_type`/`source_context`), and routing an extracted decomposer's writes through that tool instead of calling `create_tasks_on_board` in-process the way today's in-kernel decomposer does.
+  `_remap_dependencies`'s raw-SQL write (`nlp_base.py:399-580`) stays kernel-internal either way and is not part of this estimate — it is a `KanbanInterface`-conformance fix on its own schedule, not an extraction blocker.
 - **3-5 days** — `nlp.py`'s three MCP entry points, separating the decomposition-only logic from the kernel registration writes each one also performs in the same function body (see "Tangled kernel writes," below).
 
 ### Inventory table: decomposition & planning
@@ -73,7 +74,7 @@ That migration is folded into concern #3's own 8-day estimate below, not a separ
 | `_create_project_inner` | `nlp.py:850-1691` | Decomposition + registration, most mixed function in the file | Mixed | `create_project` only | writes `state.kanban_client` twice (1277, 1446), `project_registry.add_project`, `project_manager.switch_project`, `state.log_event` | Split required before any mechanism applies |
 | `add_feature` | `nlp.py:1694-1725` | MCP entry point | Extension | `server.py:2339` | none (pass-through) | K2 task-type ownership |
 | `create_tasks` | `nlp.py:1728-2032` | MCP entry point; seeded path is K10's accepted narrow case | Mixed | `server.py:2169` (HTTP only — absent from the stdio handler and `tools/__init__.py`) | `project_manager.get_kanban_client`, `state.refresh_project_state` | K10 (seeded/add-only path, accepted); prose path has no mechanism |
-| `NaturalLanguageTaskCreator.create_tasks_on_board` | `nlp_base.py:65-313` | The board-write loop | Mixed | called by `create_from_description`, the seeded path, `nlp_tools.py` | `kanban_client.create_task`, `TaskGraphValidator.validate_and_fix` | K10 for the add-only shape; no mechanism for decomposition-time graph authorship |
+| `NaturalLanguageTaskCreator.create_tasks_on_board` | `nlp_base.py:65-313` | The board-write loop | Mixed | called by `create_from_description`, the seeded path, `nlp_tools.py` | `kanban_client.create_task`, `TaskGraphValidator.validate_and_fix` | K10 for the add-only shape; reachable externally today through the seeded `create_tasks` path (see "The graph-authoring write path already exists," below) |
 | `NaturalLanguageTaskCreator._remap_dependencies` | `nlp_base.py:399-580` | Dependency-edge persistence, **the sharpest kernel/extension entanglement in this concern** | Kernel-shaped, extension-executed | `create_tasks_on_board` | raw SQL on `kanban_client._with_connection`/`_run_in_executor` — no `KanbanInterface` method exists | **Missing mechanism** — see below |
 | `NaturalLanguageTaskCreator._decompose_and_add_subtasks` | `nlp_base.py:582-786` | AI decomposition + Planka checklist side effect | Extension | `create_tasks_on_board` | `from src.marcus_mcp.coordinator import decompose_task, should_decompose` — **imports the kernel's own namespace to find itself** | None required once moved out of `coordinator/` |
 | `SafetyChecker.apply_*_dependencies` (3 methods) | `nlp_task_utils.py:280-442` | Design-before-implement, test-after-implement, deploy-last lifecycle rules | Extension | `apply_safety_checks` | none | K2 (declared per-type policy) |
@@ -98,12 +99,23 @@ None of this is a defect; it is simply why `_create_project_inner` cannot be lif
 **The kernel's decision about what work to offer an agent currently depends on the software-building extension's own vocabulary.**
 This has to be broken — a kernel-owned replacement for phase/type classification, or a K2-based declaration the kernel reads instead — before the decomposer can be extracted without leaving a residual import.
 
-### Missing mechanism: a graph-authoring write path
+### The graph-authoring write path already exists; the gap is schema richness
 
-K2's registration record (`ProjectConfig.task_type_registrations`) covers an extension that *claims* a task type the kernel already created.
-The decomposer does something K2 was never scoped for: it *mints* the entire graph and its edges, including the raw-SQL write into `task_dependencies` named above.
-ADR-0013's K10 names "an explicit-task creation path at runtime" as a capability it recommends but does not accept (only the narrower "runtime task creation may depend on an existing board task" is Accepted, per K10 and issue #841/PR #855).
-Until that lands, the only supported path for an external decomposer is the seeded path (`create_tasks`'s `options.tasks` branch) — which is HTTP-only today and still hands the raw `kanban_client` to `create_tasks_on_board`.
+(Corrected from an earlier draft of this document, Codex review on PR #866: the mechanism below was previously described as missing.
+It is not.)
+
+K2's registration record (`ProjectConfig.task_type_registrations`) covers an extension that *claims* a task type the kernel already created, which is not what a decomposer needs — a decomposer *mints* the graph in the first place.
+What a decomposer needs instead already ships: `create_tasks(options.tasks)` (`nlp.py:1951-1976`, accepted narrowly as K10's "runtime task creation may depend on an existing board task," issue #841/PR #855) builds seeded tasks, resolves their dependencies (against the same call's own batch first, then the project's existing board tasks), and persists the whole graph through `create_tasks_on_board` — reachable as an ordinary HTTP MCP tool call, with the caller never touching `kanban_client` itself.
+An external decomposer can author its generated graph through this tool today.
+
+Two concrete, smaller gaps remain, neither of which is "no mechanism exists":
+
+- **Schema richness.** `build_seeded_tasks`'s seed-spec shape carries name, dependencies, and a handful of other fields; it does not yet carry everything `TaskBuilder.build_task_data` attaches for the prose-decomposition path (`acceptance_criteria`, `completion_criteria`, `source_type`/`source_context`).
+  Extending the seeded schema to carry this is ordinary additive work, not new kernel capability.
+- **The raw-SQL dependency write stays kernel-internal.** `_remap_dependencies`'s private-method SQL write (`nlp_base.py:399-580`) is `create_tasks_on_board`'s own internal implementation detail — it is not something an external caller touches, and K10's narrow accept did not require replacing it.
+  It remains worth fixing on its own merits (K1's "every provider should go through `KanbanInterface`" standard), but it is not a blocker to extracting the decomposer.
+
+This changes concern #5's sizing materially — see its own section below.
 
 ---
 
@@ -138,19 +150,20 @@ Today the kernel *calls* the gate synchronously inside `report_task_progress` (`
 Under pull-mode, the validator would be a separate agent claiming a `verify`-type task and reporting its own evidence, which means the *blocking* semantics — an agent's completion report cannot close until the gate says yes — have to be re-expressed as a dependency edge plus the existing typed-evidence gate (K2/K4), and the retry ceiling has to move with it.
 **There is no mechanism today for "a completion is held pending another agent's verdict."**
 This single unbuilt piece is why the validation gate's estimate carries an explicit +8-12 day branch rather than being folded into the 12-18 day baseline: the baseline assumes an in-process adapter shim stays at the call seam for this pass, deferring full pull-mode dispatch to a follow-up.
+The product smoke gate (§3) needs this exact same mechanism for the exact same reason — `_record_progress` blocks on `_run_product_smoke_gate`'s return value the same way it blocks on this gate's — so building it is costed once, here, not twice; §3 cross-references this section rather than repeating the estimate.
 
 ---
 
 ## 3. The product smoke gate
 
 **Code:** `_run_product_smoke_gate` (`task.py:2288-2597`, 310 lines) and `_terminalize_escalated_smoke_task` (`task.py:1494-1558`), plus `src/integrations/product_smoke.py` (~1180 lines, the subprocess/server/probe runner).
-**Sizing: 8 engineer-days**, including roughly a day to migrate `_terminalize_escalated_smoke_task` onto the existing `DECLINED` status (see below) before the rest of the gate moves.
+**Sizing: 8 engineer-days, assuming an in-process shim is retained at the completion call site** (see the verdict-return dependency, below) — including roughly a day to migrate `_terminalize_escalated_smoke_task` onto the existing `DECLINED` status before the rest of the gate moves.
 
 ### Inventory table: product smoke gate
 
 | Item | File:line | Concern | Kernel / Extension | Kernel state touched | Target mechanism |
 | --- | --- | --- | --- | --- | --- |
-| `_run_product_smoke_gate` | `task.py:2288-2597` | Gate body: resolve root, judge behavior evidence, run verification subprocesses | Mixed, heavily extension | reads `state.kanban_client._load_workspace_state()`; writes lease via `park_for_operator` | K4 (injected check on the `integration` type) for the gate itself |
+| `_run_product_smoke_gate` | `task.py:2288-2597` | Gate body: resolve root, judge behavior evidence, run verification subprocesses | Mixed, heavily extension | reads `state.kanban_client._load_workspace_state()`; writes lease via `park_for_operator` | K4 names *which* task type owns this check, but K4's registration carries only names and descriptions (`src/core/project_registry.py`) — it does not replace this gate's synchronous execution. `_record_progress` `await`s `_run_product_smoke_gate` directly and uses its return value to refuse completion before marking the task done; moving the subprocess runner out of process needs the **same missing pull-mode verdict-return mechanism named in §2 for the validation gate**, or an explicitly retained in-process shim. See the dependency note below. |
 | ↳ `_gate_unavailable` (closure) | `task.py:2397-2465` | Park the task when the gate cannot run | **Kernel** | `lease_manager.park_for_operator`, `state.log_event("operator_needed")` | **Missing mechanism**: an operator-park response contract any extension could invoke, not just this one |
 | ↳ project-root resolution | `task.py:2467-2495` | Resolve a server-side absolute path | Mixed | `state.kanban_client._load_workspace_state()` | **K8 consequence 1** |
 | ↳ behavior-evidence judgment | `task.py:2514-2547` | Per-product-type evidence bar | Extension | `task.source_context["structural_category"]` only | K4 |
@@ -165,12 +178,24 @@ K5 (a terminal `DECLINED` status) is Accepted and built — `request_task_declin
 This is not a missing kernel capability — it is one function that has not yet been updated to use a capability that already shipped.
 Migrating it (writing `DECLINED` instead of `BLOCKED`, through the same dual-write and best-effort column-move `request_task_decline` already uses) is folded into this concern's 8-day estimate, not sequenced as a separate prerequisite.
 
+### The smoke gate shares §2's verdict-return dependency (Codex review on PR #866)
+
+K4 is this gate's registration mechanism for *ownership* (which task type it owns), not for *execution*: `_record_progress` calls `_run_product_smoke_gate` synchronously and blocks the completion report on its return value, the identical shape §2 describes for the validation gate's `_validate_task_completion` call seam.
+Moving the subprocess/server/probe runner (`product_smoke.py`) out of the kernel process therefore needs the same not-yet-built pull-mode verdict-return mechanism §2 names, or an explicitly retained in-process shim for this gate too.
+
+This is **the same missing mechanism, not a second one** — building it (or deciding to defer it behind a shim) is a single decision that serves both gates.
+§2's own sizing already carries the optional cost of building it in full (the "+8-12 days" branch on top of its 12-18-day baseline); this concern's 8-day estimate assumes the same in-process-shim baseline §2 assumes, and if the full mechanism is built, its cost is paid once in §2's number, not added again here.
+
 ---
 
 ## 4. Cost tracking (`src/cost_tracking/`)
 
 **Files:** `cost_store.py` (1743), `cost_recorder.py` (454), `cost_aggregator.py` (780), `operations.py` (403), `worker_ingester.py` (370), `worker_intent.py` (254), `worker_usage_ingester.py` (186), `ai_usage_middleware.py` (185), `token_tracker.py` (347).
-**Sizing: 5-8 engineer-days** — the least tangled of the four concerns, because the cut line is already drawn in the code.
+**Sizing: 3-5 engineer-days remaining** (revised down from an earlier 5-8 — Codex review on PR #866: combining this concern's full estimate with ADR-0013 K8's own consequence-3 sizing double-counted the same deliverable; see the correction below) — the least tangled of the four concerns, because the cut line is already drawn in the code.
+
+**Status update: the generic transport is now built.** PR #867 (`feat/742-k8-cost-ingestion-api`, shape agreed with the Minecraft harness on issue #742) shipped `src/cost_tracking/usage_ingestion.py` — `UsageRecord`, `ingest_usage_records` (with per-batch accept/already-present/rejected acknowledgement for idempotent replay), and `read_run_ledger` — and converted `WorkerJSONLIngester` into one caller of it rather than the only path into `token_events`, with all 21 of its existing tests passing unmodified.
+That was the single biggest piece of this concern's original estimate (building the transport, 2-3 days of the original 5-8).
+What remains, below, is the rest.
 
 ### The K8-consequence-3 verdict
 
@@ -192,9 +217,15 @@ Migrating it (writing `DECLINED` instead of `BLOCKED`, through the same dual-wri
 | `TokenTracker`, `AIUsageMiddleware` | `token_tracker.py`, `ai_usage_middleware.py` (532 lines combined) | A second, legacy, duplicate cost system with a hardcoded `$0.03/1k "for Claude"` rate and a placeholder 5x projection multiplier; writes a JSON file, not `token_events` | `server.py:75,202,803`; `ai_analysis_engine.py:282,1635,1671` |
 | `DEFAULT_SEED` pricing rows | `cost_store.py:~450-640` | Anthropic-specific price table with cache-write/cache-read multipliers | `load_seed_prices` |
 
-**Target mechanism:** K8 consequence 3 names this directly — a generic ingestion API wrapping `record_event`, with `WorkerJSONLIngester` kept as one caller of it (the Claude-Code-specific adapter) rather than the only path in.
-The payload schema (`TokenEvent`), the dedup primitive (`_request_id`), and the semantics (`ingest_usage_log`) already exist and are already tested; what is missing is only the transport (an MCP tool or HTTP endpoint) and the attribution binding (`AgentBinding`, `worker_ingester.py:55-86`, is the right shape for that).
-The legacy `token_tracker.py`/`ai_usage_middleware.py` pair is a separate decision (delete or extract); deciding that is part of this concern's 5-8 days, and deleting it requires first confirming nothing reads `token_usage.json`.
+**Target mechanism:** K8 consequence 3 named this directly — a generic ingestion API wrapping `record_event`, with `WorkerJSONLIngester` kept as one caller of it (the Claude-Code-specific adapter) rather than the only path in.
+**Built, in PR #867** (as a direct function call, `ingest_usage_records`, rather than a separate MCP tool or HTTP endpoint — the payload schema, dedup primitive, and semantics `worker_usage_ingester.ingest_usage_log` already proved are now generalized into it).
+
+What is left, within this concern's revised 3-5 days: (1) move `worker_ingester.py` and `worker_intent.py` (the two Claude-Code-vendor-coupled modules, now adapters rather than the only path in) out of the kernel as the actual extraction act — **1-2 days**; (2) decide the legacy `token_tracker.py`/`ai_usage_middleware.py` pair's fate (delete or extract), which requires first confirming nothing reads `token_usage.json` — **2-3 days**.
+
+**On double-counting with ADR-0013's own K8 sizing:** ADR-0013's K8 section estimates consequence 3 (the ingestion API) at 3-4 engineer-days on its own, scoped narrowly to the API itself.
+This document's cost-tracking concern scoped the *same deliverable* plus two additional pieces (moving the vendor-coupled modules, and the legacy-duplicate decision) at a wider 5-8 days.
+Adding K8's full 6-8-day total (covering all three consequences) to this document's estimate therefore counted the shipped transport twice.
+Fixed here by stating this concern's remaining 3-5 days as what is left *after* PR #867, and by not re-adding K8 consequence 3's own days separately in the summary below — see the corrected total.
 
 ---
 
@@ -322,7 +353,11 @@ Items that cannot fully move until a specific K8 consequence lands, gathered fro
   All three inject software-specific duty text into every task's prompt, unconditionally.
 - **K8 consequence 3 (cost ingestion API):** the entire §4 vendor-coupled half (`worker_ingester.py`, `worker_intent.py`).
 
-None of these three consequences block the *other* three concerns in this document (decomposition, validation, smoke-gate mechanics) from moving — they specifically block the pieces named above, which is why K8's own three-consequence sizing (6-8 engineer-days, ADR-0013 K8) is additive to, not a subset of, this document's 37-51.
+None of these three consequences block the *other* three concerns in this document (decomposition, validation, smoke-gate mechanics) from moving — they specifically block the pieces named above.
+**Correction (Codex review on PR #866):** K8's three-consequence total (6-8 engineer-days, ADR-0013 K8) is *not* fully additive to this document's total.
+Consequence 3 (cost ingestion, 3-4 of those 6-8 days) is the same deliverable §4's cost-tracking concern scopes, now built in PR #867 — §4's own 3-5-day remainder already reflects that overlap being resolved, so K8's consequence-3 days are not added again.
+Consequences 1 and 2 (artifacts as content, no kernel-assembled instruction duties) remain genuinely additive: nothing in this document's four concerns does that work.
+Net: this document's 31-43 days plus K8 consequences 1 and 2 (roughly 3-4 days, per ADR-0013's own sizing), not plus the full 6-8.
 
 ## 7. Confirmation
 
