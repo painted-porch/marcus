@@ -4840,3 +4840,215 @@ class TestCodexFindingMetricIdentityCoversJsonKeyAddressesToo:
             spec, accepted, {"c1": "Overall mean APE"}, sources=self.METRICS_SOURCES
         )
         assert problems == []
+
+
+class TestCodexFindingMultiwordSelectorValuesAreMatchedAsPhrases:
+    """Every row-provenance check tokenized a selector value into a
+    set of individual words, so a hyphenated or multiword value --
+    exactly what the NASS adapter produces, state_alpha + "-" +
+    county_name -- was never recognized as itself or as a sibling:
+    "IA-STORY" and "IA-BOONE" both reduce to the same word "ia" plus a
+    second word neither check ever required to appear *together*. A
+    lookup of IA-STORY's own row, mislabelled with IA-BOONE's name,
+    verified anyway, because the sibling-match test was really asking
+    "does the label contain the word 'boone' anywhere", not "does the
+    label name IA-BOONE."
+    """
+
+    NASS_SOURCES = {
+        "yields.csv": [
+            {"area": "IA-STORY", "actual": 100},
+            {"area": "IA-BOONE", "actual": 90},
+        ]
+    }
+
+    SPACED_SOURCES = {
+        "yields.csv": [
+            {"area": "Story County", "actual": 100},
+            {"area": "Boone County", "actual": 90},
+        ]
+    }
+
+    @pytest.mark.unit
+    def test_a_hyphenated_sibling_value_is_caught(self):
+        """Codex's exact scenario: a correct IA-STORY lookup
+        mislabelled with the sibling IA-BOONE's own name."""
+        c = Claim(
+            id="c1",
+            value=100,
+            label="IA-BOONE actual yield",
+            kind="lookup",
+            source="yields.csv",
+            key="area=IA-STORY:actual",
+        )
+        res = check_claims([c], self.NASS_SOURCES)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+    @pytest.mark.unit
+    def test_a_hyphenated_value_naming_its_own_row_still_passes(self):
+        c = Claim(
+            id="c1",
+            value=100,
+            label="IA-STORY actual yield",
+            kind="lookup",
+            source="yields.csv",
+            key="area=IA-STORY:actual",
+        )
+        assert check_claims([c], self.NASS_SOURCES)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_a_spaced_multiword_sibling_value_is_caught(self):
+        """A space-separated multiword value ("Story County" vs
+        "Boone County") gets the same phrase-level treatment as a
+        hyphenated one."""
+        c = Claim(
+            id="c1",
+            value=100,
+            label="Boone County actual yield",
+            kind="lookup",
+            source="yields.csv",
+            key="area=Story County:actual",
+        )
+        res = check_claims([c], self.SPACED_SOURCES)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+    @pytest.mark.unit
+    def test_a_spaced_multiword_value_naming_its_own_row_still_passes(self):
+        c = Claim(
+            id="c1",
+            value=100,
+            label="Story County actual yield",
+            kind="lookup",
+            source="yields.csv",
+            key="area=Story County:actual",
+        )
+        assert check_claims([c], self.SPACED_SOURCES)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_the_single_token_crop_case_still_passes(self):
+        """The existing single-word selector case (per_crop.csv's own
+        "maize"/"cotton") must keep working under phrase matching,
+        not just the new multiword cases."""
+        sources = {
+            "per_crop.csv": [
+                {"crop": "maize", "mean_ape": 20.0},
+                {"crop": "cotton", "mean_ape": 10.0},
+            ]
+        }
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize mean APE",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_a_prose_sentence_naming_the_sibling_hyphenated_value_is_caught(self):
+        """The same phrase-matching fix applies to the tagged-sentence
+        path, not just the claim's own label."""
+        c = Claim(
+            id="c1",
+            value=100,
+            label="IA-STORY actual yield",
+            kind="lookup",
+            source="yields.csv",
+            key="area=IA-STORY:actual",
+        )
+        res = check_claims(
+            [c],
+            self.NASS_SOURCES,
+            report_text="IA-BOONE's actual yield is 100 [c1].",
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_a_slide_title_naming_the_sibling_hyphenated_value_is_caught(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=100,
+                label="IA-STORY actual yield",
+                addresses=("yields.csv:area=IA-STORY:actual",),
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "IA-BOONE actual yield 100",
+                    "cells": [
+                        {"value": 100, "claim": "c1", "label": "IA-STORY actual yield"}
+                    ],
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c1": "IA-STORY actual yield"}, sources=self.NASS_SOURCES
+        )
+        assert problems
+
+
+class TestCodexFindingSlideCellWhitespaceDoesNotHidePercentScale:
+    """_percent_aware_match's own percent detection was a bare
+    endswith("%") on the slide cell's literal value, a narrower, less
+    tolerant check than the figure extractor every other surface
+    (prose, a slide title) uses. "0.481% " (a trailing space after
+    the percent sign) no longer ends with "%", so it fell through to
+    a face-value compare, and the unscaled 0.481 passed against a
+    fraction claim whose real value is 0.481 -- when the correctly
+    scaled figure is actually 0.00481. Fixed by routing a slide
+    cell's own literal through the same figure extractor, after one
+    strip, rather than a second endswith check of its own.
+    """
+
+    ACCEPTED = {
+        "c1": CheckResult(
+            claim_id="c1",
+            verdict="verified",
+            value=0.481,
+            label="overall R2",
+            addresses=("metrics.json:r2_overall",),
+            unit="fraction",
+        )
+    }
+
+    @pytest.mark.unit
+    def test_a_trailing_space_after_the_percent_sign_is_still_scaled(self):
+        """Codex's exact scenario: 0.481% with a trailing space must
+        still be read as percent-suffixed and scaled down, not taken
+        unscaled at face value."""
+        spec = {
+            "slides": [
+                {"cells": [{"value": "0.481% ", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_leading_space_before_the_figure_is_still_scaled(self):
+        spec = {
+            "slides": [
+                {"cells": [{"value": " 0.481%", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_the_correctly_scaled_spaced_percentage_still_passes(self):
+        """The control: 48.1%, scaled to the fraction 0.481, is the
+        right figure for this claim and must still pass even with
+        surrounding whitespace."""
+        spec = {
+            "slides": [
+                {"cells": [{"value": "48.1% ", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems == []

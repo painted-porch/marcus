@@ -813,6 +813,63 @@ def _words_in(text: str) -> Set[str]:
     return set(re.findall(r"[a-z0-9/]+", (text or "").lower()))
 
 
+def _ordered_words_in(text: str) -> Tuple[str, ...]:
+    """Lowercase word tokens of text, in order, for phrase matching.
+
+    :func:`_words_in` collapses a selector value into an unordered
+    set, so a multiword or hyphenated value ("IA-STORY", "Story
+    County") is reduced to its individual words and a label or
+    sentence mentioning both of those words anywhere, in any order,
+    for any reason, reads as naming it -- or as naming a sibling row
+    whose own value happens to share one of them. Order is kept here
+    so a caller can require the value's own words to appear as one
+    contiguous run, not just each show up somewhere.
+
+    Parameters
+    ----------
+    text : str
+        The text to tokenize.
+
+    Returns
+    -------
+    Tuple[str, ...]
+        Lowercased alphanumeric tokens, in the order they appear.
+    """
+    return tuple(re.findall(r"[a-z0-9/]+", (text or "").lower()))
+
+
+def _phrase_in_words(phrase: str, words: Tuple[str, ...]) -> bool:
+    """Whether ``phrase``'s own words appear as a contiguous run in ``words``.
+
+    A selector value is a match for text only when every one of its
+    own words appears together, in order -- "Story" and "County"
+    sitting apart in an unrelated sentence must not read as naming
+    "Story County", and "IA-STORY" must not read as naming "IA-BOONE"
+    just because both share the "ia" token.
+
+    Parameters
+    ----------
+    phrase : str
+        The selector value to look for (e.g. ``"IA-STORY"``).
+    words : Tuple[str, ...]
+        The ordered tokens of the text to search, from
+        :func:`_ordered_words_in`.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``phrase``'s word sequence occurs, contiguous,
+        in ``words``.
+    """
+    phrase_words = _ordered_words_in(phrase)
+    if not phrase_words:
+        return False
+    span = len(phrase_words)
+    return any(
+        words[i : i + span] == phrase_words for i in range(len(words) - span + 1)
+    )
+
+
 #: Groups of words a report's prose uses interchangeably for the
 #: same metric concept a staged column name abbreviates -- "mean" and
 #: "average" for a column ending "_ape", "n"/"records" and "count"
@@ -1347,7 +1404,7 @@ def _prose_label_contradiction(
         sel_col, sel_val = parsed.selector
         owned_by_column.setdefault((parsed.source, sel_col), set()).add(sel_val)
 
-    sentence_words = _words_in(sentence)
+    sentence_words = _ordered_words_in(sentence)
     for (source_file, sel_col), owned in owned_by_column.items():
         rows = sources.get(source_file)
         if not isinstance(rows, list) or not rows:
@@ -1356,7 +1413,7 @@ def _prose_label_contradiction(
         # sentence the right to mention others, the same allowance
         # label_contradiction and its derived-claim equivalent give a
         # label -- naming only some of them is not covered by it.
-        names_every_owned_row = all(v.lower() in sentence_words for v in owned)
+        names_every_owned_row = all(_phrase_in_words(v, sentence_words) for v in owned)
         if names_every_owned_row:
             continue
         siblings = {
@@ -1365,7 +1422,7 @@ def _prose_label_contradiction(
             if str(row.get(sel_col, "")).strip() not in owned
         }
         for other in siblings:
-            if other and other.lower() in sentence_words:
+            if other and _phrase_in_words(other, sentence_words):
                 return (
                     f"sentence says {other!r} but the tagged claim reads "
                     f"{sel_col}={sorted(owned)!r}"
@@ -1435,13 +1492,14 @@ def label_contradiction(
         rows = sources.get(parsed.source)
         if isinstance(rows, list) and rows:
             sel_col, sel_val = parsed.selector
+            label_phrase_words = _ordered_words_in(claim.label)
             # Naming its own row earns a label the right to mention
             # others. A rehearsal produced "Q2 area quartile record
             # count (Q3 and Q4 also 381)", where the value was Q2's
             # and correct and the parenthetical was useful context.
             # Only a label that names a sibling *instead of* its own
             # row is a wrong-row error.
-            names_own_row = sel_val.lower() in label_words
+            names_own_row = _phrase_in_words(sel_val, label_phrase_words)
 
             # A sibling row's selector value appearing in the label.
             siblings = {
@@ -1450,7 +1508,7 @@ def label_contradiction(
                 if str(row.get(sel_col, "")).strip() != sel_val
             }
             for other in siblings if not names_own_row else ():
-                if other and other.lower() in label_words:
+                if other and _phrase_in_words(other, label_phrase_words):
                     return (
                         f"label says {other!r} but the claim reads "
                         f"{sel_col}={sel_val!r}"
@@ -1546,7 +1604,7 @@ def _derived_label_contradiction(
     Optional[str]
         A description of the contradiction, or ``None``.
     """
-    label_words = _words_in(claim.label)
+    label_words = _ordered_words_in(claim.label)
     owned_by_column: Dict[Tuple[str, str], Set[str]] = {}
     for address in inputs.values():
         if not isinstance(address, str):
@@ -1572,7 +1630,7 @@ def _derived_label_contradiction(
         # swaps out one real input's row for a sibling's, while still
         # naming the other input, must not be waved through just
         # because it mentions something it owns.
-        names_every_owned_row = all(v.lower() in label_words for v in owned)
+        names_every_owned_row = all(_phrase_in_words(v, label_words) for v in owned)
         if names_every_owned_row:
             continue
         siblings = {
@@ -1581,7 +1639,7 @@ def _derived_label_contradiction(
             if str(row.get(sel_col, "")).strip() not in owned
         }
         for other in siblings:
-            if other and other.lower() in label_words:
+            if other and _phrase_in_words(other, label_words):
                 return (
                     f"label says {other!r} but the claim reads "
                     f"{sel_col}={sorted(owned)!r}"
@@ -2696,12 +2754,12 @@ def _text_contradicts_owned_rows(
     Optional[str]
         A description of the contradiction, or ``None``.
     """
-    text_words = _words_in(text)
+    text_words = _ordered_words_in(text)
     for (source_file, sel_col), owned in owned_by_column.items():
         rows = sources.get(source_file)
         if not isinstance(rows, list) or not rows:
             continue
-        if all(v.lower() in text_words for v in owned):
+        if all(_phrase_in_words(v, text_words) for v in owned):
             continue
         siblings = {
             str(row.get(sel_col, "")).strip()
@@ -2709,7 +2767,7 @@ def _text_contradicts_owned_rows(
             if str(row.get(sel_col, "")).strip() not in owned
         }
         for other in siblings:
-            if other and other.lower() in text_words:
+            if other and _phrase_in_words(other, text_words):
                 return (
                     f"text says {other!r} but the claim reads "
                     f"{sel_col}={sorted(owned)!r}"
@@ -2852,6 +2910,18 @@ def check_slide_spec(
                 )
         for cell in slide.get("cells", []):
             value = cell.get("value")
+            # A literal carrying surrounding whitespace ("0.481% ")
+            # must not silently skip percent handling just because
+            # the bare string no longer ends with '%' -- stripped and
+            # routed through the same figure extractor a slide title
+            # and a tagged prose sentence use to detect a percent
+            # sign however it is spaced, rather than a second,
+            # narrower endswith check of its own.
+            stated = value
+            if isinstance(value, str):
+                extracted = _extract_figures_with_percent(value.strip())
+                if extracted:
+                    stated = extracted[0]
             claim_id = cell.get("claim")
             where = where_slide
             if claim_id is not None and not isinstance(claim_id, str):
@@ -2870,7 +2940,7 @@ def check_slide_spec(
                 )
                 continue
             matched, unit_problem = _percent_aware_match(
-                value, result.value, result.unit, None, compare=_within_tolerance
+                stated, result.value, result.unit, None, compare=_within_tolerance
             )
             if unit_problem:
                 problems.append(f"{where}: {unit_problem}")
