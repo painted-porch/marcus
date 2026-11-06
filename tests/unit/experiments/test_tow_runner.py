@@ -501,17 +501,17 @@ class TestProjectPrefixedTaskIds:
 
     Cato associates a task with a registered project when the task id
     starts with the registry id plus an underscore (the exact-match
-    fallback in its matcher); the kanban provider always generates
-    opaque hex ids. The seeder therefore rewrites its own rows after
-    creation when given a prefix, so every downstream event carries a
-    project-attributable id, with no change to Marcus or Cato.
+    fallback in its matcher). Issue #741: the SQLite provider now
+    honors a caller-supplied id, so the seeder gives each task its
+    final, prefixed id at creation time -- no post-creation rewrite of
+    tasks/task_dependencies/task_labels ever runs.
     """
 
     @pytest.mark.asyncio
     async def test_task_ids_carry_prefix_and_dependencies_follow(
         self, tmp_path: Path
     ) -> None:
-        """Every seeded id gets the prefix; dependency rows stay wired."""
+        """Every seeded id is born with the prefix; dependencies follow."""
         import sqlite3
 
         dataset = _write_dataset(tmp_path / "data.csv", [_row(1), _row(2)])
@@ -552,9 +552,10 @@ class TestSeededTaskMetadata:
     collection; tasks created through the NLP pipeline land there,
     tasks seeded straight onto a kanban board do not, so a seeded
     board renders empty. The seeder therefore persists one honest
-    metadata row per task it creates, through Marcus's own
-    Persistence API, keyed by the prefixed task id and carrying the
-    registry project id.
+    metadata row per task it creates, through the sanctioned write
+    (``src.core.persistence.write_task_metadata_rows``, issue #741
+    step 3), keyed by the prefixed task id and carrying the registry
+    project id.
     """
 
     @pytest.mark.asyncio
@@ -593,3 +594,67 @@ class TestSeededTaskMetadata:
         assert all(r["name"] for r in rows)
         deps = [d for r in rows for d in r.get("dependencies", [])]
         assert deps and all(d.startswith("reg-123_") for d in deps)
+
+
+class TestSeededBoardEndToEnd:
+    """Issue #741 step 5: a seeded board is visible end to end --
+
+    registry entry, prefixed task ids, and task_metadata rows -- using
+    only the sanctioned calls (``register_sqlite_board`` for the
+    registry, the provider's own caller-supplied id for prefixed ids,
+    ``write_task_metadata_rows`` for Cato's rows), with no raw SQL
+    anywhere in the path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_registry_prefixed_ids_and_metadata_all_agree(
+        self, tmp_path: Path
+    ) -> None:
+        from src.core.persistence import (
+            FilePersistence,
+            Persistence,
+            SQLitePersistence,
+        )
+        from src.core.project_registry import ProjectRegistry, register_sqlite_board
+
+        dataset = _write_dataset(tmp_path / "data.csv", [_row(1), _row(2)])
+        db_path = str(tmp_path / "kanban.db")
+        meta_db = str(tmp_path / "marcus.db")
+        registry = ProjectRegistry(
+            persistence=Persistence(
+                backend=FilePersistence(storage_dir=tmp_path / "registry")
+            )
+        )
+
+        registry_id = await register_sqlite_board("reg-456", db_path, registry=registry)
+
+        manifest = await tow_runner.seed_cases(
+            csv_path=str(dataset),
+            db_path=db_path,
+            project_id="tow-x",
+            limit=2,
+            approval_rate=0.0,
+            seed=737,
+            manifest_path=str(tmp_path / "m.json"),
+            id_prefix=registry_id,
+            metadata_db=meta_db,
+        )
+
+        # Registry entry exists and matches the board that was seeded.
+        stored_project = await registry.get_project(registry_id)
+        assert stored_project is not None
+        assert stored_project.provider_config["db_path"] == str(Path(db_path).resolve())
+
+        # Task ids carry the registry id as their prefix.
+        all_ids = [
+            t for case in manifest["cases"].values() for t in case["tasks"].values()
+        ]
+        assert all_ids and all(i.startswith(f"{registry_id}_") for i in all_ids)
+
+        # Each task has a task_metadata row Cato can read, under its
+        # final (already-prefixed) id.
+        meta_store = Persistence(backend=SQLitePersistence(db_path=Path(meta_db)))
+        for task_id in all_ids:
+            row = await meta_store.retrieve("task_metadata", task_id)
+            assert row is not None
+            assert row["project_id"] == registry_id

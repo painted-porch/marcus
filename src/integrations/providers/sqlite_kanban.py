@@ -17,12 +17,14 @@ import dataclasses
 import enum
 import json
 import logging
+import re
 import sqlite3
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, TypeVar, Union
 
+from src.core.error_framework import ErrorContext, StateConflictError, ValidationError
 from src.core.models import Priority, Task, TaskStatus
 from src.core.paths import resolve_data_path
 from src.integrations.kanban_interface import KanbanInterface, KanbanProvider
@@ -485,6 +487,47 @@ class SQLiteKanban(KanbanInterface):
     # Task Creation
     # ----------------------------------------------------------
 
+    # Matches every id already in live use: an opaque uuid4 hex, or a
+    # seeder's registry-prefixed id ("<project_id>_<suffix>", where
+    # project_id itself may contain hyphens, e.g. "tow-b-claude").
+    _TASK_ID_CHARSET = re.compile(r"^[A-Za-z0-9_-]+$")
+
+    def _resolve_task_id(self, caller_supplied_id: Optional[str]) -> str:
+        """Validate and return a caller-supplied task id, or generate one.
+
+        Parameters
+        ----------
+        caller_supplied_id : Optional[str]
+            ``task_data.get("id")`` from :meth:`create_task`.
+
+        Returns
+        -------
+        str
+            ``caller_supplied_id`` if given and valid; a fresh uuid4
+            hex otherwise.
+
+        Raises
+        ------
+        ValidationError
+            ``caller_supplied_id`` contains characters outside
+            ``[A-Za-z0-9_-]``.
+        """
+        if not caller_supplied_id:
+            return uuid.uuid4().hex
+        if not self._TASK_ID_CHARSET.match(caller_supplied_id):
+            raise ValidationError(
+                field_name="task_data['id']",
+                validation_rule=(
+                    f"{caller_supplied_id!r} contains characters outside "
+                    "[A-Za-z0-9_-]"
+                ),
+                context=ErrorContext(
+                    operation="create_task",
+                    custom_context={"id": caller_supplied_id},
+                ),
+            )
+        return caller_supplied_id
+
     async def create_task(self, task_data: Dict[str, Any]) -> Task:
         """Create a new task on the board.
 
@@ -492,17 +535,33 @@ class SQLiteKanban(KanbanInterface):
         ----------
         task_data : Dict[str, Any]
             Task fields including name, description, priority,
-            labels, dependencies, estimated_hours, etc.
+            labels, dependencies, estimated_hours, etc. An optional
+            ``id`` is honored (issue #741): a seeder that needs
+            registry-attributable ids (e.g. ``<project_id>_<suffix>``)
+            no longer has to create with an opaque hex id and rewrite
+            every table keyed on it afterward. Charset-validated and
+            checked for collision; the uuid4 default is used when
+            absent.
 
         Returns
         -------
         Task
-            The created task with generated ID and timestamps.
+            The created task with the given or generated ID, and
+            timestamps.
+
+        Raises
+        ------
+        ValidationError
+            ``task_data["id"]`` is present but contains characters
+            outside ``[A-Za-z0-9_-]``.
+        StateConflictError
+            ``task_data["id"]`` already identifies a different task
+            on this board.
         """
         if not self.connected:
             await self.connect()
 
-        task_id = uuid.uuid4().hex
+        task_id = self._resolve_task_id(task_data.get("id"))
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
 
@@ -640,7 +699,23 @@ class SQLiteKanban(KanbanInterface):
                 conn.rollback()
                 raise
 
-        await self._run_in_executor(lambda: self._with_connection(_insert))
+        try:
+            await self._run_in_executor(lambda: self._with_connection(_insert))
+        except sqlite3.IntegrityError as exc:
+            # The id column is PRIMARY KEY; a caller-supplied collision
+            # must be refused loudly, not surfaced as an opaque
+            # sqlite3 error three layers removed from the caller (#741).
+            raise StateConflictError(
+                conflict_description=(
+                    f"task id {task_id!r} already identifies a "
+                    "different task on this board"
+                ),
+                context=ErrorContext(
+                    operation="create_task",
+                    custom_context={"id": task_id},
+                ),
+                cause=exc,
+            ) from exc
 
         task = await self.get_task_by_id(task_id)
         if task is None:

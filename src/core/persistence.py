@@ -858,3 +858,70 @@ class MemoryPersistence(PersistenceBackend):
 
             self.data[collection] = new_data
             return removed_count
+
+
+#: Fields a ``task_metadata`` row is expected to carry. ``task_id`` is
+#: required (it's the storage key); the rest are stored verbatim when
+#: present so a caller that omits one simply gets ``None`` back on read,
+#: matching how every existing writer of this collection already behaves.
+TASK_METADATA_FIELDS = (
+    "task_id",
+    "name",
+    "description",
+    "priority",
+    "estimated_hours",
+    "labels",
+    "dependencies",
+    "project_id",
+    "source_type",
+    "created_at",
+)
+
+
+async def write_task_metadata(db_path: "str | Path", row: Dict[str, Any]) -> None:
+    """Write one ``task_metadata`` row -- the sanctioned path (issue #741).
+
+    Cato renders its task universe from the ``task_metadata``
+    persistence collection. Tasks created through the NLP pipeline land
+    there as a side effect of ``create_tasks_on_board``
+    (``src/integrations/nlp_base.py``); anything that creates tasks by
+    another route -- a directly-seeded board, a future intake adapter
+    -- was previously left to open its own ``SQLitePersistence`` and
+    write the collection by hand. This is that call, factored out so
+    there is one place that owns the write.
+
+    Parameters
+    ----------
+    db_path : str | Path
+        Marcus's persistence database (normally
+        ``<marcus root>/data/marcus.db``).
+    row : Dict[str, Any]
+        The metadata row, keyed by ``task_id``. Stored exactly as
+        given; see ``TASK_METADATA_FIELDS`` for the fields Cato
+        expects.
+
+    Raises
+    ------
+    KeyError
+        ``row`` has no ``task_id``.
+    """
+    if "task_id" not in row:
+        raise KeyError("task_id")
+    await write_task_metadata_rows(db_path, [row])
+
+
+async def write_task_metadata_rows(
+    db_path: "str | Path", rows: List[Dict[str, Any]]
+) -> None:
+    """Write several ``task_metadata`` rows; see ``write_task_metadata``.
+
+    Parameters
+    ----------
+    db_path : str | Path
+        Marcus's persistence database.
+    rows : List[Dict[str, Any]]
+        One metadata row per task, each keyed by its own ``task_id``.
+    """
+    store = Persistence(backend=SQLitePersistence(db_path=Path(db_path)))
+    for row in rows:
+        await store.store("task_metadata", str(row["task_id"]), row)
