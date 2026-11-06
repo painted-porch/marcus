@@ -208,3 +208,69 @@ class TestCreateTasksSeeded:
         tasks = creator.create_tasks_on_board.call_args.args[0]
         (torches,) = tasks
         assert torches.dependencies == ["board-task-1"]
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_dependency_is_named_in_the_reply(self) -> None:
+        """Codex P2, round 3 on PR #855: when create_tasks_on_board
+
+        drops an edge (an in-batch dependency whose target failed
+        creation), the reply must name it -- a caller reading only
+        ``tasks_created``/``tasks`` has no way to see that its graph
+        is not what it asked for."""
+        from src.marcus_mcp.tools import nlp as nlp_module
+
+        state = _state()
+        created_task = MagicMock()
+        created_task.id = "k-77"
+        created_task.name = "Torches"
+        creator = MagicMock()
+        creator.create_tasks_on_board = AsyncMock(return_value=[created_task])
+        creator.dependencies_dropped = [
+            {"task": "Torches", "missing_dependency": "Wall"}
+        ]
+        with patch(
+            "src.integrations.nlp_tools.NaturalLanguageProjectCreator",
+            return_value=creator,
+        ):
+            result = await nlp_module.create_tasks(
+                task_description="curated",
+                options={
+                    "tasks": [
+                        {"name": "Wall"},
+                        {"name": "Torches", "depends_on": ["Wall"]},
+                    ]
+                },
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert result["dependencies_dropped"] == [
+            {"task": "Torches", "missing_dependency": "Wall"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_dropped_dependencies_key_when_nothing_was_dropped(self) -> None:
+        """The field must not appear at all on the ordinary success
+
+        path -- a caller checking ``"dependencies_dropped" in result``
+        must see False when nothing was dropped, not an empty list
+        with its own meaning to parse."""
+        from src.marcus_mcp.tools import nlp as nlp_module
+
+        state = _state()
+        created_task = MagicMock()
+        created_task.id = "k-77"
+        created_task.name = "Address mobs.north"
+        creator = MagicMock()
+        creator.create_tasks_on_board = AsyncMock(return_value=[created_task])
+        creator.dependencies_dropped = []
+        with patch(
+            "src.integrations.nlp_tools.NaturalLanguageProjectCreator",
+            return_value=creator,
+        ):
+            result = await nlp_module.create_tasks(
+                task_description="curated", options={"tasks": SEED}, state=state
+            )
+
+        assert result["success"] is True
+        assert "dependencies_dropped" not in result

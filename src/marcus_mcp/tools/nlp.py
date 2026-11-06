@@ -1974,7 +1974,7 @@ async def create_tasks(
                     logger.warning(
                         f"create_tasks: refresh after seeding failed: {refresh_err}"
                     )
-            return {
+            response: Dict[str, Any] = {
                 "success": True,
                 "tasks_created": len(created),
                 "board": {
@@ -1988,6 +1988,16 @@ async def create_tasks(
                 ],
                 "seeded": True,
             }
+            # Codex P2, round 3 on PR #855: a dependency dropped
+            # because its in-batch target failed creation means the
+            # caller's graph is not what it asked for. Named here
+            # rather than only in a log line, so a caller that cares
+            # (a planner retrying, a human reviewing the result) can
+            # see exactly which edge was lost and why.
+            dropped = getattr(creator, "dependencies_dropped", None)
+            if dropped:
+                response["dependencies_dropped"] = dropped
+            return response
 
         # Use the creator to parse tasks from description
         result = await creator.create_project_from_description(
