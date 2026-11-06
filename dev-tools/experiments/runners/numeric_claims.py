@@ -650,12 +650,75 @@ def _words_in(text: str) -> Set[str]:
     return set(re.findall(r"[a-z0-9/]+", (text or "").lower()))
 
 
-#: Sentence-ending punctuation followed by whitespace, or end of
-#: text. Splitting on this is a heuristic, not a parser: it is good
-#: enough to isolate "Cotton's R2 is 0.886 [c1]." as its own unit
-#: without pulling in the sentence before or after it, which is all
-#: this check needs.
-_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s+|$)")
+#: A closing quotation mark a writer's model might use, named by
+#: codepoint rather than written as a literal glyph -- see the
+#: Unicode block above for why.
+_RIGHT_DOUBLE_QUOTE = chr(0x201D)
+_RIGHT_SINGLE_QUOTE = chr(0x2019)
+
+#: Sentence-ending punctuation, then any closing markdown or
+#: quotation marks (bold, italic, underscore-italic, a straight or
+#: curly closing quote, a closing paren or bracket), then either end
+#: of text or whitespace followed by a token that actually starts a
+#: new sentence: a capital letter, a digit, or a list marker.
+#: Splitting on bare "punctuation then whitespace" (the prior rule)
+#: both over-rejected ("vs. cotton" split at the abbreviation,
+#: because nothing checked what followed) and under-rejected
+#: ("**Maize's R2 is 0.886 [c1].** Cotton's..." never split, because
+#: the closing "**" sat between the period and the next capital
+#: letter). Requiring a sentence-starting token after the whitespace
+#: fixes the first; looking past the closing markers fixes the
+#: second. This is a heuristic, not a parser: it is good enough to
+#: isolate one sentence from its neighbors, which is all this check
+#: needs.
+_SENTENCE_END_RE = re.compile(
+    r"[.!?]"
+    r'(?:\*\*|\*|_|"|' + _RIGHT_DOUBLE_QUOTE + "|" + _RIGHT_SINGLE_QUOTE + r"|\)|\])*"
+    r"(?:\s+(?=[A-Z0-9]|[-*+]\s|\|)|\Z)"
+)
+
+#: A fixed list of abbreviations whose period is never a sentence
+#: boundary, even when it happens to be followed by whitespace and a
+#: capitalized word ("e.g. Maize", "Fig. 3", "et al. Smith") -- cases
+#: the capital-letter requirement above cannot rule out by itself.
+#: Matched case-insensitively against the text immediately before
+#: the period, with a word-boundary check so "e.g" cannot match
+#: inside some unrelated longer word.
+_ABBREVIATION_ENDINGS = (
+    "vs",
+    "e.g",
+    "i.e",
+    "cf",
+    "et al",
+    "fig",
+    "no",
+    "approx",
+    "ca",
+)
+
+
+def _ends_with_abbreviation(prefix: str) -> bool:
+    """Decide whether text immediately preceding a period is an abbreviation.
+
+    Parameters
+    ----------
+    prefix : str
+        The text before the period being considered as a boundary.
+
+    Returns
+    -------
+    bool
+        True when ``prefix`` ends with one of :data:`_ABBREVIATION_ENDINGS`,
+        at a word boundary.
+    """
+    lowered = prefix.lower()
+    for abbr in _ABBREVIATION_ENDINGS:
+        if lowered.endswith(abbr):
+            before = lowered[: len(lowered) - len(abbr)]
+            if not before or not before[-1].isalnum():
+                return True
+    return False
+
 
 #: The start of a markdown list item ("- ", "* ", "+ ", "10. ") or a
 #: table row ("|") is a sentence boundary even with no terminal
@@ -682,7 +745,9 @@ def _sentence_boundaries(text: str) -> List[int]:
         ``len(text)``.
     """
     boundaries = {0, len(text)}
-    for m in _SENTENCE_BOUNDARY_RE.finditer(text):
+    for m in _SENTENCE_END_RE.finditer(text):
+        if text[m.start()] == "." and _ends_with_abbreviation(text[: m.start()]):
+            continue
         boundaries.add(m.end())
     for m in _LIST_OR_TABLE_LINE_RE.finditer(text):
         boundaries.add(m.start())

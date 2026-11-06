@@ -3275,3 +3275,122 @@ class TestCodexFindingListAndTableRowsAreSentenceBoundaries:
         text = "Cotton did poorly overall. Maize's R2 is 0.886 [c1]."
         res = check_claims([c], sources, report_text=text)
         assert [r for r in res if r.verdict == "uncovered"] == []
+
+
+class TestCodexFindingSentenceBoundaryGrammar:
+    """A period is not always a sentence boundary, and a sentence
+    boundary is not always a bare period.
+
+    Over-rejection: "vs." in "Maize (vs. cotton) has R2 0.886 [c1]."
+    split the sentence at the abbreviation, so "cotton" looked like
+    the sentence's row name and the correct maize claim was marked
+    uncovered.
+
+    Under-rejection: a boundary before a closing markdown or
+    quotation mark was missed. "**Maize's R2 is 0.886 [c1].**
+    Cotton's R2 is 0.886 [c1]." merged into one unit, so the maize
+    mention satisfied the sibling-row allowance for the following,
+    unrelated cotton sentence.
+    """
+
+    @pytest.mark.unit
+    def test_vs_abbreviation_does_not_split_the_sentence(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Maize (vs. cotton) has R2 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_eg_abbreviation_mid_sentence_does_not_split(self, sources):
+        """ "e.g." is followed by a capitalized word, so the
+        capital-letter heuristic alone would not catch it -- only the
+        fixed abbreviation list does."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Maize (e.g. Cotton) has R2 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_decimal_inside_a_sentence_does_not_split(self, sources):
+        """A decimal point has no whitespace after it, so it was
+        never a boundary candidate -- this pins that a sentence
+        naming both a number and a claim stays one unit."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Maize's R2 is 0.886 [c1], a strong result overall."
+        res = check_claims([c], sources, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_bold_markers_before_a_capital_do_split(self, sources):
+        """Codex's exact under-rejection scenario: the closing bold
+        marker sits between the period and the next sentence's
+        capital letter, and must not hide the boundary."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "**Maize's R2 is 0.886 [c1].** Cotton's R2 is 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_a_quoted_sentence_followed_by_another_sentence_splits_correctly(
+        self, sources
+    ):
+        """A closing quotation mark, not just markdown emphasis, must
+        also sit between the period and the next capital letter
+        without hiding the boundary."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "\"Maize's R2 is 0.886 [c1].\" Cotton's R2 is 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_an_unformatted_two_sentence_paragraph_still_works(self, sources):
+        """The control: ordinary prose with no abbreviation, no
+        decimal, and no closing markers must be unaffected."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Cotton's R2 lagged behind. Maize's R2 is 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []
