@@ -21,7 +21,22 @@ def _utc_now() -> datetime:
 
 @dataclass
 class ProjectConfig:
-    """Configuration for a single project."""
+    """Configuration for a single project.
+
+    Attributes
+    ----------
+    task_type_registrations : Dict[str, Dict[str, Any]]
+        ADR-0013 K2 (Accepted 2026-11-05): an extension's declared
+        ownership of this project's task types, keyed by task type.
+        Each entry is a dict describing that task type's evidence
+        requirement and whether the kernel may inject required
+        checks on top of what the worker submits -- not a callable
+        or endpoint reference. Dispatch is pull, not call (K2's own
+        decision text): the kernel never invokes an extension's code
+        directly, so nothing here ever names a function to run.
+        Empty for a project that registers nothing, which behaves
+        exactly as it did before K2 existed.
+    """
 
     id: str
     name: str
@@ -30,6 +45,7 @@ class ProjectConfig:
     created_at: datetime = field(default_factory=_utc_now)
     last_used: datetime = field(default_factory=_utc_now)
     tags: List[str] = field(default_factory=list)
+    task_type_registrations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for persistence."""
@@ -50,6 +66,7 @@ class ProjectConfig:
             "created_at",
             "last_used",
             "tags",
+            "task_type_registrations",
         }
         filtered_data = {k: v for k, v in data.items() if k in expected_fields}
 
