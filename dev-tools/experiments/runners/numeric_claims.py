@@ -793,13 +793,20 @@ def check_claims(
             )
             continue
         if not _figure_matches_claim_value(figure, claim.value):
+            # A figure whose own tagged claim does not support it has
+            # no VALID claim behind it, same as no tag at all -- so
+            # this is a coverage gap (VERDICT_UNCOVERED), not a
+            # distinct failure. Coded as VERDICT_FAILED here instead,
+            # numeric_verify.verify_workspace's coverage/claims_required
+            # math and numeric_grader.score_case's coverage_gaps filter
+            # (both keyed on VERDICT_UNCOVERED) would silently miss it
+            # and misreport the experiment's own coverage metric.
             results.append(
                 CheckResult(
-                    claim_id=ref_id,
-                    verdict=VERDICT_FAILED,
+                    claim_id=f"uncovered:{figure}",
+                    verdict=VERDICT_UNCOVERED,
                     value=figure,
                     expected=claim.value,
-                    reason="value_mismatch",
                     detail=(
                         f"figure {figure} is tagged [{ref_id}], but that "
                         f"claim's value is {claim.value}"

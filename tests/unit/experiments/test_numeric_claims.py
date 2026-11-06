@@ -1335,15 +1335,26 @@ class TestMandatoryClaimTagBinding:
         assert "c9" in uncovered[0].detail
 
     @pytest.mark.unit
-    def test_wrong_number_under_the_right_tag_is_a_value_mismatch(self, sources):
-        """A stated figure that disagrees with its own tagged claim fails.
+    def test_wrong_number_under_the_right_tag_is_uncovered(self, sources):
+        """A stated figure that disagrees with its own tagged claim is a
+        coverage gap, not a distinct failure.
 
         This is the half of #827 that tag-binding alone closes: the
         figure's value must match the value of the specific claim it
-        is tagged with, not any claim sharing that number. Catching a
-        number that is correct in VALUE but attributed to the wrong
-        LABEL in the surrounding prose (the full maize/cotton example
-        in #827) is the harder, separately-tracked second half.
+        is tagged with, not any claim sharing that number. Classified
+        as VERDICT_UNCOVERED, not VERDICT_FAILED: a figure with no
+        valid claim behind it is exactly what "uncovered" means,
+        whether that's because it carries no tag or because its tag
+        points to a claim that doesn't actually support it. Coding it
+        as a distinct FAILED result instead would corrupt
+        numeric_verify.verify_workspace's coverage math and
+        numeric_grader.score_case's coverage_gaps, both of which key
+        on VERDICT_UNCOVERED (Codex finding on #828).
+
+        Catching a number that is correct in VALUE but attributed to
+        the wrong LABEL in the surrounding prose (the full
+        maize/cotton example in #827) is the harder, separately
+        tracked second half.
         """
         c = Claim(
             id="c1",
@@ -1354,10 +1365,9 @@ class TestMandatoryClaimTagBinding:
             kind="lookup",
         )
         res = check_claims([c], sources, report_text="Cotton's R2 is 0.886 [c1].")
-        failed = [r for r in res if r.verdict == "failed"]
-        assert len(failed) == 1
-        assert failed[0].reason == "value_mismatch"
-        assert failed[0].expected == 0.585
+        uncovered = [r for r in res if r.verdict == "uncovered"]
+        assert len(uncovered) == 1
+        assert uncovered[0].expected == 0.585
 
     @pytest.mark.unit
     def test_a_claim_value_elsewhere_does_not_rescue_a_mistagged_figure(self, sources):
@@ -1381,11 +1391,13 @@ class TestMandatoryClaimTagBinding:
         )
         report = "Maize R2 is 0.886 [c1]. Cotton's R2 is 0.886 [c2]."
         res = check_claims([maize, cotton], sources, report_text=report)
-        failed = [
-            r for r in res if r.verdict == "failed" and r.reason == "value_mismatch"
+        uncovered = [
+            r
+            for r in res
+            if r.verdict == "uncovered" and r.claim_id == "uncovered:0.886"
         ]
-        assert len(failed) == 1
-        assert failed[0].claim_id == "c2"
+        assert len(uncovered) == 1
+        assert uncovered[0].expected == 0.585
 
     @pytest.mark.unit
     def test_correctly_tagged_figure_is_covered(self, sources):
