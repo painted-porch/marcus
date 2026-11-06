@@ -16,14 +16,27 @@ import pytest
 from src.ai.validation.validation_models import SourceFile, WorkEvidence
 from src.ai.validation.work_analyzer import WorkAnalyzer
 
+pytestmark = pytest.mark.unit
+
 
 class TestRuntimeValidation:
     """Test suite for runtime validation feature."""
 
     @pytest.fixture
     def analyzer(self) -> WorkAnalyzer:
-        """Create WorkAnalyzer instance."""
-        return WorkAnalyzer()
+        """Create WorkAnalyzer instance.
+
+        WorkAnalyzer.__init__ unconditionally constructs a real
+        LLMAbstraction(), which calls get_config() and raises without
+        a config_marcus.json/CLAUDE_API_KEY -- a real filesystem/
+        environment dependency this "unit" test must not have (issue
+        #873's own follow-up: this test only passed by accident, on a
+        machine or inside a run where that config happened to already
+        be present). Patched the same way test_work_analyzer.py's own
+        fixtures already do.
+        """
+        with patch("src.ai.validation.work_analyzer.LLMAbstraction"):
+            return WorkAnalyzer()
 
     @pytest.fixture
     def mock_task(self) -> Mock:
