@@ -227,6 +227,40 @@ class TestReportBlockerDoneTaskGuard:
         state.kanban_client.update_task.assert_called_once()
 
 
+class TestReportBlockerDeclinedTaskGuard:
+    """Codex P2, round 5 on PR #834.
+
+    report_blocker must not revert a DECLINED task to BLOCKED either --
+    the same immutability DONE already has, since a declined task is
+    terminal (ADR-0013 K5) and nothing should be able to act on it.
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_report_blocker_rejects_declined_task(self) -> None:
+        from src.marcus_mcp.tools.task import report_blocker
+
+        state = _make_state(
+            agent_id="agent_stale",
+            task_id="task-declined",
+            task_status=TaskStatus.DECLINED,
+            lease_holder="agent_stale",
+        )
+
+        result = await report_blocker(
+            agent_id="agent_stale",
+            task_id="task-declined",
+            blocker_description="late blocker",
+            severity="high",
+            state=state,
+            skip_ai_analysis=True,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "task_declined"
+        state.kanban_client.update_task.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # report_task_progress(status="blocked") guards
 # ---------------------------------------------------------------------------
@@ -287,4 +321,32 @@ class TestReportTaskProgressBlockedGuard:
 
         assert result["success"] is False
         assert result["status"] == "not_task_holder"
+        state.kanban_client.update_task.assert_not_called()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_progress_blocked_rejects_declined_task(self) -> None:
+        """status='blocked' on a DECLINED task must be rejected
+        (Codex P2, round 5 on PR #834)."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        state = _make_state(
+            agent_id="agent_stale",
+            task_id="task-declined",
+            task_status=TaskStatus.DECLINED,
+            lease_holder="agent_stale",
+            agent_task_id="task-declined",
+        )
+
+        result = await report_task_progress(
+            agent_id="agent_stale",
+            task_id="task-declined",
+            status="blocked",
+            progress=99,
+            message="late blocker report",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "task_declined"
         state.kanban_client.update_task.assert_not_called()
