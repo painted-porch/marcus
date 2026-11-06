@@ -1807,6 +1807,29 @@ def _claim_addresses(claim: Claim) -> List[str]:
     return [address for address in addresses if address]
 
 
+def _is_row_count_address(address: str) -> bool:
+    """Decide whether an address is a row-count operation, not a column read.
+
+    ``"per_record.csv:count:"`` counts the rows of a table; the
+    trailing segment after ``count`` is always empty, because a row
+    count has no single column to report -- unlike
+    ``"tiers.csv:sum:n_records"``, which totals one named column and
+    is not a row count by this definition.
+
+    Parameters
+    ----------
+    address : str
+        A staged address.
+
+    Returns
+    -------
+    bool
+        True when the address is exactly ``<file>:count:``.
+    """
+    parts = address.split(":")
+    return len(parts) == 3 and parts[1] == "count" and parts[2] == ""
+
+
 def _claim_source_columns(claim: Claim) -> List[str]:
     """Collect the trailing column name of every address a claim reads.
 
@@ -1930,6 +1953,14 @@ def _inferred_claim_unit(
         return claim.unit if claim.unit in ("fraction", "percent") else None
     resolved = set()
     for address in addresses:
+        # A row-count address ("per_record.csv:count:") has no
+        # column at all to look up in the manifest or guess a name
+        # for -- the "count:" operation is intrinsically count-
+        # valued, decided before either, not left to fall through to
+        # the fraction default a missing column would otherwise hit.
+        if _is_row_count_address(address):
+            resolved.add("count")
+            continue
         manifest_unit = _column_unit_from_manifest(units, address)
         if manifest_unit is not None:
             resolved.add(manifest_unit)
@@ -2101,6 +2132,26 @@ def check_claims(
                     detail=(
                         f"figure {figure} is tagged [{ref_id}], which is not "
                         f"a declared claim"
+                    ),
+                )
+            )
+            continue
+        # A claim the shape gate already rejected (tolerance=[], an
+        # unhashable unit, ...) is excluded here too, before any of
+        # its fields are reused -- claim.tolerance reaching
+        # _percent_aware_match unchecked is exactly how a malformed
+        # claim that _check_one correctly marked unresolvable still
+        # crashed this loop on a list with no .get().
+        malformed = _malformed_claim_shape(claim, units)
+        if malformed:
+            results.append(
+                CheckResult(
+                    claim_id=f"uncovered:{figure}",
+                    verdict=VERDICT_UNCOVERED,
+                    value=figure,
+                    detail=(
+                        f"figure {figure} is tagged [{ref_id}], which is "
+                        f"malformed: {malformed}"
                     ),
                 )
             )
@@ -2557,17 +2608,32 @@ def check_slide_spec(
                 # regardless of what the 99 is. Every embedded figure
                 # must be backed by some accepted claim on this
                 # slide, the same bar a slide title's own figures
-                # already have to clear.
-                for figure in extract_numbers(cell_label):
-                    if not any(
-                        _within_tolerance(figure, backed_value, None)
-                        for _, backed_value, _, _ in backed
-                    ):
-                        problems.append(
+                # already have to clear -- including the same
+                # percent-scale awareness: extract_numbers strips any
+                # '%' before comparison, so a label figure carrying
+                # one needs _extract_figures_with_percent instead, or
+                # "maize R2 (48.1%)" against a fraction-unit claim of
+                # 0.481 would compare the bare "48.1" at face value.
+                for figure in _extract_figures_with_percent(cell_label):
+                    matched_results = [
+                        _percent_aware_match(
+                            figure, backed_value, unit, None, compare=_within_tolerance
+                        )
+                        for _, backed_value, _, unit in backed
+                    ]
+                    if any(matched for matched, _ in matched_results):
+                        continue
+                    unit_problem = next(
+                        (problem for _, problem in matched_results if problem), None
+                    )
+                    problems.append(
+                        unit_problem
+                        or (
                             f"{where}: label {cell_label!r} states "
                             f"{figure}, which no accepted cell on "
                             f"this slide backs"
                         )
+                    )
     return problems
 
 

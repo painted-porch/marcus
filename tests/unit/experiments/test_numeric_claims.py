@@ -2174,6 +2174,34 @@ class TestCodexFindingMechanicalFieldSweep:
         assert check_claims([c], sources)[0].verdict == "unresolvable"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("bad_tolerance", [["x"], 5, ""], ids=repr)
+    def test_a_malformed_tolerance_does_not_crash_check_report_end_to_end(
+        self, sources, bad_tolerance
+    ):
+        """The same bad shape, driven through check_report (required
+        claims plus report_text) rather than _check_one directly --
+        this is where a malformed claim's tolerance previously slipped
+        past the gate and crashed on a bare value's .get(). The
+        figure must not already match the claim's value exactly, or
+        the comparison short-circuits before ever reaching
+        tolerance -- "0.91" against 0.9 forces the tolerance-aware
+        branch, the one that actually calls tolerance.get()."""
+        c = Claim(
+            id="c1",
+            value=0.9,
+            label="x",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+            tolerance=bad_tolerance,
+        )
+        results = check_report([c], sources, report_text="R2 is 0.91 [c1].")
+        bad = [r for r in results if r.claim_id in ("c1", "uncovered:0.91")]
+        assert bad and all(
+            r.verdict == "unresolvable" for r in bad if r.claim_id == "c1"
+        )
+
+    @pytest.mark.unit
     def test_tolerance_of_none_is_still_exact_not_malformed(self, sources):
         """None is a legitimate value for this field, not a bad shape."""
         c = Claim(
@@ -2297,7 +2325,11 @@ class TestCodexFindingFiguresEmbeddedInALabelAreUnverified:
                 label="maize R2 (99% confidence)",
             ),
             "c2": CheckResult(
-                claim_id="c2", verdict="verified", value=99, label="confidence"
+                claim_id="c2",
+                verdict="verified",
+                value=99,
+                label="confidence",
+                unit="percent",
             ),
         }
         spec = {
@@ -4131,3 +4163,119 @@ class TestCodexFindingSelectorColumnIsNotAMetric:
             key="tier=Good:n_records",
         )
         assert check_claims([c], self.TIER_SOURCES)[0].verdict == "verified"
+
+
+class TestCodexFindingEmbeddedCellLabelFiguresArePercentAware:
+    """A figure embedded in a slide cell's label was checked with
+    extract_numbers, which strips any '%' before this check ever
+    sees it -- the embedded-figure check compared bare digits at
+    face value, never scaling a percent-suffixed figure the way the
+    title path already does.
+
+    "maize R2 (48.1%)" over a fraction-unit claim of 0.481 should
+    pass (48.1% is 0.481, the same figure on the percent-scale
+    wording a report routinely uses); "maize R2 (0.481%)" over the
+    same claim should fail (0.481% is 0.00481, not 0.481).
+    """
+
+    @pytest.mark.unit
+    def test_a_correctly_scaled_embedded_percentage_passes(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="maize R2 (48.1%)",
+                addresses=("per_crop.csv:crop=maize:r2",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": 0.481,
+                            "claim": "c1",
+                            "label": "maize R2 (48.1%)",
+                        }
+                    ]
+                }
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "maize R2 (48.1%)"}) == []
+
+    @pytest.mark.unit
+    def test_an_unscaled_embedded_percentage_is_caught(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="maize R2 (0.481%)",
+                addresses=("per_crop.csv:crop=maize:r2",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": 0.481,
+                            "claim": "c1",
+                            "label": "maize R2 (0.481%)",
+                        }
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2 (0.481%)"})
+        assert problems
+
+
+class TestCodexFindingRowCountAddressIsIntrinsicallyCountValued:
+    """A row-count address ("per_record.csv:count:") has no column
+    at all, so unit inference fell through to the fraction default
+    even with a manifest present -- "Evaluated record count is 6000%
+    [c1]." verified against a true count of 60.
+    """
+
+    COUNT_SOURCES = {
+        "per_record.csv": [{"r2": 0.1}] * 60,
+        "metrics.json": {"n_records": 60},
+    }
+
+    @pytest.mark.unit
+    def test_a_percent_literal_against_a_row_count_claim_never_matches(self):
+        c = Claim(
+            id="c1",
+            value=60,
+            label="evaluated record count",
+            kind="lookup",
+            source="per_record.csv",
+            key="count:",
+        )
+        res = check_claims(
+            [c],
+            self.COUNT_SOURCES,
+            report_text="Evaluated record count is 6000% [c1].",
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_the_bare_row_count_figure_still_passes(self):
+        c = Claim(
+            id="c1",
+            value=60,
+            label="evaluated record count",
+            kind="lookup",
+            source="per_record.csv",
+            key="count:",
+        )
+        res = check_claims(
+            [c],
+            self.COUNT_SOURCES,
+            report_text="Evaluated record count is 60 [c1].",
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
