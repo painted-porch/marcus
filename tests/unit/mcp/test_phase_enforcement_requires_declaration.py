@@ -165,7 +165,11 @@ class TestPhaseEnforcementIsOffByDefault:
             available, scoped, tasks_by_id, state, project_id=PROJECT
         )
 
-        assert getattr(state, "_last_phase_hold", None) is None
+        holds_by_project = getattr(state, "_last_phase_hold_by_project", None)
+        assert (
+            not isinstance(holds_by_project, dict)
+            or holds_by_project.get(PROJECT) is None
+        )
 
 
 class TestPhaseEnforcementStillWorksWhenDeclared:
@@ -221,7 +225,9 @@ class TestPhaseEnforcementStillWorksWhenDeclared:
             available, scoped, tasks_by_id, state, project_id=PROJECT
         )
 
-        hold = getattr(state, "_last_phase_hold", None)
+        holds_by_project = getattr(state, "_last_phase_hold_by_project", None)
+        assert isinstance(holds_by_project, dict)
+        hold = holds_by_project.get(PROJECT)
         assert hold is not None
         # Both food_alt and cobblestone are held in this fixture; the
         # recorded reason is the latest one evaluated, not a specific
@@ -233,6 +239,56 @@ class TestPhaseEnforcementStillWorksWhenDeclared:
             "food alternative strategy",
             "cobblestone quantity confirmation",
         }
+
+
+class TestPhaseHoldIsNeverSharedAcrossProjects:
+    """Issue #861, Codex P2 round 1: ``_last_phase_hold`` used to be a
+    single flat attribute on ``state``, shared across every concurrent
+    request the server is handling. A no-work request for project B
+    could read project A's hold, recorded by a different request --
+    B never opted into phase enforcement at all. The fix keys the
+    record by project_id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bs_retry_reason_never_carries_as_hold(self) -> None:
+        from src.marcus_mcp.tools.task import calculate_retry_after_seconds
+
+        food_in_progress, food_alt, cobblestone = _minecraft_tasks()
+        scoped = [food_in_progress, food_alt, cobblestone]
+        tasks_by_id = {t.id: t for t in scoped}
+        available = [food_alt, cobblestone]
+
+        project_a = ProjectConfig(
+            id="project-a",
+            name="Project A (opted into phases)",
+            provider="sqlite",
+            provider_config={},
+            enforce_phase_order=True,
+        )
+        state = _state(project_a)
+        # A's hold is recorded first (as if A's request ran first).
+        apply_board_wide_gates(
+            available, scoped, tasks_by_id, state, project_id="project-a"
+        )
+        holds = state._last_phase_hold_by_project
+        assert "project-a" in holds, "precondition: A's hold must exist"
+
+        # B's own agent_tasks is empty, so calculate_retry_after_seconds
+        # falls through to its no-work-in-progress default -- but it
+        # must never read A's recorded hold while doing so.
+        state.agent_tasks = {}
+        retry_info = await calculate_retry_after_seconds(state, project_id="project-b")
+
+        assert retry_info["reason"] != holds["project-a"]["reason"]
+        assert "food alternative strategy" not in retry_info["reason"]
+        assert "cobblestone quantity confirmation" not in retry_info["reason"]
+
+        # Sanity: A's own retry call still gets its real hold reason.
+        a_retry_info = await calculate_retry_after_seconds(
+            state, project_id="project-a"
+        )
+        assert a_retry_info["reason"] == holds["project-a"]["reason"]
 
 
 class TestProjectDeclaresPhaseOrder:
