@@ -474,6 +474,39 @@ class SQLitePersistence(PersistenceBackend):
                 CREATE INDEX IF NOT EXISTS idx_stored_at
                 ON persistence(stored_at)
             """)
+            # Issue #890: _load_project_rows / load_decisions filter on
+            # project_id and kind (both json_extract expressions, since
+            # the decisions collection shares one table with every
+            # opinion on the board) and order by stored_at. Neither
+            # filter could use an index before this, so a kind-filtered
+            # read on a board whose newest rows are mostly a different
+            # kind walked almost the whole project's history on every
+            # agent pull (#880 made this a per-cycle read). This
+            # composite expression index covers the exact shape that
+            # query issues, with stored_at as its trailing column so
+            # the existing ORDER BY stored_at DESC is also served by it.
+            #
+            # Issue #890 round 2 (Codex): the kind column here MUST be
+            # the identical COALESCE(json_extract(data, '$.kind'),
+            # 'decision') expression _where_sql's "kind" branch builds,
+            # not the bare json_extract. A plain json_extract column
+            # next to a WHERE clause that OR's in "... IS NULL" cannot
+            # be an equality seek -- SQLite ends up testing every row
+            # in the collection/project_id range (confirmed live via
+            # EXPLAIN QUERY PLAN: the first attempt used this index for
+            # collection and project_id only, left kind unconstrained,
+            # and still needed a temp b-tree for the ORDER BY), which
+            # is the exact scan this index exists to remove.
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_persistence_project_kind
+                ON persistence(
+                    collection,
+                    json_extract(data, '$.project_id'),
+                    COALESCE(json_extract(data, '$.kind'), 'decision'),
+                    stored_at DESC,
+                    key DESC
+                )
+            """)
             conn.commit()
 
     async def store(self, collection: str, key: str, data: Dict[str, Any]) -> None:
@@ -524,8 +557,49 @@ class SQLitePersistence(PersistenceBackend):
         for field, expected in where.items():
             if not _FIELD_NAME.match(field):
                 raise ValueError(f"invalid where field name: {field!r}")
-            path = f"json_extract(data, '$.{field}')"
             values = _where_values(expected)
+            if field == "kind":
+                # Issue #890 round 2 (Codex): a disjunction over an
+                # indexed expression ("kind IN (...) OR kind IS NULL")
+                # cannot be an equality seek, no matter what index
+                # exists -- SQLite falls back to testing every row in
+                # the collection/project_id range and sorting the
+                # whole result in a temp b-tree, exactly the scan this
+                # issue exists to remove. Decision.from_dict already
+                # treats a missing kind as "decision" (rows written
+                # before #880 added the field); folding that same
+                # default into the SQL expression itself
+                # (COALESCE(..., 'decision')), identically in both this
+                # clause and idx_persistence_project_kind's definition,
+                # turns the OR into a single equality the index can
+                # actually seek on. A caller's own None in the values
+                # list (project_history.py passes {"kind": [kind,
+                # None]} only when kind == "decision") is mapped onto
+                # the same default rather than kept as a separate
+                # IS NULL branch.
+                path = "COALESCE(json_extract(data, '$.kind'), 'decision')"
+                # Deduplicated: {"kind": ["decision", None]} maps both
+                # entries onto "decision", and a 2-value IN (?, ?) with
+                # equal params defeats SQLite's single-equality seek
+                # optimization for the ORDER BY the same way the OR
+                # it replaces did (confirmed live via EXPLAIN QUERY
+                # PLAN -- a temp b-tree came back for ORDER BY even
+                # though every row-count check elsewhere was correct).
+                seen: set[Any] = set()
+                mapped: List[Any] = []
+                for v in values:
+                    mapped_v = "decision" if v is None else v
+                    if mapped_v not in seen:
+                        seen.add(mapped_v)
+                        mapped.append(mapped_v)
+                if not mapped:
+                    # An empty list of values matches nothing.
+                    clauses.append("(0)")
+                else:
+                    clauses.append(f"({path} IN ({', '.join('?' * len(mapped))}))")
+                    params.extend(mapped)
+                continue
+            path = f"json_extract(data, '$.{field}')"
             non_null = [v for v in values if v is not None]
             parts: List[str] = []
             if non_null:

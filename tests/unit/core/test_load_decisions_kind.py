@@ -184,14 +184,24 @@ class TestTheFilterReachesTheStoredQuery:
 
     @pytest.mark.asyncio
     async def test_the_sql_filters_on_the_kind_field(self, tmp_path: Path) -> None:
-        """The clause reaches SQL as a json_extract test, so the page is matching rows."""
+        """The clause reaches SQL as a json_extract test, so the page is
+        matching rows.
+
+        Issue #890 round 2: the clause folds a missing ``kind`` onto
+        the literal ``"decision"`` via ``COALESCE`` rather than an
+        ``OR ... IS NULL`` branch, so this is a single equality the
+        new index can seek on -- a disjunction over an indexed
+        expression cannot be. Correctness for the legacy (no ``kind``
+        field at all) row is covered separately by
+        ``tests/unit/core/test_persistence_decisions_index.py``.
+        """
         from src.core.persistence import SQLitePersistence
 
         backend = SQLitePersistence(tmp_path / "marcus.db")
         clause, params = backend._where_sql({"kind": ["decision", None]})
 
         assert "json_extract(data, '$.kind')" in clause
-        assert "IS NULL" in clause
+        assert "COALESCE(" in clause
         assert "decision" in params
 
     @pytest.mark.asyncio
