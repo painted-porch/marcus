@@ -8,7 +8,6 @@ file-based storage and ready for database backends.
 
 import asyncio
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -26,6 +25,25 @@ from src.core.events import Event
 from src.core.paths import DATA_DIR_ENV
 
 logger = logging.getLogger(__name__)
+
+try:
+    import fcntl
+
+    _FCNTL_AVAILABLE = True
+except ImportError:
+    # fcntl is POSIX-only (issue #883 review). On a platform without it
+    # (Windows), FilePersistence degrades to the pre-#883 per-instance
+    # asyncio.Lock only -- correct for a single process/instance, not
+    # safe across two independent writers -- rather than failing to
+    # import at all and taking the whole server down with it.
+    _FCNTL_AVAILABLE = False
+    logger.warning(
+        "fcntl is not available on this platform; FilePersistence's "
+        "cross-process write lock is disabled. Concurrent writers "
+        "(two processes, or two independent FilePersistence instances "
+        "in one process) sharing a data directory can lose each "
+        "other's writes. See issue #883."
+    )
 
 
 #: A JSON field name as it may appear in a ``where`` prefilter.
@@ -172,7 +190,16 @@ class FilePersistence(PersistenceBackend):
         ``flock`` blocks the calling thread while contended, so the
         acquire/release run in a worker thread via ``asyncio.to_thread``
         rather than on the event loop.
+
+        On a platform without ``fcntl`` (Windows), this degrades to a
+        no-op -- the per-instance ``asyncio.Lock`` in ``_get_lock`` is
+        the only protection there; a warning is logged once at import
+        time (see the ``try``/``except ImportError`` above).
         """
+        if not _FCNTL_AVAILABLE:
+            yield
+            return
+
         lock_path = file_path.with_suffix(file_path.suffix + ".lock")
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         try:
