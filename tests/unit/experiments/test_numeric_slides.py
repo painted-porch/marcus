@@ -8,6 +8,7 @@ finished deck is scored.
 """
 
 import json
+from unittest.mock import patch
 
 import pytest
 from runners.numeric_claims import CheckResult
@@ -15,6 +16,7 @@ from runners.numeric_slides import (
     accepted_claims,
     build_slide_workspace,
     load_slide_spec,
+    main,
     verify_slide_workspace,
 )
 
@@ -203,3 +205,106 @@ class TestLoadSlideSpec:
         spec = load_slide_spec(tmp_path)
         assert "_problem" not in spec
         assert len(spec["slides"]) == 1
+
+
+class TestCodexFindingSlideGenerationRequiresAVerifiedReport:
+    """A rejected report must not still produce a successful deck.
+
+    main() extracted individually verified claims and built a deck
+    from them without ever checking the overall report verdict. A
+    report that fails a harness-required consistency check (H4's
+    guarantee is specifically about this: "a deck assembled only from
+    accepted claims cannot carry a figure the report verifier
+    rejected") still has individually-correct claims to build a
+    technically-mapping-clean deck from, which let a declined report
+    produce an apparently successful slide run.
+
+    Codex's exact example: metrics.json says 10 records, tiers.csv's
+    counts add up to 9. The required cross-table check fails the
+    report, but the tier count of 9 is still individually verified
+    and would still map cleanly onto a slide.
+    """
+
+    @pytest.mark.unit
+    def test_a_report_failing_a_required_check_refuses_slide_generation(self, tmp_path):
+        """The 10-vs-9 example: slide generation must refuse, not build."""
+        ws = tmp_path / "case"
+        staged = ws / "staged"
+        staged.mkdir(parents=True)
+        (staged / "metrics.json").write_text(json.dumps({"n_records": 10}))
+        (staged / "tiers.csv").write_text("tier,n_records\nGood,5\nPoor,4\n")
+        (ws / "report.md").write_text("Good tier has 5 [c1].")
+        (ws / "claims.json").write_text(
+            json.dumps(
+                {
+                    "claims": [
+                        {
+                            "id": "c1",
+                            "value": 5,
+                            "label": "good tier count",
+                            "kind": "lookup",
+                            "source": "tiers.csv",
+                            "key": "tier=Good:n_records",
+                        }
+                    ]
+                }
+            )
+        )
+
+        with patch("runners.numeric_slides.run_slide_worker") as mock_run:
+            code = main(
+                [
+                    "--verify-workspace",
+                    str(ws),
+                    "--out-dir",
+                    str(tmp_path / "slides"),
+                ]
+            )
+
+        assert code != 0
+        mock_run.assert_not_called()
+        assert not (tmp_path / "slides").exists()
+
+    @pytest.mark.unit
+    def test_a_cleanly_verified_report_still_proceeds(self, tmp_path):
+        """The fix must not block an ordinary, fully-verified report."""
+        ws = tmp_path / "case"
+        staged = ws / "staged"
+        staged.mkdir(parents=True)
+        (staged / "metrics.json").write_text(json.dumps({"n_records": 9}))
+        (staged / "tiers.csv").write_text("tier,n_records\nGood,5\nPoor,4\n")
+        (ws / "report.md").write_text("Good tier has 5 [c1].")
+        (ws / "claims.json").write_text(
+            json.dumps(
+                {
+                    "claims": [
+                        {
+                            "id": "c1",
+                            "value": 5,
+                            "label": "good tier count",
+                            "kind": "lookup",
+                            "source": "tiers.csv",
+                            "key": "tier=Good:n_records",
+                        }
+                    ]
+                }
+            )
+        )
+
+        with patch("runners.numeric_slides.run_slide_worker") as mock_run:
+            mock_run.return_value = {
+                "returncode": 0,
+                "seconds": 0.1,
+                "stdout_tail": "",
+                "stderr_tail": "",
+            }
+            main(
+                [
+                    "--verify-workspace",
+                    str(ws),
+                    "--out-dir",
+                    str(tmp_path / "slides"),
+                ]
+            )
+
+        mock_run.assert_called_once()

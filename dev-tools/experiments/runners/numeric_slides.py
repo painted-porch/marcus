@@ -294,6 +294,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     """
     args = build_parser().parse_args(argv)
     outcome = verify_workspace(Path(args.verify_workspace))
+    if outcome["verdict"] != VERDICT_VERIFIED:
+        # H4's guarantee is that a deck built only from accepted
+        # claims cannot carry a figure the report verifier rejected.
+        # A report that failed -- even on a harness-required check no
+        # individual slide claim is about -- was never accepted as a
+        # whole, so there is nothing to build a deck from.
+        print(f"report verdict: {outcome['verdict'].upper()}, refusing to build slides")
+        for problem in outcome["failed_claims"]:
+            print(f"  problem: {problem['claim_id']}: {problem['detail']}")
+        return 1
+
     accepted = accepted_claims(outcome)
     print(f"accepted claims available: {len(accepted)}")
 
