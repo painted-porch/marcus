@@ -578,6 +578,36 @@ def _within_tolerance(
 _ORDERED_LIST_MARKER_RE = re.compile(r"^\s*\d+\.\s", re.MULTILINE)
 
 
+def _mask_ordered_list_markers(text: str) -> str:
+    """Blank an ordered-list marker to same-width spaces, not one space.
+
+    Collapsing a marker to a single space (the old behavior) shortens
+    the text by the marker's own length minus one -- harmless for a
+    caller that only wants the figures, since nothing downstream of
+    that caller cares about character offsets, but every offset
+    computed on the shortened text drifts out of alignment with the
+    caller's original ``text`` from that point on. A ten-item list
+    has a four-character marker ("10. ") where every earlier item had
+    a three-character one ("1. ", "2. ", ...), so the drift is
+    cumulative and position-dependent: :func:`_tag_figures` needs its
+    positions to stay valid against callers that extract a sentence
+    around one, so this masks markers without ever changing the
+    text's own length.
+
+    Parameters
+    ----------
+    text : str
+        Report text, already run through :func:`_normalize_numeric_text`.
+
+    Returns
+    -------
+    str
+        The same text with every marker's characters replaced by
+        spaces, one for one.
+    """
+    return _ORDERED_LIST_MARKER_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+
 def extract_numbers(text: str) -> List[str]:
     """Pull every figure out of report prose.
 
@@ -1189,12 +1219,13 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str], int]]:
         ``(figure, claim_id, position)`` in order of appearance;
         ``claim_id`` is ``None`` when the figure carries no tag.
         ``position`` is the figure's own character offset in
-        ``_normalize_numeric_text(text)`` -- every substitution that
-        function makes preserves character length, so the offset is
-        valid against the caller's own ``text`` too.
+        ``_mask_ordered_list_markers(_normalize_numeric_text(text))``
+        -- every substitution either function makes preserves
+        character length, so the offset is valid against the
+        caller's own ``text`` too, and against that same prepared
+        text if the caller needs to extract a sentence around it.
     """
-    cleaned = _normalize_numeric_text(text or "")
-    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
+    cleaned = _mask_ordered_list_markers(_normalize_numeric_text(text or ""))
     tokens: List[Tuple[int, str, str]] = []
     for m in _NUMBER_RE.finditer(cleaned):
         figure = m.group(1)
@@ -1577,7 +1608,13 @@ def check_claims(
     coverage_lookup = {
         c.id: c for c in (coverage_claims if coverage_claims is not None else claims)
     }
-    normalized_text = _normalize_numeric_text(report_text)
+    # Must match exactly what _tag_figures's own positions were
+    # computed against, including the ordered-list-marker masking --
+    # not just _normalize_numeric_text on its own -- or _sentence_at
+    # below reads a different, unmasked text at a position computed
+    # for a shorter, masked one, drifting further out of alignment
+    # with every marker the text has already passed.
+    normalized_text = _mask_ordered_list_markers(_normalize_numeric_text(report_text))
     for figure, ref_id, position in _tag_figures(report_text):
         if ref_id is None:
             results.append(

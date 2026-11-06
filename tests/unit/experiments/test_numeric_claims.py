@@ -3163,3 +3163,65 @@ class TestCodexFindingUnitsComeFromTheStagersOwnManifest:
         no manifest at all."""
         c = Claim(id="c1", value=1, label="x", kind="lookup")
         assert _inferred_claim_unit(c, units=self.UNITS) is None
+
+
+class TestCodexFindingOrderedListMarkersDoNotDriftSentencePositions:
+    """An ordered-list marker's own length, not just its presence,
+    corrupted every later figure's sentence-check position.
+
+    _tag_figures blanked a marker like "10. " down to a single
+    space, shortening the text by three characters at that point.
+    Every figure after it was then checked against a sentence
+    extracted from a DIFFERENT, unmasked text (built independently
+    in check_claims) at that same, now-wrong offset -- drifting
+    further with every marker already passed, and specifically
+    drifting backward into an earlier sentence since each marker is
+    longer than the one space it was replaced with.
+    """
+
+    @pytest.mark.unit
+    def test_a_ten_item_ordered_list_does_not_drift_the_last_entry(self, sources):
+        """Codex's exact scenario: nine ordinary one-digit markers,
+        then "10." (one character longer), with the tenth entry's own
+        sentence correctly naming cotton, not maize."""
+        lines = [f"{i}. Maize R2 is 0.886 [c1]." for i in range(1, 10)]
+        lines.append("10. Cotton's R2 is 0.886 [c1].")
+        text = "\n".join(lines)
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_markers_of_varying_width_do_not_drift_at_any_position(self, sources):
+        """1. through 12. spans both one- and two-digit markers; a
+        wrong-crop sentence placed at every position in the list must
+        be caught regardless of how many markers came before it."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        for wrong_at in (1, 5, 9, 12):
+            lines = []
+            for i in range(1, 13):
+                if i == wrong_at:
+                    lines.append(f"{i}. Cotton's R2 is 0.886 [c1].")
+                else:
+                    lines.append(f"{i}. Maize R2 is 0.886 [c1].")
+            text = "\n".join(lines)
+            res = check_claims([c], sources, report_text=text)
+            bad = [r for r in res if r.verdict == "uncovered"]
+            assert (
+                len(bad) == 1
+            ), f"failed to catch the wrong sentence at item {wrong_at}"
