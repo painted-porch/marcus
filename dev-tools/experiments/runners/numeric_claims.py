@@ -1044,7 +1044,18 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
     cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
     tokens: List[Tuple[int, str, str]] = []
     for m in _NUMBER_RE.finditer(cleaned):
-        tokens.append((m.start(), "num", m.group(1)))
+        figure = m.group(1)
+        # A literal '%' immediately after the digits changes what
+        # number is actually being asserted ("0.481%" is 0.00481,
+        # not 0.481), the same scale change _percent_scaled already
+        # applies to a slide cell's value. _NUMBER_RE itself never
+        # captures the sign, so extract_numbers (which many other
+        # things rely on returning the bare digits) is unaffected;
+        # only this function's own figures carry it forward, for
+        # _figure_matches_claim_value to scale.
+        if cleaned[m.end() : m.end() + 1] == "%":
+            figure += "%"
+        tokens.append((m.start(), "num", figure))
     for m in _CLAIM_REF_RE.finditer(cleaned):
         tokens.append((m.start(), "ref", m.group(1)))
     tokens.sort(key=lambda t: t[0])
@@ -1102,6 +1113,18 @@ def _figure_matches_claim_value(
         original value is not rounding noise, it is a different
         number).
     """
+    if figure.endswith("%"):
+        # A literal '%' changes the number being asserted: "48.1%"
+        # is 0.481, "0.481%" is 0.00481 -- scaling down by 100 before
+        # comparing is the same rule _percent_scaled already applies
+        # to a slide cell's value, carried through to prose. No raw,
+        # unscaled fallback: the whole point is that the digits alone
+        # are not the number when a '%' follows them.
+        try:
+            scaled = float(figure[:-1].replace(",", "")) / 100
+        except ValueError:
+            return False
+        return _figure_matches_claim_value(f"{scaled:g}", value, tolerance)
     candidates = {str(value)}
     coerced = _coerce(value)
     if isinstance(coerced, float):

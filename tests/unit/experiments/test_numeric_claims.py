@@ -2590,3 +2590,58 @@ class TestCodexFindingSlideTitleBindsToASpecificClaimsProvenance:
         }
         problems = check_slide_spec(spec, accepted, {"c1": "maize R2"})
         assert problems == []
+
+
+class TestCodexFindingPercentScaleInProseIsRespected:
+    """The slide-cell percent fix did not reach the prose path.
+
+    "Maize R2 is 0.481% [c1]." passed check_report against a staged
+    maize R2 of 0.481, because _tag_figures dropped the '%' suffix
+    entirely before the figure ever reached comparison -- the same
+    scale confusion _percent_scaled already fixed for a slide cell,
+    unfixed here.
+    """
+
+    @pytest.mark.unit
+    def test_a_correctly_converted_percentage_in_prose_passes(self):
+        """ "48.1% [c1]" is 0.481 -- the same number, the other way.
+        The claim's own value is the plain 0.481 that matches the
+        source; it is the report's own figure text that uses the
+        percent form."""
+        sources = {"metrics.json": {"r2_overall": 0.481}}
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        res = check_claims([c], sources, report_text="Overall R2 is 48.1% [c1].")
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_an_unscaled_percentage_in_prose_is_caught(self):
+        """Codex's exact scenario: "0.481%" is 0.00481, not 0.481, and
+        must not pass just because stripping the '%' leaves the same
+        digits as the real value."""
+        sources = {"metrics.json": {"r2_overall": 0.481}}
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        res = check_claims([c], sources, report_text="Overall R2 is 0.481% [c1].")
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_extract_numbers_is_unaffected_by_the_percent_carry(self):
+        """The fix is scoped to _tag_figures; extract_numbers's own
+        contract (the bare digits, no '%') must not change -- other
+        callers (coverage-gap detection, slide titles) depend on it."""
+        text = "R2 was 0.858 across 1,200 records; median error 4.4%."
+        assert set(extract_numbers(text)) >= {"0.858", "1,200", "4.4"}
