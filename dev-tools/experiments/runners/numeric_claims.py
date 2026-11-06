@@ -697,7 +697,20 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str]]]:
     return pairs
 
 
-def _figure_matches_claim_value(figure: str, value: Any) -> bool:
+#: A rounded restatement may not discard more than this fraction of
+#: the value's own magnitude. Bounds the rounding-candidate search
+#: below so a fraction cannot round all the way to an unrelated
+#: integer (0.481 rounded to 0 decimal places is 0, a 100% relative
+#: change, not rounding noise) -- the same scaled-tolerance principle
+#: as MATERIAL_REL_TOLERANCE in numeric_grader.py, applied here to
+#: what counts as "the same figure" rather than "not materially
+#: different."
+_ROUNDING_REL_TOLERANCE = 0.05
+
+
+def _figure_matches_claim_value(
+    figure: str, value: Any, tolerance: Optional[Dict[str, Any]] = None
+) -> bool:
     """Check a report figure against one claim's value, rounding-tolerant.
 
     Parameters
@@ -706,13 +719,20 @@ def _figure_matches_claim_value(figure: str, value: Any) -> bool:
         The figure exactly as it appears in the report text.
     value : Any
         The claim's declared value.
+    tolerance : Optional[Dict[str, Any]]
+        The claim's own declared tolerance, if any. A figure within
+        this tolerance of the value counts as a match even when it
+        falls outside the generic rounding guess below.
 
     Returns
     -------
     bool
         True when the figure is the same number as the claim's value,
         allowing for prose restating it at coarser rounding (0.481
-        written as "0.48" later is still the same figure).
+        written as "0.48" later is still the same figure, but not as
+        "0" -- rounding to a figure that discards most of the
+        original value is not rounding noise, it is a different
+        number).
     """
     candidates = {str(value)}
     coerced = _coerce(value)
@@ -722,8 +742,11 @@ def _figure_matches_claim_value(figure: str, value: Any) -> bool:
             candidates.add(str(int(coerced)))
             candidates.add(f"{int(coerced):,}")
         else:
+            floor = max(abs(coerced), 1e-6) * _ROUNDING_REL_TOLERANCE
             for places in range(4):
-                candidates.add(f"{round(coerced, places):g}")
+                candidate = round(coerced, places)
+                if abs(candidate - coerced) <= floor:
+                    candidates.add(f"{candidate:g}")
     normalized = figure.replace(",", "")
     if figure in candidates or normalized in candidates:
         return True
@@ -731,7 +754,11 @@ def _figure_matches_claim_value(figure: str, value: Any) -> bool:
         as_float = float(normalized)
     except ValueError:
         return False
-    return f"{as_float:g}" in candidates
+    if f"{as_float:g}" in candidates:
+        return True
+    if tolerance is not None:
+        return _within_tolerance(as_float, coerced, tolerance)
+    return False
 
 
 def check_claims(
@@ -798,7 +825,7 @@ def check_claims(
                 )
             )
             continue
-        if not _figure_matches_claim_value(figure, claim.value):
+        if not _figure_matches_claim_value(figure, claim.value, claim.tolerance):
             # A figure whose own tagged claim does not support it has
             # no VALID claim behind it, same as no tag at all -- so
             # this is a coverage gap (VERDICT_UNCOVERED), not a

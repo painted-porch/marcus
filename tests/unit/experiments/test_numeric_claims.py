@@ -1458,3 +1458,71 @@ class TestMandatoryClaimTagBinding:
             report_text="See claim [c1] for the overall R2 of 0.858 [c1].",
         )
         assert [r for r in res if r.verdict in ("uncovered", "failed")] == []
+
+
+class TestCodexFindingRoundingLeniencyIsBounded:
+    """Coverage's rounding allowance accepted any precision, even zero.
+
+    ``_figure_matches_claim_value`` tried rounding the claim's value
+    to 0-3 decimal places and accepted any of them as "the same
+    figure." ``round(0.481, 0)`` is ``0``, so a report tagging a bare
+    ``0`` with a claim whose real value is ``0.481`` was accepted as
+    covered -- a materially wrong figure (a 100% relative error, not
+    rounding noise) slipping through because "0" happened to appear
+    in the candidate set.
+    """
+
+    @pytest.mark.unit
+    def test_rounding_a_fraction_down_to_zero_is_not_the_same_figure(self, tmp_path):
+        """A bare 0 tagged with a claim of 0.481 is a value mismatch.
+
+        Codex's exact example. 0.481 must round to 0 at zero decimal
+        places (unlike the fixture's other R2 values, which round to
+        1), so this uses its own minimal source rather than the
+        shared fixture.
+        """
+        d = tmp_path / "eval"
+        d.mkdir()
+        (d / "metrics.json").write_text('{"r2_overall": 0.481}')
+        tiny_sources = load_sources(d)
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        res = check_claims([c], tiny_sources, report_text="Overall R2 is 0 [c1].")
+        bad = [r for r in res if r.verdict in ("uncovered", "failed")]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_genuine_two_decimal_rounding_still_covered(self, sources):
+        """The fix must not break the ordinary rounding case it allows."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+        )
+        res = check_claims([c], sources, report_text="R2 was 0.86 [c1].")
+        assert [r for r in res if r.verdict in ("uncovered", "failed")] == []
+
+    @pytest.mark.unit
+    def test_a_declared_tolerance_is_honored_for_a_rounded_restatement(self, sources):
+        """A figure outside the generic rounding guess but inside the
+        claim's own declared tolerance is still covered."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+            tolerance={"type": "abs", "value": 0.1},
+        )
+        res = check_claims([c], sources, report_text="R2 was about 0.8 [c1].")
+        assert [r for r in res if r.verdict in ("uncovered", "failed")] == []
