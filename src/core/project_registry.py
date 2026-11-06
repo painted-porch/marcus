@@ -6,6 +6,7 @@ Manages multiple project configurations across different providers
 for project definitions.
 """
 
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from src.core.error_framework import (
     StateConflictError,
 )
 from src.core.persistence import Persistence
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -517,10 +520,41 @@ class ProjectRegistry:
         -------
             The owning project's configuration, or None when no
             cached entry's ``provider_config["project_id"]`` matches.
+
+        Notes
+        -----
+            Two registry entries can share one provider project id
+            (Codex P2, round 2 on PR #853): ``discover_planka_projects``
+            registers one entry per BOARD, and two boards can belong
+            to the same Planka project, while ``_convert_card_to_task``
+            stamps only the project id on a task, never which board it
+            came from, so this method cannot yet tell the two boards
+            apart by that alone (also tracked in #854's real fix).
+            With more than one match, the active project is preferred
+            when it is among them -- the caller's own context is at
+            least not a guess -- and logged, unresolved, when it is
+            not, rather than silently returning an arbitrary one.
         """
-        for project in self._cache.values():
-            if project.provider_config.get("project_id") == provider_project_id:
+        matches = [
+            project
+            for project in self._cache.values()
+            if project.provider_config.get("project_id") == provider_project_id
+        ]
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        for project in matches:
+            if project.id == self._active_project_id:
                 return project
+        logger.warning(
+            "get_project_by_provider_id(%r) matched %d registry entries "
+            "(%s) and none is the active project; refusing to guess which "
+            "one a task belongs to.",
+            provider_project_id,
+            len(matches),
+            ", ".join(sorted(p.id for p in matches)),
+        )
         return None
 
     def get_active_project_sync(self) -> Optional[ProjectConfig]:
