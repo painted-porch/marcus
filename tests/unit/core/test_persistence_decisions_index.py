@@ -18,6 +18,7 @@ insufficient: rows written before ``kind`` existed, which have no
 
 import sqlite3
 from pathlib import Path
+from typing import Any, Dict, Tuple
 
 import pytest
 
@@ -46,26 +47,61 @@ def test_schema_creates_an_index_covering_project_id_and_kind(
     assert "idx_persistence_project_kind" in indexes
 
 
-def test_query_plan_uses_the_new_index_for_project_and_kind_filter(
-    sqlite_backend: SQLitePersistence,
-) -> None:
-    """EXPLAIN QUERY PLAN for exactly the query shape
-    ``_load_project_rows`` issues (collection = ?, project_id filter,
-    kind filter, ORDER BY stored_at DESC) must report using the new
-    index, not a full scan of the table or of idx_stored_at alone."""
+def _explain(
+    sqlite_backend: SQLitePersistence, where: Dict[str, Any], params: Tuple[Any, ...]
+) -> str:
+    """Build the REAL WHERE clause through ``_where_sql`` (so this test
+    can never silently drift from the production query) and return the
+    flattened ``EXPLAIN QUERY PLAN`` text for it.
+    """
+    where_sql, where_params = sqlite_backend._where_sql(where)
     sql = (
-        "SELECT key, data, stored_at FROM persistence WHERE collection = ? "
-        "AND (json_extract(data, '$.project_id') IN (?)) "
-        "AND (json_extract(data, '$.kind') IN (?) OR json_extract(data, '$.kind') IS NULL) "
-        "ORDER BY stored_at DESC, key DESC LIMIT ? OFFSET ?"
+        "SELECT key, data, stored_at FROM persistence WHERE collection = ?"
+        f"{where_sql} ORDER BY stored_at DESC, key DESC LIMIT ? OFFSET ?"
     )
     with sqlite3.connect(sqlite_backend.db_path) as conn:
         plan = conn.execute(
             "EXPLAIN QUERY PLAN " + sql,
-            ("decisions", "proj-1", "decision", 10, 0),
+            (*params, *where_params, 10, 0),
         ).fetchall()
-    plan_text = " ".join(str(cell) for row in plan for cell in row)
-    assert "idx_persistence_project_kind" in plan_text, plan_text
+    return " ".join(str(cell) for row in plan for cell in row)
+
+
+def test_query_plan_uses_the_new_index_for_project_and_kind_filter(
+    sqlite_backend: SQLitePersistence,
+) -> None:
+    """EXPLAIN QUERY PLAN for the REAL query ``_load_project_rows``
+    issues (collection = ?, project_id filter, kind filter, ORDER BY
+    stored_at DESC) must show the seek constraining all three columns
+    and no temp b-tree sort.
+
+    Issue #890 round 2 (Codex, confirmed live): a first version of
+    this index was used for collection and project_id only, with kind
+    left unconstrained and a temp b-tree still needed for the ORDER
+    BY -- exactly the scan this index exists to remove -- while a
+    weaker version of this same test passed because it only checked
+    the index's NAME appeared in the plan, not what it actually
+    constrained. This asserts the constrained-column count and the
+    absence of a sort, not the index's name, so a future change that
+    reintroduces either regression fails here again.
+    """
+    plan_text = _explain(
+        sqlite_backend,
+        {"project_id": "proj-1", "kind": ["decision", None]},
+        ("decisions",),
+    )
+    assert plan_text.count("=?") == 3, plan_text
+    assert "B-TREE" not in plan_text, plan_text
+
+    # The non-legacy kind path (e.g. "assessment") must get the same
+    # equality seek, not just the "decision" + None shape.
+    plan_text_assessment = _explain(
+        sqlite_backend,
+        {"project_id": "proj-1", "kind": ["assessment"]},
+        ("decisions",),
+    )
+    assert plan_text_assessment.count("=?") == 3, plan_text_assessment
+    assert "B-TREE" not in plan_text_assessment, plan_text_assessment
 
 
 @pytest.mark.asyncio
