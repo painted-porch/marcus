@@ -43,7 +43,8 @@ async def query_project_history(
         - "tasks": Find tasks (filters: status, agent_id, start_time, end_time)
         - "blocked_tasks": Find tasks with blockers
         - "task_dependencies": Get dependency chain (requires: task_id)
-        - "decisions": Find decisions (filters: task_id, agent_id, affecting_task_id)  # noqa: E501
+        - "decisions": Find decisions (filters: task_id, agent_id, affecting_task_id,
+          kind; ``kind="decision"`` leaves opinions and the primer out)
         - "opinions": Opinions grouped by subject with the distinct-agent count
           (filters: subject, kind, since); pagination is over subjects
         - "artifacts": Find artifacts (filters: task_id, artifact_type, agent_id)
@@ -201,6 +202,20 @@ async def query_project_history(
                     decision_offset=offset,
                 )
                 decisions = history.decisions
+
+            # Opinions and the project primer are decision rows too
+            # (``kind="assessment"`` and ``kind="objective"``), so a reader
+            # that wants the crew's decisions alone asks for
+            # ``kind="decision"`` (#880). Rows written before ``kind``
+            # existed are decisions, the field's default. No ``kind``
+            # keeps the mixed listing.
+            wanted_kind = filters.get("kind")
+            if wanted_kind is not None:
+                decisions = [
+                    d
+                    for d in decisions
+                    if getattr(d, "kind", "decision") == wanted_kind
+                ]
 
             return {
                 "success": True,
