@@ -355,10 +355,6 @@ def ingest_usage_records(
         agent_role = "planner" if record.attribution == "controller" else "worker"
 
         request_id = record.request_id_override or _request_id(record)
-        existing = store.conn.execute(
-            "SELECT event_id FROM token_events WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
 
         event = TokenEvent(
             run_id=record.run_id,
@@ -388,12 +384,19 @@ def ingest_usage_records(
             api=record.api,
             timestamp=timestamp,
         )
-        store.record_event(event)
+        # Codex review, round 3 on PR #867: deriving accepted/
+        # already_present from a SELECT taken before this INSERT is a
+        # check-then-act race -- two callers on separate connections
+        # can both see "not found" and both report "accepted" for
+        # what the database ultimately stores as one row.
+        # record_event_with_status's rowcount comes from the INSERT
+        # OR IGNORE itself, atomic with the write.
+        _event_id, was_inserted = store.record_event_with_status(event)
 
-        if existing is not None:
-            already_present += 1
-        else:
+        if was_inserted:
             accepted += 1
+        else:
+            already_present += 1
 
     return BatchAck(
         batch_id=batch_id,

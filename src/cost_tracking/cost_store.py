@@ -46,7 +46,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -1017,6 +1017,37 @@ class CostStore:
         int
             The auto-incremented ``event_id``.
         """
+        event_id, _was_inserted = self.record_event_with_status(event)
+        return event_id
+
+    def record_event_with_status(self, event: TokenEvent) -> Tuple[int, bool]:
+        """Insert one ``token_events`` row, exposing whether it was new.
+
+        Codex review, round 3 on PR #867: a caller that needs to know
+        "did I just insert this, or was it already there" (an
+        idempotent batch acknowledgement, for instance) cannot derive
+        that safely from a separate existence check before calling
+        :meth:`record_event` -- two callers racing the same
+        ``request_id`` on separate connections can both see "not
+        found" before either inserts, then both report "newly
+        accepted" after the ``INSERT OR IGNORE`` silently drops one of
+        them. This method instead reads the insert's own ``rowcount``
+        -- 1 when this call's ``INSERT OR IGNORE`` actually added the
+        row, 0 when a concurrent or prior insert already holds that
+        ``request_id`` -- which is atomic with the write itself, not a
+        separate check-then-act step.
+
+        Parameters
+        ----------
+        event : TokenEvent
+            Event payload. Token counts default to 0 if not supplied.
+
+        Returns
+        -------
+        Tuple[int, bool]
+            ``(event_id, was_inserted)``. ``was_inserted`` is ``True``
+            only when THIS call's insert is the one that landed.
+        """
         cur = self.conn.execute(
             """
             INSERT OR IGNORE INTO token_events (
@@ -1075,11 +1106,11 @@ class CostStore:
             ).fetchone()
             if row is None:  # pragma: no cover - rowcount==0 implies match exists
                 raise RuntimeError("INSERT OR IGNORE skipped but no matching row")
-            return int(row[0])
+            return int(row[0]), False
         event_id = cur.lastrowid
         if event_id is None:  # pragma: no cover - sqlite3 always returns rowid
             raise RuntimeError("sqlite3 did not return lastrowid")
-        return event_id
+        return event_id, True
 
     def update_attribution(
         self,

@@ -10,6 +10,7 @@ class cache token counts, an optional vendor-reported ``usd`` and
 relay (harness/controller) from a worker's own self-report.
 """
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -208,6 +209,53 @@ class TestIngestUsageRecords:
             ("20261105T213906",),
         ).fetchone()
         assert row[0] is None
+
+
+class TestConcurrentIngestionNeverDoubleAccepts:
+    """Codex review (round 3 on #867): accepted/already_present must
+    come from the INSERT's own atomic outcome, not a SELECT taken
+    before it -- two callers racing the same record on separate
+    connections must never both report "accepted"."""
+
+    def test_two_connections_racing_the_same_record_accept_exactly_once(
+        self, tmp_path: Path
+    ) -> None:
+        """Two real CostStore instances (separate sqlite3 connections,
+        separate threads) ingest the identical record at the same
+        moment. Across both, exactly one row lands in the database,
+        exactly one ack reports accepted=1, and exactly one reports
+        already_present=1 -- never accepted=1 twice."""
+        db_path = tmp_path / "costs.db"
+        CostStore(db_path=db_path)  # create the schema once up front
+
+        start = threading.Barrier(2)
+        results: list = [None, None]
+
+        def _ingest(index: int) -> None:
+            store = CostStore(db_path=db_path)
+            start.wait()
+            results[index] = ingest_usage_records(store, "project-A", [_record()])
+
+        threads = [
+            threading.Thread(target=_ingest, args=(0,)),
+            threading.Thread(target=_ingest, args=(1,)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        total_accepted = sum(ack.accepted for ack in results)
+        total_already_present = sum(ack.already_present for ack in results)
+        assert total_accepted == 1
+        assert total_already_present == 1
+
+        final_store = CostStore(db_path=db_path)
+        count = final_store.conn.execute(
+            "SELECT COUNT(*) FROM token_events WHERE run_id = ?",
+            ("20261105T213906",),
+        ).fetchone()[0]
+        assert count == 1
 
 
 class TestDedupKeyHasNoDelimiterAmbiguity:
