@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.core.project_registry import ProjectConfig
+from src.core.persistence import MemoryPersistence, Persistence
+from src.core.project_registry import ProjectConfig, ProjectRegistry
 
 pytestmark = pytest.mark.unit
 
@@ -112,3 +113,41 @@ class TestTaskTypeRegistrationsRoundTrip:
         a.task_type_registrations["verify"] = {"evidence_schema": {}}
 
         assert b.task_type_registrations == {}
+
+
+def _registry() -> ProjectRegistry:
+    """Build a ProjectRegistry over an in-memory backend."""
+    return ProjectRegistry(Persistence(MemoryPersistence()))
+
+
+class TestGetActiveProjectSync:
+    """Issue #830: a synchronous cache read for callers that cannot await.
+
+    ``eligibility.py`` runs inside the synchronous assignment path and
+    needs the active project's registration without awaiting the
+    registry's normal I/O path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_the_active_project_once_loaded(self) -> None:
+        registry = _registry()
+        config = _config()
+        await registry.add_project(config)
+
+        active = registry.get_active_project_sync()
+
+        assert active is not None
+        assert active.id == config.id
+
+    def test_returns_none_before_any_project_is_active(self) -> None:
+        registry = _registry()
+
+        assert registry.get_active_project_sync() is None
+
+    @pytest.mark.asyncio
+    async def test_matches_the_async_accessor(self) -> None:
+        registry = _registry()
+        config = _config()
+        await registry.add_project(config)
+
+        assert registry.get_active_project_sync() == await registry.get_active_project()
