@@ -98,8 +98,8 @@ class Claim:
     source: Optional[str] = None
     key: Optional[str] = None
     expr: Optional[str] = None
-    inputs: Dict[str, str] = field(default_factory=dict)
-    tolerance: Optional[Dict[str, Any]] = None
+    inputs: Dict[str, Any] = field(default_factory=dict)
+    tolerance: Any = None
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "Claim":
@@ -537,6 +537,55 @@ def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
     return f", within a declared {unit} tolerance of {amount}"
 
 
+def _malformed_claim_shape(claim: Claim) -> Optional[str]:
+    """Check a claim's own fields before any resolution is attempted.
+
+    Every one of this file's crash-on-writer-input findings so far
+    has the same shape: a field that ``Claim.from_dict`` accepted at
+    face value (an object-valued ``inputs``, a dict-valued
+    ``tolerance``) turns out to hold something a downstream consumer
+    cannot use (a null address, a non-string expr, a tolerance value
+    that isn't numeric). Checking every such field once here, before
+    ``_check_one`` resolves anything, means the next malformed field
+    is caught by this same gate instead of needing its own patch at
+    whichever operation it happens to reach first.
+
+    Parameters
+    ----------
+    claim : Claim
+        The claim to check.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the first problem found, or ``None`` when
+        the claim's fields are well-shaped enough to attempt
+        resolving.
+    """
+    if claim.kind == "lookup":
+        if not isinstance(claim.source, str) or not claim.source:
+            return f"{claim.label}: lookup claim has no source file"
+        if not isinstance(claim.key, str) or not claim.key:
+            return f"{claim.label}: lookup claim has no key"
+    if claim.kind in ("derived", "consistency"):
+        if not isinstance(claim.expr, str) or not claim.expr.strip():
+            return f"{claim.label}: claim has no expression to evaluate"
+        for var, address in (claim.inputs or {}).items():
+            if not isinstance(address, str) or not address:
+                return (
+                    f"{claim.label}: input {var!r} is not a usable "
+                    f"address: {address!r}"
+                )
+    if claim.tolerance is not None:
+        if not isinstance(claim.tolerance, dict):
+            return f"{claim.label}: tolerance is not an object: {claim.tolerance!r}"
+        if "value" in claim.tolerance:
+            amount = claim.tolerance["value"]
+            if not isinstance(amount, (int, float)) or isinstance(amount, bool):
+                return f"{claim.label}: tolerance value is not numeric: {amount!r}"
+    return None
+
+
 def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
     """Resolve and judge a single claim.
 
@@ -553,6 +602,9 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         The verdict.
     """
     base = {"claim_id": claim.id, "value": claim.value, "label": claim.label}
+    problem = _malformed_claim_shape(claim)
+    if problem:
+        return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=problem, **base)
     if claim.kind == "lookup":
         address = f"{claim.source}:{claim.key}"
         try:

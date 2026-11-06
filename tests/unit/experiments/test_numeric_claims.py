@@ -242,6 +242,134 @@ class TestCodexFindingMalformedToleranceDoesNotCrash:
         assert res[0].verdict == "unresolvable"
 
 
+class TestCodexFindingClaimShapeIsValidatedBeforeResolution:
+    """Every claim field reachable from writer JSON is checked up front.
+
+    Round 14's finding: ``{"inputs": {"a": null}}`` passes
+    ``Claim.from_dict`` (an object-valued ``inputs`` is accepted), but
+    ``resolve_address`` then calls ``address.split(":")`` on ``None``
+    and raises an uncaught ``AttributeError``, aborting the whole
+    ``check_claims`` pass over one claim. This is the fourth round
+    where writer-supplied data reached a code path that assumed its
+    shape (malformed tolerance values, non-object ``slides``, a
+    constant-only ``expr``, now a null input address). Rather than
+    patch each field's consumer again, ``_check_one`` now validates a
+    claim's shape -- source/key for a lookup, expr and every input
+    address for a derived/consistency claim, and the tolerance object
+    -- in one place before attempting any resolution, so the next
+    malformed field is caught here too.
+    """
+
+    @pytest.mark.unit
+    def test_a_null_input_address_is_unresolvable_not_a_crash(self, sources):
+        """The exact payload from the finding."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="derived",
+            expr="a",
+            inputs={"a": None},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_non_string_input_address_is_unresolvable_not_a_crash(self, sources):
+        """A non-null but still non-string address is caught the same way."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="derived",
+            expr="a",
+            inputs={"a": 42},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_an_empty_string_input_address_is_unresolvable_not_a_crash(self, sources):
+        """An empty address string is not a usable address either."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="derived",
+            expr="a",
+            inputs={"a": ""},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_non_string_expr_is_unresolvable_not_a_crash(self, sources):
+        """An expr that is not a string at all (e.g. a number) is caught."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="derived",
+            expr=999,
+            inputs={"a": "metrics.json:n_records"},
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_lookup_claim_with_no_source_is_unresolvable_not_a_crash(self, sources):
+        """A lookup claim missing its source file is caught before the
+        address is even built."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="lookup",
+            source=None,
+            key="n_records",
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_non_object_tolerance_is_unresolvable_not_a_crash(self, sources):
+        """A tolerance that is not an object at all (e.g. a bare string)."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+            tolerance="loose",
+        )
+        res = check_claims([c], sources)
+        assert len(res) == 1
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_well_formed_claim_is_unaffected(self, sources):
+        """The validation gate must not disturb an ordinary, valid claim."""
+        c = Claim(
+            id="c1",
+            value=22.08,
+            label="maize to cotton ratio",
+            kind="derived",
+            expr="a / b",
+            inputs={
+                "a": "per_crop.csv:crop=maize:n_records",
+                "b": "per_crop.csv:crop=cotton:n_records",
+            },
+            tolerance={"type": "abs", "value": 0.01},
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+
 class TestDerivedClaims:
     """A derived claim is recomputed, never taken on trust."""
 
