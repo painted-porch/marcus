@@ -70,6 +70,19 @@ class ProjectConfig:
         Minecraft board with no software phases at all, holding
         claimable tasks on a false domain inference; this flag is the
         declaration K1/K3 require instead of letting the kernel guess.
+    has_commit_based_recovery : bool
+        ADR-0013 K8 consequence 2 (Accepted 2026-11-06, issue #868):
+        whether this project's agents checkpoint by committing to a
+        git branch, which is what makes a dead worker's partial work
+        salvageable by the recovery handoff. ``True`` (the default,
+        for every existing project and every project that never sets
+        this) keeps today's behavior: every task's instructions
+        include the checkpoint-duty text (``_build_checkpoint_duty_prompt``,
+        ``src/marcus_mcp/tools/task.py``). ``False`` declares that
+        this project's agents have no git branch at all (a Minecraft
+        build, an ops runbook) -- the kernel stops assembling commit-
+        based instruction text into their prompts, rather than
+        letting the project's own prompt fight the kernel's.
     """
 
     id: str
@@ -81,6 +94,7 @@ class ProjectConfig:
     tags: List[str] = field(default_factory=list)
     task_type_registrations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     enforce_phase_order: bool = False
+    has_commit_based_recovery: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for persistence."""
@@ -103,6 +117,7 @@ class ProjectConfig:
             "tags",
             "task_type_registrations",
             "enforce_phase_order",
+            "has_commit_based_recovery",
         }
         filtered_data = {k: v for k, v in data.items() if k in expected_fields}
 

@@ -96,6 +96,51 @@ def project_declares_phase_order(state: Any, project_id: Optional[str]) -> bool:
     return getattr(project, "enforce_phase_order", False) is True
 
 
+def project_has_commit_based_recovery(state: Any, project_id: Optional[str]) -> bool:
+    """Return whether a project's agents checkpoint by git commit.
+
+    ADR-0013 K8 consequence 2 (issue #868): a Minecraft-building agent
+    has no git branch at all, so the kernel's checkpoint-duty
+    instruction text ("a checkpoint is an ordinary commit on your
+    branch") is not merely unhelpful for that project, it is actively
+    wrong -- the Minecraft harness's own prompt has to separately
+    instruct its agents to ignore it. ``_build_checkpoint_duty_prompt``
+    (``src/marcus_mcp/tools/task.py``) calls this before assembling
+    that text at all.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state, passed through to the registration
+        lookup.
+    project_id : Optional[str]
+        The candidate task's own project id (``task.project_id``).
+        ``None`` falls back to the server's active project.
+
+    Returns
+    -------
+    bool
+        ``True`` (the default) for no project registry, no resolvable
+        project, or a project that has never set
+        ``has_commit_based_recovery`` -- the same "absent means
+        today's behavior" default every other K2-family declaration
+        in this module follows. ``False`` only when the resolved
+        project has explicitly set ``has_commit_based_recovery`` to
+        ``False``.
+    """
+    registry = getattr(state, "project_registry", None)
+    if not isinstance(registry, ProjectRegistry):
+        return True
+    project = (
+        registry.get_project_sync(project_id)
+        if project_id
+        else registry.get_active_project_sync()
+    )
+    if project is None:
+        return True
+    return getattr(project, "has_commit_based_recovery", True) is not False
+
+
 def injected_checks_for_task_type(
     task_type: str, state: Any, project_id: Optional[str]
 ) -> List[Dict[str, str]]:

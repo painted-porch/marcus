@@ -56,6 +56,7 @@ from src.marcus_mcp.coordinator.agent_project import project_for_agent
 from src.marcus_mcp.coordinator.drain import compute_board_drain
 from src.marcus_mcp.coordinator.task_type_registration import (
     injected_checks_for_task_type,
+    project_has_commit_based_recovery,
     task_type_registration,
 )
 from src.marcus_mcp.tools.context import give_opinion
@@ -2743,7 +2744,9 @@ def _resolve_scaffold_path(task: Task) -> str:
     return raw
 
 
-def _build_checkpoint_duty_prompt(state: Optional[Any]) -> str:
+def _build_checkpoint_duty_prompt(
+    state: Optional[Any], project_id: Optional[str] = None
+) -> str:
     """State the ADR-0012 D8 checkpoint duty in Marcus's configured numbers.
 
     The duty is what makes a dead worker's partial work salvageable: the
@@ -2759,16 +2762,29 @@ def _build_checkpoint_duty_prompt(state: Optional[Any]) -> str:
     retunes them retunes the contract too. Without one, the ADR defaults
     are used.
 
+    ADR-0013 K8 consequence 2 (issue #868): a project may declare it
+    has no commit-based recovery story at all (no git branch, e.g. a
+    Minecraft build), in which case this returns an empty string
+    rather than instructions the agent cannot act on and must
+    separately be told to ignore.
+
     Parameters
     ----------
     state : Optional[Any]
-        Marcus server state. Read for ``lease_manager``.
+        Marcus server state. Read for ``lease_manager`` and, via
+        ``project_has_commit_based_recovery``, the project registry.
+    project_id : Optional[str]
+        The task's own project id, so the right project's declaration
+        is read rather than the server's active project.
 
     Returns
     -------
     str
-        The instruction layer, ready to append.
+        The instruction layer, ready to append, or an empty string
+        when the project has declared it has no commit-based recovery.
     """
+    if state is not None and not project_has_commit_based_recovery(state, project_id):
+        return ""
     cadence = DEFAULT_CHECKPOINT_CADENCE_MINUTES
     silence = DEFAULT_SILENCE_TIMEOUT_MINUTES
     lease_manager = getattr(state, "lease_manager", None) if state else None
@@ -2886,7 +2902,9 @@ def build_tiered_instructions(
     # Layer 0.2: the ADR-0012 D8 checkpoint duty, in Marcus's own numbers.
     # Partial work is only salvageable if it was committed, so the cadence
     # is part of the task contract rather than a hope.
-    instructions_parts.append(_build_checkpoint_duty_prompt(state))
+    instructions_parts.append(
+        _build_checkpoint_duty_prompt(state, getattr(task, "project_id", None))
+    )
     # Layer 1: Base instructions
     instructions_parts.append(base_instructions)
 
