@@ -414,6 +414,34 @@ class TestRegisterBoard:
         assert first == second
         assert len(await registry.list_projects(provider="sqlite")) == 1
 
+    @pytest.mark.asyncio
+    async def test_the_same_project_id_against_a_different_db_is_refused(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """Codex P2, round 1 on PR #838: ProjectConfig.id is now the
+        kanban project id (GH-306), so seeding the same project_id
+        into a second database must not silently overwrite the first
+        registration -- add_project() replaces both persistence and
+        the cache under that id unconditionally, discarding the
+        original board's path and any K2 registration it carried, and
+        redirecting anything already holding this project id to the
+        new board."""
+        from src.core.error_framework import StateConflictError
+
+        first_db = str(tmp_path / "kanban-first.db")
+        second_db = str(tmp_path / "kanban-second.db")
+
+        await tow_runner.register_board("tow-b-claude", first_db, registry=registry)
+
+        with pytest.raises(StateConflictError):
+            await tow_runner.register_board(
+                "tow-b-claude", second_db, registry=registry
+            )
+
+        stored = await registry.get_project("tow-b-claude")
+        assert stored is not None
+        assert Path(stored.provider_config["db_path"]) == Path(first_db).resolve()
+
 
 class TestProjectPrefixedTaskIds:
     """Test suite for Cato-visible task ids.

@@ -54,6 +54,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.core.error_framework import ErrorContext, StateConflictError  # noqa: E402
 from src.core.project_registry import (  # noqa: E402
     ProjectConfig,
     ProjectRegistry,
@@ -559,11 +560,13 @@ async def register_board(
     step the registry, and every consumer of it such as the Cato
     dashboard's project list, never learns the board exists, and a
     server in ``single_project_mode`` stays bound to whatever project
-    was already active. Registration is idempotent on the pair of
-    project name and absolute db path, so re-seeding never duplicates
-    an entry, and ``add_project`` only claims the active slot when no
-    project was active before, so registering never disturbs a
-    running server.
+    was already active. Registration is idempotent on ``project_id``
+    (also the registry id, GH-306): re-seeding the same project_id
+    against the same db path never duplicates an entry, and
+    ``add_project`` only claims the active slot when no project was
+    active before, so registering never disturbs a running server.
+    Re-seeding the same project_id against a *different* db path is
+    refused (see Raises) rather than silently overwritten.
 
     Parameters
     ----------
@@ -582,15 +585,43 @@ async def register_board(
     str
         The registry project id (the existing one when the board was
         already registered).
+
+    Raises
+    ------
+    StateConflictError
+        ``project_id`` is already registered against a *different*
+        database path. ``ProjectConfig.id`` is the kanban project id
+        (GH-306), so ``add_project`` would otherwise overwrite that
+        record under the same id -- silently discarding the original
+        board's path and any K2 registration it carries, and
+        redirecting anything already holding this project id to the
+        new board (Codex P2, round 1 on PR #838).
     """
     absolute = str(Path(db_path).resolve())
     registry = registry or ProjectRegistry()
     await registry.initialize()
 
-    for existing in await registry.list_projects(provider="sqlite"):
-        cfg = existing.provider_config
-        if cfg.get("project_name") == project_id and cfg.get("db_path") == absolute:
-            return existing.id
+    existing = await registry.get_project(project_id)
+    if existing is not None:
+        existing_db_path = existing.provider_config.get("db_path")
+        if existing_db_path != absolute:
+            raise StateConflictError(
+                conflict_description=(
+                    f"project id {project_id!r} is already registered "
+                    f"against a different board ({existing_db_path!r}); "
+                    f"refusing to overwrite it with {absolute!r}. Use a "
+                    "different project_id for the new board."
+                ),
+                context=ErrorContext(
+                    operation="register_board",
+                    custom_context={
+                        "project_id": project_id,
+                        "existing_db_path": existing_db_path,
+                        "requested_db_path": absolute,
+                    },
+                ),
+            )
+        return existing.id
 
     config = ProjectConfig(
         # GH-306: the kanban project id is the single source of truth,
