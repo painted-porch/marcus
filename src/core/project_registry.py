@@ -330,6 +330,40 @@ class ProjectRegistry:
             return await self.get_project(self._active_project_id)
         return None
 
+    def get_project_sync(self, project_id: str) -> Optional[ProjectConfig]:
+        """
+        Get a project by id from cache, without any I/O.
+
+        For callers that cannot await -- issue #830's eligibility check
+        runs synchronously inside the assignment path. Reads only the
+        in-memory cache ``initialize``/``add_project``/``switch_project``
+        already populate; a project that has never been loaded into this
+        process reads as not found rather than being fetched.
+
+        Parameters
+        ----------
+            project_id
+                Project id to look up.
+
+        Returns
+        -------
+            That project's configuration, or None if it is not cached.
+        """
+        return self._cache.get(project_id)
+
+    def get_active_project_sync(self) -> Optional[ProjectConfig]:
+        """
+        Get the currently active project from cache, without any I/O.
+
+        Returns
+        -------
+            Active project configuration, or None if there is no active
+            project or it is not yet cached.
+        """
+        if self._active_project_id is None:
+            return None
+        return self.get_project_sync(self._active_project_id)
+
     async def create_from_legacy_config(self, legacy_config: Dict[str, Any]) -> str:
         """
         Create a project from legacy single-project configuration.

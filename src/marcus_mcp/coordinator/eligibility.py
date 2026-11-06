@@ -11,11 +11,16 @@ keeps the Bright Line Test satisfied (Invariant #1).
 
 The rules, in full:
 
-- A ``verify`` task is never offered to the author of the claim it
+- A verify-shaped task is never offered to the author of the claim it
   depends on, nor to any worker whose vendor is the author's vendor.
-  The author is found through ``task.dependencies`` to the DONE find
-  task's ``assigned_to``; the vendor comes from the author's
-  registration (``state.agent_status``).
+  The author is found through ``task.dependencies`` to the matching
+  DONE producer task's ``assigned_to``; the vendor comes from the
+  author's registration (``state.agent_status``). "Verify-shaped" is
+  the literal task type ``"verify"`` (producer ``"find"``) by default,
+  or whatever an ADR-0013 K2 registration names via
+  ``task_type_registrations[task_type]["verifies_task_type"]`` --
+  issue #830, so an extension whose verification step is not literally
+  named ``"verify"`` still gets this guarantee.
 - An ``approve`` task is offered only to a ``human`` principal.
 - Every other task type is offered only to an ``agent`` principal.
 
@@ -34,23 +39,122 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.core.models import Task, TaskStatus, WorkerStatus
+from src.core.project_registry import ProjectRegistry
 
 logger = logging.getLogger(__name__)
 
 APPROVE_TYPE = "approve"
 VERIFY_TYPE = "verify"
+FIND_TYPE = "find"
 
 
-def _claim_authors(task: Task, state: Any) -> List[Tuple[str, str]]:
-    """Find the authors of the claims a verify task depends on.
+def _task_type_registration(
+    task_type: str, state: Any, project_id: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """Return a project's ADR-0013 K2 registration for a task type.
 
-    Walks ``task.dependencies`` to every DONE ``find`` task and
-    collects who completed it and that worker's registered vendor.
+    Codex P2 on PR #836: a worker can request tasks for a project other
+    than the server's active one (``_find_optimal_task_original_logic``
+    scopes candidates by ``state.agent_project_map``, not by what is
+    active), and a ``Task`` carries its own ``project_id``. Looking up
+    the registration from the active project regardless applied the
+    wrong project's rules -- project A's author stayed eligible for its
+    own ``check`` task whenever some other project B happened to be
+    active, since B's (non-existent) registration returned no producer
+    type. This resolves the candidate's own project first; the active
+    project is a fallback only for a legacy task with no ``project_id``
+    at all.
+
+    Parameters
+    ----------
+    task_type : str
+        The task type to look up.
+    state : Any
+        Marcus server state. Only a real ``ProjectRegistry`` is
+        trusted, the same defensive posture as the ``WorkerStatus``
+        checks elsewhere in this module -- a bare ``Mock`` auto-creates
+        a ``project_registry`` attribute that would otherwise look
+        present without ever being one.
+    project_id : Optional[str]
+        The candidate task's own project id (``task.project_id``).
+        ``None`` falls back to the server's active project.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        The registration dict, or ``None`` when there is no project
+        registry, no resolvable project, or no registration for this
+        type.
+    """
+    registry = getattr(state, "project_registry", None)
+    if not isinstance(registry, ProjectRegistry):
+        return None
+    project = (
+        registry.get_project_sync(project_id)
+        if project_id
+        else registry.get_active_project_sync()
+    )
+    if project is None:
+        return None
+    return project.task_type_registrations.get(task_type)
+
+
+def _verify_producer_type(
+    task_type: str, state: Any, project_id: Optional[str] = None
+) -> Optional[str]:
+    """Return the task type whose completion ``task_type`` checks.
+
+    Issue #830: the self-check exclusion (K12) and ``_claim_authors``
+    used to recognize only the literal ``"verify"``/``"find"`` pair, so
+    an extension registering differently-named task types silently lost
+    the guarantee. This reads the project's K2 registration
+    (``task_type_registrations[task_type]["verifies_task_type"]``)
+    first, and falls back to the literal ``"find"`` producer only when
+    ``task_type`` is itself the literal ``"verify"`` -- the fallback
+    issue #830 asks for, so a project that registers nothing behaves
+    exactly as it did before K2 existed.
+
+    Parameters
+    ----------
+    task_type : str
+        The candidate task's type.
+    state : Any
+        Marcus server state, passed through to the registration lookup.
+    project_id : Optional[str]
+        The candidate task's own project id, so the registration
+        resolved is that project's, not whichever project happens to
+        be active server-wide (Codex P2 on PR #836).
+
+    Returns
+    -------
+    Optional[str]
+        The producer task type to protect against self-checking, or
+        ``None`` when ``task_type`` is not a verify-shaped type at all.
+    """
+    registration = _task_type_registration(task_type, state, project_id)
+    producer = registration.get("verifies_task_type") if registration else None
+    if producer:
+        return str(producer)
+    if task_type == VERIFY_TYPE:
+        return FIND_TYPE
+    return None
+
+
+def _claim_authors(task: Task, producer_type: str, state: Any) -> List[Tuple[str, str]]:
+    """Find the authors of the claims a verify-shaped task depends on.
+
+    Walks ``task.dependencies`` to every DONE task of ``producer_type``
+    and collects who completed it and that worker's registered vendor.
 
     Parameters
     ----------
     task : Task
-        The verify task being offered.
+        The verify-shaped task being offered.
+    producer_type : str
+        The task type whose completion ``task`` checks (from
+        :func:`_verify_producer_type`) -- the literal ``"find"`` for an
+        unregistered project, or whatever a project's K2 registration
+        names.
     state : Any
         Marcus server state; ``project_tasks`` holds the board's tasks
         and ``agent_status`` the registered workers.
@@ -69,7 +173,7 @@ def _claim_authors(task: Task, state: Any) -> List[Tuple[str, str]]:
         dep = tasks_by_id.get(dep_id)
         if dep is None:
             continue
-        if dep.task_type != "find" or dep.status != TaskStatus.DONE:
+        if dep.task_type != producer_type or dep.status != TaskStatus.DONE:
             continue
         if not dep.assigned_to:
             continue
@@ -110,8 +214,11 @@ def is_eligible(agent: WorkerStatus, task: Task, state: Any) -> Tuple[bool, str]
             "principal is offered approve tasks only",
         )
 
-    if task.task_type == VERIFY_TYPE:
-        for author_id, author_vendor in _claim_authors(task, state):
+    producer_type = _verify_producer_type(
+        task.task_type, state, getattr(task, "project_id", None)
+    )
+    if producer_type is not None:
+        for author_id, author_vendor in _claim_authors(task, producer_type, state):
             if agent.worker_id == author_id:
                 return False, "author of the claim this verify task checks"
             if author_vendor and agent.vendor and agent.vendor == author_vendor:

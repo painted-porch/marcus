@@ -147,16 +147,14 @@ Its code imports a verification function by name directly into the kernel's own 
 This is exactly the failure mode K2 exists to close.
 If you find yourself writing an `import` of your own verification code into anything under `src/marcus_mcp/`, stop — that is the sign you need a registration, not a shortcut around one.
 
-## No one checks their own work (ADR-0013 K12) — decided generally, implemented narrowly
+## No one checks their own work (ADR-0013 K12)
 
 K12's decision is general: a verification extension needs the kernel to exclude an artifact's producer, and anyone who shares its vendor, from the task that checks that artifact.
-**Its current implementation is not general yet.**
-`src/marcus_mcp/coordinator/eligibility.py`'s `is_eligible` only applies this exclusion to a task whose `task_type` is the literal string `"verify"`, and `_claim_authors` only discovers the producer by walking that task's direct dependencies for ones typed exactly `"find"`.
-
-If your extension's task types are named anything else — `"check"` instead of `"verify"`, say, or a producer type other than `"find"` — **this guarantee does not apply to you today**, even though K12 itself does not depend on those specific names.
-Until the implementation generalizes, either reuse the `find`/`verify` names, or treat this as still your own responsibility and say so explicitly in your own extension's documentation.
-Tracked as [#830](https://github.com/painted-porch/marcus/issues/830), sequenced after K2's registration mechanism lands, since the fix should key off which task types your project's own registration marks as the verify-shaped and find-shaped ones, rather than a second pair of hardcoded names.
-This is enforced, where it applies, at the point the kernel decides what to offer (`filter_eligible_tasks`) — not something your extension calls — and the refusal is silent, so a worker cannot probe around it.
+The exclusion applies whether your task types are named `find`/`verify` or something else entirely.
+`src/marcus_mcp/coordinator/eligibility.py`'s `is_eligible` reads your project's ADR-0013 K2 registration to learn which task type is the verify-shaped one and which type it checks: set `"verifies_task_type"` on the verify-shaped type's registration entry (`task_type_registrations["check"] = {"verifies_task_type": "write", ...}`), and the exclusion applies to that pair exactly the way it always has to `find`/`verify`.
+If you register nothing, the literal `find`/`verify` pair is still honored as a fallback — unregistered behaves exactly as it did before K2 existed.
+Fixed in [#830](https://github.com/painted-porch/marcus/issues/830).
+This is enforced at the point the kernel decides what to offer (`filter_eligible_tasks`) — not something your extension calls — and the refusal is silent, so a worker cannot probe around it.
 
 ## Where the kernel/extension boundary sits in the code
 
