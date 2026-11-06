@@ -7,6 +7,8 @@ file-based storage and ready for database backends.
 """
 
 import asyncio
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -14,7 +16,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import aiofiles
 
@@ -149,12 +151,45 @@ class FilePersistence(PersistenceBackend):
         """Get the file path for a collection."""
         return self.storage_dir / f"{collection}.json"
 
+    @contextlib.asynccontextmanager
+    async def _cross_process_lock(self, file_path: Path) -> AsyncIterator[None]:
+        """Serialize a collection's read-modify-write across writers.
+
+        ``_get_lock``'s ``asyncio.Lock`` only serializes callers that
+        share this exact ``FilePersistence`` instance and event loop.
+        It does nothing for two independent instances in the same
+        process (e.g. ``ProjectRegistry()`` constructed twice, once by
+        the long-lived server and once by a short-lived helper) or for
+        two separate OS processes writing the same data directory
+        (issue #883: a project registered while another process held
+        a stale read of the collection file overwrote it on write,
+        silently dropping the first process's entry). An OS-level
+        advisory lock (``fcntl.flock``) on a sibling ``.lock`` file
+        closes both gaps: it is held per file descriptor, not per
+        Python object, so it serializes every writer regardless of
+        which instance or process it came from.
+
+        ``flock`` blocks the calling thread while contended, so the
+        acquire/release run in a worker thread via ``asyncio.to_thread``
+        rather than on the event loop.
+        """
+        lock_path = file_path.with_suffix(file_path.suffix + ".lock")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
     async def store(self, collection: str, key: str, data: Dict[str, Any]) -> None:
         """Store data in a collection."""
         lock = self._get_lock(collection)
-        async with lock:
+        file_path = self._get_collection_file(collection)
+        async with lock, self._cross_process_lock(file_path):
             # Load existing data
-            file_path = self._get_collection_file(collection)
             existing_data: Dict[str, Any] = {}
 
             if file_path.exists():
@@ -246,9 +281,8 @@ class FilePersistence(PersistenceBackend):
     async def delete(self, collection: str, key: str) -> None:
         """Delete data from a collection."""
         lock = self._get_lock(collection)
-        async with lock:
-            file_path = self._get_collection_file(collection)
-
+        file_path = self._get_collection_file(collection)
+        async with lock, self._cross_process_lock(file_path):
             if not file_path.exists():
                 return
 
@@ -272,9 +306,8 @@ class FilePersistence(PersistenceBackend):
     async def clear_old(self, collection: str, days: int) -> int:
         """Clear data older than specified days."""
         lock = self._get_lock(collection)
-        async with lock:
-            file_path = self._get_collection_file(collection)
-
+        file_path = self._get_collection_file(collection)
+        async with lock, self._cross_process_lock(file_path):
             if not file_path.exists():
                 return 0
 

@@ -142,6 +142,39 @@ class TestFilePersistence:
         items = await file_persistence.query("concurrent")
         assert len(items) == 3
 
+    async def test_concurrent_writers_do_not_lose_each_others_entries(self, temp_dir):
+        """Two independent FilePersistence instances racing on the same
+        collection file must not drop each other's writes.
+
+        ``_get_lock``'s asyncio.Lock is per-instance, so it does
+        nothing when two separate ``FilePersistence`` objects point at
+        the same directory -- e.g. two ``ProjectRegistry()``
+        instances in one process, or two separate OS processes
+        sharing a data directory (issue #883: a second project
+        registered on an already-running server never appeared in
+        the shared projects.json; the write path's own cross-process
+        locking gap is the explanation that reproduces deterministically
+        here. A plain asyncio.Lock on one instance can't close this --
+        only an OS-level lock shared by file descriptor, not by Python
+        object, can).
+        """
+        writer_a = FilePersistence(storage_dir=temp_dir)
+        writer_b = FilePersistence(storage_dir=temp_dir)
+
+        # Before the fix, two independent instances' asyncio.Lock
+        # objects never contended with each other, so both writers'
+        # read-modify-write cycles could interleave freely and the
+        # loser's entry was silently overwritten. Running them
+        # concurrently, with no artificial delay needed, is enough to
+        # trigger that interleaving on an unlocked implementation.
+        await asyncio.gather(
+            writer_a.store("projects", "proj-1", {"name": "proj-1"}),
+            writer_b.store("projects", "proj-2", {"name": "proj-2"}),
+        )
+
+        on_disk = json.loads((temp_dir / "projects.json").read_text())
+        assert set(on_disk.keys()) == {"proj-1", "proj-2"}
+
 
 class TestSQLitePersistence:
     """Test suite for SQLite-based persistence"""
