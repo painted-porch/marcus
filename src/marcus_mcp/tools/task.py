@@ -7688,6 +7688,11 @@ async def _record_progress(
 
         # Update task in kanban
         update_data: Dict[str, Any] = {"progress": progress}
+        # Issue #858 round 2, Codex P2: the "blocked" branch writes the
+        # board itself, before the release below, rather than relying
+        # on the shared write further down — set True once that write
+        # has actually succeeded, so the shared write isn't repeated.
+        _blocked_board_write_done = False
 
         # VALIDATION GATE: Check if implementation task needs validation
         if status == "completed":
@@ -8495,6 +8500,40 @@ async def _record_progress(
             # so the card must not still show it as the assignee.
             update_data["assigned_to"] = None
 
+            # Issue #858 round 2, Codex P2: write the board BEFORE
+            # releasing coordination state, not after. The release used
+            # to run first, relying on the shared update_task call
+            # further down the function to write BLOCKED afterward — so
+            # a transient provider failure on that later write left the
+            # board showing IN_PROGRESS while the assignment and lease
+            # were already gone: the agent's retry of the same blocked
+            # report would then hit Guard 3's not_current_assignment
+            # rejection (current_tasks already empty), and the lease
+            # monitor had nothing left to recover. Writing first and
+            # returning the provider error on failure — leaving the
+            # assignment and lease untouched so the report is retryable
+            # — has no such window; this is the same order
+            # report_blocker's own terminal give-up path already uses.
+            try:
+                await state.kanban_client.update_task(task_id, update_data)
+            except Exception as board_write_err:
+                logger.error(
+                    f"report_task_progress(blocked) board write failed for "
+                    f"task {task_id}, agent {agent_id}: {board_write_err}. "
+                    "Coordination state left untouched; retry the same report."
+                )
+                return {
+                    "success": False,
+                    "status": "board_write_failed",
+                    "error": str(board_write_err),
+                    "message": (
+                        f"Could not record task {task_id} as blocked on the "
+                        "board; your assignment and lease are untouched. "
+                        "Retry the same report."
+                    ),
+                }
+            _blocked_board_write_done = True
+
             # Record blocker in Memory if available
             if hasattr(state, "memory") and state.memory and message:
                 # Try to get current task assignment
@@ -8526,6 +8565,7 @@ async def _record_progress(
             # task is sitting unassigned and BLOCKED on the board — until
             # the agent's run ends and something else cleans it up
             # externally. Mirrors the "completed" branch's release above.
+            # Only reached once the board write above has succeeded.
             if agent_id in state.agent_status:
                 agent = state.agent_status[agent_id]
                 agent.current_tasks = []
@@ -8539,8 +8579,10 @@ async def _record_progress(
                         )
                         logger.info(f"Removed lease for blocked task {task_id}")
 
-        # Update Kanban card
-        await state.kanban_client.update_task(task_id, update_data)
+        # Update Kanban card (the "blocked" branch already wrote it above,
+        # before releasing coordination state -- issue #858 round 2).
+        if not _blocked_board_write_done:
+            await state.kanban_client.update_task(task_id, update_data)
         _timer.mark("kanban_update")
 
         # Update task progress (including checklist items).
