@@ -190,6 +190,18 @@ def read_self_check(workspace: Path) -> Dict[str, Any]:
             "reasons": [f"self_check.json has no valid verdict: {data!r}"],
         }
     result: Dict[str, Any] = data
+    if result.get("verdict") == "reject":
+        reasons = result.get("reasons")
+        if not isinstance(reasons, list) or not all(
+            isinstance(r, str) for r in reasons
+        ):
+            # The retry prompt below joins this list directly; a
+            # malformed value here (null, a number, a list with a
+            # non-string element) must not reach that join and crash
+            # the whole run over one bad field in the self-check's
+            # own output.
+            result = dict(result)
+            result["reasons"] = [f"self-check returned malformed reasons: {reasons!r}"]
     return result
 
 

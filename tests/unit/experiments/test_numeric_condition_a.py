@@ -154,6 +154,95 @@ class TestCodexFindingNonObjectPayloadDoesNotCrash:
         assert result["verdict"] == "reject"
 
 
+class TestCodexFindingMalformedReasonsDoesNotCrash:
+    """A reject verdict with malformed "reasons" crashed the retry prompt.
+
+    ``{"verdict": "reject", "reasons": null}`` passes
+    ``read_self_check``'s existing validation (it is an object with a
+    valid verdict), but the caller builds the retry prompt with
+    ``"\\n".join(f"- {r}" for r in verdict.get("reasons", []))`` --
+    ``.get``'s default only applies when the key is *absent*, not
+    when it is present and null, so iterating ``None`` raises an
+    uncaught ``TypeError`` and terminates the whole run instead of
+    recording malformed feedback and continuing through its bounded
+    retries.
+    """
+
+    @pytest.mark.unit
+    def test_null_reasons_on_a_reject_is_substituted_not_a_crash(self, tmp_path):
+        """The exact payload from the finding."""
+        (tmp_path / "self_check.json").write_text(
+            json.dumps({"verdict": "reject", "reasons": None})
+        )
+        result = read_self_check(tmp_path)
+        assert result["verdict"] == "reject"
+        assert isinstance(result["reasons"], list)
+        assert all(isinstance(r, str) for r in result["reasons"])
+
+    @pytest.mark.unit
+    def test_numeric_reasons_on_a_reject_is_substituted_not_a_crash(self, tmp_path):
+        """A non-list, non-null malformed value is caught the same way."""
+        (tmp_path / "self_check.json").write_text(
+            json.dumps({"verdict": "reject", "reasons": 42})
+        )
+        result = read_self_check(tmp_path)
+        assert isinstance(result["reasons"], list)
+        assert all(isinstance(r, str) for r in result["reasons"])
+
+    @pytest.mark.unit
+    def test_a_reasons_list_with_a_non_string_element_is_substituted(self, tmp_path):
+        """Every element must itself be a string, not just the list shape."""
+        (tmp_path / "self_check.json").write_text(
+            json.dumps({"verdict": "reject", "reasons": ["ok", None]})
+        )
+        result = read_self_check(tmp_path)
+        assert isinstance(result["reasons"], list)
+        assert all(isinstance(r, str) for r in result["reasons"])
+
+    @pytest.mark.unit
+    def test_a_well_formed_reject_reasons_list_is_unaffected(self, tmp_path):
+        """The fix must not disturb an ordinary, valid reject."""
+        (tmp_path / "self_check.json").write_text(
+            json.dumps({"verdict": "reject", "reasons": ["c1: wrong"]})
+        )
+        result = read_self_check(tmp_path)
+        assert result["reasons"] == ["c1: wrong"]
+
+    @pytest.mark.unit
+    def test_an_accept_verdict_is_unaffected_by_the_reasons_check(self, tmp_path):
+        """An accept carries no reasons and must not be touched."""
+        (tmp_path / "self_check.json").write_text(json.dumps({"verdict": "accept"}))
+        result = read_self_check(tmp_path)
+        assert result["verdict"] == "accept"
+
+    @pytest.mark.unit
+    def test_a_malformed_reject_does_not_terminate_the_whole_run(
+        self, staged, tmp_path
+    ):
+        """End to end, at the actual retry-prompt construction site: the
+        run continues through its bounded retries instead of raising
+        out of run_condition_a_case entirely."""
+
+        def reject_with_null_reasons(workspace):
+            (workspace / "self_check.json").write_text(
+                json.dumps({"verdict": "reject", "reasons": None})
+            )
+
+        fake, calls = fake_claude_factory(
+            [
+                write_report_and_claims,
+                reject_with_null_reasons,
+                write_report_and_claims,
+                accept,
+            ]
+        )
+        with patch("runners.numeric_condition_a._run_claude", fake):
+            outcome = run_condition_a_case(staged, tmp_path / "out")
+        assert outcome["verdict"] == "accept"
+        assert outcome["rounds"] == 2
+        assert calls["n"] == 4
+
+
 class TestRoundFlow:
     """The write-then-check loop's control flow."""
 
