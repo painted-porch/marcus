@@ -307,6 +307,31 @@ async def add_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 # fresh from the just-updated provider_config.
                 if hasattr(server, "project_manager"):
                     await server.project_manager.invalidate_context(project_id)
+                    # Codex round 4: if project_id was already the
+                    # ACTIVE project and make_active is False (no
+                    # switch_project call coming below to rebuild
+                    # it), the eviction above just orphaned it --
+                    # active_project_id still names it, but its
+                    # context is gone, so get_kanban_client() now
+                    # returns None, and the server's own
+                    # kanban_client attribute (only reassigned when
+                    # make_active) still holds the stale pre-eviction
+                    # client. A value invalidated and never replaced,
+                    # the same seam as rounds 1-3 from the other
+                    # side. Rebuild immediately in that one case,
+                    # regardless of make_active, so the invariant
+                    # this whole fix exists for -- after add_project
+                    # returns, the registry, the context manager, and
+                    # the server's client all agree about the
+                    # project's provider_config -- actually holds.
+                    if (
+                        not make_active
+                        and server.project_manager.active_project_id == project_id
+                    ):
+                        await server.project_manager.switch_project(project_id)
+                        server.kanban_client = (
+                            await server.project_manager.get_kanban_client()
+                        )
 
         conversation_logger.log_pm_decision(
             decision=f"Registered sqlite project '{project_id}'",

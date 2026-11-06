@@ -241,3 +241,92 @@ class TestAddProjectSqlite:
         client = await manager.get_kanban_client()
         assert client is not None
         assert client._project_root == str(new_root)
+
+    @pytest.mark.asyncio
+    async def test_re_registering_an_already_active_project_with_make_active_false_still_rebuilds_it(
+        self, tmp_path: Path
+    ) -> None:
+        """Re-registering the ALREADY-ACTIVE project with
+        make_active=False must still rebuild its client (issue #886,
+        Codex review round 4).
+
+        Round 3's fix evicted the cached context on re-registration,
+        correctly, but only switch_project (gated on make_active)
+        rebuilds one. When the project being re-registered is already
+        the active one and the caller passes make_active=False (no
+        reason to switch to what's already active), the eviction
+        alone orphans it: the manager's own active_project_id still
+        names it, but get_kanban_client() now returns None, and the
+        SERVER's own kanban_client attribute -- never reassigned
+        unless make_active -- keeps pointing at the stale,
+        pre-eviction client object with the old project_root. A test
+        that only checks the eviction happened, or that re-reads the
+        manager's own getter, would pass while this bug stands; this
+        one reads the workspace root back through the actual
+        server.kanban_client attribute the rest of the server code
+        uses, not through the registry and not through the manager's
+        getter.
+        """
+        from unittest.mock import patch
+
+        from src.core.project_context_manager import ProjectContextManager
+
+        db_path = tmp_path / "board.db"
+
+        with patch("src.core.project_context_manager.get_config", return_value=Mock()):
+            manager = ProjectContextManager(registry=_file_backed_registry(tmp_path))
+
+        server = Mock()
+        server.project_registry = manager.registry
+        server.project_manager = manager
+
+        # First registration, make_active=True: builds and caches a
+        # real client, and this becomes the active project.
+        first = await add_project(
+            server,
+            {
+                "name": "sqlite-project",
+                "provider": "sqlite",
+                "config": {"project_id": "proj-sqlite-5", "db_path": str(db_path)},
+                "make_active": True,
+            },
+        )
+        assert first["success"] is True
+        server.kanban_client = await manager.get_kanban_client()
+        stale_client = server.kanban_client
+        assert stale_client._project_root is None
+        assert manager.active_project_id == "proj-sqlite-5"
+
+        # Re-registration of the SAME, already-active project, with a
+        # new project_root, and make_active=False -- no reason to
+        # "switch to" what's already active.
+        new_root = tmp_path / "existing-board-workspace"
+        new_root.mkdir()
+        second = await add_project(
+            server,
+            {
+                "name": "sqlite-project",
+                "provider": "sqlite",
+                "config": {
+                    "project_id": "proj-sqlite-5",
+                    "db_path": str(db_path),
+                    "project_root": str(new_root),
+                },
+                "make_active": False,
+            },
+        )
+        assert second["success"] is True
+
+        # The manager must still consider this project active, and
+        # must still be able to serve a client for it.
+        assert manager.active_project_id == "proj-sqlite-5"
+        rebuilt = await manager.get_kanban_client()
+        assert rebuilt is not None
+
+        # The real check: the server's OWN kanban_client attribute --
+        # what the rest of the server code actually reads -- must
+        # have been replaced, and must reflect the new project_root.
+        # Before this fix, add_project never touched it when
+        # make_active was False, so it kept pointing at stale_client.
+        assert server.kanban_client is not stale_client
+        assert server.kanban_client._project_root == str(new_root)
