@@ -14,18 +14,25 @@ have vanished on the very next read.
 """
 
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict
 
 import pytest
 
-from src.core.persistence import MemoryPersistence, Persistence
-from src.core.project_registry import ProjectConfig, ProjectRegistry
+from src.core.error_framework import StateConflictError
+from src.core.persistence import FilePersistence, MemoryPersistence, Persistence
+from src.core.project_registry import (
+    ProjectConfig,
+    ProjectRegistry,
+    register_sqlite_board,
+)
 
 pytestmark = pytest.mark.unit
 
 
 def _config(**overrides: object) -> ProjectConfig:
     """Build a minimal ProjectConfig, overriding only what a test needs."""
-    defaults: dict = {
+    defaults: Dict[str, Any] = {
         "id": "proj-1",
         "name": "payments-rework",
         "provider": "sqlite",
@@ -34,7 +41,7 @@ def _config(**overrides: object) -> ProjectConfig:
         "last_used": datetime(2026, 11, 6, 0, 0, tzinfo=timezone.utc),
     }
     defaults.update(overrides)
-    return ProjectConfig(**defaults)  # type: ignore[arg-type]
+    return ProjectConfig(**defaults)
 
 
 class TestTaskTypeRegistrationsDefaultsEmpty:
@@ -151,3 +158,125 @@ class TestGetActiveProjectSync:
         await registry.add_project(config)
 
         assert registry.get_active_project_sync() == await registry.get_active_project()
+
+
+class TestRegisterSqliteBoard:
+    """Issue #741 step 2: the sanctioned path for registering a board
+
+    that was seeded directly through a kanban provider, bypassing
+    Marcus's own project-creation pipeline. Callers get back the
+    registry project id BEFORE seeding, so tasks can be created with
+    their final, registry-prefixed ids and no seeder-side rewrite is
+    ever needed.
+    """
+
+    @pytest.fixture
+    def registry(self, tmp_path: Path) -> Any:
+        """File-backed registry in a temporary directory."""
+        backend = FilePersistence(storage_dir=tmp_path / "state")
+        return ProjectRegistry(persistence=Persistence(backend=backend))
+
+    @pytest.mark.asyncio
+    async def test_registers_the_board_under_its_real_name(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        db = tmp_path / "kanban.db"
+
+        project_id = await register_sqlite_board("my-board", str(db), registry=registry)
+
+        stored = await registry.get_project(project_id)
+        assert stored is not None
+        assert stored.name == "my-board - Main Board"
+        assert stored.provider == "sqlite"
+        assert stored.provider_config["project_name"] == "my-board"
+        assert Path(stored.provider_config["db_path"]).is_absolute()
+        assert "auto-created" in stored.tags
+
+    @pytest.mark.asyncio
+    async def test_registry_id_matches_the_kanban_project_id(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """GH-306: the kanban project id is the single source of truth,
+        not an auto-generated registry UUID, so a task's own
+        project_id field (written from this same string) finds this
+        project on lookup."""
+        db = tmp_path / "kanban.db"
+
+        project_id = await register_sqlite_board("my-board", str(db), registry=registry)
+
+        assert project_id == "my-board"
+
+    @pytest.mark.asyncio
+    async def test_registration_is_idempotent(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        db = str(tmp_path / "kanban.db")
+
+        first = await register_sqlite_board("my-board", db, registry=registry)
+        second = await register_sqlite_board("my-board", db, registry=registry)
+
+        assert first == second
+        assert len(await registry.list_projects(provider="sqlite")) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_same_project_id_against_a_different_db_is_refused(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        first_db = str(tmp_path / "kanban-first.db")
+        second_db = str(tmp_path / "kanban-second.db")
+
+        await register_sqlite_board("my-board", first_db, registry=registry)
+
+        with pytest.raises(StateConflictError):
+            await register_sqlite_board("my-board", second_db, registry=registry)
+
+        stored = await registry.get_project("my-board")
+        assert stored is not None
+        assert Path(stored.provider_config["db_path"]) == Path(first_db).resolve()
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_uuid_record_is_migrated_not_duplicated(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """A board registered by a pre-GH-306 caller carries a
+        generated UUID as its registry id, not project_id.
+        Re-registering it migrates in place: one record, under
+        project_id, with the legacy registrations and active status
+        carried over, the UUID record gone."""
+        db = str(tmp_path / "kanban.db")
+        absolute = str(Path(db).resolve())
+        now = datetime.now(timezone.utc)
+        legacy_id = "ad71d867-8384-4db7-b125-d84d6d2acf8c"
+        legacy = ProjectConfig(
+            id=legacy_id,
+            name="my-board - Main Board",
+            provider="sqlite",
+            provider_config={
+                "db_path": absolute,
+                "project_name": "my-board",
+                "attachments_dir": str(Path(absolute).parent / "attachments"),
+                "project_id": "my-board",
+            },
+            created_at=now,
+            last_used=now,
+            tags=["auto-created", "sqlite", "tow-experiment"],
+            task_type_registrations={
+                "verify": {"evidence_schema": {"required": ["verdict"]}}
+            },
+        )
+        await registry.add_project(legacy)
+        await registry.set_active_project(legacy_id)
+
+        new_id = await register_sqlite_board("my-board", db, registry=registry)
+
+        assert new_id == "my-board"
+        boards = await registry.list_projects(provider="sqlite")
+        assert len(boards) == 1
+        canonical = boards[0]
+        assert canonical.id == "my-board"
+        assert canonical.task_type_registrations == {
+            "verify": {"evidence_schema": {"required": ["verdict"]}}
+        }
+        active = await registry.get_active_project()
+        assert active is not None
+        assert active.id == "my-board"

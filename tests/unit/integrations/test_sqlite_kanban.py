@@ -428,6 +428,92 @@ class TestSQLiteKanbanCreateTask:
         assert task.id is not None
 
 
+class TestSQLiteKanbanCallerSuppliedId:
+    """Issue #741: honor task_data["id"] instead of always generating one.
+
+    A seeder that needs registry-attributable ids
+    (``<project_id>_<suffix>``) no longer has to create with an
+    opaque hex id and rewrite every table keyed on it afterward.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_caller_supplied_id_is_used_as_is(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        task = await connected_kanban.create_task(
+            _sample_task_data(id="tow-b-claude_abc123")
+        )
+
+        assert task.id == "tow-b-claude_abc123"
+
+    @pytest.mark.asyncio
+    async def test_the_caller_supplied_id_round_trips_through_get_task_by_id(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        await connected_kanban.create_task(_sample_task_data(id="tow-b-claude_abc123"))
+
+        fetched = await connected_kanban.get_task_by_id("tow-b-claude_abc123")
+
+        assert fetched is not None
+        assert fetched.id == "tow-b-claude_abc123"
+
+    @pytest.mark.asyncio
+    async def test_no_id_still_generates_a_uuid4_hex(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """No regression: the existing default behavior is unchanged."""
+        task = await connected_kanban.create_task(_sample_task_data())
+
+        assert len(task.id) == 32
+
+    @pytest.mark.asyncio
+    async def test_a_charset_violation_is_rejected(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        from src.core.error_framework import ValidationError
+
+        with pytest.raises(ValidationError):
+            await connected_kanban.create_task(_sample_task_data(id="not a valid id!"))
+
+    @pytest.mark.asyncio
+    async def test_a_colliding_id_is_rejected_loudly(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """A collision must surface as a named Marcus error, not an
+        opaque sqlite3 exception three layers removed from the
+        caller."""
+        from src.core.error_framework import StateConflictError
+
+        await connected_kanban.create_task(_sample_task_data(id="dup-1"))
+
+        with pytest.raises(StateConflictError):
+            await connected_kanban.create_task(
+                _sample_task_data(id="dup-1", name="A different task")
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_collision_does_not_leave_a_partial_row(
+        self, connected_kanban: SQLiteKanban
+    ) -> None:
+        """The rollback on IntegrityError must still run -- the
+        original task survives untouched, no half-written row."""
+        from src.core.error_framework import StateConflictError
+
+        original = await connected_kanban.create_task(
+            _sample_task_data(id="dup-2", name="Original")
+        )
+
+        with pytest.raises(StateConflictError):
+            await connected_kanban.create_task(
+                _sample_task_data(id="dup-2", name="Colliding")
+            )
+
+        fetched = await connected_kanban.get_task_by_id("dup-2")
+        assert fetched is not None
+        assert fetched.name == "Original"
+        assert fetched.id == original.id
+
+
 class TestSQLiteKanbanGetTasks:
     """Test task retrieval methods."""
 

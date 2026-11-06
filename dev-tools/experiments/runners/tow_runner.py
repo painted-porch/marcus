@@ -45,6 +45,7 @@ import csv
 import json
 import random
 import sys
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,10 +55,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.core.error_framework import ErrorContext, StateConflictError  # noqa: E402
 from src.core.project_registry import (  # noqa: E402
-    ProjectConfig,
     ProjectRegistry,
+    register_sqlite_board,
 )
 from src.integrations.providers.sqlite_kanban import SQLiteKanban  # noqa: E402
 
@@ -347,56 +347,6 @@ def build_case_spec(
     return spec
 
 
-def _apply_id_prefix(db_path: str, prefix: str, cases: Dict[str, Any]) -> None:
-    """Rewrite seeded task ids to ``<prefix>_<original>`` in place.
-
-    Cato associates a task with a registered project when the task id
-    starts with the project's registry id plus an underscore (the
-    exact-match fallback in its matcher), and the kanban provider
-    always generates opaque hex ids. The seeder rewrites its own rows
-    after creation so every downstream event carries an attributable
-    id; experiment tooling only, no provider or Cato change.
-
-    Parameters
-    ----------
-    db_path : str
-        The seeded SQLite board file.
-    prefix : str
-        The registry project id to prefix.
-    cases : Dict[str, Any]
-        The manifest cases; their task ids are rewritten in place.
-    """
-    import sqlite3
-
-    mapping = {
-        old: f"{prefix}_{old}"
-        for case in cases.values()
-        for old in case["tasks"].values()
-    }
-    con = sqlite3.connect(db_path)
-    with con:
-        for old, new in mapping.items():
-            con.execute("UPDATE tasks SET id=? WHERE id=?", (new, old))
-            con.execute(
-                "UPDATE task_dependencies SET task_id=? WHERE task_id=?",
-                (new, old),
-            )
-            con.execute(
-                "UPDATE task_dependencies SET depends_on_id=? " "WHERE depends_on_id=?",
-                (new, old),
-            )
-            # Labels live in their own table keyed by task id; the
-            # case:<id> label is how export_case finds a case's tasks,
-            # so an orphaned label row means an empty audit bundle.
-            con.execute(
-                "UPDATE task_labels SET task_id=? WHERE task_id=?",
-                (new, old),
-            )
-    con.close()
-    for case in cases.values():
-        case["tasks"] = {role: mapping[tid] for role, tid in case["tasks"].items()}
-
-
 async def seed_cases(
     csv_path: str,
     db_path: str,
@@ -434,8 +384,10 @@ async def seed_cases(
         first-N, so every publisher's crawler posture is represented.
     id_prefix : str | None
         When set (normally the registry project id), every seeded
-        task id is rewritten to ``<prefix>_<original>`` so registry
-        consumers such as Cato can attribute the tasks to the board.
+        task is born with a final id of ``<prefix>_<uuid4 hex>``
+        (issue #741: the SQLite provider honors a caller-supplied id,
+        so no post-creation rewrite is needed) so registry consumers
+        such as Cato can attribute the tasks to the board.
     metadata_db : str | None
         Marcus persistence database to write ``task_metadata`` rows
         into (requires ``id_prefix``). Cato's task universe is this
@@ -469,6 +421,11 @@ async def seed_cases(
         for role, task_data, depends_on in spec:
             task_data = dict(task_data)
             task_data["dependencies"] = [ids_by_role[r] for r in depends_on]
+            if id_prefix:
+                # Final, registry-prefixed id at creation (issue #741):
+                # the provider honors it, so no post-creation rewrite
+                # of tasks/task_dependencies/task_labels ever happens.
+                task_data["id"] = f"{id_prefix}_{uuid.uuid4().hex}"
             created = await board.create_task(task_data)
             ids_by_role[role] = created.id
             seeded_rows.append(
@@ -480,6 +437,7 @@ async def seed_cases(
                     "estimated_hours": 0.5,
                     "labels": [task_data.get("task_type", "")],
                     "dependencies": list(task_data["dependencies"]),
+                    "project_id": id_prefix or project_id,
                     "source_type": "tow_experiment_seed",
                 }
             )
@@ -500,14 +458,8 @@ async def seed_cases(
 
     await board.disconnect()
 
-    if id_prefix:
-        _apply_id_prefix(db_path, id_prefix, cases)
-        for row in seeded_rows:
-            row["task_id"] = f"{id_prefix}_{row['task_id']}"
-            row["dependencies"] = [f"{id_prefix}_{d}" for d in row["dependencies"]]
-            row["project_id"] = id_prefix
-        if metadata_db:
-            await _persist_task_metadata(metadata_db, seeded_rows)
+    if id_prefix and metadata_db:
+        await _persist_task_metadata(metadata_db, seeded_rows)
 
     manifest = {
         "project_id": project_id,
@@ -527,11 +479,10 @@ async def seed_cases(
 async def _persist_task_metadata(metadata_db: str, rows: List[Dict[str, Any]]) -> None:
     """Write one ``task_metadata`` row per seeded task.
 
-    Cato renders tasks from Marcus's ``task_metadata`` persistence
-    collection; the NLP pipeline writes it and direct seeding does
-    not, so a seeded board is invisible without these rows. The rows
-    are honest copies of what seeding just created, written through
-    Marcus's own Persistence API.
+    Thin wrapper over the sanctioned write (issue #741, step 3),
+    ``src.core.persistence.write_task_metadata_rows`` -- kept here
+    under its original name so this seeder's own call sites and tests
+    don't need to change.
 
     Parameters
     ----------
@@ -542,11 +493,9 @@ async def _persist_task_metadata(metadata_db: str, rows: List[Dict[str, Any]]) -
         One prepared metadata row per seeded task, ids already
         prefixed.
     """
-    from src.core.persistence import Persistence, SQLitePersistence
+    from src.core.persistence import write_task_metadata_rows
 
-    store = Persistence(backend=SQLitePersistence(db_path=Path(metadata_db)))
-    for row in rows:
-        await store.store("task_metadata", row["task_id"], row)
+    await write_task_metadata_rows(metadata_db, rows)
 
 
 async def register_board(
@@ -554,26 +503,12 @@ async def register_board(
 ) -> str:
     """Register a seeded board in Marcus's project registry.
 
-    Seeding writes tasks straight into the SQLite board, which
-    bypasses ``create_project``, the normal path that introduces a
-    project to Marcus (``ProjectRegistry.add_project``). Without this
-    step the registry, and every consumer of it such as the Cato
-    dashboard's project list, never learns the board exists, and a
-    server in ``single_project_mode`` stays bound to whatever project
-    was already active. Registration is idempotent on ``project_id``
-    (also the registry id, GH-306): re-seeding the same project_id
-    against the same db path never duplicates an entry, and
-    ``add_project`` only claims the active slot when no project was
-    active before, so registering never disturbs a running server.
-    Re-seeding the same project_id against a *different* db path is
-    refused (see Raises) rather than silently overwritten. A board
-    registered by a version of this function predating GH-306
-    (carrying a generated UUID as its registry id instead of
-    project_id) is migrated in place on first re-registration: its
-    task_type_registrations and active-project status are carried to
-    the canonical project_id record, and the UUID record is retired,
-    rather than creating a second, parallel project for the same
-    board.
+    Thin wrapper over the sanctioned registration path (issue #741,
+    step 2), ``src.core.project_registry.register_sqlite_board`` --
+    kept here under its original name so this seeder's own tests and
+    call sites don't need to change. See that function's docstring
+    for the full behavior (idempotency, the different-db-path refusal,
+    and the pre-GH-306 migration path).
 
     Parameters
     ----------
@@ -581,8 +516,7 @@ async def register_board(
         The board's project id, which seeding also uses as the kanban
         project name (e.g. ``tow-b-claude``).
     db_path : str
-        SQLite board file; stored absolute so the entry stays valid
-        from any working directory.
+        SQLite board file.
     registry : ProjectRegistry | None
         Injected in tests; defaults to Marcus's file-backed registry
         under the package root.
@@ -597,91 +531,9 @@ async def register_board(
     ------
     StateConflictError
         ``project_id`` is already registered against a *different*
-        database path. ``ProjectConfig.id`` is the kanban project id
-        (GH-306), so ``add_project`` would otherwise overwrite that
-        record under the same id -- silently discarding the original
-        board's path and any K2 registration it carries, and
-        redirecting anything already holding this project id to the
-        new board (Codex P2, round 1 on PR #838).
+        database path.
     """
-    absolute = str(Path(db_path).resolve())
-    registry = registry or ProjectRegistry()
-    await registry.initialize()
-
-    existing = await registry.get_project(project_id)
-    if existing is not None:
-        existing_db_path = existing.provider_config.get("db_path")
-        if existing_db_path != absolute:
-            raise StateConflictError(
-                conflict_description=(
-                    f"project id {project_id!r} is already registered "
-                    f"against a different board ({existing_db_path!r}); "
-                    f"refusing to overwrite it with {absolute!r}. Use a "
-                    "different project_id for the new board."
-                ),
-                context=ErrorContext(
-                    operation="register_board",
-                    custom_context={
-                        "project_id": project_id,
-                        "existing_db_path": existing_db_path,
-                        "requested_db_path": absolute,
-                    },
-                ),
-            )
-        return existing.id
-
-    # Migration path (Codex P2, round 2 on PR #838): a board registered
-    # by the pre-GH-306 version of this function carries a generated
-    # UUID as its registry id instead of project_id, found here by the
-    # name+path match that was this function's only lookup before. Left
-    # alone, this id-first branch would create a second, parallel
-    # record with empty task_type_registrations while the original --
-    # carrying any real K2 registration -- stayed live under the old
-    # UUID: duplicate projects for every registry consumer, and the
-    # task-project-id lookup still unable to find this board's rules.
-    # Carrying the legacy record's registrations and active-project
-    # status over to the canonical record, then retiring the UUID one,
-    # keeps this a single project throughout.
-    legacy = None
-    for candidate in await registry.list_projects(provider="sqlite"):
-        cfg = candidate.provider_config
-        if cfg.get("project_name") == project_id and cfg.get("db_path") == absolute:
-            legacy = candidate
-            break
-
-    task_type_registrations: Dict[str, Dict[str, Any]] = {}
-    legacy_was_active = False
-    if legacy is not None:
-        task_type_registrations = dict(legacy.task_type_registrations)
-        active = await registry.get_active_project()
-        legacy_was_active = active is not None and active.id == legacy.id
-
-    config = ProjectConfig(
-        # GH-306: the kanban project id is the single source of truth,
-        # not an auto-generated registry UUID -- otherwise task.project_id
-        # (written from this same string at task creation) never matches
-        # a registry lookup by id, breaking any per-project K2
-        # registration a seeded board declares (issue #830, second half).
-        id=project_id,
-        name=f"{project_id} - Main Board",
-        provider="sqlite",
-        provider_config={
-            "db_path": absolute,
-            "project_name": project_id,
-            "attachments_dir": str(Path(absolute).parent / "attachments"),
-            "project_id": project_id,
-        },
-        tags=["auto-created", "sqlite", "tow-experiment"],
-        task_type_registrations=task_type_registrations,
-    )
-    new_id = await registry.add_project(config)
-
-    if legacy is not None:
-        await registry.delete_project(legacy.id)
-        if legacy_was_active:
-            await registry.set_active_project(new_id)
-
-    return new_id
+    return await register_sqlite_board(project_id, db_path, registry=registry)
 
 
 def main() -> None:

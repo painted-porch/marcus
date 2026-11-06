@@ -18,7 +18,11 @@ from src.core.persistence import (
     Persistence,
     PersistenceBackend,
     SQLitePersistence,
+    write_task_metadata,
+    write_task_metadata_rows,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestFilePersistence:
@@ -362,3 +366,60 @@ class TestPersistence:
 
         assert result == {"data": "value"}
         mock_backend.retrieve.assert_called_with("custom", "key1")
+
+
+class TestWriteTaskMetadata:
+    """Issue #741 step 3: the sanctioned ``task_metadata`` write.
+
+    Cato renders its task universe from this collection; before this
+    existed, anything that created tasks outside the NLP pipeline (an
+    experiment seeder, a future intake adapter) had to open its own
+    ``SQLitePersistence`` and write the collection by hand.
+    """
+
+    @pytest.fixture
+    def db_path(self, tmp_path: Path) -> Path:
+        return tmp_path / "marcus.db"
+
+    @pytest.mark.asyncio
+    async def test_a_single_row_is_written_and_readable_back(
+        self, db_path: Path
+    ) -> None:
+        await write_task_metadata(
+            str(db_path),
+            {
+                "task_id": "task-1",
+                "name": "Find the headline",
+                "project_id": "tow-b-claude",
+            },
+        )
+
+        store = Persistence(backend=SQLitePersistence(db_path=db_path))
+        stored = await store.retrieve("task_metadata", "task-1")
+
+        assert stored is not None
+        assert stored["name"] == "Find the headline"
+        assert stored["project_id"] == "tow-b-claude"
+
+    @pytest.mark.asyncio
+    async def test_a_row_without_a_task_id_is_rejected(self, db_path: Path) -> None:
+        with pytest.raises(KeyError):
+            await write_task_metadata(str(db_path), {"name": "no id here"})
+
+    @pytest.mark.asyncio
+    async def test_several_rows_are_each_written_under_their_own_id(
+        self, db_path: Path
+    ) -> None:
+        rows = [
+            {"task_id": "task-1", "name": "Find"},
+            {"task_id": "task-2", "name": "Verify"},
+        ]
+
+        await write_task_metadata_rows(str(db_path), rows)
+
+        store = Persistence(backend=SQLitePersistence(db_path=db_path))
+        first = await store.retrieve("task_metadata", "task-1")
+        second = await store.retrieve("task_metadata", "task-2")
+
+        assert first is not None and first["name"] == "Find"
+        assert second is not None and second["name"] == "Verify"
