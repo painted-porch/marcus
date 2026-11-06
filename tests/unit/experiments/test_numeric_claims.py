@@ -4648,3 +4648,195 @@ class TestCodexFindingWhitespaceBeforePercentSignIsRecognized:
             spec, accepted, {"c1": "overall R2 (0.481 % margin)"}
         )
         assert problems
+
+
+class TestCodexFindingShareOfPopulationIsNotASiblingMetric:
+    """A share claim's own sentence routinely names the population it
+    is a share of -- "55% of evaluated records" -- and that population
+    noun collides with a sibling count column's own tokens (n_records
+    tokenizes to "count"), even though nothing in the sentence names
+    the actual sibling metric. The metric-identity check must not
+    treat a population noun as a sibling-metric contradiction when the
+    claim's own unit is a share (percent or fraction) of that
+    population; it must still catch a genuine count claim that names
+    the wrong row.
+    """
+
+    TIER_SOURCES = {
+        "tiers.csv": [
+            {"tier": "Excellent", "rate_pct": 55.0, "n_records": 110},
+            {"tier": "Good", "rate_pct": 30.0, "n_records": 60},
+        ]
+    }
+
+    @pytest.mark.unit
+    def test_a_percent_sentence_naming_the_population_still_passes(self):
+        """Codex's exact scenario: a correct rate_pct lookup, stated
+        as a share of "evaluated records" -- records is the
+        population the percentage is a share of, not a sibling
+        metric."""
+        c = Claim(
+            id="c1",
+            value=55.0,
+            label="Excellent tier rate",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Excellent:rate_pct",
+            unit="percent",
+        )
+        res = check_claims(
+            [c],
+            self.TIER_SOURCES,
+            report_text=("Excellent tier contains 55% [c1] of evaluated records."),
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_count_claim_naming_a_sibling_total_is_still_caught(self):
+        """The exclusion is scoped to percent/fraction claims, not to
+        the population word itself: a count-unit claim's label still
+        gets a population-type sibling token (here "total") held
+        against it, exactly as round 31 intended, because for a count
+        claim that token is not describing the claim's own population
+        -- it is naming a different count column entirely."""
+        sources = {
+            "tiers.csv": [
+                {
+                    "tier": "Excellent",
+                    "n_records": 110,
+                    "total_evaluations": 500,
+                }
+            ]
+        }
+        c = Claim(
+            id="c1",
+            value=110,
+            label="Excellent tier total",
+            kind="lookup",
+            source="tiers.csv",
+            key="tier=Excellent:n_records",
+        )
+        units = {"tiers.csv": {"n_records": "count", "total_evaluations": "count"}}
+        res = check_claims([c], sources, units=units)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+
+class TestCodexFindingMetricIdentityCoversJsonKeyAddressesToo:
+    """The metric-identity guard only ever ran for a CSV row-selector
+    address; a flat JSON source's sibling keys were never compared at
+    all. With metrics.json holding both mean_ape and median_ape, a
+    correct mean_ape lookup labelled "median APE" -- or stated as
+    "median APE" in the surrounding sentence, or on a slide title --
+    passed anyway, because _metric_contradiction_for_addresses
+    returned None outright for anything but a CSV "select" address.
+    """
+
+    METRICS_SOURCES = {"metrics.json": {"mean_ape": 20.0, "median_ape": 4.4}}
+
+    @pytest.mark.unit
+    def test_a_sentence_naming_the_sibling_json_key_is_caught(self):
+        """Codex's exact scenario: a correct mean_ape lookup, stated
+        in prose under the sibling key's own name."""
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="Overall mean APE",
+            kind="lookup",
+            source="metrics.json",
+            key="mean_ape",
+            unit="percent",
+        )
+        res = check_claims(
+            [c],
+            self.METRICS_SOURCES,
+            report_text="Overall median APE is 20% [c1].",
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_a_sentence_naming_its_own_json_key_still_passes(self):
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="Overall mean APE",
+            kind="lookup",
+            source="metrics.json",
+            key="mean_ape",
+            unit="percent",
+        )
+        res = check_claims(
+            [c],
+            self.METRICS_SOURCES,
+            report_text="Overall mean APE is 20% [c1].",
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_label_naming_the_sibling_json_key_is_rejected(self):
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="Overall median APE",
+            kind="lookup",
+            source="metrics.json",
+            key="mean_ape",
+            unit="percent",
+        )
+        res = check_claims([c], self.METRICS_SOURCES)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+    @pytest.mark.unit
+    def test_a_slide_title_naming_the_sibling_json_key_is_rejected(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=20.0,
+                label="Overall mean APE",
+                addresses=("metrics.json:mean_ape",),
+                unit="percent",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Overall median APE 20%",
+                    "cells": [
+                        {"value": 20.0, "claim": "c1", "label": "Overall mean APE"}
+                    ],
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c1": "Overall mean APE"}, sources=self.METRICS_SOURCES
+        )
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_slide_title_naming_its_own_json_key_still_passes(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=20.0,
+                label="Overall mean APE",
+                addresses=("metrics.json:mean_ape",),
+                unit="percent",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Overall mean APE 20%",
+                    "cells": [
+                        {"value": 20.0, "claim": "c1", "label": "Overall mean APE"}
+                    ],
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c1": "Overall mean APE"}, sources=self.METRICS_SOURCES
+        )
+        assert problems == []

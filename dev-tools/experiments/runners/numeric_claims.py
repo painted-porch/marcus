@@ -833,6 +833,8 @@ _METRIC_TOKEN_ALIASES: Dict[str, str] = {
     "n": "count",
     "record": "count",
     "records": "count",
+    "row": "count",
+    "rows": "count",
     "share": "share",
     "rate": "share",
     "pct": "share",
@@ -919,8 +921,21 @@ def _normalize_metric_notation(text: str) -> str:
     return text
 
 
+#: Tokens naming the population a share is a share OF -- "60% of
+#: records" names what the percentage is measured against, not a
+#: different metric reading the same row. Excluded from sibling
+#: comparison only when the claim itself is percent- or fraction-
+#: valued; a count-valued claim ("Excellent tier has 55 records")
+#: still treats these as real sibling metrics, since there "records"
+#: could legitimately be confused with a different count column.
+_SHARE_POPULATION_TOKENS = frozenset({"count", "total"})
+
+
 def _metric_contradiction(
-    label_words: Set[str], own_column: str, row: Dict[str, Any]
+    label_words: Set[str],
+    own_column: str,
+    row: Dict[str, Any],
+    claim_unit: Optional[str] = None,
 ) -> Optional[str]:
     """Report a label naming a sibling column's metric, not its own.
 
@@ -943,6 +958,13 @@ def _metric_contradiction(
         The column the claim's address actually selects.
     row : Dict[str, Any]
         One row of the source table, for its column names.
+    claim_unit : Optional[str]
+        The claim's own effective unit, from
+        :func:`_inferred_claim_unit`. When ``"percent"`` or
+        ``"fraction"``, a sibling column that is only a population
+        noun (:data:`_SHARE_POPULATION_TOKENS`) is never treated as
+        a contradiction -- "55% of records" names its own population,
+        not a sibling metric.
 
     Returns
     -------
@@ -951,10 +973,15 @@ def _metric_contradiction(
     """
     own_tokens = _metric_tokens(own_column)
     label_tokens = {_METRIC_TOKEN_ALIASES.get(w, w) for w in label_words}
+    exclude = (
+        _SHARE_POPULATION_TOKENS if claim_unit in ("percent", "fraction") else set()
+    )
     for column in row:
         if column == own_column:
             continue
-        sibling_tokens = _metric_tokens(column)
+        sibling_tokens = _metric_tokens(column) - exclude
+        if not sibling_tokens:
+            continue
         own_only = own_tokens - sibling_tokens
         sibling_only = sibling_tokens - own_tokens
         if not sibling_only:
@@ -967,7 +994,10 @@ def _metric_contradiction(
 
 
 def _metric_contradiction_for_addresses(
-    text: str, addresses: Sequence[str], sources: Dict[str, Any]
+    text: str,
+    addresses: Sequence[str],
+    sources: Dict[str, Any],
+    unit: Optional[str] = None,
 ) -> Optional[str]:
     """Run :func:`_metric_contradiction` from a raw address list.
 
@@ -982,16 +1012,25 @@ def _metric_contradiction_for_addresses(
     Scoped to exactly one address, the same way round 31 scoped the
     label check to a single-input derived claim: a claim combining
     more than one metric (a ratio, a sum) has no single "own metric"
-    left to compare text against.
+    left to compare text against. Covers both a CSV row-selector
+    address (sibling metrics are the row's other columns) and a flat
+    JSON key address (sibling metrics are the file's other top-level
+    keys) -- a JSON source's "columns" are just read a different way
+    to resolve, not a different thing to compare a label against.
 
     Parameters
     ----------
     text : str
         The text to check (a label, a sentence, a slide title).
     addresses : Sequence[str]
-        Staged addresses, e.g. ``"per_crop.csv:crop=maize:mean_ape"``.
+        Staged addresses, e.g. ``"per_crop.csv:crop=maize:mean_ape"``
+        or ``"metrics.json:mean_ape"``.
     sources : Dict[str, Any]
         Output of :func:`load_sources`.
+    unit : Optional[str]
+        The claim's own effective unit, from
+        :func:`_inferred_claim_unit`, passed through to
+        :func:`_metric_contradiction`.
 
     Returns
     -------
@@ -1001,25 +1040,29 @@ def _metric_contradiction_for_addresses(
     if len(addresses) != 1:
         return None
     parsed = _parse_address(addresses[0])
-    if (
-        isinstance(parsed, str)
-        or parsed.operation != "select"
-        or parsed.selector is None
-    ):
+    if isinstance(parsed, str) or parsed.column is None:
         return None
-    rows = sources.get(parsed.source)
-    if not isinstance(rows, list) or not rows:
+    if parsed.operation == "select":
+        if parsed.selector is None:
+            return None
+        rows = sources.get(parsed.source)
+        if not isinstance(rows, list) or not rows:
+            return None
+        # The selector column itself ("tier" in "tier=Good:n_records")
+        # is a row label, not a metric -- an ordinary sentence naming
+        # its own row ("Good tier has 5 [c1].") would otherwise be
+        # read as naming a sibling "metric" called "tier".
+        sel_col, _ = parsed.selector
+        row = {column: v for column, v in rows[0].items() if column != sel_col}
+    elif parsed.operation == "key":
+        data = sources.get(parsed.source)
+        if not isinstance(data, dict):
+            return None
+        row = data
+    else:
         return None
-    # The selector column itself ("tier" in "tier=Good:n_records")
-    # is a row label, not a metric -- an ordinary sentence naming
-    # its own row ("Good tier has 5 [c1].") would otherwise be read
-    # as naming a sibling "metric" called "tier". A "select"
-    # address always carries a column too.
-    assert parsed.column is not None
-    sel_col, _ = parsed.selector
-    row = {column: v for column, v in rows[0].items() if column != sel_col}
     return _metric_contradiction(
-        _words_in(_normalize_metric_notation(text)), parsed.column, row
+        _words_in(_normalize_metric_notation(text)), parsed.column, row, unit
     )
 
 
@@ -1242,7 +1285,10 @@ def _sentence_at(text: str, position: int) -> str:
 
 
 def _prose_label_contradiction(
-    claim: Claim, sentence: str, sources: Dict[str, Any]
+    claim: Claim,
+    sentence: str,
+    sources: Dict[str, Any],
+    units: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Optional[str]:
     """Report a sentence that contradicts the row a tagged claim reads.
 
@@ -1269,6 +1315,10 @@ def _prose_label_contradiction(
         :func:`_sentence_at`).
     sources : Dict[str, Any]
         Output of :func:`load_sources`.
+    units : Optional[Dict[str, Dict[str, str]]]
+        The stager's own units manifest, passed to
+        :func:`_inferred_claim_unit` for the metric check's own
+        population-noun allowance.
 
     Returns
     -------
@@ -1327,10 +1377,16 @@ def _prose_label_contradiction(
     # row check above only catches a different crop; this catches a
     # different column of the correct one, scoped to a single
     # address the same way the label check is.
-    return _metric_contradiction_for_addresses(sentence, addresses, sources)
+    return _metric_contradiction_for_addresses(
+        sentence, addresses, sources, unit=_inferred_claim_unit(claim, units)
+    )
 
 
-def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
+def label_contradiction(
+    claim: Claim,
+    sources: Dict[str, Any],
+    units: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Optional[str]:
     """Report a label that contradicts the row the claim reads.
 
     The label is the writer's own words, so nothing in the numbers
@@ -1352,6 +1408,10 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
         The claim to inspect.
     sources : Dict[str, Any]
         Output of :func:`load_sources`.
+    units : Optional[Dict[str, Dict[str, str]]]
+        The stager's own units manifest, passed to
+        :func:`_inferred_claim_unit` for the metric check's own
+        population-noun allowance.
 
     Returns
     -------
@@ -1361,44 +1421,62 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     if claim.kind != "lookup" or not claim.source or not claim.key:
         return None
     parsed = _parse_address(f"{claim.source}:{claim.key}")
-    if (
-        isinstance(parsed, str)
-        or parsed.operation != "select"
-        or parsed.selector is None
-    ):
+    if isinstance(parsed, str):
         return None
-    rows = sources.get(parsed.source)
-    if not isinstance(rows, list) or not rows:
-        return None
-    sel_col, sel_val = parsed.selector
     label_words = _words_in(claim.label)
+    # The row check and the unit-column check below only apply to a
+    # CSV row-selector address; a flat JSON key has no row to check
+    # either way. The metric check further down applies to both, and
+    # must still run for a JSON address even though these two do not.
+    is_row_selected = parsed.operation == "select" and parsed.selector is not None
 
-    # Naming its own row earns a label the right to mention others.
-    # A rehearsal produced "Q2 area quartile record count (Q3 and Q4
-    # also 381)", where the value was Q2's and correct and the
-    # parenthetical was useful context. Only a label that names a
-    # sibling *instead of* its own row is a wrong-row error.
-    names_own_row = sel_val.lower() in label_words
+    if is_row_selected:
+        assert parsed.selector is not None
+        rows = sources.get(parsed.source)
+        if isinstance(rows, list) and rows:
+            sel_col, sel_val = parsed.selector
+            # Naming its own row earns a label the right to mention
+            # others. A rehearsal produced "Q2 area quartile record
+            # count (Q3 and Q4 also 381)", where the value was Q2's
+            # and correct and the parenthetical was useful context.
+            # Only a label that names a sibling *instead of* its own
+            # row is a wrong-row error.
+            names_own_row = sel_val.lower() in label_words
 
-    # A sibling row's selector value appearing in the label.
-    siblings = {
-        str(row.get(sel_col, "")).strip()
-        for row in rows
-        if str(row.get(sel_col, "")).strip() != sel_val
-    }
-    for other in siblings if not names_own_row else ():
-        if other and other.lower() in label_words:
-            return f"label says {other!r} but the claim reads " f"{sel_col}={sel_val!r}"
+            # A sibling row's selector value appearing in the label.
+            siblings = {
+                str(row.get(sel_col, "")).strip()
+                for row in rows
+                if str(row.get(sel_col, "")).strip() != sel_val
+            }
+            for other in siblings if not names_own_row else ():
+                if other and other.lower() in label_words:
+                    return (
+                        f"label says {other!r} but the claim reads "
+                        f"{sel_col}={sel_val!r}"
+                    )
 
     # A label naming a different metric of the same row -- "maize
     # median APE" for a claim that actually reads mean_ape. The row
     # check above only catches a different crop; this catches a
-    # different column of the correct one.
+    # different column of the correct one. Runs for both a CSV
+    # row-selector address and a flat JSON key.
     metric_contradiction = _metric_contradiction_for_addresses(
-        claim.label, [f"{claim.source}:{claim.key}"], sources
+        claim.label,
+        [f"{claim.source}:{claim.key}"],
+        sources,
+        unit=_inferred_claim_unit(claim, units),
     )
     if metric_contradiction:
         return metric_contradiction
+
+    if not is_row_selected:
+        return None
+    assert parsed.selector is not None
+    rows = sources.get(parsed.source)
+    if not isinstance(rows, list) or not rows:
+        return None
+    sel_col, sel_val = parsed.selector
 
     # A different unit appearing in the label. Units are compared as
     # token sets so spacing around the slash does not matter.
@@ -1515,7 +1593,9 @@ def _derived_label_contradiction(
     # expression combines more than one metric and "the metric" is
     # not a single thing to compare a label against.
     addresses = [a for a in inputs.values() if isinstance(a, str)]
-    return _metric_contradiction_for_addresses(claim.label, addresses, sources)
+    return _metric_contradiction_for_addresses(
+        claim.label, addresses, sources, unit=claim.unit
+    )
 
 
 def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
@@ -1736,7 +1816,7 @@ def _check_one(
                 ),
                 **base,
             )
-        contradiction = label_contradiction(claim, sources)
+        contradiction = label_contradiction(claim, sources, units)
         if contradiction:
             return CheckResult(
                 verdict=VERDICT_FAILED,
@@ -2404,7 +2484,7 @@ def check_claims(
         # reads it: #827 step 2 -- a right number under a correct
         # claim can still sit in a sentence that names the wrong row.
         sentence = _sentence_at(normalized_text, position)
-        contradiction = _prose_label_contradiction(claim, sentence, sources)
+        contradiction = _prose_label_contradiction(claim, sentence, sources, units)
         if contradiction:
             results.append(
                 CheckResult(
@@ -2729,8 +2809,8 @@ def check_slide_spec(
                 for _, value, _, unit in backed
             ]
             matches = [
-                (claim_id, addresses)
-                for (claim_id, _, addresses, _), (matched, _) in zip(
+                (claim_id, addresses, unit)
+                for (claim_id, _, addresses, unit), (matched, _) in zip(
                     backed, matched_results
                 )
                 if matched
@@ -2759,8 +2839,10 @@ def check_slide_spec(
                 _text_contradicts_owned_rows(
                     title, _owned_rows_for_addresses(addresses), sources
                 )
-                or _metric_contradiction_for_addresses(title, addresses, sources)
-                for _, addresses in matches
+                or _metric_contradiction_for_addresses(
+                    title, addresses, sources, unit=unit
+                )
+                for _, addresses, unit in matches
             ]
             if all(contradictions):
                 problems.append(
