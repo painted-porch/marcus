@@ -164,10 +164,18 @@ jobs:
     if: |
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && (inputs.test_suite == 'e2e' || inputs.test_suite == 'full'))
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same gap as full-test-suite below: a schedule trigger only
+        # ever checks out main. Run against develop too.
+        branch: ${{ github.event_name == 'schedule' && fromJSON('["main", "develop"]') || fromJSON('["dispatch-ref"]') }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch == 'dispatch-ref' && github.ref || matrix.branch }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -188,7 +196,15 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Run E2E and slow tests
+      # Issue #884 triaged this job's failures into groups by cause.
+      # Groups B/C/C2/D/E (stale test fixtures, no external
+      # dependency) are must-pass: a failure here means something
+      # broke. Groups A/F genuinely need a live external system (a
+      # real AI provider key, a live Planka board) this job's
+      # environment does not reliably have, so they are
+      # allowed-to-fail, kept in a separate step so their known,
+      # environment-shaped noise can never mask a must-pass failure.
+      - name: Run E2E and slow tests (must-pass)
         env:
           KANBAN_PROVIDER: ${{ secrets.KANBAN_PROVIDER }}
           PLANKA_URL: ${{ secrets.PLANKA_URL }}
@@ -198,15 +214,55 @@ jobs:
           CLAUDE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pytest tests/integration -m "e2e or slow" -v --tb=long
+          pytest tests/integration -m "e2e or slow" -v --tb=long \
+            --ignore=tests/integration/ai/test_bundled_domain_designs_e2e.py \
+            --ignore=tests/integration/test_nlp_board_integration.py
         timeout-minutes: 30
+
+      # Allowed-to-fail (#884 groups A and F): needs a real AI
+      # provider key (A) or a live Planka board (F). continue-on-error
+      # keeps a known-environment failure here from failing the job,
+      # but the step's own pass/fail is still visible in the Actions
+      # UI and its output is written into the job summary below
+      # (not swallowed) -- see that summary step for the deliberate
+      # limitation this does NOT cover.
+      - name: Run E2E and slow tests (allowed-to-fail - needs external AI/Planka, #884 groups A/F)
+        id: e2e_allowed_to_fail
+        continue-on-error: true
+        if: always()
+        env:
+          KANBAN_PROVIDER: ${{ secrets.KANBAN_PROVIDER }}
+          PLANKA_URL: ${{ secrets.PLANKA_URL }}
+          PLANKA_USERNAME: ${{ secrets.PLANKA_USERNAME }}
+          PLANKA_PASSWORD: ${{ secrets.PLANKA_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLAUDE_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pytest tests/integration/ai/test_bundled_domain_designs_e2e.py \
+            tests/integration/test_nlp_board_integration.py \
+            -m "e2e or slow" -v --tb=long
+        timeout-minutes: 15
 
       - name: Generate test summary
         if: always()
         run: |
           echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "✅ Complete workflow tests completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Must-pass tests completed (#884 groups B/C/C2/D/E)" >> $GITHUB_STEP_SUMMARY
           echo "⚠️  These tests use real AI and may incur costs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Allowed-to-fail (#884 groups A/F: needs a real AI key or a live Planka board)" >> $GITHUB_STEP_SUMMARY
+          echo "Outcome: ${{ steps.e2e_allowed_to_fail.outcome }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "This bucket never fails the job, by design -- its environment" >> $GITHUB_STEP_SUMMARY
+          echo "dependency is expected to be absent here. That also means a" >> $GITHUB_STEP_SUMMARY
+          echo "failure here for a genuinely NEW reason (not the known missing" >> $GITHUB_STEP_SUMMARY
+          echo "credential/board) is not automatically distinguished from the" >> $GITHUB_STEP_SUMMARY
+          echo "expected one -- nothing diffs this run's failure against a" >> $GITHUB_STEP_SUMMARY
+          echo "prior run's. The outcome and full log above are the extent of" >> $GITHUB_STEP_SUMMARY
+          echo "what this workflow surfaces; noticing a new failure mode in" >> $GITHUB_STEP_SUMMARY
+          echo "this bucket still requires a human to read this summary." >> $GITHUB_STEP_SUMMARY
+          echo "Tracked as issue #892." >> $GITHUB_STEP_SUMMARY
 
   # Full test suite with coverage - nightly only
   full-test-suite:
@@ -215,10 +271,24 @@ jobs:
     if: |
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.test_suite == 'full')
+    strategy:
+      fail-fast: false
+      matrix:
+        # Issue #873: a schedule trigger always checks out the
+        # repository's default branch (main), so this job has never
+        # run against develop -- where development actually happens --
+        # through its normal nightly trigger; its last five nightly
+        # runs were red on main with nobody looking. For a schedule
+        # event, run against both branches explicitly. A
+        # workflow_dispatch run already checks out whatever ref it was
+        # dispatched against (github.ref), so one entry covers it.
+        branch: ${{ github.event_name == 'schedule' && fromJSON('["main", "develop"]') || fromJSON('["dispatch-ref"]') }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch == 'dispatch-ref' && github.ref || matrix.branch }}
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -256,7 +326,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          # Issue #873 review: with the branch matrix, a scheduled run
+          # now produces two instances of this job (main, develop).
+          # upload-artifact@v4 fails outright on a name collision
+          # (unlike v3), so without matrix.branch here the second
+          # instance's job would fail on this upload rather than on
+          # its own tests, and that branch's coverage report would go
+          # missing entirely.
+          name: coverage-report-${{ matrix.branch }}
           path: htmlcov/
 
       - name: Generate test summary

@@ -5,6 +5,11 @@ All notable changes to Marcus will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.11] - 2026-11-06
+
+### Fixed
+- The nightly full-suite CI job now also runs against `develop`, not only `main`, since a scheduled workflow checks out the default branch and the suite had never run against where development happens; `tests.yml`'s end-to-end job also separates tests that must pass from tests that cannot pass without a live external system, using issue #884's own grouping, so a red result means something broke rather than something was absent (#873). This version bump exists only to satisfy the repository's version gate for a workflow-only change; it carries no code difference from 0.3.10.
+
 ## [0.3.10] - 2026-10-18
 
 ### Fixed
