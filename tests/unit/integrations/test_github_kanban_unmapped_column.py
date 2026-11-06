@@ -2,12 +2,15 @@
 Unit tests for GitHubKanban.move_task_to_column on an unmapped column.
 
 Codex P1, round 4 on PR #834: the function's fallback was a bare
-``return True`` reached for ANY column it has no mapping for (e.g.
-"declined" -- GitHub status persistence for that status is #835, out
-of scope here). A caller trusting that return value to mean the board
-agrees with its own state was lied to. This covers only the
-fix-worthy part: no network call happens, and the return value is
-False, for any column this provider's move logic does not recognize.
+``return True`` reached for ANY column it has no mapping for. A
+caller trusting that return value to mean the board agrees with its
+own state was lied to. This covers the fix-worthy part: no network
+call happens, and the return value is False, for any column this
+provider's move logic does not recognize.
+
+"declined" used to be exactly that unmapped example; #835 mapped it
+(a label, symmetric with "blocked"), so this file now also covers
+that it round-trips like every other known column.
 """
 
 from typing import Any, Dict, List
@@ -46,7 +49,7 @@ class TestMoveTaskToColumnRejectsUnmappedColumns:
             {"mcp_function_caller": caller, "owner": "acme", "repo": "widgets"}
         )
 
-        ok = await provider.move_task_to_column("7", "declined")
+        ok = await provider.move_task_to_column("7", "frobnicate")
 
         assert ok is False
 
@@ -57,7 +60,7 @@ class TestMoveTaskToColumnRejectsUnmappedColumns:
             {"mcp_function_caller": caller, "owner": "acme", "repo": "widgets"}
         )
 
-        await provider.move_task_to_column("7", "declined")
+        await provider.move_task_to_column("7", "frobnicate")
 
         caller.assert_not_awaited()
 
@@ -70,3 +73,30 @@ class TestMoveTaskToColumnRejectsUnmappedColumns:
         )
 
         assert await provider.move_task_to_column("7", "done") is True
+
+
+class TestMoveTaskToColumnDeclined:
+    """ "declined" (#835) is mapped: a label, symmetric with "blocked"."""
+
+    @pytest.mark.asyncio
+    async def test_declined_sets_a_declined_label(self) -> None:
+        async def _call(tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+            if tool == "github.get_issue":
+                return {"issue": {"number": 7, "labels": []}}
+            return {"success": True, "issue": {"labels": [{"name": "declined"}]}}
+
+        caller = AsyncMock(side_effect=_call)
+        provider = _ConcreteGitHubKanban(
+            {"mcp_function_caller": caller, "owner": "acme", "repo": "widgets"}
+        )
+
+        ok = await provider.move_task_to_column("7", "declined")
+
+        assert ok is True
+        update_calls = [
+            call.args[1]
+            for call in caller.await_args_list
+            if call.args[0] == "github.update_issue"
+        ]
+        (update,) = update_calls
+        assert update["labels"] == ["declined"]

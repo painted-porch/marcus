@@ -2,13 +2,17 @@
 Unit tests for LinearKanban.move_task_to_column on an unmapped column.
 
 Codex P1, round 4 on PR #834: for a column with no entry in
-``state_map`` (e.g. "declined" -- Linear status persistence for that
-status is #835, out of scope here), the function fell back to sending
-Linear the literal column name as a status, which Linear does not
-recognize either. Whether that particular call happens to fail is an
-accident of what the mock (or Linear) does with an unrecognized
-status string; this fix makes the refusal explicit and stops the call
-from being made at all.
+``state_map``, the function fell back to sending Linear the literal
+column name as a status, which Linear does not recognize either.
+Whether that particular call happens to fail is an accident of what
+the mock (or Linear) does with an unrecognized status string; this
+fix makes the refusal explicit and stops the call from being made at
+all.
+
+"declined" used to be exactly that unmapped example; #835 mapped it
+(a workflow state name, "Declined", symmetric with "Blocked"), so
+this file now also covers that it round-trips like every other known
+column.
 """
 
 from unittest.mock import AsyncMock
@@ -32,7 +36,7 @@ class TestMoveTaskToColumnRejectsUnmappedColumns:
         caller = AsyncMock(return_value={"success": True})
         provider = _provider(caller)
 
-        ok = await provider.move_task_to_column("issue-1", "declined")
+        ok = await provider.move_task_to_column("issue-1", "frobnicate")
 
         assert ok is False
 
@@ -41,7 +45,7 @@ class TestMoveTaskToColumnRejectsUnmappedColumns:
         caller = AsyncMock(return_value={"success": True})
         provider = _provider(caller)
 
-        await provider.move_task_to_column("issue-1", "declined")
+        await provider.move_task_to_column("issue-1", "frobnicate")
 
         caller.assert_not_awaited()
 
@@ -56,4 +60,17 @@ class TestMoveTaskToColumnRejectsUnmappedColumns:
         assert ok is True
         caller.assert_awaited_once_with(
             "linear.update_issue", {"issueId": "issue-1", "status": "Blocked"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_declined_is_now_mapped(self) -> None:
+        """#835: "declined" moves to the Declined workflow state."""
+        caller = AsyncMock(return_value={"success": True})
+        provider = _provider(caller)
+
+        ok = await provider.move_task_to_column("issue-1", "declined")
+
+        assert ok is True
+        caller.assert_awaited_once_with(
+            "linear.update_issue", {"issueId": "issue-1", "status": "Declined"}
         )

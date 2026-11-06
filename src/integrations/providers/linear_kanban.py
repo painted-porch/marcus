@@ -134,11 +134,18 @@ class LinearKanban(KanbanInterface):
                 for label in labels
             ]
 
-        # Map Linear state to TaskStatus
+        # Map Linear state to TaskStatus. Linear's own "type" is one of
+        # five fixed categories (backlog/unstarted/started/completed/
+        # canceled) and carries no information about which named state
+        # within that category an issue is in, so it alone cannot
+        # distinguish "Blocked" or "Declined" from an ordinary state in
+        # the same category. The state's own name is checked first for
+        # those two (#835); any other name falls back to the type map,
+        # unchanged from before.
         state = issue.get("state", {})
-        state_type = (
-            state.get("type", "backlog") if isinstance(state, dict) else "backlog"
-        )
+        state_name = (
+            (state.get("name") or "") if isinstance(state, dict) else ""
+        ).lower()
         status_map = {
             "backlog": TaskStatus.TODO,
             "unstarted": TaskStatus.TODO,
@@ -146,6 +153,15 @@ class LinearKanban(KanbanInterface):
             "completed": TaskStatus.DONE,
             "canceled": TaskStatus.DONE,
         }
+        if "declined" in state_name:
+            status = TaskStatus.DECLINED
+        elif "blocked" in state_name:
+            status = TaskStatus.BLOCKED
+        else:
+            state_type = (
+                state.get("type", "backlog") if isinstance(state, dict) else "backlog"
+            )
+            status = status_map.get(state_type, TaskStatus.TODO)
 
         # Parse dates
         created_at = issue.get("createdAt", "")
@@ -165,7 +181,7 @@ class LinearKanban(KanbanInterface):
             id=issue.get("id", ""),
             name=issue.get("title", "Untitled"),
             description=issue.get("description", ""),
-            status=status_map.get(state_type, TaskStatus.TODO),
+            status=status,
             priority=priority_map.get(linear_priority, Priority.MEDIUM),
             labels=labels,
             estimated_hours=issue.get("estimate", 0) or 8,
@@ -239,6 +255,18 @@ class LinearKanban(KanbanInterface):
             }
             update_data["priority"] = priority_map.get(updates["priority"], "3")
 
+        # update_task never touched status at all (#835): DONE and
+        # IN_PROGRESS get their own workflow-state move through
+        # update_task_progress, but a terminal-failure status
+        # (BLOCKED, DECLINED) can only ever reach the board through
+        # this call, so it is included here directly rather than as a
+        # second round-trip through move_task_to_column.
+        status = updates.get("status")
+        if status == TaskStatus.BLOCKED:
+            update_data["status"] = "Blocked"
+        elif status == TaskStatus.DECLINED:
+            update_data["status"] = "Declined"
+
         result = await self.mcp_caller("linear.update_issue", update_data)
 
         if not result.get("issue"):
@@ -267,16 +295,16 @@ class LinearKanban(KanbanInterface):
             "done": "Done",
             "completed": "Done",
             "blocked": "Blocked",
+            "declined": "Declined",
         }
 
         status_name = state_map.get(column_name.lower())
         if status_name is None:
-            # Codex P1 (round 4 on PR #834): a column this provider has
-            # no mapping for (e.g. "declined" -- tracked separately in
-            # #835) must not silently report success by sending Linear
-            # a status name it will not recognize either. The caller
-            # trusts this return value to decide whether the status
-            # actually persisted.
+            # A column this provider has no mapping for must not
+            # silently report success by sending Linear a status name
+            # it will not recognize either. The caller trusts this
+            # return value to decide whether the status actually
+            # persisted.
             logger.warning(
                 "[LinearKanban] move_task_to_column: no mapping for "
                 "column '%s' on issue %s; status was not persisted",

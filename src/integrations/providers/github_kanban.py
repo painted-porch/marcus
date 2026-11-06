@@ -120,6 +120,9 @@ class GitHubKanban(KanbanInterface):
                 if "in progress" in label_lower or "in-progress" in label_lower:
                     status = TaskStatus.IN_PROGRESS
                     break
+                elif "declined" in label_lower:
+                    status = TaskStatus.DECLINED
+                    break
                 elif "blocked" in label_lower:
                     status = TaskStatus.BLOCKED
                     break
@@ -234,16 +237,36 @@ class GitHubKanban(KanbanInterface):
             update_data["title"] = updates["name"]
         if "description" in updates:
             update_data["body"] = updates["description"]
+        label_column: Optional[str] = None
         if "status" in updates:
-            update_data["state"] = (
-                "closed" if updates["status"] == TaskStatus.DONE else "open"
-            )
+            status = updates["status"]
+            update_data["state"] = "closed" if status == TaskStatus.DONE else "open"
+            # BLOCKED and DECLINED have no GitHub issue state of their
+            # own (#835): both stay "open" above and are represented by
+            # a label instead, applied after the state/field update so
+            # move_task_to_column's own read-modify-write of the label
+            # set sees this call's other field changes too.
+            if status == TaskStatus.BLOCKED:
+                label_column = "blocked"
+            elif status == TaskStatus.DECLINED:
+                label_column = "declined"
 
         result = await self.mcp_caller("github.update_issue", update_data)
 
         if not result.get("issue"):
             raise Exception(
                 f"Failed to update issue: {result.get('error', 'Unknown error')}"
+            )
+
+        if label_column is not None:
+            await self.move_task_to_column(task_id, label_column)
+            result = await self.mcp_caller(
+                "github.get_issue",
+                {
+                    "owner": self.owner,
+                    "repo": self.repo,
+                    "issue_number": int(task_id),
+                },
             )
 
         return self._github_issue_to_task(result["issue"])
@@ -289,11 +312,12 @@ class GitHubKanban(KanbanInterface):
             return await self._replace_status_label(task_id, "in-progress")
         elif column_lower == "blocked":
             return await self._replace_status_label(task_id, "blocked")
+        elif column_lower == "declined":
+            return await self._replace_status_label(task_id, "declined")
 
-        # Codex P1 (round 4 on PR #834): a column this provider has no
-        # mapping for (e.g. "declined" -- tracked separately in #835)
-        # must not silently report success. The caller trusts this
-        # return value to decide whether the status actually persisted.
+        # A column this provider has no mapping for must not silently
+        # report success. The caller trusts this return value to
+        # decide whether the status actually persisted.
         logger.warning(
             "[GithubKanban] move_task_to_column: no mapping for column "
             "'%s' on issue %s; status was not persisted",
@@ -304,7 +328,13 @@ class GitHubKanban(KanbanInterface):
 
     # Labels that encode the board column. Anything else on the issue
     # (priority/*, domain/*, user-managed labels) is not ours to touch.
-    _STATUS_LABEL_PREFIXES = ("blocked", "in-progress", "in progress", "ready")
+    _STATUS_LABEL_PREFIXES = (
+        "blocked",
+        "declined",
+        "in-progress",
+        "in progress",
+        "ready",
+    )
 
     def _is_status_label(self, label: str) -> bool:
         """Return True when ``label`` encodes a board column.
@@ -317,8 +347,9 @@ class GitHubKanban(KanbanInterface):
         Returns
         -------
         bool
-            True for ``blocked``, ``blocked/<severity>``, ``in-progress``,
-            ``in progress`` and ``ready``; False for everything else.
+            True for ``blocked``, ``blocked/<severity>``, ``declined``,
+            ``in-progress``, ``in progress`` and ``ready``; False for
+            everything else.
         """
         lowered = label.lower()
         return any(lowered.startswith(prefix) for prefix in self._STATUS_LABEL_PREFIXES)
