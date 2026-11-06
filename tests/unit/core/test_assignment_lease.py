@@ -374,54 +374,170 @@ class TestK13ClosesTheLeaseExpiryStatusGap:
 
 
 class TestShouldRecoverExpiredLeaseProjectScoping:
-    """Issue #859: the terminal-status check must not query the wrong
-    project's board.
+    """Issue #859/#863: the terminal-status check must not query the
+    wrong project's board, and must never default to the destructive
+    "recover" outcome on uncertainty.
 
     A kanban client is bound to exactly one project at a time, but a
     single server can be juggling several registered projects (the
     sibling bug #856's round 4 fixed in ``AssignmentMonitor``). If a
     lease's own task belongs to a DIFFERENT project than the one the
-    client is currently bound to, ``get_task_by_id`` would query the
-    wrong board -- "not found" then means "wrong board", not "not
-    terminal", and the pre-#859 code treated every "not found" as
-    license to recover.
+    client is currently bound to, a lookup against the bound client
+    could be querying the wrong board OR, for a provider like SQLite
+    that shares one database file across projects, could be querying
+    a client that can see the lease's project just fine. Codex's
+    #863 round-1 finding: defaulting to "recover" on a mismatch is
+    backwards, because recovery is the destructive branch. The fix
+    resolves the lease's own project's client (``project_client_resolver``)
+    and runs the terminal check against THAT client; only when no such
+    resolution is possible does it default to "do not recover".
     """
 
-    def _manager(self, kanban_client: Mock) -> AssignmentLeaseManager:
+    def _manager(
+        self,
+        kanban_client: Mock,
+        project_client_resolver=None,
+    ) -> AssignmentLeaseManager:
         persistence = Mock()
         persistence.remove_assignment = AsyncMock()
         persistence.record_task_epoch = AsyncMock()
         persistence.update_assignment_fields = AsyncMock()
         return AssignmentLeaseManager(
-            kanban_client, persistence, default_lease_hours=4.0, task_list=[]
+            kanban_client,
+            persistence,
+            default_lease_hours=4.0,
+            task_list=[],
+            project_client_resolver=project_client_resolver,
         )
 
-    @pytest.mark.asyncio
-    async def test_a_mismatched_project_skips_the_lookup_and_recovers(self) -> None:
-        """The lease belongs to project A; the client is bound to B,
-        whose board (correctly) has no task by this id. Before #859
-        this returns False (wrongly treats "not found" as terminal);
-        after #859 the lookup is skipped and the lease is recovered on
-        the ordinary time-based decision."""
-        kanban_client = Mock()
-        kanban_client.project_id = "project-B"
-        kanban_client.registry_project_id = None
-        kanban_client.get_task_by_id = AsyncMock(return_value=None)
-        manager = self._manager(kanban_client)
-
-        lease = AssignmentLease(
+    def _expired_lease(self, project_id: str = "project-A") -> AssignmentLease:
+        return AssignmentLease(
             task_id="task-1",
             agent_id="agent-1",
             assigned_at=datetime.now(timezone.utc) - timedelta(hours=5),
             lease_expires=datetime.now(timezone.utc) - timedelta(hours=1),
             last_renewed=datetime.now(timezone.utc) - timedelta(hours=5),
-            project_id="project-A",
+            project_id=project_id,
         )
 
-        result = await manager.should_recover_expired_lease(lease)
+    @pytest.mark.asyncio
+    async def test_a_mismatched_project_with_no_resolver_does_not_recover(
+        self,
+    ) -> None:
+        """No resolver configured at all (e.g. a Planka-shaped
+        deployment where projects genuinely do not share data): a
+        mismatch must default to NOT recovering, and the bound
+        client's board is never queried."""
+        kanban_client = Mock()
+        kanban_client.project_id = "project-B"
+        kanban_client.registry_project_id = None
+        kanban_client.get_task_by_id = AsyncMock(return_value=None)
+        manager = self._manager(kanban_client, project_client_resolver=None)
+
+        result = await manager.should_recover_expired_lease(self._expired_lease())
+
+        assert result is False
+        kanban_client.get_task_by_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_mismatched_project_resolver_returns_none_does_not_recover(
+        self,
+    ) -> None:
+        """A resolver is configured but cannot find the lease's own
+        project (e.g. it was never registered, or is itself a
+        Planka-shaped provider the resolver can't resolve to a client):
+        same safe default as having no resolver at all."""
+        kanban_client = Mock()
+        kanban_client.project_id = "project-B"
+        kanban_client.registry_project_id = None
+        kanban_client.get_task_by_id = AsyncMock(return_value=None)
+        resolver = AsyncMock(return_value=None)
+        manager = self._manager(kanban_client, project_client_resolver=resolver)
+
+        result = await manager.should_recover_expired_lease(self._expired_lease())
+
+        assert result is False
+        resolver.assert_awaited_once_with("project-A")
+        kanban_client.get_task_by_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_mismatched_project_resolver_raising_does_not_recover(
+        self,
+    ) -> None:
+        """The resolver itself raises (e.g. a transient connection
+        failure building project A's client): still the safe default,
+        not a crash and not a recovery."""
+        kanban_client = Mock()
+        kanban_client.project_id = "project-B"
+        kanban_client.registry_project_id = None
+        kanban_client.get_task_by_id = AsyncMock(return_value=None)
+        resolver = AsyncMock(side_effect=RuntimeError("connection refused"))
+        manager = self._manager(kanban_client, project_client_resolver=resolver)
+
+        result = await manager.should_recover_expired_lease(self._expired_lease())
+
+        assert result is False
+        kanban_client.get_task_by_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shared_sqlite_mismatch_resolves_leases_own_project_and_finds_it_done(
+        self,
+    ) -> None:
+        """The real #863 scenario: project A and project B are two
+        SQLite-backed projects sharing ONE database file. The lease
+        belongs to A; the server's single lease manager is currently
+        bound to B's client. A's task is genuinely DONE. The resolver
+        hands back A's own (correctly scoped) client, and the terminal
+        check must run against THAT client -- the task must stay DONE,
+        not be reopened to TODO."""
+        done_task = Mock()
+        done_task.status = TaskStatus.DONE
+        bound_client_b = Mock()
+        bound_client_b.project_id = "project-B"
+        bound_client_b.registry_project_id = None
+        bound_client_b.get_task_by_id = AsyncMock(return_value=None)
+
+        project_a_client = Mock()
+        project_a_client.project_id = "project-A"
+        project_a_client.registry_project_id = None
+        project_a_client.get_task_by_id = AsyncMock(return_value=done_task)
+
+        resolver = AsyncMock(return_value=project_a_client)
+        manager = self._manager(bound_client_b, project_client_resolver=resolver)
+
+        result = await manager.should_recover_expired_lease(self._expired_lease())
+
+        assert result is False
+        resolver.assert_awaited_once_with("project-A")
+        project_a_client.get_task_by_id.assert_awaited_once_with("task-1")
+        bound_client_b.get_task_by_id.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_mismatched_project_resolved_client_finds_it_still_live(
+        self,
+    ) -> None:
+        """The resolver finds project A's own client, and on THAT
+        board the task genuinely is not terminal -- recovery proceeds
+        on the ordinary time-based decision, exactly as the matching-
+        project case would."""
+        live_task = Mock()
+        live_task.status = TaskStatus.IN_PROGRESS
+        bound_client_b = Mock()
+        bound_client_b.project_id = "project-B"
+        bound_client_b.registry_project_id = None
+
+        project_a_client = Mock()
+        project_a_client.project_id = "project-A"
+        project_a_client.registry_project_id = None
+        project_a_client.get_task_by_id = AsyncMock(return_value=live_task)
+
+        resolver = AsyncMock(return_value=project_a_client)
+        manager = self._manager(bound_client_b, project_client_resolver=resolver)
+
+        result = await manager.should_recover_expired_lease(self._expired_lease())
 
         assert result is True
-        kanban_client.get_task_by_id.assert_not_awaited()
+        project_a_client.get_task_by_id.assert_awaited_once_with("task-1")
 
     @pytest.mark.asyncio
     async def test_matching_projects_still_run_the_terminal_check(self) -> None:

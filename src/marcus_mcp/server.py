@@ -912,6 +912,9 @@ class MarcusServer:
                 self.assignment_persistence,
                 lease_config,
                 task_list=self.project_tasks,
+                project_client_resolver=(
+                    self.project_manager.get_kanban_client_for_project
+                ),
             )
 
             self.lease_monitor = LeaseMonitor(self.lease_manager)

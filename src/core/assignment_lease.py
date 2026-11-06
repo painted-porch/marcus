@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional
 
 from src.core.assignment_persistence import AssignmentPersistence
 from src.core.event_loop_utils import EventLoopLockManager
@@ -199,6 +199,9 @@ class AssignmentLeaseManager:
         silence_timeout_minutes: float = DEFAULT_SILENCE_TIMEOUT_MINUTES,
         budget_multiplier: float = 3.0,
         checkpoint_cadence_minutes: float = DEFAULT_CHECKPOINT_CADENCE_MINUTES,
+        project_client_resolver: Optional[
+            Callable[[str], Awaitable[Optional[KanbanInterface]]]
+        ] = None,
     ):
         """
         Initialize the lease manager.
@@ -255,6 +258,16 @@ class AssignmentLeaseManager:
             checkpoint_cadence_minutes
                 How often the session contract obliges an agent to
                 checkpoint (D8); only used to validate the silence timeout.
+            project_client_resolver
+                Issue #863: resolves a project id to THAT project's own
+                kanban client, without disturbing whichever project this
+                manager's own ``kanban_client`` is currently bound to.
+                Used by ``should_recover_expired_lease`` when a lease's
+                project disagrees with the bound client, so the
+                terminal-status check can still run against the lease's
+                own board instead of being skipped outright. ``None``
+                when no such resolution is available (e.g. tests), in
+                which case a mismatch always skips recovery.
 
         Raises
         ------
@@ -263,6 +276,7 @@ class AssignmentLeaseManager:
         """
         self.kanban_client = kanban_client
         self.assignment_persistence = assignment_persistence
+        self.project_client_resolver = project_client_resolver
         self.task_list = task_list if task_list is not None else []
         self.default_lease_hours = default_lease_hours
         self.warning_threshold_hours = warning_threshold_hours
@@ -354,6 +368,9 @@ class AssignmentLeaseManager:
         assignment_persistence: AssignmentPersistence,
         settings: Any,
         task_list: Optional[List[Task]] = None,
+        project_client_resolver: Optional[
+            Callable[[str], Awaitable[Optional[KanbanInterface]]]
+        ] = None,
     ) -> "AssignmentLeaseManager":
         """Build a manager from ``TaskLeaseSettings`` or a project config dict.
 
@@ -368,6 +385,8 @@ class AssignmentLeaseManager:
             project's config. Unknown and pre-D3 keys are ignored.
         task_list : Optional[List[Task]]
             Project tasks for recovery info updates.
+        project_client_resolver : Optional[Callable]
+            See ``__init__``.
 
         Returns
         -------
@@ -385,7 +404,13 @@ class AssignmentLeaseManager:
         kwargs: Dict[str, Any] = {
             param: raw[key] for key, param in cls._SETTINGS_FIELDS.items() if key in raw
         }
-        return cls(kanban_client, assignment_persistence, task_list=task_list, **kwargs)
+        return cls(
+            kanban_client,
+            assignment_persistence,
+            task_list=task_list,
+            project_client_resolver=project_client_resolver,
+            **kwargs,
+        )
 
     @property
     def silence_window(self) -> timedelta:
@@ -2176,20 +2201,27 @@ class AssignmentLeaseManager:
         bool
             True to recover, False when the task is already terminal.
         """
-        # Issue #859: the kanban client is bound to exactly one
+        # Issue #859/#863: the kanban client is bound to exactly one
         # project's board at a time, but a single server can be
         # juggling several registered projects (the sibling bug
         # #856's round 4 fixed in AssignmentMonitor). If this lease's
         # task belongs to a DIFFERENT project than the one the client
-        # is currently bound to, a lookup here would query the wrong
-        # board -- "not found" would then mean "wrong board", not
-        # "not terminal", and the code below treats every "not found"
-        # as license to recover. Skip the lookup entirely when both
-        # ids are known and disagree; fall through to the ordinary
-        # time-based decision exactly as if no terminal-status check
-        # applied. Either id missing (an old lease, or a provider
-        # that doesn't expose a bound project id) keeps today's exact
-        # behavior -- this is a scoping guard, not a new requirement.
+        # is currently bound to, a lookup against the bound client
+        # would query the wrong board -- "not found" would then mean
+        # "wrong board", not "not terminal". But some providers
+        # (SQLite's shared-database-file deployment shape) answer
+        # get_task_by_id with no project scoping at all, so the bound
+        # client can in fact see a different project's task just
+        # fine; a mismatch alone does not prove the lookup is unsafe.
+        #
+        # Recovery is the destructive branch (it resets a task to
+        # TODO), so on any mismatch we resolve the LEASE's OWN
+        # project's client and run the exact same terminal check
+        # against that client instead of guessing from the bound
+        # one. Only when that resolution itself is unavailable (no
+        # resolver configured, or the resolver cannot find the
+        # project) do we default to the safe outcome: do not
+        # recover, and leave the lease for the next pass.
         _lease_project_id = lease.project_id
         _bound = bound_project_id(self.kanban_client)
         _project_mismatch = (
@@ -2197,17 +2229,47 @@ class AssignmentLeaseManager:
             and _bound is not None
             and _lease_project_id != _bound
         )
-        if _project_mismatch:
-            logger.info(
-                f"Task {lease.task_id}: lease belongs to project "
-                f"{_lease_project_id!r} but the kanban client is bound "
-                f"to {_bound!r}; skipping the terminal-status lookup "
-                "to avoid querying the wrong board."
-            )
 
-        if not _project_mismatch and hasattr(self.kanban_client, "get_task_by_id"):
+        _client_for_check: Optional[KanbanInterface] = self.kanban_client
+        if _project_mismatch:
+            _client_for_check = None
+            if self.project_client_resolver is not None:
+                try:
+                    _client_for_check = await self.project_client_resolver(
+                        _lease_project_id  # type: ignore[arg-type]
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Task {lease.task_id}: resolving project "
+                        f"{_lease_project_id!r}'s own kanban client "
+                        f"failed: {e}"
+                    )
+                    _client_for_check = None
+            if _client_for_check is not None:
+                logger.info(
+                    f"Task {lease.task_id}: lease belongs to project "
+                    f"{_lease_project_id!r} but the kanban client is "
+                    f"bound to {_bound!r}; resolved project "
+                    f"{_lease_project_id!r}'s own client to run the "
+                    "terminal-status lookup against the right board."
+                )
+            else:
+                logger.info(
+                    f"Task {lease.task_id}: lease belongs to project "
+                    f"{_lease_project_id!r} but the kanban client is "
+                    f"bound to {_bound!r}, and the lease's own project "
+                    "client could not be resolved. Recovery is "
+                    "destructive, so the safe default on this "
+                    "uncertainty is to NOT recover; leaving the lease "
+                    "for the next pass."
+                )
+                return False
+
+        if _client_for_check is not None and hasattr(
+            _client_for_check, "get_task_by_id"
+        ):
             try:
-                task_obj = await self.kanban_client.get_task_by_id(lease.task_id)
+                task_obj = await _client_for_check.get_task_by_id(lease.task_id)
                 if task_obj is not None:
                     status_value = getattr(task_obj, "status", None)
                     status_str = (
