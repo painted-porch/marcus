@@ -328,6 +328,37 @@ def _agent_still_holds_task(state: Any, agent_id: str, task_id: str) -> bool:
     return any(t.id == task_id for t in agent.current_tasks)
 
 
+def _agent_holds_live_lease(state: Any, agent_id: str, task_id: str) -> bool:
+    """Check whether the lease manager confirms ``agent_id`` currently
+
+    holds ``task_id``, independent of ``current_tasks``.
+
+    Issue #858, Codex P2 round 3: ``current_tasks`` starts empty for a
+    worker restored after a server restart (``worker_from_record``;
+    ``MarcusServer._reconcile_registrations_with_leases`` can only
+    repopulate it from ``project_tasks``, which itself starts empty
+    until ``refresh_project_state`` runs). The lease manager, by
+    contrast, IS rebuilt from persistence on startup, which makes it
+    the authoritative source across a restart -- the same cold-cache
+    fallback the "completed" branch's own stale-completion guard
+    already uses (``report_task_progress``, the ``lease_holder_matches``
+    check). Without this, a legitimate first post-restart blocked
+    report from the real lease holder was rejected as a stale/duplicate
+    report by Guard 3.
+    """
+    if not (hasattr(state, "lease_manager") and state.lease_manager is not None):
+        return False
+    try:
+        lease = state.lease_manager.active_leases.get(task_id)
+        return lease is not None and getattr(lease, "agent_id", None) == agent_id
+    except Exception as lease_err:  # noqa: BLE001 - fail closed to the caller's guard
+        logger.warning(
+            f"Cold-cache lease lookup failed for {task_id}/{agent_id}: "
+            f"{lease_err}. Falling through to the current_tasks check."
+        )
+        return False
+
+
 def _repair_instructions(
     blocker_description: str,
     suggestions: Any,
@@ -8484,8 +8515,18 @@ async def _record_progress(
             # to a new one). Without this guard, the release below
             # would clear whatever the agent CURRENTLY holds, not the
             # task actually being reported.
-            if agent_id in state.agent_status and not _agent_still_holds_task(
-                state, agent_id, task_id
+            #
+            # Round 3: current_tasks is not the only legitimate source
+            # of truth for "does this agent hold this task" -- a worker
+            # restored after a server restart starts with an empty
+            # current_tasks (see _agent_holds_live_lease's docstring),
+            # so a real lease holder's first post-restart blocked
+            # report must not be rejected as stale just because the
+            # in-memory cache hasn't caught up yet.
+            if (
+                agent_id in state.agent_status
+                and not _agent_still_holds_task(state, agent_id, task_id)
+                and not _agent_holds_live_lease(state, agent_id, task_id)
             ):
                 logger.warning(
                     f"report_task_progress(blocked) ignored: agent "

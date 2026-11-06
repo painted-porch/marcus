@@ -965,3 +965,90 @@ class TestBlockedBoardWriteFailureLeavesCoordinationStateIntact:
         assert state.agent_status["agent-1"].current_tasks == []
         assert "agent-1" not in state.agent_tasks
         assert task.id not in state.lease_manager.active_leases
+
+
+class TestGuard3ColdCacheFallback:
+    """Issue #858, Codex P2 round 3: Guard 3 must not reject a
+    legitimate blocked report from a worker whose ``current_tasks``
+    is empty only because of a cold in-memory cache after a server
+    restart -- the same cold-cache fallback the "completed" branch's
+    own stale-completion guard already uses.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_live_lease_holder_with_empty_current_tasks_is_accepted(
+        self,
+    ) -> None:
+        """worker_from_record restores current_tasks=[]; the lease
+        manager, rebuilt from persistence, still confirms this agent
+        holds the task. The blocked report must go through."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        # Simulate the post-restart cold cache: current_tasks empty,
+        # even though the lease manager (rebuilt from persistence)
+        # still correctly shows this agent as the live holder.
+        state.agent_status["agent-1"].current_tasks = []
+
+        result = await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck after a restart",
+            state=state,
+        )
+
+        assert result["success"] is True
+        assert result.get("status") != "not_current_assignment"
+
+    @pytest.mark.asyncio
+    async def test_a_lease_held_by_a_different_agent_is_still_rejected(
+        self,
+    ) -> None:
+        """The fallback must not become a bypass: if the lease is held
+        by someone else, Guard 3 must still reject."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        state.agent_status["agent-1"].current_tasks = []
+        state.lease_manager.active_leases[task.id].agent_id = "agent-2"
+
+        result = await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck after a restart",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "not_task_holder"
+
+    @pytest.mark.asyncio
+    async def test_no_lease_at_all_and_empty_current_tasks_is_still_rejected(
+        self,
+    ) -> None:
+        """Neither signal confirms the agent holds the task -- the
+        genuinely stale case must still be rejected."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        state.agent_status["agent-1"].current_tasks = []
+        state.lease_manager.active_leases = {}
+
+        result = await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "not_current_assignment"
