@@ -566,7 +566,14 @@ async def register_board(
     ``add_project`` only claims the active slot when no project was
     active before, so registering never disturbs a running server.
     Re-seeding the same project_id against a *different* db path is
-    refused (see Raises) rather than silently overwritten.
+    refused (see Raises) rather than silently overwritten. A board
+    registered by a version of this function predating GH-306
+    (carrying a generated UUID as its registry id instead of
+    project_id) is migrated in place on first re-registration: its
+    task_type_registrations and active-project status are carried to
+    the canonical project_id record, and the UUID record is retired,
+    rather than creating a second, parallel project for the same
+    board.
 
     Parameters
     ----------
@@ -623,6 +630,32 @@ async def register_board(
             )
         return existing.id
 
+    # Migration path (Codex P2, round 2 on PR #838): a board registered
+    # by the pre-GH-306 version of this function carries a generated
+    # UUID as its registry id instead of project_id, found here by the
+    # name+path match that was this function's only lookup before. Left
+    # alone, this id-first branch would create a second, parallel
+    # record with empty task_type_registrations while the original --
+    # carrying any real K2 registration -- stayed live under the old
+    # UUID: duplicate projects for every registry consumer, and the
+    # task-project-id lookup still unable to find this board's rules.
+    # Carrying the legacy record's registrations and active-project
+    # status over to the canonical record, then retiring the UUID one,
+    # keeps this a single project throughout.
+    legacy = None
+    for candidate in await registry.list_projects(provider="sqlite"):
+        cfg = candidate.provider_config
+        if cfg.get("project_name") == project_id and cfg.get("db_path") == absolute:
+            legacy = candidate
+            break
+
+    task_type_registrations: Dict[str, Dict[str, Any]] = {}
+    legacy_was_active = False
+    if legacy is not None:
+        task_type_registrations = dict(legacy.task_type_registrations)
+        active = await registry.get_active_project()
+        legacy_was_active = active is not None and active.id == legacy.id
+
     config = ProjectConfig(
         # GH-306: the kanban project id is the single source of truth,
         # not an auto-generated registry UUID -- otherwise task.project_id
@@ -639,8 +672,16 @@ async def register_board(
             "project_id": project_id,
         },
         tags=["auto-created", "sqlite", "tow-experiment"],
+        task_type_registrations=task_type_registrations,
     )
-    return await registry.add_project(config)
+    new_id = await registry.add_project(config)
+
+    if legacy is not None:
+        await registry.delete_project(legacy.id)
+        if legacy_was_active:
+            await registry.set_active_project(new_id)
+
+    return new_id
 
 
 def main() -> None:
