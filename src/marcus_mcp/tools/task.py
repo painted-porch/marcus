@@ -9042,13 +9042,20 @@ async def request_task_decline(
 
     # 2. Board dual-write, best-effort: the model update above is what
     # deps_allow_claim and compute_board_drain read; a kanban miss must
-    # not strand the declining agent.
+    # not strand the declining agent. ``_board_persisted`` tracks whether
+    # this agent's own board write can actually be trusted, surfaced in
+    # the reply below (Codex P1, round 4 on PR #834) -- a provider that
+    # cannot represent DECLINED (GitHub, Linear; tracked in #835) must
+    # say so rather than let the caller believe the board agrees with
+    # the in-memory model when it does not.
+    _board_persisted = True
     try:
         await state.kanban_client.update_task(
             task_id,
             {"status": TaskStatus.DECLINED, "assigned_to": None},
         )
     except Exception as e:
+        _board_persisted = False
         logger.warning(
             "request_task_decline: kanban update failed for %s: %s", task_id, e
         )
@@ -9064,11 +9071,17 @@ async def request_task_decline(
         )
     # Some providers (GitHub, Linear) do not persist a status through
     # update_task at all -- the same gap report_blocker's lane-death
-    # path already works around with an explicit move, best-effort.
+    # path already works around with an explicit move, best-effort. A
+    # provider with no mapping for "declined" returns False rather than
+    # silently claiming success (fixed alongside this in
+    # github_kanban.py / linear_kanban.py).
     if hasattr(state.kanban_client, "move_task_to_column"):
         try:
-            await state.kanban_client.move_task_to_column(task_id, "declined")
+            moved = await state.kanban_client.move_task_to_column(task_id, "declined")
+            if not moved:
+                _board_persisted = False
         except Exception as move_err:  # noqa: BLE001 - best effort
+            _board_persisted = False
             logger.warning(
                 "request_task_decline: move_task_to_column('declined') "
                 "failed for %s: %s",
@@ -9120,16 +9133,26 @@ async def request_task_decline(
         },
     )
 
-    return {
+    _provider = getattr(getattr(state.kanban_client, "provider", None), "value", None)
+    result: Dict[str, Any] = {
         "success": True,
         "task_id": task_id,
         "status": "declined",
+        "persisted": _board_persisted,
         "message": (
             f"Task {task_id} is marked DECLINED — terminal, not "
             "claimable again. Request your next task to continue "
             "contributing."
         ),
     }
+    if not _board_persisted:
+        result["provider"] = _provider
+        result["message"] += (
+            f" (the {_provider or 'board'} provider could not represent "
+            "this status -- it is recorded in Marcus's own state but "
+            "not visible there)"
+        )
+    return result
 
 
 async def report_blocker(

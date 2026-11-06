@@ -60,6 +60,11 @@ def _make_state(
     state.kanban_client = Mock()
     state.kanban_client.update_task = AsyncMock()
     state.kanban_client.add_comment = AsyncMock()
+    # Matches every real provider's happy path (sqlite always succeeds;
+    # Planka/GitHub/Linear report True when they actually moved the
+    # card). Tests exercising a provider that cannot represent a
+    # status override this explicitly.
+    state.kanban_client.move_task_to_column = AsyncMock(return_value=True)
     state.assignment_persistence = Mock()
     state.assignment_persistence.remove_assignment = AsyncMock()
     state.lease_manager = Mock()
@@ -238,6 +243,95 @@ class TestRequestTaskDeclineHappyPath:
 
         assert result["success"] is True
         assert task.status == TaskStatus.DECLINED
+
+
+class TestRequestTaskDeclineSurfacesUnpersistedBoardWrites:
+    """Codex P1, round 4 on PR #834.
+
+    github_kanban.py/linear_kanban.py's ``move_task_to_column`` used to
+    report success for a column it has no mapping for at all, so the
+    caller believed the board agreed with the in-memory DECLINED model
+    when it did not. The provider fix (returning False instead of a
+    silent True) is covered by each provider's own tests; this covers
+    the caller side -- the reply must say so.
+    """
+
+    @pytest.mark.asyncio
+    async def test_persisted_is_true_on_the_happy_path(self) -> None:
+        task = _make_task()
+        state = _make_state(task)
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert result["persisted"] is True
+        assert "provider" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_provider_with_no_mapping_reports_unpersisted(self) -> None:
+        """move_task_to_column returning False (the provider fix) must
+        reach the agent, naming the provider, not be swallowed."""
+        task = _make_task()
+        state = _make_state(task)
+        state.kanban_client.move_task_to_column = AsyncMock(return_value=False)
+        state.kanban_client.provider = Mock(value="github")
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert task.status == TaskStatus.DECLINED
+        assert result["persisted"] is False
+        assert result["provider"] == "github"
+        assert "github" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_move_task_to_column_exception_also_reports_unpersisted(
+        self,
+    ) -> None:
+        task = _make_task()
+        state = _make_state(task)
+        state.kanban_client.move_task_to_column = AsyncMock(
+            side_effect=RuntimeError("down")
+        )
+        state.kanban_client.provider = Mock(value="linear")
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert result["persisted"] is False
+        assert result["provider"] == "linear"
+
+    @pytest.mark.asyncio
+    async def test_an_update_task_failure_also_reports_unpersisted(self) -> None:
+        task = _make_task()
+        state = _make_state(task)
+        state.kanban_client.update_task = AsyncMock(side_effect=RuntimeError("down"))
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="verify-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert result["persisted"] is False
 
 
 class TestRequestTaskDeclineRejections:
