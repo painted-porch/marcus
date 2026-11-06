@@ -5232,3 +5232,103 @@ class TestCodexFindingNumericMagnitudeIsGuardedAtTheGate:
             unit="plain",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
+
+
+class TestCodexFindingSoleFigureIsDecidedBySpanNotSpelling:
+    """Round 38's sole-figure check compared the trimmed cell against
+    the extractor's own canonical spelling ("48.1%"), so a cell
+    written "48.1 %" -- a space before the sign, a form the same
+    extractor already recognizes as percent-suffixed, and the prose
+    and slide-title paths already accept -- was wrongly rejected
+    merely because its own spacing does not literally equal the
+    canonical string. "Exactly one literal, nothing else" is now
+    decided by span coverage: a single figure match that runs from
+    the start of the cleaned cell to its end, through the percent
+    sign wherever recognized whitespace put it, is the whole literal
+    regardless of how that whitespace is spelled.
+    """
+
+    ACCEPTED = {
+        "c1": CheckResult(
+            claim_id="c1",
+            verdict="verified",
+            value=0.481,
+            label="overall R2",
+            addresses=("metrics.json:r2_overall",),
+            unit="fraction",
+        )
+    }
+
+    @pytest.mark.unit
+    def test_a_space_before_the_percent_sign_is_accepted(self):
+        """Codex's exact scenario."""
+        spec = {
+            "slides": [
+                {"cells": [{"value": "48.1 %", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_a_non_breaking_space_before_the_percent_sign_is_accepted(self):
+        nbsp = chr(0x00A0)
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": f"48.1{nbsp}%",
+                            "claim": "c1",
+                            "label": "overall R2",
+                        }
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_a_bare_adjacent_percent_sign_still_passes(self):
+        """The ordinary, no-whitespace form must keep working too."""
+        spec = {
+            "slides": [
+                {"cells": [{"value": "48.1%", "claim": "c1", "label": "overall R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_a_parenthetical_confidence_figure_is_still_rejected(self):
+        """Round 38's own control case must not regress."""
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": "0.481 (99% confidence)",
+                            "claim": "c1",
+                            "label": "overall R2",
+                        }
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_slash_separated_second_figure_is_still_rejected(self):
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {"value": "0.481 / 999", "claim": "c1", "label": "overall R2"}
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, self.ACCEPTED, {"c1": "overall R2"})
+        assert problems

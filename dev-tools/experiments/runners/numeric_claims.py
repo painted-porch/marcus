@@ -65,6 +65,32 @@ _NUMBER_RE = re.compile(
 _PERCENT_SIGN_WHITESPACE = " " + chr(0x00A0) + chr(0x202F) + chr(0x2009)
 
 
+def _percent_sign_end(text: str, position: int) -> Optional[int]:
+    """Index just past a '%' sign following position, skipping whitespace.
+
+    Parameters
+    ----------
+    text : str
+        The text a figure was matched in.
+    position : int
+        The offset immediately after the figure's own digits.
+
+    Returns
+    -------
+    Optional[int]
+        The index one past the ``'%'``, when one appears at
+        ``position`` or after only horizontal whitespace
+        (:data:`_PERCENT_SIGN_WHITESPACE`); ``None`` when none does.
+        A caller that only needs to know whether a percent sign
+        follows, not exactly where it ends, uses
+        :func:`_percent_sign_follows` instead.
+    """
+    i = position
+    while i < len(text) and text[i] in _PERCENT_SIGN_WHITESPACE:
+        i += 1
+    return i + 1 if i < len(text) and text[i] == "%" else None
+
+
 def _percent_sign_follows(text: str, position: int) -> bool:
     """Decide whether a '%' sign follows position, skipping whitespace.
 
@@ -81,10 +107,7 @@ def _percent_sign_follows(text: str, position: int) -> bool:
         True when a '%' appears at ``position``, or after only
         horizontal whitespace (:data:`_PERCENT_SIGN_WHITESPACE`).
     """
-    i = position
-    while i < len(text) and text[i] in _PERCENT_SIGN_WHITESPACE:
-        i += 1
-    return i < len(text) and text[i] == "%"
+    return _percent_sign_end(text, position) is not None
 
 
 #: Codepoints named explicitly rather than written as literal glyphs:
@@ -2843,6 +2866,30 @@ def _text_contradicts_owned_rows(
     return None
 
 
+def _cleaned_for_figures(text: str) -> str:
+    """Normalize text the same way every figure-extracting caller does.
+
+    The one preparation :func:`_extract_figures_with_percent` and
+    :func:`_as_sole_figure` both apply before locating a figure, kept
+    in one place so a caller computing its own match spans alongside
+    the shared extractor's own output is guaranteed to be looking at
+    the same text, not two independently normalized copies that
+    could drift apart on some input neither author had in mind.
+
+    Parameters
+    ----------
+    text : str
+        Raw text to prepare.
+
+    Returns
+    -------
+    str
+        Normalized text, ready for :data:`_NUMBER_RE`.
+    """
+    cleaned = _normalize_numeric_text(text or "")
+    return _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
+
+
 def _extract_figures_with_percent(text: str) -> List[str]:
     """Pull every figure out of text, keeping a trailing '%' on each.
 
@@ -2864,8 +2911,7 @@ def _extract_figures_with_percent(text: str) -> List[str]:
     List[str]
         Figures as they appear, each with its own '%' if it has one.
     """
-    cleaned = _normalize_numeric_text(text or "")
-    cleaned = _ORDERED_LIST_MARKER_RE.sub(" ", cleaned)
+    cleaned = _cleaned_for_figures(text)
     figures = []
     for m in _NUMBER_RE.finditer(cleaned):
         figure = m.group(1)
@@ -2889,6 +2935,20 @@ def _as_sole_figure(value: Any) -> Tuple[Any, Optional[str]]:
     whitespace; anything else is a named problem, never a partial
     match on whichever figure happened to come first.
 
+    "Exactly one, nothing else" is decided by span coverage, not
+    string equality against the extractor's own canonical spelling:
+    comparing the trimmed cell to the figure string round 38 wrote
+    over-rejected "48.1 %" (a space, or a non-breaking space, before
+    the sign) -- a form the extractor itself already recognizes as
+    percent-suffixed, and the prose and slide-title paths already
+    accept -- because the canonical figure "48.1%" the extractor
+    returns does not literally equal the cell's own spacing. A single
+    figure match whose span runs from the start of the cleaned text
+    to its end (through the percent sign, when it has one, wherever
+    recognized whitespace put it) is "the whole literal" regardless
+    of how that whitespace is spelled; string equality is not needed
+    once coverage is checked directly.
+
     Parameters
     ----------
     value : Any
@@ -2906,11 +2966,22 @@ def _as_sole_figure(value: Any) -> Tuple[Any, Optional[str]]:
     """
     if not isinstance(value, str):
         return value, None
-    stripped = value.strip()
-    normalized = _normalize_numeric_text(stripped)
-    figures = _extract_figures_with_percent(normalized)
-    if len(figures) != 1 or normalized.strip() != figures[0]:
-        return None, f"cell value {value!r} is not a single figure"
+    cleaned = _cleaned_for_figures(value.strip())
+    figures = _extract_figures_with_percent(cleaned)
+    problem = f"cell value {value!r} is not a single figure"
+    if len(figures) != 1:
+        return None, problem
+    match = _NUMBER_RE.search(cleaned)
+    if match is None or match.start() != 0:
+        return None, problem
+    span_end = match.end()
+    if figures[0].endswith("%"):
+        percent_end = _percent_sign_end(cleaned, span_end)
+        if percent_end is None:
+            return None, problem
+        span_end = percent_end
+    if span_end != len(cleaned):
+        return None, problem
     return figures[0], None
 
 
