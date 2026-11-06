@@ -488,6 +488,27 @@ async def update_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, An
     # Update project
     success = await server.project_registry.update_project(project_id, updates)
 
+    # Issue #896: the same stale-cached-client gap #888 fixed for
+    # add_project's sqlite re-registration branch. The registry write
+    # above is persisted but never reaches an already-loaded,
+    # cached client -- _get_or_create_context returns a cached
+    # context unchanged, and switch_project on its own does not
+    # rebuild one. Evicting here makes the next switch_project
+    # rebuild fresh from the just-updated provider_config.
+    if success and "provider_config" in updates and hasattr(server, "project_manager"):
+        await server.project_manager.invalidate_context(project_id)
+        # If project_id was already the ACTIVE project, the eviction
+        # above just orphaned it -- active_project_id still names it,
+        # but its context is gone, so get_kanban_client() now returns
+        # None, and the server's own kanban_client attribute (never
+        # reassigned here otherwise) would keep holding the stale,
+        # pre-eviction client. Unlike add_project, update_project has
+        # no make_active path that might rebuild it later -- rebuild
+        # immediately whenever this is the active project.
+        if server.project_manager.active_project_id == project_id:
+            await server.project_manager.switch_project(project_id)
+            server.kanban_client = await server.project_manager.get_kanban_client()
+
     if success:
         # Get updated project
         project = await server.project_registry.get_project(project_id)
