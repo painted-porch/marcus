@@ -3849,3 +3849,129 @@ class TestCodexFindingUnusedDerivedInputIsRejected:
             unit="plain",
         )
         assert check_claims([c], sources)[0].verdict == "verified"
+
+
+class TestCodexFindingManifestCountAndPlainUnitsSurviveInference:
+    """A manifest unit of "count" or "plain" was discarded on the
+    way through _column_unit_from_manifest (which only ever returned
+    "fraction" or "percent"), so a manifest-declared count column
+    fell back to the column-name heuristic, which guessed "fraction"
+    -- "Maize record count is 6000% [c1]." against an n_records of
+    60 (the manifest says "count") verified, and so did the slide.
+    """
+
+    COUNT_SOURCES = {"metrics.json": {"n_records": 60}}
+    COUNT_UNITS = {"metrics.json": {"n_records": "count"}}
+
+    @pytest.mark.unit
+    def test_a_percent_literal_against_a_count_claim_never_matches(self):
+        c = Claim(
+            id="c1",
+            value=60,
+            label="maize record count",
+            kind="lookup",
+            source="metrics.json",
+            key="n_records",
+        )
+        res = check_claims(
+            [c],
+            self.COUNT_SOURCES,
+            report_text="Maize record count is 6000% [c1].",
+            units=self.COUNT_UNITS,
+        )
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_the_bare_count_figure_still_passes(self):
+        c = Claim(
+            id="c1",
+            value=60,
+            label="maize record count",
+            kind="lookup",
+            source="metrics.json",
+            key="n_records",
+        )
+        res = check_claims(
+            [c],
+            self.COUNT_SOURCES,
+            report_text="Maize record count is 60 [c1].",
+            units=self.COUNT_UNITS,
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+
+class TestCodexFindingLabelMustNameTheRightMetricToo:
+    """The label check covered row identity and unit, but not which
+    metric: a lookup of crop=maize:mean_ape labelled "maize median
+    APE" verified "Maize median APE is 20 [c1]." against mean_ape
+    20.0, and a slide would inherit the wrong heading. mean_ape and
+    median_ape share a token ("ape"), so the fix cannot just be
+    "mentioning your own column excuses mentioning another" the way
+    the row check works -- it has to compare what distinguishes the
+    two columns specifically.
+    """
+
+    PER_CROP_SOURCES = {
+        "per_crop.csv": [
+            {"crop": "maize", "mean_ape": 20.0, "median_ape": 15.0},
+            {"crop": "cotton", "mean_ape": 10.0, "median_ape": 8.0},
+        ]
+    }
+
+    @pytest.mark.unit
+    def test_a_label_naming_the_sibling_metric_is_rejected(self):
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize median APE",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape",
+        )
+        res = check_claims([c], self.PER_CROP_SOURCES)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+    @pytest.mark.unit
+    def test_a_label_naming_its_own_metric_still_passes(self):
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize mean APE",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape",
+        )
+        assert check_claims([c], self.PER_CROP_SOURCES)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_a_label_with_no_metric_word_at_all_still_passes(self):
+        """The rule detects contradiction, not absence -- a label
+        that names only the row, not any metric, is left alone."""
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape",
+        )
+        assert check_claims([c], self.PER_CROP_SOURCES)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_a_single_input_derived_claim_gets_the_same_metric_check(self):
+        """Round 23 gave the row check this scope first; the metric
+        check gets it too, since expr "a" with one input is a lookup
+        wearing a different kind."""
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize median APE",
+            kind="derived",
+            expr="a",
+            inputs={"a": "per_crop.csv:crop=maize:mean_ape"},
+            unit="percent",
+        )
+        res = check_claims([c], self.PER_CROP_SOURCES)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"

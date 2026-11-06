@@ -650,6 +650,100 @@ def _words_in(text: str) -> Set[str]:
     return set(re.findall(r"[a-z0-9/]+", (text or "").lower()))
 
 
+#: Groups of words a report's prose uses interchangeably for the
+#: same metric concept a staged column name abbreviates -- "mean" and
+#: "average" for a column ending "_ape", "n"/"records" and "count"
+#: for a row-count column. Mapped to one canonical token per group so
+#: a label's own words and a column's own name-derived tokens can be
+#: compared on equal footing.
+_METRIC_TOKEN_ALIASES: Dict[str, str] = {
+    "mean": "mean",
+    "average": "mean",
+    "median": "median",
+    "min": "min",
+    "minimum": "min",
+    "max": "max",
+    "maximum": "max",
+    "total": "total",
+    "sum": "total",
+    "count": "count",
+    "n": "count",
+    "record": "count",
+    "records": "count",
+    "share": "share",
+    "rate": "share",
+    "pct": "share",
+    "percent": "share",
+}
+
+
+def _metric_tokens(column: str) -> Set[str]:
+    """Canonical metric-concept tokens a staged column name carries.
+
+    Splits on underscore and maps each piece through
+    :data:`_METRIC_TOKEN_ALIASES`, so ``"mean_ape"`` and a label
+    saying "average APE" share a token even though the words differ.
+
+    Parameters
+    ----------
+    column : str
+        A staged column name, e.g. ``"mean_ape"`` or ``"n_records"``.
+
+    Returns
+    -------
+    Set[str]
+        One canonical token per underscore-separated piece.
+    """
+    return {_METRIC_TOKEN_ALIASES.get(p, p) for p in column.lower().split("_") if p}
+
+
+def _metric_contradiction(
+    label_words: Set[str], own_column: str, row: Dict[str, Any]
+) -> Optional[str]:
+    """Report a label naming a sibling column's metric, not its own.
+
+    The row check's "naming every owned row earns the right to
+    mention a sibling" rule does not transfer directly here, because
+    two metric columns of the same table routinely share a token
+    (``mean_ape`` and ``median_ape`` both carry "ape") without being
+    the same metric -- a shared token must never excuse mentioning
+    the other column's own, distinguishing word. Each sibling column
+    is compared individually: the tokens that distinguish it from
+    ``own_column`` (its own tokens minus the shared ones) are what a
+    label is never allowed to name unless it also names the token
+    that distinguishes ``own_column`` right back.
+
+    Parameters
+    ----------
+    label_words : Set[str]
+        The claim's own label, tokenized by :func:`_words_in`.
+    own_column : str
+        The column the claim's address actually selects.
+    row : Dict[str, Any]
+        One row of the source table, for its column names.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the contradiction, or ``None``.
+    """
+    own_tokens = _metric_tokens(own_column)
+    label_tokens = {_METRIC_TOKEN_ALIASES.get(w, w) for w in label_words}
+    for column in row:
+        if column == own_column:
+            continue
+        sibling_tokens = _metric_tokens(column)
+        own_only = own_tokens - sibling_tokens
+        sibling_only = sibling_tokens - own_tokens
+        if not sibling_only:
+            continue
+        if (sibling_only & label_tokens) and not (own_only & label_tokens):
+            return (
+                f"label names the {column!r} metric but the claim reads {own_column!r}"
+            )
+    return None
+
+
 #: A closing or opening quotation mark a writer's model might use,
 #: named by codepoint rather than written as a literal glyph -- see
 #: the Unicode block above for why.
@@ -1003,6 +1097,15 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
         if other and other.lower() in label_words:
             return f"label says {other!r} but the claim reads " f"{sel_col}={sel_val!r}"
 
+    # A label naming a different metric of the same row -- "maize
+    # median APE" for a claim that actually reads mean_ape. The row
+    # check above only catches a different crop; this catches a
+    # different column of the correct one.
+    own_column = parts[-1]
+    metric_contradiction = _metric_contradiction(label_words, own_column, rows[0])
+    if metric_contradiction:
+        return metric_contradiction
+
     # A different unit appearing in the label. Units are compared as
     # token sets so spacing around the slash does not matter.
     unit_cols = [c for c in rows[0] if c.lower() in ("unit", "units")]
@@ -1108,6 +1211,24 @@ def _derived_label_contradiction(
                     f"label says {other!r} but the claim reads "
                     f"{sel_col}={sorted(owned)!r}"
                 )
+
+    # Metric identity, the same way label_contradiction checks it for
+    # a lookup -- scoped to a single-input claim, the same scope
+    # round 23 gave the row check first, since a multi-input
+    # expression combines more than one metric and "the metric" is
+    # not a single thing to compare a label against.
+    addresses = [a for a in inputs.values() if isinstance(a, str)]
+    if len(addresses) == 1:
+        parts = addresses[0].split(":")
+        if len(parts) >= 3 and "=" in parts[1]:
+            rows = sources.get(parts[0])
+            if isinstance(rows, list) and rows:
+                own_column = parts[-1]
+                metric_contradiction = _metric_contradiction(
+                    label_words, own_column, rows[0]
+                )
+                if metric_contradiction:
+                    return metric_contradiction
     return None
 
 
@@ -1669,21 +1790,26 @@ def _column_unit_from_manifest(
     ``numeric_stage.stage_case``, retained outside the writer's
     workspace the same way the trusted hash manifest is), so it
     takes priority over the column-name heuristic whenever it
-    declares an address's file and column.
+    declares an address's file and column -- carried through exactly
+    as declared, including ``"count"`` or ``"plain"``, neither of
+    which is percent-scale at all: discarding those two and falling
+    back to the column-name heuristic (which only ever answers
+    "fraction" or "percent") is how a manifest-declared count column
+    like ``n_records`` ended up guessed as a fraction.
 
     Parameters
     ----------
     units : Optional[Dict[str, Dict[str, str]]]
-        ``{file: {column: "fraction"|"percent"}}``, or ``None``/empty
-        when no manifest is available.
+        ``{file: {column: unit}}``, or ``None``/empty when no
+        manifest is available.
     address : str
         A staged address, e.g. ``"metrics.json:median_ape"``.
 
     Returns
     -------
     Optional[str]
-        ``"fraction"`` or ``"percent"`` when the manifest declares
-        this address's file and column, otherwise ``None``.
+        The manifest's own declared unit for this address's file and
+        column, otherwise ``None``.
     """
     if not units or ":" not in address:
         return None
@@ -1695,7 +1821,7 @@ def _column_unit_from_manifest(
     if not isinstance(file_units, dict):
         return None
     unit = file_units.get(column)
-    return unit if unit in ("fraction", "percent") else None
+    return unit if unit in _VALID_CLAIM_UNITS else None
 
 
 def _inferred_claim_unit(
@@ -1745,8 +1871,11 @@ def _inferred_claim_unit(
     Returns
     -------
     Optional[str]
-        ``"fraction"`` or ``"percent"``, or ``None`` when neither an
-        explicit declaration nor the claim's own addressing settles it.
+        ``"fraction"``, ``"percent"``, ``"count"``, or ``"plain"``
+        (the last two only ever from the manifest, since a lookup
+        may only declare "fraction" or "percent" itself), or
+        ``None`` when neither an explicit declaration nor the
+        claim's own addressing settles it.
     """
     if claim.kind in ("derived", "consistency"):
         return claim.unit if claim.unit in ("fraction", "percent") else None
@@ -1828,6 +1957,17 @@ def _percent_aware_match(
             f"figure {figure!r} carries a percent sign, but whether the "
             f"claim it is checked against is a fraction or already a "
             f"percent could not be determined"
+        )
+    if unit not in ("fraction", "percent"):
+        # "count" and "plain" are never percent-scale at all -- a
+        # percent-suffixed figure against one of these is wrong by
+        # construction, not a scale question to settle either way.
+        # "Maize record count is 6000% [c1]." against a count of 60
+        # must never match, whatever 6000% is divided or taken as.
+        return False, (
+            f"figure {figure!r} carries a percent sign, but the claim it "
+            f"is checked against is {unit!r}-valued, which is never "
+            f"percent-scale"
         )
     try:
         raw = float(figure[:-1].replace(",", ""))
