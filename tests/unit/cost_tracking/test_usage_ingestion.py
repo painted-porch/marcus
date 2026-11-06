@@ -210,6 +210,72 @@ class TestIngestUsageRecords:
         assert row[0] is None
 
 
+class TestDedupKeyHasNoDelimiterAmbiguity:
+    """Codex review (round 1 on #867): the dedup key must not collide
+    across two genuinely different calls just because a ':' inside
+    one field lines up with a ':' the key's own encoding adds."""
+
+    def test_colon_inside_agent_id_vs_seq_do_not_collide(self, tmp_path: Path) -> None:
+        """(run_id='run', agent_id='worker:1', seq='2') and
+        (run_id='run', agent_id='worker', seq='1:2') naively both
+        encode as "run:worker:1:2" when joined with ':' -- they must
+        be treated as two distinct calls, not one accepted and one
+        silently reported as a duplicate."""
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ack = ingest_usage_records(
+            store,
+            "project-A",
+            [
+                _record(run_id="run", agent_id="worker:1", seq="2"),
+                _record(run_id="run", agent_id="worker", seq="1:2"),
+            ],
+        )
+
+        assert ack.accepted == 2
+        assert ack.already_present == 0
+        count = store.conn.execute(
+            "SELECT COUNT(*) FROM token_events WHERE run_id = 'run'"
+        ).fetchone()[0]
+        assert count == 2
+
+
+class TestApiFieldRoundTrips:
+    """Codex review (round 1 on #867): the agreed shape's `api` field
+    (e.g. "anthropic-messages") must not be silently dropped."""
+
+    def test_api_is_persisted_and_readable(self, tmp_path: Path) -> None:
+        store = CostStore(db_path=tmp_path / "costs.db")
+
+        ingest_usage_records(store, "project-A", [_record(api="anthropic-messages")])
+
+        row = store.conn.execute(
+            "SELECT api FROM token_events WHERE run_id = ?",
+            ("20261105T213906",),
+        ).fetchone()
+        assert row[0] == "anthropic-messages"
+
+
+class TestProjectIdIsCanonicalized:
+    """Codex review (round 1 on #867): a dashed ProjectRegistry id
+    must be normalized the same way PlannerContext and
+    WorkerJSONLIngester already do, or this API's rows silently
+    split off into their own, invisible half of the project's
+    ledger."""
+
+    def test_dashed_project_id_is_stored_canonical(self, tmp_path: Path) -> None:
+        store = CostStore(db_path=tmp_path / "costs.db")
+        dashed = "550e8400-e29b-41d4-a716-446655440000"
+
+        ingest_usage_records(store, dashed, [_record()])
+
+        row = store.conn.execute(
+            "SELECT project_id FROM token_events WHERE run_id = ?",
+            ("20261105T213906",),
+        ).fetchone()
+        assert row[0] == dashed.replace("-", "")
+
+
 class TestRejectsMalformedInputByName:
     """Codex review (round 1 on #867): reject malformed input instead
     of defaulting it. A bad timestamp must not silently stamp "now"

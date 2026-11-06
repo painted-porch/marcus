@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
+from src.cost_tracking.cost_recorder import canonical_project_id
 from src.cost_tracking.cost_store import CostStore, TokenEvent
 
 #: Where a call falls relative to the agent's claimed task, when known.
@@ -176,9 +177,22 @@ class BatchAck:
 
 
 def _request_id(record: UsageRecord) -> str:
-    """Deterministic dedup key: (run_id, agent_id, seq)."""
-    key = f"{record.run_id}:{record.agent_id}:{record.seq}"
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+    """Deterministic dedup key: (run_id, agent_id, seq).
+
+    Codex review, round 1 on PR #867: a plain ``":"``-joined string
+    is ambiguous -- ``("run", "worker:1", "2")`` and
+    ``("run", "worker", "1:2")`` both join to ``"run:worker:1:2"``
+    and would silently collide. A length-prefixed encoding (each
+    component as ``len(component)`` followed by a null byte and the
+    component's own bytes) makes the three-way split unambiguous
+    regardless of what characters any component contains.
+    """
+    parts = (record.run_id, record.agent_id, record.seq)
+    encoded = b"".join(
+        f"{len(part.encode('utf-8'))}\0".encode("utf-8") + part.encode("utf-8")
+        for part in parts
+    )
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _parse_timestamp(raw: str) -> Optional[datetime]:
@@ -253,7 +267,13 @@ def ingest_usage_records(
     project_id : str
         The Marcus project every record in this batch belongs to.
         Not carried per-record: a caller already knows which project
-        its own run is registered under.
+        its own run is registered under. Normalized to the canonical
+        dashless form (:func:`canonical_project_id`) before storage,
+        the same normalization ``PlannerContext`` and
+        ``WorkerJSONLIngester`` already apply -- a caller-supplied
+        dashed ``ProjectRegistry`` id would otherwise split this
+        project's ledger into two halves ``CostAggregator`` never
+        joins back together.
     records : Sequence[UsageRecord]
         The batch to ingest, in the issue #742 shape.
     batch_id : Optional[str]
@@ -269,6 +289,9 @@ def ingest_usage_records(
         were already present (an idempotent replay), and which were
         rejected and why.
     """
+    canonical_pid = canonical_project_id(project_id)
+    project_id = canonical_pid if canonical_pid is not None else project_id
+
     if batch_id is None:
         if records:
             batch_id = hashlib.sha256(
@@ -362,6 +385,7 @@ def ingest_usage_records(
             reported_usd=record.usd,
             priced_by=record.priced_by,
             reasoning_tokens=record.reasoning_tokens,
+            api=record.api,
             timestamp=timestamp,
         )
         store.record_event(event)

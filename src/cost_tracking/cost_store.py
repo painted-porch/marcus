@@ -185,7 +185,10 @@ CREATE TABLE IF NOT EXISTS token_events (
   -- ``reasoning_tokens``: billed as output by most providers but
   -- tracked separately where the caller's own ledger distinguishes
   -- it (pi does).
-  reasoning_tokens      INTEGER
+  reasoning_tokens      INTEGER,
+  -- ``api``: the call's own API/endpoint label, when the caller's
+  -- ledger carries one (e.g. 'anthropic-messages').
+  api                   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_te_run       ON token_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_te_project   ON token_events(project_id);
@@ -439,6 +442,7 @@ class TokenEvent:
     reported_usd: Optional[float] = None
     priced_by: Optional[str] = None
     reasoning_tokens: Optional[int] = None
+    api: Optional[str] = None
 
 
 @dataclass
@@ -929,6 +933,7 @@ class CostStore:
         ("reported_usd", "REAL"),
         ("priced_by", "TEXT"),
         ("reasoning_tokens", "INTEGER"),
+        ("api", "TEXT"),
     )
 
     def _usage_ingestion_migration(self) -> None:
@@ -1021,9 +1026,9 @@ class CostStore:
                 cache_read_tokens, output_tokens, latency_ms, session_id,
                 turn_index, request_id, status, error_type, was_retry,
                 retry_reason, attribution, reported_by, basis,
-                reported_usd, priced_by, reasoning_tokens, timestamp
+                reported_usd, priced_by, reasoning_tokens, api, timestamp
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?,
                       COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))
             """,
             (
@@ -1056,6 +1061,7 @@ class CostStore:
                 event.reported_usd,
                 event.priced_by,
                 event.reasoning_tokens,
+                event.api,
                 event.timestamp.isoformat() if event.timestamp else None,
             ),
         )
