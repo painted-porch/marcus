@@ -63,8 +63,13 @@ See the next section for why.
 
 ### Today's state
 
-As of this writing, K2's registration is a decided Recommendation; its field on `ProjectConfig` has not shipped yet.
-The two extensions that exist today (the AI-citation verifier and the numerical-report verifier) both construct their project's record directly in Python and call `registry.add_project()` — the same mechanism, used in-process rather than through a tool call.
+K2 is Accepted, and `ProjectConfig.task_type_registrations` (#831) is the field your declaration lives on.
+The two extensions that exist today (the AI-citation verifier and the numerical-report verifier) both construct their project's record directly in Python and call `registry.add_project()` — the same mechanism, used in-process rather than through a tool call. Writing your own declaration there today works the same way.
+
+**What writing a registration does not yet do.** Having a registration on the project record does not, by itself, make the kernel's own evidence and handoff mechanisms recognize your task types. `_apply_typed_evidence_gate` and the evidence-handoff path in `src/marcus_mcp/tools/task.py` still check a task's type against two hardcoded sets — `EVIDENCE_REQUIRED_TASK_TYPES = {"find", "verify", "synthesize"}` and that set plus `"approve"` — not against any project's registration.
+Concretely: a custom task type like `"check"` can report `completed` with no evidence at all and nothing refuses it, and evidence your worker does submit, matching your own `output_schema`, never reaches a dependent task through the handoff, because neither mechanism looks at an unrecognized type.
+Tracked as [#830](https://github.com/painted-porch/marcus/issues/830), sequenced after #831.
+Until it lands, reuse the `find`/`verify`/`synthesize`/`approve` names if you need the kernel's typed-evidence gate and handoff, the same way the eligibility restriction above also currently requires reusing `find`/`verify`.
 Check ADR-0013's K2 section for the current implementation status before you build against it.
 
 ## What an extension must never do: the pull model (ADR-0013 K4, K8)
