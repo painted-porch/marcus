@@ -30,7 +30,7 @@ class TestTaskDecompositionIntegration(BaseTestCase):
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-    async def test_complete_decomposition_workflow(self):
+    async def test_complete_decomposition_workflow(self, tmp_path):
         """
         Test the complete decomposition workflow:
         1. Decompose task into subtasks
@@ -83,13 +83,13 @@ class TestTaskDecompositionIntegration(BaseTestCase):
         assert len(decomposition["subtasks"]) > 2  # Including auto integration subtask
 
         # Step 3: Store subtasks
-        manager = SubtaskManager()
+        manager = SubtaskManager(state_file=tmp_path / "subtasks.json")
         metadata = SubtaskMetadata(
             shared_conventions=decomposition["shared_conventions"],
             decomposed_by="ai",
         )
         subtasks = manager.add_subtasks(
-            parent_task.id, decomposition["subtasks"], metadata
+            parent_task.id, decomposition["subtasks"], metadata=metadata
         )
 
         # Step 4: Test subtask assignment (dependency-aware)
@@ -109,7 +109,9 @@ class TestTaskDecompositionIntegration(BaseTestCase):
         assert second_subtask is not None  # Should get different subtask with no deps
 
         # Complete first subtask
-        manager.update_subtask_status(first_subtask.id, TaskStatus.DONE, "test-agent")
+        manager.update_subtask_status(
+            first_subtask.id, TaskStatus.DONE, assigned_to="test-agent"
+        )
         completed_subtasks.add(first_subtask.id)
 
         # Now should be able to get dependent subtask
@@ -126,7 +128,7 @@ class TestTaskDecompositionIntegration(BaseTestCase):
                 break
 
             manager.update_subtask_status(
-                next_subtask.id, TaskStatus.DONE, "test-agent"
+                next_subtask.id, TaskStatus.DONE, assigned_to="test-agent"
             )
             completed_subtasks.add(next_subtask.id)
 
@@ -138,7 +140,7 @@ class TestTaskDecompositionIntegration(BaseTestCase):
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-    async def test_subtask_to_task_conversion(self):
+    async def test_subtask_to_task_conversion(self, tmp_path):
         """Test converting a subtask to a Task for assignment."""
         # Create parent task
         parent_task = self.create_sample_task(
@@ -149,7 +151,7 @@ class TestTaskDecompositionIntegration(BaseTestCase):
         )
 
         # Create subtask
-        manager = SubtaskManager()
+        manager = SubtaskManager(state_file=tmp_path / "subtasks.json")
         subtasks_data = [
             {
                 "name": "Subtask 1",
@@ -162,7 +164,9 @@ class TestTaskDecompositionIntegration(BaseTestCase):
             }
         ]
         metadata = SubtaskMetadata(shared_conventions={}, decomposed_by="test")
-        subtasks = manager.add_subtasks(parent_task.id, subtasks_data, metadata)
+        subtasks = manager.add_subtasks(
+            parent_task.id, subtasks_data, metadata=metadata
+        )
 
         # Convert to Task
         converted_task = convert_subtask_to_task(subtasks[0], parent_task)
@@ -179,13 +183,13 @@ class TestTaskDecompositionIntegration(BaseTestCase):
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-    async def test_parent_auto_completion_with_kanban(self):
+    async def test_parent_auto_completion_with_kanban(self, tmp_path):
         """Test parent task auto-completion updates kanban."""
         # Create parent task
         parent_task = self.create_sample_task(id="parent-003", name="Parent")
 
         # Create subtasks
-        manager = SubtaskManager()
+        manager = SubtaskManager(state_file=tmp_path / "subtasks.json")
         subtasks_data = [
             {
                 "name": f"Subtask {i}",
@@ -199,11 +203,15 @@ class TestTaskDecompositionIntegration(BaseTestCase):
             for i in range(3)
         ]
         metadata = SubtaskMetadata(shared_conventions={}, decomposed_by="test")
-        subtasks = manager.add_subtasks(parent_task.id, subtasks_data, metadata)
+        subtasks = manager.add_subtasks(
+            parent_task.id, subtasks_data, metadata=metadata
+        )
 
         # Complete all subtasks
         for subtask in subtasks:
-            manager.update_subtask_status(subtask.id, TaskStatus.DONE, "test-agent")
+            manager.update_subtask_status(
+                subtask.id, TaskStatus.DONE, assigned_to="test-agent"
+            )
 
         # Mock kanban client
         mock_kanban = AsyncMock()
@@ -226,13 +234,13 @@ class TestTaskDecompositionIntegration(BaseTestCase):
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-    async def test_subtask_progress_updates_parent(self):
+    async def test_subtask_progress_updates_parent(self, tmp_path):
         """Test that subtask progress updates are reflected in parent."""
         # Create parent task
         parent_task = self.create_sample_task(id="parent-004", name="Parent")
 
         # Create subtasks
-        manager = SubtaskManager()
+        manager = SubtaskManager(state_file=tmp_path / "subtasks.json")
         subtasks_data = [
             {
                 "name": f"Subtask {i}",
@@ -246,7 +254,9 @@ class TestTaskDecompositionIntegration(BaseTestCase):
             for i in range(4)
         ]
         metadata = SubtaskMetadata(shared_conventions={}, decomposed_by="test")
-        subtasks = manager.add_subtasks(parent_task.id, subtasks_data, metadata)
+        subtasks = manager.add_subtasks(
+            parent_task.id, subtasks_data, metadata=metadata
+        )
 
         # Mock kanban client
         mock_kanban = AsyncMock()
@@ -254,7 +264,9 @@ class TestTaskDecompositionIntegration(BaseTestCase):
 
         # Complete subtasks one by one and verify progress
         for i, subtask in enumerate(subtasks):
-            manager.update_subtask_status(subtask.id, TaskStatus.DONE, "test-agent")
+            manager.update_subtask_status(
+                subtask.id, TaskStatus.DONE, assigned_to="test-agent"
+            )
 
             await update_subtask_progress_in_parent(
                 parent_task.id,
@@ -270,7 +282,7 @@ class TestTaskDecompositionIntegration(BaseTestCase):
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-    async def test_find_next_available_subtask_with_assignments(self):
+    async def test_find_next_available_subtask_with_assignments(self, tmp_path):
         """Test finding next subtask respects already-assigned tasks."""
         # Create parent task
         parent_task = self.create_sample_task(id="parent-005", name="Parent")
@@ -279,7 +291,7 @@ class TestTaskDecompositionIntegration(BaseTestCase):
         project_tasks = [parent_task]
 
         # Create subtasks
-        manager = SubtaskManager()
+        manager = SubtaskManager(state_file=tmp_path / "subtasks.json")
         subtasks_data = [
             {
                 "name": f"Subtask {i}",
@@ -293,7 +305,12 @@ class TestTaskDecompositionIntegration(BaseTestCase):
             for i in range(3)
         ]
         metadata = SubtaskMetadata(shared_conventions={}, decomposed_by="test")
-        subtasks = manager.add_subtasks(parent_task.id, subtasks_data, metadata)
+        subtasks = manager.add_subtasks(
+            parent_task.id,
+            subtasks_data,
+            project_tasks=project_tasks,
+            metadata=metadata,
+        )
 
         # Find first subtask for parent-005
         assigned_ids: set[str] = set()
@@ -307,7 +324,7 @@ class TestTaskDecompositionIntegration(BaseTestCase):
         assigned_ids.add(first.id)
 
         # Complete first subtask to allow others to proceed
-        manager.update_subtask_status(first.id, TaskStatus.DONE, "agent-1")
+        manager.update_subtask_status(first.id, TaskStatus.DONE, assigned_to="agent-1")
         completed_ids: set[str] = set([first.id])
 
         # Now find another subtask (should be available)
@@ -348,7 +365,9 @@ class TestSubtaskManagerPersistence(BaseTestCase):
                 }
             ]
             metadata = SubtaskMetadata(shared_conventions={}, decomposed_by="test")
-            subtasks = manager.add_subtasks("parent-1", subtasks_data, metadata)
+            subtasks = manager.add_subtasks(
+                "parent-1", subtasks_data, metadata=metadata
+            )
 
             # Verify state file exists and has content
             assert os.path.exists(temp_file.name)

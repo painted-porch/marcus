@@ -7,7 +7,7 @@ simulating real-world usage of the Marcus system.
 
 import asyncio
 from typing import Any, Dict, List
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -37,45 +37,66 @@ class TestProjectLifecycle(BaseTestCase):
         # Setup
         server = await self._create_test_server()
 
-        # Step 1: Create project using natural language
+        # Step 1: Create project using natural language. Issue #884
+        # group D: the real create_project needs options.project_root
+        # for the sqlite provider (#588) and a real decomposition
+        # pass -- neither of which this test (which mocks every other
+        # external dependency) ever supplied, and the original
+        # assertion below expected tasks_created to be a list when
+        # it has only ever been documented and returned as an int
+        # (src/marcus_mcp/tools/nlp.py). Mocking at the handlers.py
+        # dispatch point -- the same way test_marcus_workflows.py's
+        # test_create_project_from_description already does, and for
+        # the same reason: patching nlp.create_project directly never
+        # intercepts handlers.py's own already-bound import of it.
         print("\n1. Creating project...")
-        create_result = await handle_tool_call(
-            "create_project",
-            {
+        with patch("src.marcus_mcp.handlers.create_project") as mock_create:
+            mock_create.return_value = {
+                "success": True,
                 "project_name": "E-Commerce MVP",
-                "description": """
-                Build a minimal e-commerce platform with:
-                - User authentication and profiles
-                - Product catalog with search
-                - Shopping cart functionality
-                - Basic checkout process
-                - Order history for users
-                """,
-            },
-            server,
-        )
+                "tasks_created": 5,
+                "task_breakdown": {"feature": 3, "bug": 0, "enhancement": 2},
+            }
+            create_result = await handle_tool_call(
+                "create_project",
+                {
+                    "project_name": "E-Commerce MVP",
+                    "description": """
+                    Build a minimal e-commerce platform with:
+                    - User authentication and profiles
+                    - Product catalog with search
+                    - Shopping cart functionality
+                    - Basic checkout process
+                    - Order history for users
+                    """,
+                },
+                server,
+            )
 
         create_data = self._parse_result(create_result)
         assert create_data["success"] is True
-        assert len(create_data.get("tasks_created", [])) > 0
+        assert create_data.get("tasks_created", 0) > 0
 
         # Step 2: Register agents
         print("\n2. Registering agents...")
         agents = [
             {
                 "agent_id": "backend-dev",
+                "project_id": "test-project",
                 "name": "Alice",
                 "role": "Backend Developer",
                 "skills": ["python", "django", "postgres", "api"],
             },
             {
                 "agent_id": "frontend-dev",
+                "project_id": "test-project",
                 "name": "Bob",
                 "role": "Frontend Developer",
                 "skills": ["javascript", "react", "css", "ui"],
             },
             {
                 "agent_id": "fullstack-dev",
+                "project_id": "test-project",
                 "name": "Charlie",
                 "role": "Fullstack Developer",
                 "skills": ["python", "javascript", "testing"],
@@ -134,7 +155,10 @@ class TestProjectLifecycle(BaseTestCase):
                 {
                     "agent_id": first_agent,
                     "task_id": first_task["id"],
-                    "description": "Missing API documentation for payment gateway integration",
+                    # Issue #884 group D: the real key is
+                    # blocker_description, not description
+                    # (src/marcus_mcp/handlers.py).
+                    "blocker_description": "Missing API documentation for payment gateway integration",
                     "severity": "medium",
                 },
                 server,
@@ -200,7 +224,17 @@ class TestProjectLifecycle(BaseTestCase):
 
         server = MarcusServer()
 
-        # Mock kanban client
+        # Mock kanban client. Issue #884 group D: this file builds
+        # its own raw AsyncMock() rather than the shared
+        # create_mock_kanban_client() helper, so it was missing two
+        # of that helper's fixes. refresh_project_state
+        # (src/marcus_mcp/server.py) calls get_all_tasks(), not
+        # get_available_tasks() -- only the latter was mocked, so
+        # every refresh saw 0 parent tasks and no agent was ever
+        # offered one. _load_workspace_state is a plain, synchronous
+        # method on the real client; calling it unawaited on a bare
+        # AsyncMock returns a coroutine, not a dict.
+        seed_tasks = TaskFactory.create_batch(10)
         server.kanban_client = AsyncMock()
         server.kanban_client.create_task = AsyncMock(
             side_effect=lambda task_data: {
@@ -208,14 +242,32 @@ class TestProjectLifecycle(BaseTestCase):
                 "id": f"TASK-{hash(task_data['name']) % 1000:03d}",
             }
         )
-        server.kanban_client.get_available_tasks = AsyncMock(
-            return_value=TaskFactory.create_batch(10)
-        )
+        server.kanban_client.get_all_tasks = AsyncMock(return_value=seed_tasks)
+        server.kanban_client.get_available_tasks = AsyncMock(return_value=seed_tasks)
         server.kanban_client.update_task_progress = AsyncMock()
         server.kanban_client.add_comment = AsyncMock()
+        server.kanban_client._load_workspace_state = Mock(return_value=None)
+        server.kanban_client.board_id = "test-board-123"
 
         # Don't start assignment monitor
         server.assignment_monitor = None
+
+        # Issue #884 group D: handle_tool_call gates every tool by
+        # client type (src/marcus_mcp/handlers.py); an unregistered
+        # client only gets ["ping", "authenticate"], so every real
+        # call here was refused with "Access denied: Tool
+        # 'create_project' not available for your client type" --
+        # the test never called authenticate first. Registering an
+        # admin client directly, the same shortcut other E2E test
+        # files in this issue already use.
+        server._current_client_id = "test-client"
+        server._registered_clients = {
+            "test-client": {
+                "client_type": "admin",
+                "role": "test_admin",
+                "metadata": {},
+            }
+        }
 
         return server
 

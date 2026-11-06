@@ -93,6 +93,11 @@ class TestCompleteAgentLifecycle(BaseTestCase):
             "agent_id": agent_id,
             "name": "Alice Johnson",
             "role": "Fullstack Developer",
+            # Issue #884 group B: register_agent requires project_id
+            # (GH-388/389, src/marcus_mcp/tools/agent.py:190) --
+            # agents are ephemeral and must register with the project
+            # they are working on. Reusing the test's own board_id.
+            "project_id": "ecommerce-board-123",
             "skills": [
                 "python",
                 "django",

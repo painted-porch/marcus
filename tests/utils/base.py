@@ -223,6 +223,27 @@ class BaseTestCase:
             }
         )
         client.update_task_progress = AsyncMock()
+        # Issue #884 group B: the real _load_workspace_state
+        # (src/integrations/providers/sqlite_kanban.py) is a plain,
+        # synchronous method -- request_next_task calls it with no
+        # await. The base AsyncMock() this client is built from
+        # returns a coroutine for any attribute not explicitly
+        # overridden, so an unawaited call here raised "argument of
+        # type 'coroutine' is not iterable" instead of reading a
+        # workspace state dict. A plain Mock matches the real,
+        # synchronous call shape.
+        client._load_workspace_state = Mock(return_value=None)
+        # Issue #884 group C: refresh_project_state reads
+        # self.kanban_client.board_id as a plain attribute
+        # (src/marcus_mcp/server.py, getattr(..., "board_id",
+        # "unknown")) and logs it via json.dumps. Several callers of
+        # this helper never set board_id afterward, so it stayed an
+        # auto-created AsyncMock attribute -- a Mock object, not a
+        # string -- and broke that json.dumps with "Object of type
+        # AsyncMock is not JSON serializable" the moment any tool
+        # call triggered a state refresh. A plain string default,
+        # overridable per test same as before.
+        client.board_id = "test-board-123"
         return client
 
     def create_mock_ai_engine(self) -> AsyncMock:
