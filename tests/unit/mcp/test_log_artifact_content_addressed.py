@@ -177,6 +177,66 @@ class TestLogArtifactContentAddressed:
         assert state.task_artifacts["task-1"][0]["filename"] == "build-plan.md"
 
 
+class TestLogArtifactContentAddressedFailsLoudly:
+    """Codex review (round 1 on #871): in content-addressed mode the
+    registry record is the artifact's only copy, so a persistence
+    failure must be a real error, never a bare success that quietly
+    discarded the agent's work."""
+
+    @pytest.mark.asyncio
+    async def test_no_active_project_is_a_real_error_not_a_bare_success(
+        self, tmp_path: Path
+    ) -> None:
+        """With no current_project_id to attach the artifact to, the
+        content has nowhere to go -- this must fail, not succeed with
+        content silently dropped."""
+        state = _MockState(tmp_path)
+        state.current_project_id = None
+
+        result = await log_artifact(
+            task_id="task-1",
+            filename="build-plan.md",
+            content="Build the west wall first.",
+            artifact_type="design",
+            project_root=None,
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert "error" in result or "error_response" in result
+        # Nothing should have landed in the registry either.
+        artifacts = await state.project_history_persistence.load_artifacts(
+            "minecraft-project"
+        )
+        assert artifacts == []
+
+    @pytest.mark.asyncio
+    async def test_a_persistence_failure_is_a_real_error_not_a_bare_success(
+        self, tmp_path: Path
+    ) -> None:
+        """When the persistence backend itself raises, log_artifact
+        must propagate that as an error, not report content_stored
+        after the write actually failed."""
+        state = _MockState(tmp_path)
+
+        async def _raise(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("disk full")
+
+        state.project_history_persistence.append_artifact = _raise  # type: ignore[method-assign]
+
+        result = await log_artifact(
+            task_id="task-1",
+            filename="build-plan.md",
+            content="Build the west wall first.",
+            artifact_type="design",
+            project_root=None,
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert "task-1" not in state.task_artifacts
+
+
 class TestLogArtifactFilesystemPathContentFieldIsNone:
     """The original (project_root given) path's records carry no
     content field -- only the new content-addressed path does."""

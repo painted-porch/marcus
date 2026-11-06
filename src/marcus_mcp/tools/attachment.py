@@ -291,6 +291,38 @@ async def log_artifact(
             # Write content to file
             full_path.write_text(content, encoding="utf-8")
 
+        if _content_addressed:
+            # Codex review, round 1 on PR #871: in filesystem mode the
+            # file is already safely on disk by this point, so a
+            # history-persistence failure degrades gracefully -- the
+            # artifact still exists, just undescribed in the registry.
+            # In content-addressed mode the registry IS the only copy;
+            # persist before reporting anything, and if it fails, say
+            # so with a real error rather than a bare success that
+            # discarded the agent's work.
+            try:
+                await _persist_content_addressed_artifact(
+                    task_id=task_id,
+                    filename=filename,
+                    artifact_type=artifact_type,
+                    artifact_path=artifact_path,
+                    content=content,
+                    description=description,
+                    state=state,
+                )
+            except Exception as persist_error:
+                from src.core.error_responses import handle_mcp_tool_error
+
+                logger.error(
+                    f"Content-addressed artifact {filename} was not stored: "
+                    f"{persist_error}"
+                )
+                return handle_mcp_tool_error(
+                    persist_error,
+                    "log_artifact",
+                    {"task_id": task_id, "filename": filename},
+                )
+
         # Initialize task_artifacts if not exists
         if not hasattr(state, "task_artifacts"):
             state.task_artifacts = {}
@@ -359,17 +391,21 @@ async def log_artifact(
         )
         logger.info(log_msg)
 
-        # Persist to project history for post-project analysis
-        await _persist_artifact_to_history(
-            task_id=task_id,
-            filename=filename,
-            artifact_type=artifact_type,
-            artifact_path=artifact_path,
-            full_path=full_path,
-            description=description,
-            state=state,
-            content=content if _content_addressed else None,
-        )
+        # Persist to project history for post-project analysis. A
+        # content-addressed artifact was already persisted (and its
+        # success already confirmed) above, before any other side
+        # effect ran -- persisting it again here would double-write.
+        if not _content_addressed:
+            assert full_path is not None  # guarded by _content_addressed
+            await _persist_artifact_to_history(
+                task_id=task_id,
+                filename=filename,
+                artifact_type=artifact_type,
+                artifact_path=artifact_path,
+                full_path=full_path,
+                description=description,
+                state=state,
+            )
 
         response_data: Dict[str, Any] = {
             "task_id": task_id,
@@ -443,18 +479,20 @@ async def _persist_artifact_to_history(
     filename: str,
     artifact_type: str,
     artifact_path: Path,
-    full_path: Optional[Path],
+    full_path: Path,
     description: Optional[str],
     state: Any,
-    content: Optional[str] = None,
 ) -> None:
     """
     Persist artifact metadata to project history for post-project analysis.
 
-    Stores metadata about the artifact, and -- for a content-addressed
-    artifact (ADR-0013 K8 consequence 1, issue #868's sibling) -- the
-    artifact's own content too, since there is no filesystem copy for
-    this registry to merely describe.
+    Stores metadata about the artifact (not the content) to enable tracing
+    what was produced during project execution. Filesystem mode only --
+    the artifact's actual bytes already live safely at ``full_path``,
+    so a persistence failure here degrades gracefully. A content-
+    addressed artifact (no filesystem copy at all) instead goes
+    through :func:`_persist_content_addressed_artifact`, which must
+    not fail silently, since the registry record IS the only copy.
 
     Parameters
     ----------
@@ -466,18 +504,12 @@ async def _persist_artifact_to_history(
         Type of artifact
     artifact_path : Path
         Relative path to artifact
-    full_path : Optional[Path]
-        Absolute path to artifact, or ``None`` for a content-addressed
-        artifact that was never written to any filesystem.
+    full_path : Path
+        Absolute path to artifact
     description : Optional[str]
         Description of the artifact
     state : Any
         Marcus server state
-    content : Optional[str]
-        The artifact's own content, when it was stored content-
-        addressed rather than written to ``full_path``. Size and hash
-        are computed from this directly rather than by reading a file
-        that does not exist.
 
     Notes
     -----
@@ -499,17 +531,10 @@ async def _persist_artifact_to_history(
         if not hasattr(state, "project_history_persistence"):
             state.project_history_persistence = ProjectHistoryPersistence()
 
-        # Calculate file size and hash for integrity checking. A
-        # content-addressed artifact (no full_path) hashes its own
-        # content string directly rather than reading a file that was
-        # never written.
+        # Calculate file size and hash for integrity checking
         file_size_bytes = 0
         sha256_hash = None
-        if content is not None:
-            content_bytes = content.encode("utf-8")
-            file_size_bytes = len(content_bytes)
-            sha256_hash = hashlib.sha256(content_bytes).hexdigest()
-        elif full_path is not None and full_path.exists():
+        if full_path.exists():
             file_size_bytes = full_path.stat().st_size
             # Calculate SHA256 hash
             sha256 = hashlib.sha256()
@@ -536,13 +561,12 @@ async def _persist_artifact_to_history(
             filename=filename,
             artifact_type=artifact_type,
             relative_path=str(artifact_path),
-            absolute_path=str(full_path) if full_path is not None else "",
+            absolute_path=str(full_path),
             description=description or "",
             file_size_bytes=file_size_bytes,
             sha256_hash=sha256_hash,
             kanban_comment_url=kanban_comment_url,
             project_id=project_id,
-            content=content,
         )
 
         # Persist to project history
@@ -557,3 +581,107 @@ async def _persist_artifact_to_history(
     except Exception as e:
         # Graceful degradation - log but don't fail
         logger.warning(f"Failed to persist artifact to project history: {e}")
+
+
+async def _persist_content_addressed_artifact(
+    task_id: str,
+    filename: str,
+    artifact_type: str,
+    artifact_path: Path,
+    content: str,
+    description: Optional[str],
+    state: Any,
+) -> ArtifactMetadata:
+    """
+    Persist a content-addressed artifact, raising on any failure.
+
+    ADR-0013 K8 consequence 1 (issue #870): when there is no
+    ``project_root``, this registry record is the artifact's only
+    copy -- unlike :func:`_persist_artifact_to_history`, where the
+    file is already safe on disk, swallowing a failure here would
+    report success while silently discarding the agent's work.
+    Raises instead, so the caller returns a real error.
+
+    Parameters
+    ----------
+    task_id : str
+        Task that produced the artifact
+    filename : str
+        Name of the artifact file
+    artifact_type : str
+        Type of artifact
+    artifact_path : Path
+        Relative path the artifact would have used under a
+        ``project_root``, kept for the registry's own ``relative_path``
+        field even though nothing is written there.
+    content : str
+        The artifact's own content.
+    description : Optional[str]
+        Description of the artifact
+    state : Any
+        Marcus server state
+
+    Returns
+    -------
+    ArtifactMetadata
+        The persisted record.
+
+    Raises
+    ------
+    StateConflictError
+        No active project to attach this artifact to.
+    Exception
+        Whatever the persistence backend itself raises, propagated
+        rather than swallowed.
+    """
+    from src.core.error_framework import ErrorContext, StateConflictError
+
+    if not hasattr(state, "current_project_id") or not state.current_project_id:
+        raise StateConflictError(
+            "no active project to attach a content-addressed artifact to",
+            context=ErrorContext(
+                operation="log_artifact_content_addressed",
+                custom_context={"task_id": task_id, "filename": filename},
+            ),
+        )
+
+    project_id = state.current_project_id
+    project_name = getattr(state, "current_project_name", project_id)
+    agent_id = getattr(state, "current_agent_id", "unknown")
+
+    if not hasattr(state, "project_history_persistence"):
+        state.project_history_persistence = ProjectHistoryPersistence()
+
+    content_bytes = content.encode("utf-8")
+    file_size_bytes = len(content_bytes)
+    sha256_hash = hashlib.sha256(content_bytes).hexdigest()
+
+    now = datetime.now(timezone.utc)
+    artifact_id = f"art_{task_id}_{now.timestamp()}"
+
+    artifact_metadata = ArtifactMetadata(
+        artifact_id=artifact_id,
+        task_id=task_id,
+        agent_id=agent_id,
+        timestamp=now,
+        filename=filename,
+        artifact_type=artifact_type,
+        relative_path=str(artifact_path),
+        absolute_path="",
+        description=description or "",
+        file_size_bytes=file_size_bytes,
+        sha256_hash=sha256_hash,
+        project_id=project_id,
+        content=content,
+    )
+
+    # No try/except: a failure here must reach the caller, which
+    # returns it as a real error rather than a bare success.
+    await state.project_history_persistence.append_artifact(
+        project_id, project_name, artifact_metadata
+    )
+
+    logger.info(
+        f"Persisted content-addressed artifact {filename} for project {project_id}"
+    )
+    return artifact_metadata
