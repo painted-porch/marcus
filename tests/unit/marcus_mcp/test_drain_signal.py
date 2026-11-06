@@ -414,7 +414,16 @@ class TestVerdictWhenDrained:
         ]
         state = _state(tasks)
 
-        verdict = await compute_board_drain(state, PROJECT)
+        # Issue #852: phase enforcement is now opt-in per project (K2).
+        # This test is specifically about phase-gate behavior on a
+        # software project, so it declares phases the way a real
+        # project's K2 registration would.
+        with patch(
+            "src.marcus_mcp.coordinator.task_type_registration."
+            "project_declares_phase_order",
+            return_value=True,
+        ):
+            verdict = await compute_board_drain(state, PROJECT)
 
         assert verdict.drained is True
         assert verdict.reason == "blocked"
@@ -464,23 +473,32 @@ class TestVerdictWhenDrained:
         scoped = [stale_impl, done_impl, testing]
         tasks_by_id = {t.id: t for t in scoped}
 
-        allowed_while_stale = apply_board_wide_gates(
-            list(scoped), scoped, tasks_by_id, state
-        )
-        assert testing in allowed_while_stale, (
-            "the bug: the testing task is wrongly offered because the "
-            "just-assigned implementation task still reads TODO in memory"
-        )
+        # Issue #852: phase enforcement is now opt-in per project (K2).
+        # This test is specifically about phase-gate behavior on a
+        # software project, so it declares phases the way a real
+        # project's K2 registration would.
+        with patch(
+            "src.marcus_mcp.coordinator.task_type_registration."
+            "project_declares_phase_order",
+            return_value=True,
+        ):
+            allowed_while_stale = apply_board_wide_gates(
+                list(scoped), scoped, tasks_by_id, state
+            )
+            assert testing in allowed_while_stale, (
+                "the bug: the testing task is wrongly offered because the "
+                "just-assigned implementation task still reads TODO in memory"
+            )
 
-        stale_impl.status = TaskStatus.IN_PROGRESS
-        stale_impl.assigned_to = "agent-1"
+            stale_impl.status = TaskStatus.IN_PROGRESS
+            stale_impl.assigned_to = "agent-1"
 
-        allowed_once_synced = apply_board_wide_gates(
-            list(scoped), scoped, tasks_by_id, state
-        )
-        assert testing not in allowed_once_synced
+            allowed_once_synced = apply_board_wide_gates(
+                list(scoped), scoped, tasks_by_id, state
+            )
+            assert testing not in allowed_once_synced
 
-        fixed_verdict = await compute_board_drain(state, PROJECT)
+            fixed_verdict = await compute_board_drain(state, PROJECT)
         assert fixed_verdict.tasks_claimable == 0
         assert fixed_verdict.tasks_in_flight == 1
         assert fixed_verdict.tasks_unclaimable == 1

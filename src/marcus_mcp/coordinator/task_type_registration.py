@@ -54,6 +54,48 @@ def task_type_registration(
     return project.task_type_registrations.get(task_type)
 
 
+def project_declares_phase_order(state: Any, project_id: Optional[str]) -> bool:
+    """Return whether a project has opted into ADR-0013 K1/K3 phase order.
+
+    Issue #852: phase order (design before implementation before
+    testing before documentation) is a software-project convention,
+    not a kernel default. A board with no such declaration must never
+    have a task held because Marcus *inferred* a phase order the
+    project never declared -- this is the check
+    ``apply_board_wide_gates`` (``src/marcus_mcp/tools/task.py``) makes
+    before running any phase-based filtering at all.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state, passed through to the registration
+        lookup.
+    project_id : Optional[str]
+        The candidate task's own project id (``task.project_id``).
+        ``None`` falls back to the server's active project.
+
+    Returns
+    -------
+    bool
+        ``True`` only when the resolved project's
+        ``enforce_phase_order`` is explicitly ``True``. ``False`` for
+        no project registry, no resolvable project, or a project that
+        has never set the field -- the same "absent means off" default
+        every other K2 declaration in this module already follows.
+    """
+    registry = getattr(state, "project_registry", None)
+    if not isinstance(registry, ProjectRegistry):
+        return False
+    project = (
+        registry.get_project_sync(project_id)
+        if project_id
+        else registry.get_active_project_sync()
+    )
+    if project is None:
+        return False
+    return getattr(project, "enforce_phase_order", False) is True
+
+
 def injected_checks_for_task_type(
     task_type: str, state: Any, project_id: Optional[str]
 ) -> List[Dict[str, str]]:
