@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05; K3, K6 and K7 accepted 2026-11-06**; the other four remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05; K1, K3, K6 and K7 accepted 2026-11-06**; the other three remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -55,7 +55,9 @@ Four findings arrived from the consumers during this drafting and are referenced
 
 ### K1 — What the kernel is
 
-**Recommendation.** The kernel owns the board and nothing that presumes a domain.
+**Accepted 2026-11-06 (Lawrence Gray: "Accept K1", following K3, K6 and K7).**
+
+**Decision.** The kernel owns the board and nothing that presumes a domain.
 
 In the kernel: the task graph and its gates, claiming and self-selection, leases and fencing, the event log, all mutable state under one root, board-mediated communication, and the measurement of coordination quality.
 
@@ -64,10 +66,29 @@ In extensions: decomposition and planning, verification policy, the worktree and
 **Evidence.** The citation verifier runs today with no decomposer and no planner.
 Minecraft runs with no repository, so every git-shaped gate skips, and board-only completion works by a fall-through rather than by contract.
 
-**Alternative.** Keep one program and extract only verification.
+**Alternative, considered and not taken.** Keep one program and extract only verification.
 Cheaper now, and it leaves the software assumptions in the core where three of four consumers must route around them.
 
 **What this rules out.** Any kernel change justified by one consumer's needs alone.
+
+**Why this is accepted now rather than argued from first principles: it is already drawn, nine times over, by decisions that shipped for other reasons.** K1 states the boundary as policy; it did not have to invent it, because every decision accepted before it already put something on one side or the other without citing K1, since K1 did not yet exist. One line each, kernel side first:
+
+- **K2** (how an extension registers). Kernel: the registration record itself (`ProjectConfig.task_type_registrations`), board state with project lifetime, and the pull-based offer that makes it reachable. Extension: the policy declared in that record, and the worker process that pulls work and computes its own verdict — the kernel never calls into it.
+- **K3** (evidence policy is declared, never inferred from labels). Narrower than it first reads: `should_validate_task`'s label vocabulary still decides whether a task enters the validation gate at all, unchanged by this decision (K3's own "What this does not change" paragraph above). Once inside, `validate_implementation_task` gathers evidence and checks `has_source_files()` first; the declaration is consulted only afterward, to skip the resulting no-source-files failure for a registered task type. Kernel: that one skip, keyed on the same K2 registration field. Extension: the declaration itself (`requires_source_tree`) — not a second control channel that opts a task out of validation, only a stated exception to one specific failure inside the gate it was already routed into.
+- **K4** (check authorship). Decided for the kernel: a mechanism that lets a verification extension inject a check the worker did not author, with the required-or-not choice left to the extension as per-type policy. Checking the code while writing this section found that the mechanism itself is not yet built — `ProjectConfig.task_type_registrations` can carry a `checks_injectable` entry today (round-tripped by its own tests), but nothing in the kernel reads it or injects anything. K4's boundary call stands; its kernel-side implementation does not exist yet. Listed as a follow-up below, not fixed here.
+- **K5** (a terminal declined outcome). Kernel: `DECLINED` as a status with its own claimability semantics, extending the same settled/unsettled gate `DONE` and `BLOCKED` already use. Extension: what evidence content makes a claim actually unverifiable — a vocabulary question the kernel's gate never reads.
+- **K6** (write attribution). Kernel: the single rule, and now the single shared lookup (`project_for_agent`), that every write is stamped from the writing agent's registration. Extension: nothing — this is kernel-internal plumbing with no extension-visible surface at all, which is itself evidence the rule belongs there.
+- **K7** (handoff idempotency on redo). Kernel: the re-open path's guarantee that a dependent only ever sees the re-opened task's latest contribution, backed by a durable provenance record. Extension: the evidence shape that gets handed off, not the mechanism that makes a second handoff safe.
+- **K11** (verification is the first cut). Not a boundary line by itself — a sequencing decision about which extension to carve off first — but its own justification is K1's claim stated operationally: the citation verifier already proved an extension detaches cleanly, before this ADR said in words what "detaches cleanly" has to mean.
+- **K12** (offer-time eligibility). Kernel: the exclusion mechanism itself, enforced where `request_next_task` decides what to offer, silent so it cannot be probed. Extension: nothing new — the mechanism runs over data (producer, vendor) the extension already supplied under K2; a second verification extension gets the guarantee without writing it.
+- **K13** (write-consistency). Kernel: the guarantee lives at the `state.kanban_client` boundary, one wrapper applied where the client is assigned, so every caller gets it without earning it. Extension/provider: untouched — `KanbanInterface` and its four implementations stay exactly as decoupled from `MarcusServer` as they were, which is what let standalone tooling (`tow_runner.py`'s seed scripts) keep constructing a provider directly with no server in the process.
+
+Read together, every one of the nine put the *mechanism* in the kernel and the *policy it governs* in the extension — never the reverse, and never a case where an extension needed to reach into kernel internals to get a guarantee it could not otherwise have (K4 and K7 are the two sharpest instances of that specific test, already named where each was decided).
+K1 is therefore not a new argument.
+It is the line those nine already drew, written down once so K8, K9 and K10 — the three still-open proposals, each itself a kernel-scope question — are decided against a stated boundary instead of three separate implicit ones.
+
+**No code change.** This decision is a description of a boundary the shipped code already observes, not a new guarantee to build.
+If writing this section surfaces something that crosses the boundary it describes, that is a found gap for a follow-up issue, not a defect in this decision, and is listed under Related below rather than fixed in this PR.
 
 ### K2 — How an extension registers
 
