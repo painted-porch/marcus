@@ -13,6 +13,17 @@ from src.logging.conversation_logger import conversation_logger
 
 logger = logging.getLogger(__name__)
 
+#: add_project's accepted provider values. Single source of truth for
+#: both the implementation's own validation below and the legacy
+#: stdio schema's advertised enum (handlers.py). Issue #886's review
+#: found provider="sqlite" rejected by the advertised schema before
+#: this function ever ran, the same accepted-value-vs-advertised-
+#: schema drift as #871's project_root and #880's kind argument --
+#: importing this constant instead of a second literal list closes
+#: that gap here for good rather than relying on two lists staying
+#: in sync by habit.
+ADD_PROJECT_PROVIDERS = ["planka", "linear", "github", "sqlite"]
+
 
 async def list_projects(server: Any, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -232,8 +243,116 @@ async def add_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": "name and provider are required"}
 
     # Validate provider
-    if provider not in ["planka", "linear", "github"]:
+    if provider not in ADD_PROJECT_PROVIDERS:
         return {"success": False, "error": f"Invalid provider: {provider}"}
+
+    if provider == "sqlite":
+        # Sqlite's provider_config shape (db_path, project_name,
+        # attachments_dir, project_id) is built by register_sqlite_board,
+        # the sanctioned registration path for a board seeded outside
+        # Marcus's own create_project flow (issue #741). Delegating to
+        # it here, rather than re-deriving that shape, is the actual
+        # fix for #886: add_project could not register a sqlite
+        # project at all, for lack of it.
+        sqlite_project_id = config.get("project_id")
+        db_path = config.get("db_path")
+        if not sqlite_project_id or not db_path:
+            return {
+                "success": False,
+                "error": (
+                    "sqlite provider requires config.project_id and " "config.db_path"
+                ),
+            }
+
+        from src.core.error_responses import handle_mcp_tool_error
+        from src.core.project_registry import register_sqlite_board
+
+        try:
+            project_id = await register_sqlite_board(
+                project_id=sqlite_project_id,
+                db_path=db_path,
+                registry=server.project_registry,
+            )
+        except Exception as e:
+            return handle_mcp_tool_error(e, "add_project", arguments)
+
+        # register_sqlite_board only builds the fields it itself needs
+        # (db_path, project_name, attachments_dir, project_id) -- it
+        # has no concept of project_root, since its own caller (the
+        # Tow experiment runner, issue #741) never has one to give it.
+        # A caller registering an EXISTING board through this tool can
+        # supply one, and silently dropping it would register a
+        # project that comes back less capable than one created
+        # through create_project's own auto-register path: project_root
+        # is what log_artifact's filesystem mode resolves paths
+        # against, and what the software smoke gate needs too.
+        project_root = config.get("project_root")
+        if project_root:
+            registered = await server.project_registry.get_project(project_id)
+            if registered is not None:
+                merged_provider_config = {
+                    **registered.provider_config,
+                    "project_root": project_root,
+                }
+                await server.project_registry.update_project(
+                    project_id, {"provider_config": merged_provider_config}
+                )
+                # The registry write above is pointless if a context
+                # for this project is already cached: switch_project
+                # returns the cached context unchanged, so the
+                # running client would keep serving its old (or
+                # missing) project_root until the server restarts or
+                # the LRU cache evicts it on its own schedule.
+                # Evicting here makes the next switch_project rebuild
+                # fresh from the just-updated provider_config.
+                if hasattr(server, "project_manager"):
+                    await server.project_manager.invalidate_context(project_id)
+                    # Codex round 4: if project_id was already the
+                    # ACTIVE project and make_active is False (no
+                    # switch_project call coming below to rebuild
+                    # it), the eviction above just orphaned it --
+                    # active_project_id still names it, but its
+                    # context is gone, so get_kanban_client() now
+                    # returns None, and the server's own
+                    # kanban_client attribute (only reassigned when
+                    # make_active) still holds the stale pre-eviction
+                    # client. A value invalidated and never replaced,
+                    # the same seam as rounds 1-3 from the other
+                    # side. Rebuild immediately in that one case,
+                    # regardless of make_active, so the invariant
+                    # this whole fix exists for -- after add_project
+                    # returns, the registry, the context manager, and
+                    # the server's client all agree about the
+                    # project's provider_config -- actually holds.
+                    if (
+                        not make_active
+                        and server.project_manager.active_project_id == project_id
+                    ):
+                        await server.project_manager.switch_project(project_id)
+                        server.kanban_client = (
+                            await server.project_manager.get_kanban_client()
+                        )
+
+        conversation_logger.log_pm_decision(
+            decision=f"Registered sqlite project '{project_id}'",
+            rationale="User requested new project configuration",
+            decision_factors={"project_id": project_id, "provider": provider},
+        )
+
+        if make_active:
+            await server.project_manager.switch_project(project_id)
+            server.kanban_client = await server.project_manager.get_kanban_client()
+
+        return {
+            "success": True,
+            "project": {
+                "id": project_id,
+                "name": f"{project_id} - Main Board",
+                "provider": "sqlite",
+                "tags": ["auto-created", "sqlite"],
+                "is_active": make_active,
+            },
+        }
 
     # Create project config
     project = ProjectConfig(
