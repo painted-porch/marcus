@@ -232,8 +232,59 @@ async def add_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "error": "name and provider are required"}
 
     # Validate provider
-    if provider not in ["planka", "linear", "github"]:
+    if provider not in ["planka", "linear", "github", "sqlite"]:
         return {"success": False, "error": f"Invalid provider: {provider}"}
+
+    if provider == "sqlite":
+        # Sqlite's provider_config shape (db_path, project_name,
+        # attachments_dir, project_id) is built by register_sqlite_board,
+        # the sanctioned registration path for a board seeded outside
+        # Marcus's own create_project flow (issue #741). Delegating to
+        # it here, rather than re-deriving that shape, is the actual
+        # fix for #886: add_project could not register a sqlite
+        # project at all, for lack of it.
+        sqlite_project_id = config.get("project_id")
+        db_path = config.get("db_path")
+        if not sqlite_project_id or not db_path:
+            return {
+                "success": False,
+                "error": (
+                    "sqlite provider requires config.project_id and " "config.db_path"
+                ),
+            }
+
+        from src.core.error_responses import handle_mcp_tool_error
+        from src.core.project_registry import register_sqlite_board
+
+        try:
+            project_id = await register_sqlite_board(
+                project_id=sqlite_project_id,
+                db_path=db_path,
+                registry=server.project_registry,
+            )
+        except Exception as e:
+            return handle_mcp_tool_error(e, "add_project", arguments)
+
+        conversation_logger.log_pm_decision(
+            decision=f"Registered sqlite project '{project_id}'",
+            rationale="User requested new project configuration",
+            decision_factors={"project_id": project_id, "provider": provider},
+        )
+
+        if make_active:
+            await server.project_manager.switch_project(project_id)
+            server.kanban_client = await server.project_manager.get_kanban_client()
+
+        return {
+            "success": True,
+            "project": {
+                "id": project_id,
+                "name": f"{project_id} - Main Board",
+                "provider": "sqlite",
+                "tags": ["auto-created", "sqlite"],
+                "is_active": make_active,
+            },
+        }
 
     # Create project config
     project = ProjectConfig(
