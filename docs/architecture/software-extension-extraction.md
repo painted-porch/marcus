@@ -7,16 +7,19 @@ Nothing here changes behavior.
 
 ## Summary
 
-**Total estimate: 37-57 engineer-days** across four concerns, not counting two prerequisites that are each their own separate decision with their own sizing:
+**Total estimate: 37-51 engineer-days** across four concerns, not counting one prerequisite that is its own separate decision with its own sizing:
 
-- K5 (a terminal `DECLINED` status, Accepted but unbuilt) — 3-5 days, blocks the smoke gate's extraction.
 - Full pull-mode dispatch for the validation gate (a "deferred-completion" mechanism that does not exist anywhere in Marcus today) — +8-12 days on top of the validation gate's own 12-18, if attempted in this pass rather than deferred behind a shim.
+
+K5 (a terminal `DECLINED` status) is Accepted **and built**: `request_task_decline` (`task.py:9416-9609`) landed in PR #834 (merged to `develop` as `a162fc90`, after six Codex review rounds).
+What remains is narrower than "build K5": the smoke gate's own escalation path (`_terminalize_escalated_smoke_task`) still fakes a terminal outcome by hand, writing `BLOCKED` and reaching into `agent_tasks`/`assignment_persistence` directly instead of using the now-existing `DECLINED` status and its already-correct release sequence.
+That migration is folded into concern #3's own 8-day estimate below, not a separate prerequisite.
 
 | # | Concern | Engineer-days | Blocked on |
 | --- | --- | --- | --- |
 | 1 | Cost tracking (`src/cost_tracking/`) | 5-8 | Nothing — can start immediately |
 | 2 | Decomposition & planning, clean half (`src/integrations/nlp_task_utils.py`) | 1 | Nothing — can start immediately |
-| 3 | Product smoke gate (`_run_product_smoke_gate` and its callers) | 8-14 | K5 (terminal `DECLINED`), not yet built |
+| 3 | Product smoke gate (`_run_product_smoke_gate` and its callers) | 8 | Nothing — K5 is already built; the ~1 day to migrate the escalation path onto it is folded into this estimate |
 | 4 | Validation gate (`src/ai/validation/`) | 12-18 | Shares `report_task_progress`'s completion path with #3; do not run concurrently with #3 on parallel branches |
 | 5 | Decomposition & planning, hard half (`nlp.py`, `nlp_base.py`) | 11-16 | K10's "explicit-task creation path at runtime," named as open in ADR-0013 but not yet built |
 
@@ -24,9 +27,8 @@ Nothing here changes behavior.
 
 1. **Cost tracking first.** It is the cheapest, the most independent (the vendor-coupled half has zero `src/` callers today), and it builds the generic ingestion-API pattern that K8 consequence 3 needs anyway — doing it first buys a worked example of "registration plus ingestion" at the lowest risk in the whole set.
 2. **The decomposer's clean half in parallel.** `nlp_task_utils.py` touches no kernel state at all and can move almost mechanically; there is no reason to wait for anything else.
-3. **The smoke gate, but only after K5 lands.**
-   K5 (Accepted 2026-11-05) is the terminal `DECLINED` status the smoke gate's own escalation path currently fakes by hand-mutating `agent_tasks`/`assignment_persistence` directly.
-   Extracting the gate before K5 exists means the extension keeps a hand inside kernel assignment state, which fails the same "does an extension need a kernel guarantee modified" test K7 and K4 were decided against.
+3. **The smoke gate.**
+   Nothing blocks it today: migrate `_terminalize_escalated_smoke_task` onto the existing `DECLINED` status and its release sequence first (roughly a day, folded into the 8-day estimate above), then extract the rest of the gate.
 4. **The validation gate, after the smoke gate, not concurrently with it.**
    Both gates are concentrated in the same roughly 240-line region of `report_task_progress` (`src/marcus_mcp/tools/task.py:7867-8110`).
    Attempting both on parallel branches will produce conflicting rewrites of that region.
@@ -142,7 +144,7 @@ This single unbuilt piece is why the validation gate's estimate carries an expli
 ## 3. The product smoke gate
 
 **Code:** `_run_product_smoke_gate` (`task.py:2288-2597`, 310 lines) and `_terminalize_escalated_smoke_task` (`task.py:1494-1558`), plus `src/integrations/product_smoke.py` (~1180 lines, the subprocess/server/probe runner).
-**Sizing: 8 engineer-days if K5 lands first, 14 if the extraction has to work around K5's absence.**
+**Sizing: 8 engineer-days**, including roughly a day to migrate `_terminalize_escalated_smoke_task` onto the existing `DECLINED` status (see below) before the rest of the gate moves.
 
 ### Inventory table: product smoke gate
 
@@ -152,15 +154,16 @@ This single unbuilt piece is why the validation gate's estimate carries an expli
 | ↳ `_gate_unavailable` (closure) | `task.py:2397-2465` | Park the task when the gate cannot run | **Kernel** | `lease_manager.park_for_operator`, `state.log_event("operator_needed")` | **Missing mechanism**: an operator-park response contract any extension could invoke, not just this one |
 | ↳ project-root resolution | `task.py:2467-2495` | Resolve a server-side absolute path | Mixed | `state.kanban_client._load_workspace_state()` | **K8 consequence 1** |
 | ↳ behavior-evidence judgment | `task.py:2514-2547` | Per-product-type evidence bar | Extension | `task.source_context["structural_category"]` only | K4 |
-| **`_terminalize_escalated_smoke_task`** | `task.py:1494-1558` | **The one place this gate mutates kernel task state** | **Kernel** | `kanban_client.update_task` to `BLOCKED`, clears `agent_status`/`agent_tasks`, releases `assignment_persistence` and the lease | **This is K5's `DECLINED` done by hand as `BLOCKED`** — the exact gap K5 was accepted to close |
+| **`_terminalize_escalated_smoke_task`** | `task.py:1494-1558` | **The one place this gate mutates kernel task state** | **Kernel** | `kanban_client.update_task` to `BLOCKED`, clears `agent_status`/`agent_tasks`, releases `assignment_persistence` and the lease | Migrate onto `request_task_decline`'s already-built `DECLINED` status and release sequence (`task.py:9416-9609`, PR #834) — not a missing mechanism, a one-day migration this inventory is flagging |
 | smoke-gate instruction block | `task.py:2852-2890` | Injects "SMOKE GATE REQUIRED" duty text into the prompt | Extension | prompt assembly only | **K8 consequence 2** |
 | `verify_verification_specs`, `VerificationSpec`/`Step`/`Result` | `product_smoke.py` | Subprocess/server/probe runner | Extension | none | No mechanism needed; pure extension logic |
 
-### Why K5 is a hard prerequisite, not a nice-to-have
+### Why the migration, not a prerequisite decision
 
-`_terminalize_escalated_smoke_task` reaches directly into `state.agent_tasks` (`del state.agent_tasks[agent_id]`) and `state.assignment_persistence` to fake a terminal outcome using `BLOCKED`, because no terminal `DECLINED` status exists yet.
-Extracting the smoke gate without K5 landed first means the extension keeps that same hand inside kernel assignment state — precisely the "extension needs a kernel guarantee modified" test K7 and K4 were each decided against, now reproduced a third time.
-Sequence K5 (its own 3-5 days, not counted in this concern's 8-14) before attempting this extraction.
+K5 (a terminal `DECLINED` status) is Accepted and built — `request_task_decline` (`task.py:9416-9609`) landed in PR #834, merged to `develop` as `a162fc90` after six Codex review rounds.
+`_terminalize_escalated_smoke_task` was written before that landed and still reaches directly into `state.agent_tasks` (`del state.agent_tasks[agent_id]`) and `state.assignment_persistence` to fake a terminal outcome by writing `BLOCKED` by hand, rather than using the status and release sequence that already exist for exactly this case.
+This is not a missing kernel capability — it is one function that has not yet been updated to use a capability that already shipped.
+Migrating it (writing `DECLINED` instead of `BLOCKED`, through the same dual-write and best-effort column-move `request_task_decline` already uses) is folded into this concern's 8-day estimate, not sequenced as a separate prerequisite.
 
 ---
 
@@ -233,7 +236,7 @@ This is the complete marking issue #862 asked for, so the eventual module-split'
 | `_apply_approval_gate` | 1181-1241 | Kernel | Principal-based gate on the task graph |
 | `_handoff_evidence_to_dependents` | 1244-1318 | Kernel | Board-mediated communication, K7 handoff |
 | `_apply_handoff_to_dependent` (>100 lines) | 1320-1491 | Kernel | K7's named implementation |
-| `_terminalize_escalated_smoke_task` | 1494-1559 | Mixed | BLOCKED write + release is kernel; exists only to serve the smoke gate's escalation (K5 gap, see §3) |
+| `_terminalize_escalated_smoke_task` | 1494-1559 | Mixed | BLOCKED write + release is kernel; exists only to serve the smoke gate's escalation, and should migrate onto `request_task_decline`'s `DECLINED` status (see §3) |
 | `clear_validation_retry` | 1562-1585 | Mixed | Budget reset is kernel; smoke/validation counters it clears are extension |
 | `get_project_board_context` | 1588-1654 | Kernel | K6 write-attribution lookup |
 | `_response_project_for_task` | 1657-1700 | Kernel | K6 attribution from the task's own project |
@@ -319,7 +322,7 @@ Items that cannot fully move until a specific K8 consequence lands, gathered fro
   All three inject software-specific duty text into every task's prompt, unconditionally.
 - **K8 consequence 3 (cost ingestion API):** the entire §4 vendor-coupled half (`worker_ingester.py`, `worker_intent.py`).
 
-None of these three consequences block the *other* three concerns in this document (decomposition, validation, smoke-gate mechanics) from moving — they specifically block the pieces named above, which is why K8's own three-consequence sizing (6-8 engineer-days, ADR-0013 K8) is additive to, not a subset of, this document's 37-57.
+None of these three consequences block the *other* three concerns in this document (decomposition, validation, smoke-gate mechanics) from moving — they specifically block the pieces named above, which is why K8's own three-consequence sizing (6-8 engineer-days, ADR-0013 K8) is additive to, not a subset of, this document's 37-51.
 
 ## 7. Confirmation
 
@@ -329,5 +332,6 @@ Every file:line reference above was read directly from `develop` while writing t
 ## Related
 
 - ADR-0013 (`docs/architecture/adr/0013-kernel-and-extensions.md`), especially K2, K3, K4, K5, K8, K10.
+- PR #834 (`a162fc90`), where K5's `DECLINED` status and `request_task_decline` landed.
 - `docs/architecture/building-an-extension.md`, the practical guide this extraction will eventually let a fifth extension follow without reading the kernel's source.
 - Issue #862 (this document's own source), #841/#855 (K10's narrow accept), #798 (K3), #830 (K2's evidence/handoff gap), #742 (K8 consequence 3).
