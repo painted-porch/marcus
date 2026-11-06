@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05**; the other seven remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05; K3 accepted 2026-11-06**; the other six remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -99,13 +99,26 @@ It resolves without a callable field, because "the kernel calls into extension c
 
 ### K3 — Evidence policy is declared, never inferred from labels
 
-**Recommendation.** A project declares its evidence policy. "No repository" becomes a stated case rather than a fall-through.
+**Accepted 2026-11-06 (Lawrence Gray, in the chief-of-staff channel: "Go with the recommended order of the next kernel decisions" — K3 first, since it closes #798).**
+
+**Decision.** A project declares its evidence policy. "No repository" becomes a stated case rather than a fall-through.
 
 **Evidence.** Today an implementation label turns on a source-tree validator that rejects a project with no source files (#798).
 A domain whose actual verb is "build a wall" must avoid the word "build" to avoid a gate it can never pass, and omitting the label silently turns validation off entirely.
 Vocabulary is doing policy.
 
 **What this rules out.** `build`, `create`, `implement`, `develop` and `feature` as a control channel.
+
+**The declaration, concretely.** K2's own registration field already carries a project's per-task-type policy (`ProjectConfig.task_type_registrations`), so K3 extends it rather than inventing a second mechanism: `task_type_registrations[task_type]["requires_source_tree"] = False` declares that a task type's completion is not code-producing and has no source tree by design.
+`WorkAnalyzer.validate_implementation_task` (`src/ai/validation/work_analyzer.py`) checks this before its existing "no source files found" immediate-fail branch; when declared, it passes without attempting the runtime-test/LLM-source-review pipeline below, which assumes files to review.
+Absent — the default for every existing registration and every unregistered project — the gate behaves exactly as it did before K3.
+
+**What this does not change.** `should_validate_task`'s label vocabulary (`src/ai/validation/task_filter.py`) still decides *whether* a task is routed into the validation gate at all; K3 only changes what the gate does once a task reaches it.
+A board-only project's implementation-shaped task still needs a label `should_validate_task` recognizes to be validated at all — K3 is the fix for what counts as evidence once that happens, not a second control channel replacing the first.
+Narrowing that label vocabulary too is a separate, smaller decision this ADR does not need to make to close #798.
+
+**Confirmed live.** `WorkAnalyzer.gather_evidence` run for real (not mocked) against a temp directory with no git repository and no source files — #798's own reproduction shape — with a real `ProjectRegistry` carrying the declaration: the gate passed, and the LLM validator (patched to raise if reached) was never called.
+Full record: `~/marcus-experiments/798-k3-live-check/live_check.py`.
 
 ### K4 — Check authorship: mechanism in the kernel, policy per task type
 
