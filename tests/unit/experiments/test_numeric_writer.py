@@ -5,10 +5,11 @@ actually produced, so it has to survive a writer that wrote garbage,
 not just a writer that wrote nothing.
 """
 
+import hashlib
 import json
 
 import pytest
-from runners.numeric_writer import build_workspace, collect_output
+from runners.numeric_writer import build_workspace, collect_output, trusted_hashes_path
 
 
 def write(ws, report=None, claims_raw=None):
@@ -112,3 +113,49 @@ class TestCodexFindingStaleSiblingTrapReachable:
         workspace = build_workspace(current, tmp_path / "out")
 
         assert sorted(p.name for p in workspace.iterdir()) == ["staged"]
+
+
+class TestCodexFindingTrustedHashesLiveOutsideTheWorkspace:
+    """The integrity manifest a writer could edit was not real integrity.
+
+    Round 8 wrote ``staged/HASHES.json`` *inside* the writer's own
+    workspace copy, so a writer (or a bug in one) could edit a staged
+    file and regenerate that manifest to match -- Codex demonstrated
+    exactly this: change an R2 value, declare the matching claim,
+    delete or rewrite the in-workspace manifest, and the checker
+    still says "verified". A manifest the writer can reach is not a
+    trust boundary. build_workspace now writes the real manifest to a
+    sibling path outside ``out_dir`` entirely -- not inside the
+    ``--add-dir`` grant the writer's session gets -- computed from the
+    original ``staged_dir``'s own files, before any copy exists for
+    anyone to edit.
+    """
+
+    @pytest.mark.unit
+    def test_trusted_hashes_file_lives_outside_the_workspace(self, tmp_path):
+        """The manifest is a sibling of out_dir, not a child of it."""
+        staged_dir = tmp_path / "eval_20261103_120000"
+        staged_dir.mkdir()
+        (staged_dir / "metrics.json").write_text('{"r2_overall": 0.886}')
+        out_dir = tmp_path / "out"
+
+        workspace = build_workspace(staged_dir, out_dir)
+
+        manifest_path = trusted_hashes_path(workspace)
+        assert manifest_path.exists()
+        assert manifest_path.parent == workspace.parent
+        assert "staged" not in manifest_path.relative_to(workspace.parent).parts[1:]
+
+    @pytest.mark.unit
+    def test_trusted_hashes_match_the_original_staged_files(self, tmp_path):
+        """The manifest's hashes are the real, pre-copy file contents."""
+        staged_dir = tmp_path / "eval_20261103_120000"
+        staged_dir.mkdir()
+        content = b'{"r2_overall": 0.886}'
+        (staged_dir / "metrics.json").write_bytes(content)
+        out_dir = tmp_path / "out"
+
+        workspace = build_workspace(staged_dir, out_dir)
+
+        manifest = json.loads(trusted_hashes_path(workspace).read_text())
+        assert manifest["metrics.json"] == hashlib.sha256(content).hexdigest()

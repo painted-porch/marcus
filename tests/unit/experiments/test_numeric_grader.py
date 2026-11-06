@@ -7,6 +7,9 @@ uncaught. These tests pin the scoring function's blindness and the
 arithmetic behind each rate.
 """
 
+import hashlib
+import json
+
 import pytest
 from runners.numeric_grader import (
     CONDITION_A,
@@ -21,9 +24,35 @@ from runners.numeric_grader import (
     load_condition_c,
     score_case,
 )
+from runners.numeric_writer import trusted_hashes_path
 
 
-def make_record(case_id, condition, claims, rounds=1, declined=False):
+def _write_trusted_manifest(case_dir):
+    """Write the harness-retained manifest matching case_dir/staged/ as-is.
+
+    A hand-built workspace in a test has no manifest unless it
+    writes one itself -- see ``runners.numeric_writer.
+    trusted_hashes_path``. Tests about something other than staged
+    integrity call this so the (now mandatory) integrity check does
+    not short-circuit them.
+
+    Parameters
+    ----------
+    case_dir : pathlib.Path
+        The workspace whose current ``staged/`` contents to hash.
+    """
+    staged = case_dir / "staged"
+    hashes = {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(staged.glob("*"))
+        if p.is_file()
+    }
+    trusted_hashes_path(case_dir).write_text(json.dumps(hashes, indent=2))
+
+
+def make_record(
+    case_id, condition, claims, rounds=1, declined=False, verified_clean=True
+):
     """Build a CaseRecord for a test.
 
     Returns
@@ -37,6 +66,7 @@ def make_record(case_id, condition, claims, rounds=1, declined=False):
         claims=claims,
         rounds=rounds,
         declined=declined,
+        verified_clean=verified_clean,
     )
 
 
@@ -108,6 +138,93 @@ class TestWrongShipped:
         ]
         out = score_case(make_record("case-1", CONDITION_B, claims), {})
         assert out["wrong_shipped"] == []
+
+
+class TestCodexFindingWrongShippedOnlyCountsForReleasedReports:
+    """A wrong figure in a case that never released never shipped.
+
+    wrong_figures_shipped counted a verified-but-wrong claim even
+    when another claim in the same case failed and the whole report
+    was declined. numeric_slides.main() refuses to build a deck
+    unless the overall report verifies, so that figure never reached
+    anyone -- counting it in a metric named "shipped" overstates how
+    many wrong figures a reader could actually have seen.
+
+    Codex's exact example: a claim accepted at 0.9 against a true
+    0.481 (materially wrong, verified), alongside a separately
+    rejected claim that declines the case as a whole.
+    """
+
+    @pytest.mark.unit
+    def test_a_wrong_verified_claim_in_a_declined_case_does_not_ship(self):
+        """The exact payload from the finding."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="verified",
+                stated=0.9,
+                resolved=0.481,
+            ),
+            ClaimRecord(
+                claim_id="c2",
+                kind="declared",
+                verdict="failed",
+                stated=1,
+                resolved=2,
+                reason="value_mismatch",
+            ),
+        ]
+        record = make_record("case-1", CONDITION_B, claims, verified_clean=False)
+        out = score_case(record, {})
+        assert out["wrong_shipped"] == []
+        assert len(out["wrong_figures_in_rejected_reports"]) == 1
+        assert out["wrong_figures_in_rejected_reports"][0].claim_id == "c1"
+
+    @pytest.mark.unit
+    def test_the_same_wrong_claim_in_a_released_case_still_ships(self):
+        """The fix must not hide a wrong figure in a case that DID
+        release -- only a declined case's figures are diagnostic-only."""
+        claims = [
+            ClaimRecord(
+                claim_id="c1",
+                kind="declared",
+                verdict="verified",
+                stated=0.9,
+                resolved=0.481,
+            ),
+        ]
+        record = make_record("case-1", CONDITION_B, claims, verified_clean=True)
+        out = score_case(record, {})
+        assert len(out["wrong_shipped"]) == 1
+        assert out["wrong_figures_in_rejected_reports"] == []
+
+    @pytest.mark.unit
+    def test_compute_rates_reports_both_metrics_separately(self):
+        """The aggregate rate keeps the two counts distinct, not merged."""
+        released = {
+            "wrong_shipped": [1],
+            "wrong_figures_in_rejected_reports": [],
+            "false_declines": [],
+            "coverage_gaps": [],
+            "traps_present": [],
+            "declined": False,
+            "verified_clean": True,
+            "rounds": 1,
+        }
+        declined = {
+            "wrong_shipped": [],
+            "wrong_figures_in_rejected_reports": [1],
+            "false_declines": [],
+            "coverage_gaps": [],
+            "traps_present": [],
+            "declined": True,
+            "verified_clean": False,
+            "rounds": 3,
+        }
+        rates = compute_rates({CONDITION_B: [released, declined]})
+        assert rates[CONDITION_B]["wrong_figures_shipped"] == 1
+        assert rates[CONDITION_B]["wrong_figures_in_rejected_reports"] == 1
 
 
 class TestFalseDeclines:
@@ -555,6 +672,7 @@ class TestCodexFindingIncompleteCasesAreNotSilentlyDropped:
         staged = case_dir / "staged"
         staged.mkdir(parents=True)
         (staged / "metrics.json").write_text('{"n_records": 10, "r2_overall": 0.9}')
+        _write_trusted_manifest(case_dir)
         (case_dir / "report.md").write_text("R2 was 0.9 [c1].")
         (case_dir / "claims.json").write_text(
             '{"claims": [{"id": "c1", "value": 0.9, "label": "R2", '

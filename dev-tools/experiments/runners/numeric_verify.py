@@ -43,41 +43,57 @@ from runners.numeric_claims import (  # noqa: E402
     extract_numbers,
     load_sources,
 )
+from runners.numeric_writer import trusted_hashes_path  # noqa: E402
 
 STAGED_SUBDIR = "staged"
-HASHES_FILENAME = "HASHES.json"
 
 
-def _check_staged_integrity(staged: Path) -> Optional[str]:
+def _check_staged_integrity(workspace: Path) -> Optional[str]:
     """Catch a workspace's staged/ copy diverging from what was staged.
 
     The writer is handed its own copy of the staged evaluation
-    (``numeric_writer.build_workspace``), not the original, so nothing
-    stops it from editing that copy before the checker reads it. The
-    staging step writes ``HASHES.json`` into the original directory
-    before any workspace is built, and that file is carried along in
-    the copy, so it is a trustworthy manifest of what was there first.
+    (``numeric_writer.build_workspace``), not the original, so
+    nothing stops it from editing that copy before the checker reads
+    it. A manifest living *inside* the workspace is not a defense
+    against that: a writer (or a bug in one) that edits a staged file
+    can just as easily rewrite or delete an in-workspace manifest to
+    match. The real manifest build_workspace writes lives outside the
+    workspace entirely (:func:`runners.numeric_writer.
+    trusted_hashes_path`), computed from the original staged files
+    before any copy existed for anyone to edit -- the only thing this
+    function trusts.
+
+    A missing or mismatched manifest is always a verification
+    failure. It is never treated as "nothing to check": every real
+    workspace from :func:`build_workspace` has one, so its absence
+    means either staging was skipped entirely or the manifest itself
+    was tampered with, and either way the data cannot be trusted.
 
     Parameters
     ----------
-    staged : Path
-        The workspace's ``staged/`` directory.
+    workspace : Path
+        The workspace (not just its ``staged/`` subdirectory, since
+        the manifest this checks against is a sibling of the
+        workspace, not inside it).
 
     Returns
     -------
     Optional[str]
-        A description of the first mismatch found, or ``None`` when
-        no manifest is present (nothing to check against) or every
-        manifested file still matches.
+        A description of the problem, or ``None`` when the manifest
+        is present and every file it names still matches.
     """
-    manifest_path = staged / HASHES_FILENAME
+    manifest_path = trusted_hashes_path(workspace)
     if not manifest_path.exists():
-        return None
+        return (
+            f"no trusted hash manifest at {manifest_path} -- staged data "
+            f"cannot be verified"
+        )
     try:
         manifest = json.loads(manifest_path.read_text())
     except json.JSONDecodeError as exc:
-        return f"staged/{HASHES_FILENAME} could not be read: {exc}"
+        return f"trusted hash manifest could not be read: {exc}"
 
+    staged = workspace / STAGED_SUBDIR
     for name, expected in manifest.items():
         path = staged / name
         if not path.exists():
@@ -109,7 +125,7 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
     report_path = workspace / "report.md"
     claims_path = workspace / "claims.json"
 
-    integrity_error = _check_staged_integrity(staged)
+    integrity_error = _check_staged_integrity(workspace)
     if integrity_error:
         return {
             "verdict": VERDICT_FAILED,

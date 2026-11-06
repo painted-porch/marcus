@@ -315,20 +315,33 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
     Returns
     -------
     Dict[str, Any]
-        ``wrong_shipped`` (claims verified that should have failed,
-        there are none by construction once the checker ran, so this
-        is always empty for Condition B and is the live question for
-        A), ``false_declines`` (claims failed that were in fact
-        correct), ``coverage_gaps`` (uncovered figures), and
+        ``wrong_shipped`` (claims verified that should have failed
+        *and* whose case actually released -- there are none by
+        construction once the checker ran, so this is always empty
+        for Condition B and is the live question for A),
+        ``wrong_figures_in_rejected_reports`` (the same kind of
+        claim, but in a case that was declined, so it never shipped;
+        kept so the information is not lost, not merged into the
+        headline count), ``false_declines`` (claims failed that were
+        in fact correct), ``coverage_gaps`` (uncovered figures), and
         ``traps_present`` echoed back for the catch-rate join.
     """
-    wrong_shipped = [
+    _verified_but_wrong = [
         c
         for c in record.claims
         if c.verdict == VERDICT_VERIFIED
         and c.resolved is not None
         and _materially_different(c.stated, c.resolved)
     ]
+    # numeric_slides.main() refuses to build a deck at all unless the
+    # overall report verifies, so a verified-but-wrong claim in a
+    # case that was otherwise declined never reached a reader -- it
+    # did not ship. Counting it in the headline metric overstates
+    # how many wrong figures a reader could actually have seen.
+    wrong_shipped = _verified_but_wrong if record.verified_clean else []
+    wrong_figures_in_rejected_reports = (
+        [] if record.verified_clean else _verified_but_wrong
+    )
     false_declines = [
         c
         for c in record.claims
@@ -360,6 +373,7 @@ def score_case(record: CaseRecord, truth: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "wrong_shipped": wrong_shipped,
+        "wrong_figures_in_rejected_reports": wrong_figures_in_rejected_reports,
         "false_declines": false_declines,
         "coverage_gaps": coverage_gaps,
         "traps_present": _trap_names(truth.get("traps", [])),
@@ -454,8 +468,12 @@ def compute_rates(
     -------
     Dict[str, Any]
         One entry per condition with ``cases``, ``wrong_shipped``,
-        ``false_decline_rate``, ``coverage``, ``trap_catch_rate``
-        (by trap name), ``mean_rounds``, and ``declined_rate``.
+        ``wrong_figures_in_rejected_reports`` (the same kind of wrong
+        claim, but in a case that was declined and so never actually
+        reached a reader -- diagnostic, not part of the headline
+        figure), ``false_decline_rate``, ``coverage``,
+        ``trap_catch_rate`` (by trap name), ``mean_rounds``, and
+        ``declined_rate``.
     """
     report: Dict[str, Any] = {}
     for condition, cases in scored_by_condition.items():
@@ -465,6 +483,9 @@ def compute_rates(
 
         n = len(cases)
         wrong_shipped = sum(len(c["wrong_shipped"]) for c in cases)
+        wrong_in_rejected = sum(
+            len(c.get("wrong_figures_in_rejected_reports", [])) for c in cases
+        )
         false_declines = sum(len(c["false_declines"]) for c in cases)
         coverage_gaps = sum(len(c["coverage_gaps"]) for c in cases)
         declined = sum(1 for c in cases if c["declined"])
@@ -494,6 +515,7 @@ def compute_rates(
         report[condition] = {
             "cases": n,
             "wrong_figures_shipped": wrong_shipped,
+            "wrong_figures_in_rejected_reports": wrong_in_rejected,
             "false_decline_rate": round(false_declines / n, 3),
             "coverage_gap_rate": round(coverage_gaps / n, 3),
             "declined_rate": round(declined / n, 3),

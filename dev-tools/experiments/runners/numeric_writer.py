@@ -21,6 +21,7 @@ is rehearsed before any board is involved::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess  # nosec B404 - fixed argv, no shell, local CLI
@@ -131,6 +132,31 @@ Write report.md and claims.json now. Do not write any other file.
 """
 
 STAGED_SUBDIR = "staged"
+TRUSTED_HASHES_SUFFIX = ".trusted_hashes.json"
+
+
+def trusted_hashes_path(workspace: Path) -> Path:
+    """Where a workspace's harness-retained integrity manifest lives.
+
+    Deliberately a sibling of the workspace, not a file inside it: a
+    manifest a writer's own workspace could contain is a manifest a
+    writer (or a bug in one) could edit to match whatever it also
+    edited in ``staged/``, which is not a trust boundary at all. The
+    writer's session is granted ``--add-dir <workspace>``, not
+    ``<workspace's parent>``, so this path is outside what it can
+    reach.
+
+    Parameters
+    ----------
+    workspace : Path
+        The workspace (what :func:`build_workspace` returns).
+
+    Returns
+    -------
+    Path
+        The manifest's path, a sibling of ``workspace``.
+    """
+    return workspace.parent / f"{workspace.name}{TRUSTED_HASHES_SUFFIX}"
 
 
 def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
@@ -144,6 +170,11 @@ def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
     copied in too as its own separate copy, so the writer can still
     stumble into reading it. Verification is unaffected either way,
     since it only ever reads ``staged/``.
+
+    A hash manifest of the original ``staged_dir``'s files, computed
+    here before any copy exists, is written to
+    :func:`trusted_hashes_path` -- outside this workspace, so nothing
+    the writer does inside it can touch that record.
 
     Parameters
     ----------
@@ -161,6 +192,13 @@ def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
     if out_dir.exists():
         shutil.rmtree(out_dir)
     staged_dir = staged_dir.expanduser()
+
+    hashes = {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(staged_dir.glob("*"))
+        if p.is_file()
+    }
+
     staged_copy = out_dir / STAGED_SUBDIR
     shutil.copytree(staged_dir, staged_copy)
 
@@ -168,6 +206,8 @@ def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
         if sibling.resolve() == staged_dir.resolve():
             continue
         shutil.copytree(sibling, out_dir / sibling.name)
+
+    trusted_hashes_path(out_dir).write_text(json.dumps(hashes, indent=2))
     return out_dir
 
 

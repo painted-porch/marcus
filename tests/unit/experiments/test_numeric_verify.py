@@ -12,11 +12,41 @@ import json
 
 import pytest
 from runners.numeric_verify import verify_workspace
+from runners.numeric_writer import trusted_hashes_path
+
+
+def _write_trusted_manifest(workspace):
+    """Write the harness-retained manifest matching staged/ as it is now.
+
+    The real integrity check trusts only this sibling file, never
+    anything inside the workspace -- see
+    ``runners.numeric_writer.trusted_hashes_path``. Tests that build a
+    workspace by hand (not via ``build_workspace``) call this to get
+    a passing-by-default manifest, the same way a real staged case
+    always has one.
+
+    Parameters
+    ----------
+    workspace : pathlib.Path
+        The workspace whose current ``staged/`` contents to hash.
+    """
+    staged = workspace / "staged"
+    hashes = {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(staged.glob("*"))
+        if p.is_file()
+    }
+    trusted_hashes_path(workspace).write_text(json.dumps(hashes, indent=2))
 
 
 @pytest.fixture
 def workspace(tmp_path):
     """Build a workspace with a consistent staged evaluation.
+
+    Carries a matching trusted hash manifest by default, same as a
+    real workspace from ``build_workspace`` always does, so tests
+    that are not specifically about staged integrity do not need to
+    set one up themselves.
 
     Returns
     -------
@@ -37,6 +67,7 @@ def workspace(tmp_path):
     (staged / "tiers.csv").write_text(
         "tier,n_records,rate_pct\nGood,60,60.0\nPoor,40,40.0\n"
     )
+    _write_trusted_manifest(ws)
     return ws
 
 
@@ -159,10 +190,19 @@ class TestRequiredChecksRun:
 
     @pytest.mark.unit
     def test_short_table_fails_though_the_writer_was_silent(self, workspace):
-        """A writer cannot pass by omitting the contradiction."""
+        """A writer cannot pass by omitting the contradiction.
+
+        This test is about the staged data's own tiers table being
+        short, not about tampering, so the trusted manifest is
+        refreshed to match the table this test stages -- otherwise
+        the staged-integrity check (which has no way to tell "this is
+        the test's real data" from "something edited staged/ after
+        the manifest was written") would short-circuit first.
+        """
         (workspace / "staged" / "tiers.csv").write_text(
             "tier,n_records,rate_pct\nGood,60,60.0\nPoor,35,35.0\n"
         )
+        _write_trusted_manifest(workspace)
         write(workspace, "A report with no figures at all.", [])
         out = verify_workspace(workspace)
         assert out["verdict"] == "failed"
@@ -265,23 +305,6 @@ class TestCodexFindingMissingReportIsAFailure:
         assert out.get("parse_error")
 
 
-def _stage_hashes(workspace):
-    """Write a HASHES.json manifest matching the staged files as-is.
-
-    Parameters
-    ----------
-    workspace : pathlib.Path
-        The workspace whose ``staged/`` contents to hash.
-    """
-    staged = workspace / "staged"
-    hashes = {
-        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in sorted(staged.glob("*"))
-        if p.is_file()
-    }
-    (staged / "HASHES.json").write_text(json.dumps(hashes, indent=2))
-
-
 class TestCodexFindingStagedIntegrity:
     """A writer could modify its own staged/ copy and have it trusted.
 
@@ -290,15 +313,24 @@ class TestCodexFindingStagedIntegrity:
     that edited its workspace's staged/ copy -- by mistake or to make
     a wrong claim look right -- would have that edit treated as
     ground truth, and load_condition_b does not catch it either since
-    it calls this same function. HASHES.json, written by the staging
-    step before any workspace is built, is the manifest this checks
-    against.
+    it calls this same function. The ``workspace`` fixture writes a
+    matching trusted manifest (the one build_workspace always writes
+    for a real case) by default, so these tests are about what
+    happens when that manifest and the staged data disagree, not
+    about setting a manifest up.
+
+    Round 17 corrected this fix itself: the manifest originally lived
+    *inside* the workspace (``staged/HASHES.json``), which a writer
+    could edit right along with the data it was supposed to guard.
+    The real manifest now lives outside the workspace entirely (see
+    ``trusted_hashes_path``), so nothing written inside the workspace
+    -- including a regenerated copy of the old in-workspace file --
+    can affect what this check trusts.
     """
 
     @pytest.mark.unit
     def test_clean_staged_files_pass_through_unaffected(self, workspace):
         """A manifest that matches every file changes nothing."""
-        _stage_hashes(workspace)
         write(
             workspace,
             "The overall score was 0.9 [c1].",
@@ -320,7 +352,6 @@ class TestCodexFindingStagedIntegrity:
     @pytest.mark.unit
     def test_a_modified_staged_file_is_caught_not_trusted(self, workspace):
         """A writer editing its own staged/ copy must not pass as truth."""
-        _stage_hashes(workspace)
         (workspace / "staged" / "metrics.json").write_text(
             json.dumps({"n_records": 100, "r2_overall": 0.99})
         )
@@ -345,7 +376,6 @@ class TestCodexFindingStagedIntegrity:
     @pytest.mark.unit
     def test_a_staged_file_deleted_after_staging_is_caught(self, workspace):
         """A staged file missing from a manifested set is a failure."""
-        _stage_hashes(workspace)
         (workspace / "staged" / "metrics.json").unlink()
         write(workspace, "The overall score was 0.9.", [])
         out = verify_workspace(workspace)
@@ -353,16 +383,22 @@ class TestCodexFindingStagedIntegrity:
         assert "metrics.json" in out["parse_error"]
 
     @pytest.mark.unit
-    def test_no_manifest_present_is_not_an_integrity_failure(self, workspace):
-        """Workspaces without a HASHES.json (e.g. older fixtures) still
-        verify normally -- there is nothing to check tampering against."""
+    def test_a_missing_trusted_manifest_is_a_hard_failure(self, workspace):
+        """Codex's first demonstration: change a staged value, declare
+        the matching claim, delete the manifest -- the old design let
+        this verify; a missing manifest is now always a failure, not
+        "nothing to check"."""
+        (workspace / "staged" / "metrics.json").write_text(
+            json.dumps({"n_records": 100, "r2_overall": 0.999})
+        )
+        trusted_hashes_path(workspace).unlink()
         write(
             workspace,
-            "The overall score was 0.9 [c1].",
+            "The overall score was 0.999 [c1].",
             [
                 {
                     "id": "c1",
-                    "value": 0.9,
+                    "value": 0.999,
                     "label": "overall R2",
                     "kind": "lookup",
                     "source": "metrics.json",
@@ -371,7 +407,44 @@ class TestCodexFindingStagedIntegrity:
             ],
         )
         out = verify_workspace(workspace)
-        assert out["verdict"] == "verified"
+        assert out["verdict"] == "failed"
+        assert "manifest" in out["parse_error"]
+
+    @pytest.mark.unit
+    def test_a_regenerated_in_workspace_manifest_has_no_effect(self, workspace):
+        """Codex's second demonstration: regenerate the manifest after
+        the edit. Writing a new staged/HASHES.json that matches the
+        tampered data -- the old design's trust point -- must not
+        rescue the claim, because the real manifest outside the
+        workspace still reflects the original, untampered value."""
+        (workspace / "staged" / "metrics.json").write_text(
+            json.dumps({"n_records": 100, "r2_overall": 0.999})
+        )
+        tampered_hashes = {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted((workspace / "staged").glob("*"))
+            if p.is_file()
+        }
+        (workspace / "staged" / "HASHES.json").write_text(
+            json.dumps(tampered_hashes, indent=2)
+        )
+        write(
+            workspace,
+            "The overall score was 0.999 [c1].",
+            [
+                {
+                    "id": "c1",
+                    "value": 0.999,
+                    "label": "overall R2",
+                    "kind": "lookup",
+                    "source": "metrics.json",
+                    "key": "r2_overall",
+                }
+            ],
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+        assert "metrics.json" in out["parse_error"]
 
 
 class TestCodexFindingMistaggedFiguresDoNotCorruptCoverage:

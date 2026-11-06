@@ -7,6 +7,7 @@ them. These tests pin what reaches the slide workspace and how a
 finished deck is scored.
 """
 
+import hashlib
 import json
 from unittest.mock import patch
 
@@ -19,6 +20,22 @@ from runners.numeric_slides import (
     main,
     verify_slide_workspace,
 )
+from runners.numeric_writer import trusted_hashes_path
+
+
+def _write_trusted_manifest(workspace):
+    """Write the harness-retained manifest matching workspace/staged/.
+
+    See ``runners.numeric_writer.trusted_hashes_path``: a hand-built
+    workspace in a test has no manifest unless it writes one itself.
+    """
+    staged = workspace / "staged"
+    hashes = {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(staged.glob("*"))
+        if p.is_file()
+    }
+    trusted_hashes_path(workspace).write_text(json.dumps(hashes, indent=2))
 
 
 def outcome_with(results):
@@ -273,6 +290,7 @@ class TestCodexFindingSlideGenerationRequiresAVerifiedReport:
         staged.mkdir(parents=True)
         (staged / "metrics.json").write_text(json.dumps({"n_records": 9}))
         (staged / "tiers.csv").write_text("tier,n_records\nGood,5\nPoor,4\n")
+        _write_trusted_manifest(ws)
         (ws / "report.md").write_text("Good tier has 5 [c1].")
         (ws / "claims.json").write_text(
             json.dumps(
