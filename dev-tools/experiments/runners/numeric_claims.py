@@ -1077,10 +1077,17 @@ def check_slide_spec(
     """
     problems: List[str] = []
     for index, slide in enumerate(spec.get("slides", []), start=1):
+        where_slide = f"slide {index}"
+        # A cell's claim id is a dict key below; a writer-supplied
+        # value that isn't a string (a list, an object) is unhashable
+        # and would crash that lookup. Treat it the same as "no claim
+        # id" for the purposes of the title check, and report it
+        # explicitly in the main loop below.
         backed_values = [
             result.value
             for cell in slide.get("cells", [])
-            for result in [accepted.get(cell.get("claim", ""))]
+            if isinstance(cell.get("claim"), str)
+            for result in [accepted.get(cell["claim"])]
             if result is not None and result.verdict == VERDICT_VERIFIED
         ]
         for figure in extract_numbers(str(slide.get("title") or "")):
@@ -1088,13 +1095,16 @@ def check_slide_spec(
                 _within_tolerance(figure, value, None) for value in backed_values
             ):
                 problems.append(
-                    f"slide {index}: title states {figure}, which no "
+                    f"{where_slide}: title states {figure}, which no "
                     f"accepted cell on this slide backs"
                 )
         for cell in slide.get("cells", []):
             value = cell.get("value")
             claim_id = cell.get("claim")
-            where = f"slide {index}"
+            where = where_slide
+            if claim_id is not None and not isinstance(claim_id, str):
+                problems.append(f"{where}: claim id is not a string: {claim_id!r}")
+                continue
             if not claim_id:
                 problems.append(f"{where}: figure {value} carries no claim id")
                 continue

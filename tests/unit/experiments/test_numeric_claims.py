@@ -613,6 +613,62 @@ class TestSlideMapping:
         assert check_slide_spec(spec, accepted, {"c1": "maize R2"})
 
 
+class TestCodexFindingSlideCellClaimIdMustBeAString:
+    """A non-string claim id crashed the slide checker.
+
+    Round 15's finding: a cell with ``"claim": ["c1"]`` passes
+    ``load_slide_spec``'s structural checks (the cells are objects
+    inside valid lists -- nothing there inspects individual field
+    values), then crashes ``accepted.get(claim_id)`` with an
+    uncaught ``TypeError: unhashable type: 'list'``, in both the
+    title-check pass and the main per-cell loop. Same class of bug as
+    round 14 (a document the writer controls reaching an operation
+    that assumes its shape), on the slide spec instead of the claims
+    file.
+    """
+
+    @pytest.mark.unit
+    def test_a_list_valued_claim_id_is_a_named_problem_not_a_crash(self):
+        """The exact payload from the finding."""
+        accepted = {
+            "c1": CheckResult(claim_id="c1", verdict="verified", value=1, label="x")
+        }
+        spec = {"slides": [{"cells": [{"value": "1", "claim": ["c1"]}]}]}
+        problems = check_slide_spec(spec, accepted, {"c1": "x"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_an_object_valued_claim_id_is_a_named_problem_not_a_crash(self):
+        """A dict-valued claim id is just as unhashable."""
+        accepted = {
+            "c1": CheckResult(claim_id="c1", verdict="verified", value=1, label="x")
+        }
+        spec = {"slides": [{"cells": [{"value": "1", "claim": {"id": "c1"}}]}]}
+        problems = check_slide_spec(spec, accepted, {"c1": "x"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_list_valued_claim_id_in_a_titled_slide_does_not_crash(self):
+        """The title-check pass has its own, separate lookup over cells."""
+        accepted = {
+            "c1": CheckResult(claim_id="c1", verdict="verified", value=1, label="x")
+        }
+        spec = {
+            "slides": [{"title": "Summary", "cells": [{"value": "1", "claim": ["c1"]}]}]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "x"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_well_formed_claim_id_is_unaffected(self):
+        """The fix must not disturb an ordinary, valid string claim id."""
+        accepted = {
+            "c1": CheckResult(claim_id="c1", verdict="verified", value=1, label="x")
+        }
+        spec = {"slides": [{"cells": [{"value": "1", "claim": "c1", "label": "x"}]}]}
+        assert check_slide_spec(spec, accepted, {"c1": "x"}) == []
+
+
 class TestLabelConsistency:
     """A claim's label must not contradict the data it reads.
 
