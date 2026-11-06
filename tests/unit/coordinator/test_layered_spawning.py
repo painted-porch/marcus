@@ -287,6 +287,27 @@ class TestCountUnclaimedTasksInActiveLayer:
         # layer [b] is settled (DONE/BLOCKED only) — cursor advances to [d]
         assert count_unclaimed_tasks_in_active_layer(tasks) == 1
 
+    def test_declined_tasks_are_not_unclaimed(self) -> None:
+        """A DECLINED task is not claimable, so it is not counted
+        (ADR-0013 K5, round 6 on PR #834)."""
+        tasks = [
+            _task("a", status=TaskStatus.DECLINED),
+            _task("b", status=TaskStatus.TODO),
+        ]
+
+        assert count_unclaimed_tasks_in_active_layer(tasks) == 1
+
+    def test_declined_only_layer_does_not_pin_the_count(self) -> None:
+        """A declined-only layer is settled — the count advances past
+        it, the same way a blocked-only layer already does."""
+        tasks = [
+            _task("l0", status=TaskStatus.DONE),
+            _task("b", dependencies=["l0"], status=TaskStatus.DECLINED),
+            _task("d", dependencies=["b"], status=TaskStatus.TODO),
+        ]
+
+        assert count_unclaimed_tasks_in_active_layer(tasks) == 1
+
     def test_zero_when_all_done(self) -> None:
         """No active layer (all DONE) → zero unclaimed."""
         tasks = [_task("a", status=TaskStatus.DONE)]
@@ -345,6 +366,41 @@ class TestComputeActiveLayerSignal:
         tasks = [
             _task("a", status=TaskStatus.DONE),
             _task("b", dependencies=["a"], status=TaskStatus.BLOCKED),
+        ]
+
+        signal = compute_active_layer_signal(tasks)
+
+        assert signal.desired_agent_count == 0
+        assert signal.unclaimed_tasks == 0
+
+    def test_declined_task_does_not_pin_the_active_layer(self) -> None:
+        """A DECLINED task settles its layer like BLOCKED (ADR-0013 K5,
+        Codex P1, round 6 on PR #834).
+
+        Codex's exact scenario: layer 0 has task A DECLINED and task B
+        DONE; layer 1 has task C (TODO) depending only on B. Before this
+        fix, DECLINED was not in ``_SETTLED_STATUSES``, so layer 0 never
+        settled and the cursor stayed pinned there with
+        ``unclaimed_tasks == 0`` even though C was claimable --
+        starving the layered-spawning runner of the signal to launch a
+        replacement worker.
+        """
+        tasks = [
+            _task("a", status=TaskStatus.DECLINED),
+            _task("b", status=TaskStatus.DONE),
+            _task("c", dependencies=["b"], status=TaskStatus.TODO),
+        ]
+
+        signal = compute_active_layer_signal(tasks)
+
+        assert signal.desired_agent_count == 1
+        assert signal.unclaimed_tasks == 1
+
+    def test_all_done_or_declined_is_settled(self) -> None:
+        """Every task DONE or DECLINED → the run is settled, 0 agents."""
+        tasks = [
+            _task("a", status=TaskStatus.DONE),
+            _task("b", dependencies=["a"], status=TaskStatus.DECLINED),
         ]
 
         signal = compute_active_layer_signal(tasks)

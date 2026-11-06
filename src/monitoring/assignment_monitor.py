@@ -176,6 +176,13 @@ class AssignmentMonitor:
             logger.info(f"Task {task_id} blocked and unassigned")
             return True
 
+        # Case 5: Task declined but no longer assigned (ADR-0013 K5,
+        # Codex round-6 sweep on PR #834 -- the same unassigned-terminal
+        # shape Case 4 already covers for BLOCKED).
+        if task.status == TaskStatus.DECLINED and not task.assigned_to:
+            logger.info(f"Task {task_id} declined and unassigned")
+            return True
+
         return False
 
     async def _handle_reversion(self, reversion: Dict[str, Any]) -> None:

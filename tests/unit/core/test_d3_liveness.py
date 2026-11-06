@@ -261,6 +261,22 @@ class TestLiveness:
         assert await manager.should_recover_expired_lease(lease) is False
 
     @pytest.mark.asyncio
+    async def test_declined_task_is_never_recovered(
+        self, manager: AssignmentLeaseManager, kanban: Mock
+    ) -> None:
+        """DECLINED is terminal for recovery purposes too (ADR-0013
+        K5, Codex round-6 sweep on PR #834) -- a lease that expires
+        around the same time as a decline must not hand the declined
+        task to a fresh agent."""
+        lease = await manager.create_lease("t1", "agent-a", _task("t1"))
+        lease.lease_expires = datetime.now(timezone.utc) - 5 * MINUTE
+        declined = _task("t1")
+        declined.status = TaskStatus.DECLINED
+        kanban.get_task_by_id = AsyncMock(return_value=declined)
+
+        assert await manager.should_recover_expired_lease(lease) is False
+
+    @pytest.mark.asyncio
     async def test_terminal_skip_increments_the_observability_counter(
         self, manager: AssignmentLeaseManager, kanban: Mock
     ) -> None:

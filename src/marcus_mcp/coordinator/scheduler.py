@@ -602,13 +602,18 @@ class ActiveLayerSignal:
 
 
 # A layer no longer needs an agent once every task in it is "settled":
-# DONE or BLOCKED. BLOCKED is terminal — report_blocker releases the
-# lease and Marcus never auto-resolves it — and the drain signal treats
-# a board with no claimable task and no live lease as drained even when
-# blocked tasks remain. The active-layer cursor
-# must agree, or a single blocked task pins the cursor and starves every
-# downstream layer indefinitely (issue #595).
-_SETTLED_STATUSES = (TaskStatus.DONE, TaskStatus.BLOCKED)
+# DONE, BLOCKED, or DECLINED. BLOCKED is terminal — report_blocker
+# releases the lease and Marcus never auto-resolves it — and the drain
+# signal treats a board with no claimable task and no live lease as
+# drained even when blocked tasks remain. DECLINED (ADR-0013 K5) joins
+# it for the same reason: it is terminal and never re-claimable, and
+# omitting it pinned the active-layer cursor on a declined task forever
+# even when the rest of its layer was settled, starving every later
+# layer that did not depend on it (Codex P1, round 6 on PR #834). The
+# active-layer cursor must agree, or a single settled-but-unrecognized
+# task pins the cursor and starves every downstream layer indefinitely
+# (issue #595).
+_SETTLED_STATUSES = (TaskStatus.DONE, TaskStatus.BLOCKED, TaskStatus.DECLINED)
 
 
 def compute_active_layer_signal(
