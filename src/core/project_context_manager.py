@@ -456,6 +456,17 @@ class ProjectContextManager:
         # Merge with project-specific config
         config.update(project.provider_config)
 
+        # Issue #854: the real fix for #849/#853's Planka/Linear
+        # regression. Carried down AFTER the provider_config merge so
+        # a caller-supplied value can never spoof it -- the registry
+        # id is this method's own authority, not something provider
+        # config can override. KanbanClient/LinearKanban read this to
+        # stamp every task's project_id with it, in place of the
+        # provider's own id, so a task's id always matches a registry
+        # key directly (the same guarantee GH-306 already gives
+        # SQLite, where the two happen to be the same string).
+        config["registry_project_id"] = project.id
+
         return config
 
     async def _save_project_state(self, project_id: str) -> None:

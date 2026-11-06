@@ -831,6 +831,47 @@ class TestKanbanClient:
 
             assert task.project_id == "planka-project-123"
 
+    def test_card_to_task_prefers_the_registry_project_id(self):
+        """Issue #854: the real fix for #849/#853's Planka/Linear
+
+        regression. When the client is constructed from a registered
+        ProjectConfig, ``registry_project_id`` carries that config's
+        own ``id`` (set by ``project_context_manager``), which must
+        win over the provider's own ``project_id`` -- the two are
+        different strings for Planka/Linear (unlike SQLite, GH-306),
+        and a task's ``project_id`` must match a registry key
+        directly for every K2-keyed lookup to find it."""
+        with (
+            patch("src.integrations.kanban_client.os.path.exists", return_value=False),
+            patch("src.integrations.kanban_client.os.environ", {}),
+            patch("sys.stderr"),
+        ):
+            client = KanbanClient()
+            client.project_id = "planka-project-123"
+            client.registry_project_id = "uuid-registry-9"
+
+            task = client._card_to_task({"id": "card-1", "name": "Task"})
+
+            assert task.project_id == "uuid-registry-9"
+
+    def test_card_to_task_falls_back_without_a_registry_project_id(self):
+        """A client constructed outside project_context_manager (a
+
+        standalone script, a test) has no registry id to carry;
+        falling back to the provider's own project id keeps every
+        existing, non-registry-aware construction path working."""
+        with (
+            patch("src.integrations.kanban_client.os.path.exists", return_value=False),
+            patch("src.integrations.kanban_client.os.environ", {}),
+            patch("sys.stderr"),
+        ):
+            client = KanbanClient()
+            client.project_id = "planka-project-123"
+
+            task = client._card_to_task({"id": "card-1", "name": "Task"})
+
+            assert task.project_id == "planka-project-123"
+
     @pytest.mark.asyncio
     async def test_mcp_connection_error(self):
         """Test handling of MCP connection errors."""

@@ -157,11 +157,12 @@ class TestCreateTasksSeeded:
 
     @pytest.mark.asyncio
     async def test_depends_on_resolves_for_a_planka_shaped_project(self) -> None:
-        """Issue #855, Codex P2: the board-task filter must match a
+        """Issue #854: a Planka-shaped project's existing board task
 
-        Planka-shaped task (``project_id`` is the PROVIDER's own id,
-        not the registry id) via ``task_belongs_to_project``, the
-        same identity gap PR #853 bridged elsewhere."""
+        carries the REGISTRY id (stamped at kanban-client
+        construction, not the provider's own id) -- the board-task
+        filter is a plain project_id equality check now; the
+        provider-id bridge PR #855 added for this is retired."""
         from src.marcus_mcp.tools import nlp as nlp_module
 
         state = _state()
@@ -178,7 +179,7 @@ class TestCreateTasksSeeded:
         existing = MagicMock()
         existing.id = "board-task-1"
         existing.name = "Raise the north wall"
-        existing.project_id = "planka-proj-77"  # the PROVIDER's own id
+        existing.project_id = "uuid-registry-1"  # the REGISTRY id, per #854
         kanban_client = await state.project_manager.get_kanban_client()
         kanban_client.get_all_tasks = AsyncMock(return_value=[existing])
 

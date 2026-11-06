@@ -183,9 +183,10 @@ class MarcusServer:
         # K13: production assignments wrap in TaskSyncingKanbanClient,
         # which delegates every KanbanInterface method but is not
         # itself a KanbanInterface subclass.
-        self.kanban_client: Optional[
+        # Will be set via the kanban_client property below (set by project manager)
+        self._kanban_client: Optional[
             Union[KanbanInterface, TaskSyncingKanbanClient]
-        ] = None  # Will be set by project manager
+        ] = None
         self.ai_engine = AIAnalysisEngine()
         # ProjectMonitor uses KanbanClient (Planka-only). Skip for other providers
         # so non-Planka startups are not blocked by kanban-mcp path detection.
@@ -406,6 +407,55 @@ class MarcusServer:
     def assignment_lock(self) -> asyncio.Lock:
         """Get assignment lock for the current event loop."""
         return self._lock_manager.get_lock()
+
+    @property
+    def kanban_client(
+        self,
+    ) -> Optional[Union[KanbanInterface, TaskSyncingKanbanClient]]:
+        """Get the currently active kanban client."""
+        return self._kanban_client
+
+    @kanban_client.setter
+    def kanban_client(
+        self, client: Optional[Union[KanbanInterface, TaskSyncingKanbanClient]]
+    ) -> None:
+        """Replace the kanban client and rebind every long-lived holder.
+
+        This is the only place that replaces the kanban client, so
+        every long-lived service holding a reference to it sees a
+        replacement immediately.
+
+        Issue #856 round 3: ``AssignmentMonitor`` (and its nested
+        ``AssignmentReconciler``) and ``AssignmentLeaseManager`` each
+        capture the client passed to them at construction into their
+        own ``self.kanban_client`` attribute and never see this
+        attribute change again. Round 1's always-fresh-client fix for
+        ``create_project`` made that latent bug reachable: a second
+        project on the same provider now gets a genuinely new client
+        object, but those three services -- built once, guarded by
+        ``if self.assignment_monitor is None`` -- kept talking to the
+        OLD one. ``AssignmentMonitor._check_for_reversions`` then
+        queried the old board and deleted the new project's
+        assignments as missing tasks, and lease recovery checked
+        terminal status against the old board too.
+
+        Routing every write through this setter (instead of adding
+        another ad hoc rebind call at each of the several places that
+        used to write ``self.kanban_client = ...`` directly) means a
+        replacement propagates to every holder with nothing to
+        remember. If a future service captures the client the same
+        way, it must be rebound here too.
+        """
+        self._kanban_client = client
+        monitor = getattr(self, "assignment_monitor", None)
+        if monitor is not None:
+            monitor.kanban_client = client
+            reconciler = getattr(monitor, "reconciler", None)
+            if reconciler is not None:
+                reconciler.kanban_client = client
+        lease_manager = getattr(self, "lease_manager", None)
+        if lease_manager is not None:
+            lease_manager.kanban_client = client
 
     @property
     def current_project_id(self) -> Optional[str]:

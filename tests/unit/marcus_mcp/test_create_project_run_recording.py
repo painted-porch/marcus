@@ -55,6 +55,43 @@ def _clear_create_project_dedup_cache() -> Any:
     nlp_module._recent_create_project_calls.clear()
 
 
+@pytest.fixture(autouse=True)
+def _patch_kanban_factory() -> Any:
+    """Issue #856: ``create_project`` always builds a fresh client via
+    ``KanbanFactory.create`` now, even when a provider matches the
+    currently-active one (it must never reuse/mutate an existing
+    instance -- that was the bug). These tests used to rely on the old
+    reuse-and-skip-the-factory behaviour: they pre-seeded
+    ``state.kanban_client`` as a bare ``Mock`` with the Planka ids
+    already set, and the factory was simply never called. Without this
+    patch the REAL ``KanbanFactory.create`` runs instead, which tries
+    to construct and connect a real ``Planka`` provider -- harmless
+    noise on a dev machine with a local Planka reachable, but a hang or
+    exception in CI with no such server, which is exactly what made the
+    runs-row assertions fail there (no rows ever get recorded).
+
+    The fake factory returns a fresh Planka-shaped ``Mock`` carrying
+    the same ids ``_build_state`` used to put directly on
+    ``kanban_client``, so the registration block downstream sees the
+    same data either way.
+    """
+    from src.integrations.kanban_interface import KanbanProvider
+
+    def _fake_create(provider: str, config: Any = None) -> Mock:
+        client = Mock()
+        client.provider = KanbanProvider.PLANKA
+        client.project_id = "1670692878487127607"
+        client.board_id = "1670692878621345337"
+        client.connect = AsyncMock()
+        return client
+
+    with patch(
+        "src.integrations.kanban_factory.KanbanFactory.create",
+        side_effect=_fake_create,
+    ):
+        yield
+
+
 def _build_state(cost_store: Any) -> Mock:
     """Mock state pre-wired with a real CostStore so the wrapper writes to disk."""
     from src.integrations.kanban_interface import KanbanProvider

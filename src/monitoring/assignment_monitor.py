@@ -18,6 +18,22 @@ from src.integrations.kanban_interface import KanbanInterface
 logger = logging.getLogger(__name__)
 
 
+def _bound_project_id(kanban_client: Any) -> Optional[str]:
+    """Resolve the project scope the given kanban client is bound to.
+
+    Mirrors the same precedence ``KanbanClient._card_to_task`` uses to
+    stamp a task's own ``project_id`` (registry id wins when present;
+    the provider's own id otherwise), so an assignment's stamped
+    ``project_id`` can be compared against it directly (#856 round 4).
+    Works across providers: SQLite has no separate registry id (its
+    own ``project_id`` already *is* the registry id, GH-306); Planka
+    and Linear expose ``registry_project_id`` since #854.
+    """
+    return getattr(kanban_client, "registry_project_id", None) or getattr(
+        kanban_client, "project_id", None
+    )
+
+
 class AssignmentMonitor:
     """Monitors task assignments for state reversions and inconsistencies."""
 
@@ -105,10 +121,36 @@ class AssignmentMonitor:
 
             task_map = {task.id: task for task in all_tasks}
 
+            # Issue #856 round 4: ``self.persistence`` is the server-wide
+            # assignment store, not scoped to one project, but
+            # ``self.kanban_client`` is bound to exactly one project's
+            # board at a time. Switching the active project (a fresh
+            # client for project B, round 1's fix) made every OTHER
+            # project's still-valid assignments look "missing" here,
+            # because they simply don't appear on B's board. An
+            # assignment can only be "missing" relative to its OWN
+            # project's board -- never a board that isn't its own.
+            bound_project_id = _bound_project_id(self.kanban_client)
+
             reversions_detected = []
 
             for worker_id, assignment in list(assignments.items()):
                 task_id = assignment["task_id"]
+                assignment_project_id = (assignment.get("task_data") or {}).get(
+                    "project_id"
+                )
+                if (
+                    bound_project_id is not None
+                    and assignment_project_id is not None
+                    and assignment_project_id != bound_project_id
+                ):
+                    # Belongs to a different project than the one this
+                    # monitor is currently bound to -- leave it alone
+                    # this cycle. (An assignment made before this field
+                    # existed has no project_id recorded and falls
+                    # through to the pre-existing, unscoped check below,
+                    # unchanged.)
+                    continue
 
                 # Check if task still exists
                 if task_id not in task_map:

@@ -25,14 +25,18 @@ replacing ``async with _kanban_init_lock_manager.get_lock():`` with
   but not yet connected.  This is the actual race the lock protects
   against.
 
-* **Tests 1, 2, 4** are invariant assertions, not regression nets.
-  They pass vacuously without the lock because Python's
-  sync-assignment-before-await means subsequent callers see
-  ``state.kanban_client`` already populated by the first caller's
-  synchronous ``KanbanFactory.create(...)`` assignment, before the
-  first caller yields on ``await connect()``.  These tests still
-  matter — they pin invariants that must hold even after a future
-  refactor — but they don't replace Test 3 for catching lock removal.
+* **Tests 1, 2, 4** are invariant assertions, not regression nets for
+  the lock itself — they pin behaviour that would hold the same way
+  with or without it.  They don't replace Test 3 for catching lock
+  removal.
+
+  Issue #856 update: ``create_project`` no longer skips
+  ``KanbanFactory.create`` when the existing client's provider
+  matches the requested one — it always builds a fresh, unshared
+  client, because reusing one risked mutating an instance
+  ``ProjectContextManager`` still had cached for another project.
+  Tests 1 and 4 now pin "once per call, always", not "once total,
+  skipped on a match".
 
 Verification recipe for future hardening
 ----------------------------------------
@@ -87,26 +91,28 @@ class TestKanbanInitLockUnderConcurrency:
     """
 
     @pytest.mark.asyncio
-    async def test_kanban_factory_create_called_exactly_once_under_3_concurrent(
+    async def test_kanban_factory_create_called_once_per_concurrent_call(
         self, tmp_path: Path
     ) -> None:
         """Invariant assertion (NOT a regression net): three concurrent
-        ``create_project`` calls → ``KanbanFactory.create`` runs
-        exactly once.
+        ``create_project`` calls -> ``KanbanFactory.create`` runs
+        exactly three times, once per call.
 
-        Per Kaia review #7 (Simon ``6c77618f``): this assertion holds
-        even without the lock under current sync-create semantics —
-        Python's synchronous assignment of ``state.kanban_client``
-        completes before the first caller yields on
-        ``await connect()``, so subsequent callers see the populated
-        client and skip init.  Test 3 is the real regression net for
-        lock removal.
+        Issue #856, Codex P1: ``create_project`` used to skip
+        ``KanbanFactory.create`` whenever ``state.kanban_client``
+        already matched the requested provider, reusing (and
+        mutating) that same object. That object is frequently the one
+        ``ProjectContextManager`` has cached for the active project,
+        so mutating it in place to point at a brand-new project
+        corrupted the cache entry and leaked one project's tasks into
+        another's view. The fix always builds a fresh, unshared
+        client, so under N concurrent calls the factory now runs N
+        times, not once.
 
         Why keep this test: pins the invariant that future refactors
-        must preserve.  If ``KanbanFactory.create`` ever becomes async
-        (or the order of operations changes so assignment happens
-        after ``await``), this test would suddenly become a regression
-        net too.  Today it is documentation of the contract.
+        must preserve -- `create_project` must never again special-case
+        a "the client I already have will do" path, because that path
+        is exactly what caused #856.
         """
         from src.marcus_mcp.tools import nlp as nlp_module
 
@@ -177,11 +183,11 @@ class TestKanbanInitLockUnderConcurrency:
         for r in results:
             assert r.get("success") is True
 
-        # KanbanFactory.create ran exactly once — the lock prevented
-        # the second and third callers from re-initializing.
-        assert factory_create_calls == 1, (
-            f"KanbanFactory.create must run exactly once under "
-            f"concurrent create_project; ran {factory_create_calls} times"
+        # KanbanFactory.create ran once per call — every create_project
+        # call gets its own, unshared client (issue #856).
+        assert factory_create_calls == 3, (
+            f"KanbanFactory.create must run once per concurrent "
+            f"create_project call; ran {factory_create_calls} times"
         )
 
     @pytest.mark.asyncio
@@ -378,24 +384,22 @@ class TestKanbanInitLockUnderConcurrency:
         )
 
     @pytest.mark.asyncio
-    async def test_existing_matching_client_skips_factory_call(
+    async def test_existing_matching_client_is_never_reused(
         self, tmp_path: Path
     ) -> None:
-        """Invariant assertion (different invariant from Test 1): when
-        ``state.kanban_client`` already matches the requested provider,
-        no concurrent caller calls ``KanbanFactory.create``.
+        """Issue #856, Codex P1: even when ``state.kanban_client``
+        already matches the requested provider, every concurrent
+        caller still builds a fresh client via ``KanbanFactory.create``
+        rather than reusing the existing one.
 
-        Per Kaia review #7 (Simon ``6c77618f``): this is not a
-        lock-removal regression net either — it pins the
-        ``need_new_client=False`` branch of the provider-identity
-        check.  Even without the lock, if the existing client
-        already matches, no caller would re-init.  Test 3 catches
-        lock removal.
-
-        Why keep this test: separately documents that the
-        provider-match short-circuit works under concurrency.  Catches
-        a future regression where someone accidentally inverts the
-        ``need_new_client`` logic so matching clients get re-created.
+        This used to assert the opposite -- that a matching existing
+        client made ``KanbanFactory.create`` a no-op. That was the bug:
+        reusing (and mutating) a client that may be the SAME object
+        ``ProjectContextManager`` has cached for the currently-active
+        project corrupted that cache entry when this call's new
+        project/board got stamped onto it, leaking one project's tasks
+        into another project's view. A fresh instance per call, even
+        on a provider match, is what the fix requires.
         """
         from src.integrations.kanban_interface import KanbanProvider
         from src.marcus_mcp.tools import nlp as nlp_module
@@ -466,7 +470,8 @@ class TestKanbanInitLockUnderConcurrency:
                 ]
             )
 
-        assert factory_create_calls == 0, (
-            f"KanbanFactory.create must NOT run when state already has a "
-            f"matching client; ran {factory_create_calls} times"
+        assert factory_create_calls == 3, (
+            f"KanbanFactory.create must run for every call, even when "
+            f"state already has a matching client (issue #856); ran "
+            f"{factory_create_calls} times"
         )
