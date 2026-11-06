@@ -159,3 +159,89 @@ class TestCodexFindingTrustedHashesLiveOutsideTheWorkspace:
 
         manifest = json.loads(trusted_hashes_path(workspace).read_text())
         assert manifest["metrics.json"] == hashlib.sha256(content).hexdigest()
+
+
+class TestCodexFindingClaimFieldGateIsMechanical:
+    """The second time the claims gate missed a field: id can be unhashable.
+
+    {"claims":[{"id":["c1"],"kind":"lookup"}]} passed collect_output's
+    "a claim entry is not an object" guard (the entry itself is a
+    dict), then crashed with TypeError on the id's own set membership
+    check or insertion -- a list is not hashable. run_condition_a_case
+    calls collect_output right after every writer pass, so this
+    aborted the case before the self-check or the bounded retry could
+    run, wasting the case in a paid run.
+
+    Every field collect_output reads from a claim entry -- id, kind,
+    nothing else -- is swept here with the same five shapes: None, a
+    list, an object, a number, and an empty string. The sibling sweep
+    for ``_malformed_claim_shape``'s own fields lives in
+    ``test_numeric_claims.py``.
+    """
+
+    BAD_SHAPES = [None, ["c1"], {"id": "c1"}, 5, ""]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_id", BAD_SHAPES, ids=repr)
+    def test_a_malformed_id_is_a_named_problem_not_a_crash(self, tmp_path, bad_id):
+        """Codex's exact field: id must never reach a set operation
+        unless it is already known to be a usable, hashable value."""
+        write(
+            tmp_path,
+            report="x",
+            claims_raw=json.dumps({"claims": [{"id": bad_id, "kind": "lookup"}]}),
+        )
+        got = collect_output(tmp_path)
+        assert got["problems"] != []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_kind", BAD_SHAPES, ids=repr)
+    def test_a_malformed_kind_is_a_named_problem_not_a_crash(self, tmp_path, bad_kind):
+        """kind is compared with ``in`` against a tuple of strings,
+        which never raises regardless of type -- pinning that this
+        stays true rather than assuming it."""
+        write(
+            tmp_path,
+            report="x",
+            claims_raw=json.dumps({"claims": [{"id": "c1", "kind": bad_kind}]}),
+        )
+        got = collect_output(tmp_path)
+        assert got["problems"] != []
+
+    @pytest.mark.unit
+    def test_duplicate_detection_still_works_for_ordinary_ids(self, tmp_path):
+        """The fix must not break the one thing this gate exists for."""
+        write(
+            tmp_path,
+            report="x",
+            claims_raw=json.dumps(
+                {
+                    "claims": [
+                        {"id": "c1", "kind": "lookup"},
+                        {"id": "c1", "kind": "lookup"},
+                    ]
+                }
+            ),
+        )
+        got = collect_output(tmp_path)
+        assert any("duplicate" in p for p in got["problems"])
+
+    @pytest.mark.unit
+    def test_a_list_valued_id_does_not_poison_duplicate_detection(self, tmp_path):
+        """A malformed id must not silently occupy a slot that lets a
+        later, well-formed duplicate through unreported."""
+        write(
+            tmp_path,
+            report="x",
+            claims_raw=json.dumps(
+                {
+                    "claims": [
+                        {"id": ["c1"], "kind": "lookup"},
+                        {"id": "c2", "kind": "lookup"},
+                        {"id": "c2", "kind": "lookup"},
+                    ]
+                }
+            ),
+        )
+        got = collect_output(tmp_path)
+        assert any("duplicate" in p for p in got["problems"])

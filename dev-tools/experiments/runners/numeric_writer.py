@@ -28,7 +28,7 @@ import subprocess  # nosec B404 - fixed argv, no shell, local CLI
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 INSTRUCTIONS = """\
 You are writing a model performance report from a completed evaluation.
@@ -314,19 +314,23 @@ def collect_output(workspace: Path) -> Dict[str, Any]:
         elif raw is not None:
             problems.append("claims.json is neither an object nor a list")
 
-    seen = set()
+    seen: Set[str] = set()
     for claim in claims:
         if not isinstance(claim, dict):
             problems.append(f"a claim entry is not an object: {claim!r}")
             continue
         cid = claim.get("id")
-        if not cid:
-            problems.append("a claim has no id")
+        # id must be known hashable before any set operation touches
+        # it -- a list or object id would otherwise raise TypeError
+        # here and abort the whole collection, not just this claim.
+        if not isinstance(cid, str) or not cid:
+            problems.append(f"a claim's id is not a nonempty string: {cid!r}")
         elif cid in seen:
             problems.append(f"duplicate claim id: {cid}")
-        seen.add(cid)
+        else:
+            seen.add(cid)
         if claim.get("kind") not in ("lookup", "derived", "consistency"):
-            problems.append(f"claim {cid} has kind {claim.get('kind')!r}")
+            problems.append(f"claim {cid!r} has kind {claim.get('kind')!r}")
 
     expected = {"report.md", "claims.json", STAGED_SUBDIR}
     extra = sorted(p.name for p in workspace.iterdir() if p.name not in expected)

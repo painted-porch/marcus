@@ -2051,3 +2051,109 @@ class TestCodexFindingUnicodeNumericForms:
         """Decision: reject, not normalize -- "10 squared" must not
         become the fabricated literal figure 102."""
         assert extract_numbers("The area is 10² units.") == ["10"]
+
+
+class TestCodexFindingMechanicalFieldSweep:
+    """Every field _malformed_claim_shape reads, fuzzed the same way.
+
+    Round 21's finding (numeric_writer.collect_output's id field) was
+    the second time a claims gate missed a field -- round 14 was the
+    first, for this very function. To make the next one mechanical
+    instead of another one-off patch, every field this gate reads --
+    source, key, expr, inputs, and tolerance -- gets the same five
+    shapes: None, a list, an object, a number, and an empty string.
+
+    Fields: source, key (lookup); expr, inputs (derived/consistency);
+    tolerance (either kind).
+    """
+
+    BAD_SHAPES = [None, ["x"], {"k": "v"}, 5, ""]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_source", BAD_SHAPES, ids=repr)
+    def test_a_malformed_lookup_source_is_unresolvable(self, sources, bad_source):
+        """source."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="lookup",
+            source=bad_source,
+            key="n_records",
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_key", BAD_SHAPES, ids=repr)
+    def test_a_malformed_lookup_key_is_unresolvable(self, sources, bad_key):
+        """key."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="lookup",
+            source="metrics.json",
+            key=bad_key,
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_expr", BAD_SHAPES, ids=repr)
+    def test_a_malformed_derived_expr_is_unresolvable(self, sources, bad_expr):
+        """expr."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="derived",
+            expr=bad_expr,
+            inputs={"a": "metrics.json:n_records"},
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_inputs", [["x"], "a", 5], ids=repr)
+    def test_a_malformed_inputs_field_itself_is_unresolvable(self, sources, bad_inputs):
+        """inputs, as a whole, not just the addresses inside it.
+
+        Defense-in-depth, not a reachable-today bug: Claim.from_dict
+        always coerces this field to a dict or raises an exception
+        the caller already catches, and the harness's own direct
+        Claim(...) constructions (required_consistency_claims) always
+        pass a well-formed dict literal. The gate should not depend
+        on its only callers happening to be safe.
+        """
+        c = Claim(
+            id="c1", value=1, label="x", kind="derived", expr="a", inputs=bad_inputs
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_tolerance", [["x"], 5, ""], ids=repr)
+    def test_a_malformed_tolerance_is_unresolvable(self, sources, bad_tolerance):
+        """tolerance -- excluding None (explicitly means exact) and a
+        well-formed object (the valid shape) from the bad-shape set."""
+        c = Claim(
+            id="c1",
+            value=0.9,
+            label="x",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+            tolerance=bad_tolerance,
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_tolerance_of_none_is_still_exact_not_malformed(self, sources):
+        """None is a legitimate value for this field, not a bad shape."""
+        c = Claim(
+            id="c1",
+            value=0.858,
+            label="x",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+            tolerance=None,
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"

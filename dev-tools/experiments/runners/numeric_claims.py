@@ -216,7 +216,7 @@ class Claim:
     source: Optional[str] = None
     key: Optional[str] = None
     expr: Optional[str] = None
-    inputs: Dict[str, Any] = field(default_factory=dict)
+    inputs: Any = field(default_factory=dict)
     tolerance: Any = None
 
     @classmethod
@@ -720,6 +720,8 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
     if claim.kind in ("derived", "consistency"):
         if not isinstance(claim.expr, str) or not claim.expr.strip():
             return f"{claim.label}: claim has no expression to evaluate"
+        if claim.inputs and not isinstance(claim.inputs, dict):
+            return f"{claim.label}: inputs is not an object: {claim.inputs!r}"
         for var, address in (claim.inputs or {}).items():
             if not isinstance(address, str) or not address:
                 return (
