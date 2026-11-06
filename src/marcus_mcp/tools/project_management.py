@@ -276,6 +276,28 @@ async def add_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             return handle_mcp_tool_error(e, "add_project", arguments)
 
+        # register_sqlite_board only builds the fields it itself needs
+        # (db_path, project_name, attachments_dir, project_id) -- it
+        # has no concept of project_root, since its own caller (the
+        # Tow experiment runner, issue #741) never has one to give it.
+        # A caller registering an EXISTING board through this tool can
+        # supply one, and silently dropping it would register a
+        # project that comes back less capable than one created
+        # through create_project's own auto-register path: project_root
+        # is what log_artifact's filesystem mode resolves paths
+        # against, and what the software smoke gate needs too.
+        project_root = config.get("project_root")
+        if project_root:
+            registered = await server.project_registry.get_project(project_id)
+            if registered is not None:
+                merged_provider_config = {
+                    **registered.provider_config,
+                    "project_root": project_root,
+                }
+                await server.project_registry.update_project(
+                    project_id, {"provider_config": merged_provider_config}
+                )
+
         conversation_logger.log_pm_decision(
             decision=f"Registered sqlite project '{project_id}'",
             rationale="User requested new project configuration",

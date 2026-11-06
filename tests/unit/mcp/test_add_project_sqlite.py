@@ -64,9 +64,23 @@ class TestAddProjectSqlite:
     ) -> None:
         """Registering through the tool must be readable by a fresh,
         independent registry instance -- not just the in-memory cache
-        of the one that wrote it."""
+        of the one that wrote it.
+
+        Also covers project_root: register_sqlite_board itself has no
+        concept of it (its own caller, the Tow experiment runner, never
+        has one to give it), so a caller registering an EXISTING board
+        through this tool and supplying project_root must see it carried
+        through -- dropping it would register a project that comes back
+        less capable than one created through create_project's own
+        auto-register path (project_root is what log_artifact's
+        filesystem mode and the software smoke gate both need). An
+        independent reader is exactly what would catch a silently
+        dropped field.
+        """
         db_path = tmp_path / "board.db"
         db_path.touch()
+        project_root = tmp_path / "existing-board-workspace"
+        project_root.mkdir()
 
         server = Mock()
         server.project_registry = _file_backed_registry(tmp_path)
@@ -76,7 +90,11 @@ class TestAddProjectSqlite:
             {
                 "name": "sqlite-project",
                 "provider": "sqlite",
-                "config": {"project_id": "proj-sqlite-1", "db_path": str(db_path)},
+                "config": {
+                    "project_id": "proj-sqlite-1",
+                    "db_path": str(db_path),
+                    "project_root": str(project_root),
+                },
                 "make_active": False,
             },
         )
@@ -93,6 +111,7 @@ class TestAddProjectSqlite:
         assert stored is not None
         assert stored.provider == "sqlite"
         assert stored.provider_config["db_path"] == str(db_path.resolve())
+        assert stored.provider_config["project_root"] == str(project_root)
 
     @pytest.mark.asyncio
     async def test_missing_project_id_or_db_path_is_rejected_with_a_clear_error(
