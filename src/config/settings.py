@@ -10,6 +10,7 @@ import os
 from typing import Any, Dict, Optional
 
 from .config_loader import get_config
+from .config_path import resolve_config_candidates
 
 
 class Settings:
@@ -51,9 +52,10 @@ class Settings:
     """
 
     def __init__(self, config_path: Optional[str] = None) -> None:
-        # Use the new marcus.config.json location
-        self.config_path = config_path or os.environ.get(
-            "MARCUS_CONFIG", "marcus.config.json"
+        # resolve_config_candidates puts MARCUS_CONFIG first when set
+        # (issue #891), same as every other config-loading path.
+        self.config_path = config_path or str(
+            resolve_config_candidates("marcus.config.json")[0]
         )
 
         # Default configuration

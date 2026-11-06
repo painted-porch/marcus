@@ -12,6 +12,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from src.config.config_path import resolve_config_candidates
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,23 +37,13 @@ class ConfigLoader:
 
     def _load_config(self) -> None:
         """Load configuration from marcus.config.json."""
-        # Find config file
-        # Try multiple locations in order of preference
-        possible_paths = []
-
-        # 1. Check MARCUS_CONFIG environment variable first (highest priority)
-        if "MARCUS_CONFIG" in os.environ:
-            env_path = Path(os.environ["MARCUS_CONFIG"])
-            possible_paths.append(env_path)
-
-        # 2. Then try default locations
-        possible_paths.extend(
-            [
-                Path.cwd() / "config_marcus.json",  # Current directory
-                Path(__file__).parent.parent.parent
-                / "config_marcus.json",  # Project root
-                Path.home() / ".marcus" / "config_marcus.json",  # User home
-            ]
+        # Find config file. resolve_config_candidates puts MARCUS_CONFIG
+        # first when set (issue #891); the rest of this list is this
+        # loader's own fallback order.
+        possible_paths = resolve_config_candidates(
+            Path.cwd() / "config_marcus.json",  # Current directory
+            Path(__file__).parent.parent.parent / "config_marcus.json",  # Project root
+            Path.home() / ".marcus" / "config_marcus.json",  # User home
         )
 
         for path in possible_paths:

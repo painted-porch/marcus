@@ -326,19 +326,16 @@ class KanbanClient:
         ``MARCUS_CONFIG`` could not actually rely on a Planka-backed
         client (this one) honoring it.
         """
-        # Try multiple locations for config file
+        # resolve_config_candidates puts MARCUS_CONFIG first when set
+        # (issue #891); the rest of this list is this loader's own
+        # fallback order.
         from pathlib import Path
 
-        config_paths = []
-        env_override = os.environ.get("MARCUS_CONFIG")
-        if env_override:
-            config_paths.append(Path(env_override))
-        config_paths.extend(
-            [
-                Path("config_marcus.json"),  # Current directory
-                # Project root
-                Path(__file__).parent.parent.parent / "config_marcus.json",
-            ]
+        from src.config.config_path import resolve_config_candidates
+
+        config_paths = resolve_config_candidates(
+            Path("config_marcus.json"),  # Current directory
+            Path(__file__).parent.parent.parent / "config_marcus.json",  # Project root
         )
 
         config_path = None

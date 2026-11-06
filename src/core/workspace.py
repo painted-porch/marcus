@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
+from src.config.config_path import resolve_config_candidates
+
 
 class WorkspaceSecurityError(Exception):
     """
@@ -242,17 +244,19 @@ class WorkspaceManager:
         lose to an ambient repo-root file here even when both were
         set.
         """
+        # resolve_config_candidates puts MARCUS_CONFIG first when set
+        # (issue #891); the rest of this list is this loader's own
+        # fallback order.
         config_locations = [
-            # Environment variable (explicit override, highest priority)
-            os.environ.get("MARCUS_CONFIG", ""),
-            # XDG config directory (preferred ambient default)
-            os.path.expanduser("~/.config/marcus/config.json"),
-            # Local config in Marcus root
-            os.path.join(self.marcus_root, "config_marcus.json"),
+            str(p)
+            for p in resolve_config_candidates(
+                os.path.expanduser("~/.config/marcus/config.json"),
+                os.path.join(self.marcus_root, "config_marcus.json"),
+            )
         ]
 
         for location in config_locations:
-            if location and os.path.exists(location):
+            if os.path.exists(location):
                 try:
                     self.load_config(location)
                     print(f"Loaded workspace config from: {location}", file=sys.stderr)
