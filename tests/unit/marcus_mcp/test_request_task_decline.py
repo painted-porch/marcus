@@ -171,6 +171,55 @@ class TestRequestTaskDeclineHappyPath:
         state.file_lock_registry.release.assert_awaited_once_with("verify-1")
 
     @pytest.mark.asyncio
+    async def test_persists_through_the_subtask_manager_with_no_kanban_row(
+        self, tmp_path
+    ) -> None:
+        """Codex P1, round 3 on PR #834: the board write cannot
+        substitute for this. SubtaskManager's own store is what
+        actually persists subtask state -- a migrated subtask may have
+        no kanban row at all -- and is what request_next_task's own
+        subtask path reads back on the next poll."""
+        from src.marcus_mcp.coordinator.subtask_manager import (
+            Subtask,
+            SubtaskManager,
+        )
+
+        task = _make_task(task_id="sub-1")
+        task.is_subtask = True
+        task.parent_task_id = "parent-1"
+        state = _make_state(task)
+
+        manager = SubtaskManager(state_file=tmp_path / "subtasks_test.json")
+        manager.subtasks["sub-1"] = Subtask(
+            id="sub-1",
+            parent_task_id="parent-1",
+            name="Verify the claim",
+            description="",
+            status=TaskStatus.IN_PROGRESS,
+            priority=Priority.MEDIUM,
+            assigned_to="verifier-1",
+            created_at=datetime.now(timezone.utc),
+            estimated_hours=1.0,
+        )
+        state.subtask_manager = manager
+        # No kanban_client write can be trusted to carry this -- the
+        # real regression report_blocker's lane-death comment names
+        # (GitHub, Linear) don't persist BLOCKED through update_task
+        # either, which is exactly why this path must not depend on it.
+        state.kanban_client.update_task = AsyncMock(side_effect=RuntimeError("down"))
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            result = await request_task_decline(
+                agent_id="verifier-1",
+                task_id="sub-1",
+                reason="wrong",
+                state=state,
+            )
+
+        assert result["success"] is True
+        assert manager.subtasks["sub-1"].status == TaskStatus.DECLINED
+
+    @pytest.mark.asyncio
     async def test_survives_a_kanban_write_failure(self) -> None:
         """A board write failure must not fail the decline -- the task
         model is the source of truth, matching request_task_redo."""

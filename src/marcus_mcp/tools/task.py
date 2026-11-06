@@ -9062,6 +9062,32 @@ async def request_task_decline(
         logger.warning(
             "request_task_decline: kanban comment failed for %s: %s", task_id, e
         )
+    # Some providers (GitHub, Linear) do not persist a status through
+    # update_task at all -- the same gap report_blocker's lane-death
+    # path already works around with an explicit move, best-effort.
+    if hasattr(state.kanban_client, "move_task_to_column"):
+        try:
+            await state.kanban_client.move_task_to_column(task_id, "declined")
+        except Exception as move_err:  # noqa: BLE001 - best effort
+            logger.warning(
+                "request_task_decline: move_task_to_column('declined') "
+                "failed for %s: %s",
+                task_id,
+                move_err,
+            )
+
+    # 2b. Subtask record (Codex P1, round 3 on PR #834): the board write
+    # above cannot substitute for this. SubtaskManager's store is what
+    # actually persists subtask state -- a migrated subtask may have no
+    # kanban row at all -- and is what request_next_task's own subtask
+    # path reads back. Mirrors report_blocker's lane-death path exactly
+    # (``isinstance(..., dict)`` guard, not just ``hasattr``, since a
+    # bare Mock state would otherwise always look like it has one).
+    _subtasks = getattr(getattr(state, "subtask_manager", None), "subtasks", None)
+    if isinstance(_subtasks, dict) and task_id in _subtasks:
+        state.subtask_manager.update_subtask_status(
+            task_id, TaskStatus.DECLINED, state.project_tasks
+        )
 
     # 3. Release coordination state -- a declined task is terminal for
     # the current agent, the same decoupling report_blocker's BLOCKED
