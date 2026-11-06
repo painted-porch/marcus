@@ -72,6 +72,13 @@ Tracked as [#830](https://github.com/painted-porch/marcus/issues/830), sequenced
 Until it lands, reuse the `find`/`verify`/`synthesize`/`approve` names if you need the kernel's typed-evidence gate and handoff, the same way the eligibility restriction above also currently requires reusing `find`/`verify`.
 Check ADR-0013's K2 section for the current implementation status before you build against it.
 
+### Board provider: SQLite only
+
+`KanbanInterface` has four implementations (SQLite, Planka, Linear, GitHub), but only SQLite is supported going forward — the other three are best-effort.
+Build and test your extension against the `sqlite` provider.
+If a review finding against your PR touches only Planka-, Linear-, or GitHub-specific adapter code, it gets filed as a follow-up issue tagged `adapter` rather than blocking your merge.
+A kernel bug that happens to surface through one of those adapters is not covered by this exception and still needs fixing before merge.
+
 ## What an extension must never do: the pull model (ADR-0013 K4, K8)
 
 The single most common mistake building against Marcus is assuming the kernel calls into your extension's code — the way a plugin system usually works.
