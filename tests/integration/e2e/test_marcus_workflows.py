@@ -96,17 +96,25 @@ class TestAgentRegistrationAndTaskAssignment(BaseTestCase):
             assert worker.role == agent["role"]
             assert set(worker.skills) == set(agent["skills"])
 
-        # Check list of registered agents
+        # Check list of registered agents. Issue #884 group C: the
+        # worker roster persists across restarts by design (ADR-0012
+        # O1) and is rehydrated from a data directory shared across
+        # the whole pytest session, not per test file -- running
+        # alongside other E2E files that also register agents (e.g.
+        # test_complete_agent_lifecycle.py) made the exact total == 3
+        # assumption fail even though this test's own 3 registrations
+        # worked correctly. Checking for this test's own agents as a
+        # subset, not an exact count, tests what this test is
+        # actually for without being fragile to another file's state.
         result = await handle_tool_call("list_registered_agents", {}, server)
         data = self._parse_result(result)
 
         assert data["success"] is True
-        assert data["total"] == 3
-        assert len(data["agents"]) == 3
+        assert data["total"] == len(data["agents"])
 
         # Verify each agent in the list
         agent_ids = {a["id"] for a in data["agents"]}
-        assert agent_ids == {"backend-1", "frontend-1", "devops-1"}
+        assert {"backend-1", "frontend-1", "devops-1"} <= agent_ids
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("anyio_backend", ["asyncio"])
@@ -343,8 +351,14 @@ class TestProjectCreationAndTaskGeneration(BaseTestCase):
         """
         server = await self._create_test_server()
 
-        # Mock the actual natural language processing
-        with patch("src.marcus_mcp.tools.nlp.create_project") as mock_create:
+        # Mock the actual natural language processing. Issue #884
+        # group C: handlers.py does `from .tools.nlp import
+        # create_project`, binding its own local reference --
+        # patching nlp.create_project never intercepted the real
+        # dispatch, so the unmocked create_project ran for real and
+        # rejected the call for lacking a sqlite project_root (#588),
+        # unrelated to anything this test is actually exercising.
+        with patch("src.marcus_mcp.handlers.create_project") as mock_create:
             mock_create.return_value = {
                 "success": True,
                 "project_name": "E-Commerce Platform",
@@ -406,10 +420,12 @@ class TestProjectCreationAndTaskGeneration(BaseTestCase):
         mock_kanban = cast(AsyncMock, server.kanban_client)
         mock_kanban.get_all_tasks.return_value = existing_tasks
 
-        # Mock add_feature response
-        with patch(
-            "src.integrations.nlp_tools.add_feature_natural_language"
-        ) as mock_add:
+        # Mock add_feature response. Issue #884 group C: nlp.py does
+        # `from src.integrations.nlp_tools import
+        # add_feature_natural_language`, binding its own local
+        # reference -- patching nlp_tools's copy never intercepted
+        # the real call nlp.py's own add_feature makes.
+        with patch("src.marcus_mcp.tools.nlp.add_feature_natural_language") as mock_add:
             mock_add.return_value = {
                 "success": True,
                 "tasks_created": 3,
@@ -929,7 +945,17 @@ class TestProgressTrackingAndCompletion(BaseTestCase):
                 )
                 completed_count += 1
 
-        # Check project status
+        # Check project status. Issue #884 group C: get_project_status
+        # (src/marcus_mcp/tools/project.py) resolves its kanban client
+        # through state.project_manager.get_kanban_client(), not
+        # state.kanban_client directly the way request_next_task does
+        # -- this test's server never registers a real active
+        # project, so the real project_manager correctly had nothing
+        # to return. Routing it to the same mock every other call in
+        # this test already uses.
+        server.project_manager.get_kanban_client = AsyncMock(  # type: ignore[method-assign]
+            return_value=server.kanban_client
+        )
         result = await handle_tool_call("get_project_status", {}, server)
         data = self._parse_result(result)
 
@@ -1024,10 +1050,11 @@ class TestErrorRecoveryAndResilience(BaseTestCase):
 
         # Simulate kanban failure
         mock_kanban = cast(AsyncMock, server.kanban_client)
+        # Issue #884 group C: KanbanIntegrationError/MarcusBaseError
+        # never accepted a details kwarg (src/core/error_framework.py).
         mock_kanban.get_all_tasks.side_effect = KanbanIntegrationError(
             board_name="test-board",
             operation="get_tasks",
-            details="Connection timeout",
             context=ErrorContext(operation="task_fetch"),
         )
 
@@ -1292,9 +1319,14 @@ class TestSystemHealthAndMonitoring(BaseTestCase):
         assert data["echo"] == "health-check"
         assert "timestamp" in data
 
-        # Check assignment health
+        # Check assignment health. Issue #884 group C: must patch
+        # where the name is looked up (src.marcus_mcp.tools.system
+        # imports AssignmentHealthChecker directly into its own
+        # namespace), not where it's defined -- the original target
+        # never intercepted the real call, so the unmocked health
+        # checker ran and returned a shape with no top-level "status".
         with patch(
-            "src.monitoring.assignment_monitor.AssignmentHealthChecker"
+            "src.marcus_mcp.tools.system.AssignmentHealthChecker"
         ) as mock_checker:
             mock_health_checker = Mock()
             mock_health_checker.check_assignment_health = AsyncMock(
