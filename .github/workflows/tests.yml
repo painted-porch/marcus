@@ -262,6 +262,7 @@ jobs:
           echo "prior run's. The outcome and full log above are the extent of" >> $GITHUB_STEP_SUMMARY
           echo "what this workflow surfaces; noticing a new failure mode in" >> $GITHUB_STEP_SUMMARY
           echo "this bucket still requires a human to read this summary." >> $GITHUB_STEP_SUMMARY
+          echo "Tracked as issue #892." >> $GITHUB_STEP_SUMMARY
 
   # Full test suite with coverage - nightly only
   full-test-suite:
