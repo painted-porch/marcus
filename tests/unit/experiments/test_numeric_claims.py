@@ -311,6 +311,39 @@ class TestDerivedClaims:
         )
         assert check_claims([c], sources)[0].verdict == "unresolvable"
 
+    @pytest.mark.unit
+    def test_constant_only_expression_with_no_inputs_is_unresolvable(self, sources):
+        """A derived claim must recompute from staged data, not restate
+        itself.
+
+        ``expr="999"`` with ``inputs={}`` evaluates to 999 regardless
+        of anything staged, so a claim whose value is 999 would
+        "verify" by matching an assertion with nothing behind it.
+        """
+        c = Claim(
+            id="c1",
+            value=999,
+            label="fabricated",
+            kind="derived",
+            expr="999",
+            inputs={},
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_an_unused_decoy_input_does_not_rescue_a_constant_expression(self, sources):
+        """Declaring an input the expression never references is the
+        same bypass wearing a disguise."""
+        c = Claim(
+            id="c1",
+            value=999,
+            label="fabricated",
+            kind="derived",
+            expr="999",
+            inputs={"a": "metrics.json:n_records"},
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
 
 class TestConsistencyClaims:
     """A consistency claim asserts a relation between figures."""

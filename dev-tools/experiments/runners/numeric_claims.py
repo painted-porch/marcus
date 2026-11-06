@@ -609,8 +609,28 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
                 )
         try:
             tree = ast.parse(claim.expr or "", mode="eval")
+        except SyntaxError as exc:
+            return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
+        used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        if not used & set(names):
+            # A derived or consistency claim is supposed to be
+            # recomputed from staged data, not restate its own
+            # assertion as a constant: expr="999" with no (or no
+            # referenced) input evaluates to 999 regardless of
+            # anything staged, so a fabricated value would "verify"
+            # against nothing.
+            return CheckResult(
+                verdict=VERDICT_UNRESOLVABLE,
+                detail=(
+                    f"{claim.label}: expr {claim.expr!r} does not reference "
+                    f"any resolved input, cannot be recomputed from staged "
+                    f"data"
+                ),
+                **base,
+            )
+        try:
             truth = _safe_eval(tree, names)
-        except (SyntaxError, ValueError, ZeroDivisionError, TypeError) as exc:
+        except (ValueError, ZeroDivisionError, TypeError) as exc:
             return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=str(exc), **base)
         try:
             ok = _within_tolerance(claim.value, truth, claim.tolerance)
