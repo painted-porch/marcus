@@ -90,6 +90,11 @@ It is the line those nine already drew, written down once so K8, K9 and K10 — 
 **No code change.** This decision is a description of a boundary the shipped code already observes, not a new guarantee to build.
 If writing this section surfaces something that crosses the boundary it describes, that is a found gap for a follow-up issue, not a defect in this decision, and is listed under Related below rather than fixed in this PR.
 
+**SQLite-only support policy (Lawrence Gray, 2026-11-06).** `KanbanInterface` names four providers, but only SQLite is supported going forward.
+Planka, Linear and GitHub are best-effort.
+A Codex review finding that touches only adapter-specific code for one of the three best-effort providers is filed as an issue, tagged with the `adapter` label, and its review thread resolved with a pointer to that issue rather than blocking the PR.
+A kernel bug that merely surfaces through a best-effort adapter's example still gets fixed normally — this policy narrows which *provider-specific* findings block a merge, not which kernel findings do.
+
 ### K2 — How an extension registers
 
 **Accepted 2026-11-05 (Lawrence Gray).**
@@ -212,13 +217,45 @@ Confirmed by reading the current implementation and its three Codex review round
 
 ### K8 — Runtime neutrality
 
-**Recommendation.** The agent contract assumes nothing about the agent's runtime.
+**Accepted 2026-11-06 (Lawrence Gray, in the chief-of-staff channel: "Accept K8 runtime neutrality," in the recommended order below).**
+
+**Decision.** The agent contract assumes nothing about the agent's runtime.
 
 Three consequences: artifacts are delivered as content, or through a content-addressed store, rather than as paths on the server's filesystem; task instruction text carries no domain duties the kernel assembled; and per-task agent cost arrives through an ingestion API rather than being read from one vendor's transcripts.
 
 **Evidence.** `log_artifact` requires `project_root`, an absolute server-side path meaning "where the code lives", so a non-software project invents a directory that is deliberately not a repository.
 Every Minecraft task's instructions carry the D8 checkpoint duty telling the agent a checkpoint is a commit on its branch; the agent has no branch, and the prompt must teach it to ignore text the kernel assembled.
 Minecraft agents' tokens live in their own transcripts, so cost had to be computed by parsing them, which makes cost-per-task incomparable across consumers.
+
+**Evidence and sizing, by consequence.** For each consequence: the exact code it touches today, the external extension it hurts, and an engineer-day estimate.
+
+- **(3) Per-task cost arrives through an ingestion API, not vendor transcript parsing — 3-4 engineer-days.**
+  Touches `src/cost_tracking/worker_ingester.py` (370 lines): `WorkerJSONLIngester` reads `~/.claude/projects/<dir>/<session-id>.jsonl` directly, Claude Code's own session-log format, keyed on `message.usage` token-count blocks unique to that CLI, and hardcodes `provider="anthropic"`.
+  Hurts Minecraft severely: its agents are Node processes with no Claude Code session at all, so there is no JSONL file for this ingester to read, and cost has to be computed by a separate, ad hoc parse of whatever Minecraft's own process happens to log.
+  The citation and numerical verifiers are largely unaffected today, since both currently run as Claude Code sessions, but that is incidental to their implementation, not a guarantee.
+  Largest of the three because it is new API surface, not a parameter relaxation: a generic cost-ingestion endpoint/schema any runtime can call (token/cost counts keyed by `agent_id`/`task_id`/`run_id`, vendor-agnostic), with `WorkerJSONLIngester` kept as one caller of that API (the Claude-Code-specific adapter) rather than the only path in.
+  Directly unblocks #742 (cost reaching the record as a field of task completion rather than a batch sidecar read).
+- **(2) Task instruction text carries no kernel-assembled domain duties — 1 engineer-day.**
+  Touches `_build_checkpoint_duty_prompt` (`src/marcus_mcp/tools/task.py:2746-2889`), unconditionally appended to every task's instructions as "Layer 0.2: the ADR-0012 D8 checkpoint duty" ("always included" per its own layer comment) — text that assumes a git branch exists.
+  Hurts Minecraft: it has no branch at all, so its own prompt has to separately instruct the agent to ignore text the kernel itself assembled into its instructions, duplicated and contradictory.
+  The citation and numerical verifiers are unaffected; both run from real git checkouts where the duty is accurate.
+  Smallest of the three: one function, one call site, the same declaration shape K3 already established to skip the injection for a project that declares it has no commit-based recovery story.
+- **(1) Artifacts as content, not server-filesystem paths — 2-3 engineer-days.**
+  Touches `log_artifact` (`src/marcus_mcp/tools/attachment.py:32-134`): `project_root` is a required parameter that hard-fails if absent, not absolute, or does not exist on the server's own filesystem.
+  Hurts Minecraft: it has no repository, so every artifact-logging task invents a fake `project_root` directory purely to satisfy this check, with nothing meaningful written there.
+  The AI-citation and numerical-report verifiers are unaffected, both running from a real checkout with a real `project_root`.
+  Largest agent-facing contract change of the three, so it benefits from the other two already landing: add an alternate content-addressed path (store the artifact's bytes/hash in the existing `ProjectHistoryPersistence` store instead of requiring a filesystem location), make `project_root` optional when content is supplied this way, and update the handful of callers/readers that currently assume a resolved filesystem path.
+
+| Consequence | Code touched | Extension hurt | Engineer-days |
+| --- | --- | --- | --- |
+| (3) Cost ingestion API | `cost_tracking/worker_ingester.py` (Claude-Code-JSONL-only) | Minecraft (no Claude Code session to parse at all) | 3-4 |
+| (2) No kernel-assembled domain duties in instructions | `task.py:2746-2889` (`_build_checkpoint_duty_prompt`) | Minecraft (no branch to commit to) | 1 |
+| (1) Artifacts as content | `attachment.py:32-134` (`log_artifact`) | Minecraft (fake `project_root`) | 2-3 |
+| **Total** | | | **6-8** |
+
+**Recommended order, and why.** (3) first: it unblocks #742 immediately and is the one with zero safety net today (no fallback cost path for a non-Claude-Code runtime at all).
+Then (2): cheapest, and it reuses K3's own declaration pattern one level up rather than inventing a new mechanism.
+Then (1) last: the largest agent-facing contract change, and it benefits from the other two already having landed a working pattern for "a project declares what it does not have."
 
 ### K9 — Measurement belongs to the kernel
 
