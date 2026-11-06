@@ -11,8 +11,10 @@ import contextlib
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -187,9 +189,28 @@ class FilePersistence(PersistenceBackend):
         Python object, so it serializes every writer regardless of
         which instance or process it came from.
 
-        ``flock`` blocks the calling thread while contended, so the
-        acquire/release run in a worker thread via ``asyncio.to_thread``
-        rather than on the event loop.
+        Blocking ``flock(LOCK_EX)`` in a worker thread (the first cut
+        of this fix) shares the default executor with ``aiofiles``'s
+        own file I/O. Under enough concurrent writers, every worker
+        thread can end up parked on the lock while the thread holding
+        it has nowhere left to run its own read/write or release the
+        lock -- a deadlock, reproduced by Codex review with 40
+        independent writers. That is strictly worse than #883's
+        original bug (a race loses one entry; this could hang
+        persistence, and anything else sharing the executor,
+        entirely).
+
+        So this never blocks a thread: it polls ``flock(LOCK_EX |
+        LOCK_NB)`` directly on the event loop and backs off with
+        ``asyncio.sleep`` on ``BlockingIOError`` between attempts.
+        There is no acquisition timeout -- a bounded wait that gives
+        up and proceeds unlocked would silently reintroduce #883's
+        race under load, which is worse than waiting. A write under
+        this lock is a few milliseconds of JSON (de)serialization, so
+        real contention resolves almost immediately; a wait past a
+        few seconds is logged as a warning, once per acquisition, so
+        a genuinely stuck holder (e.g. a process frozen mid-write) is
+        visible rather than silently absorbed into latency.
 
         On a platform without ``fcntl`` (Windows), this degrades to a
         no-op -- the per-instance ``asyncio.Lock`` in ``_get_lock`` is
@@ -203,11 +224,28 @@ class FilePersistence(PersistenceBackend):
         lock_path = file_path.with_suffix(file_path.suffix + ".lock")
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         try:
-            await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+            start = time.monotonic()
+            delay = 0.001
+            warned = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    waited = time.monotonic() - start
+                    if waited > 5.0 and not warned:
+                        logger.warning(
+                            f"Waiting >5s to acquire the cross-process "
+                            f"lock for {lock_path}; another process or "
+                            f"instance may be stuck holding it."
+                        )
+                        warned = True
+                    await asyncio.sleep(delay + random.uniform(0, delay))
+                    delay = min(delay * 2, 0.05)
             try:
                 yield
             finally:
-                await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
 
