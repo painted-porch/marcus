@@ -2674,7 +2674,7 @@ class MarcusServer:
                 filename: str,
                 content: Union[str, Dict[str, Any], List[Any]],
                 artifact_type: str,
-                project_root: str,
+                project_root: Optional[str] = None,
                 description: str = "",
                 location: Optional[str] = None,
             ) -> Dict[str, Any]:
@@ -2709,11 +2709,17 @@ class MarcusServer:
                 artifact_type : str
                     Type of artifact (any string accepted - use descriptive names
                     like "podcast-script", "research", "video-storyboard", etc.)
-                project_root : str
-                    REQUIRED: Absolute path to the project root directory where
+                project_root : Optional[str], optional
+                    Absolute path to the project root directory where
                     artifacts will be created. All agents working on the same
                     project MUST use the same project_root path.
                     Example: /Users/username/projects/my-app
+                    ADR-0013 K8 consequence 1 (issue #870): omit this
+                    entirely when your runtime has no filesystem Marcus
+                    can reach at all (no shared workspace, e.g. the
+                    Minecraft harness). The artifact's content is then
+                    stored directly in Marcus's own record instead of
+                    being written to a path.
                 description : str, optional
                     Description of the artifact
                 location : str, optional

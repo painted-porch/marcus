@@ -660,7 +660,13 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "(e.g., an 'api' artifact will go in "
                             "{project_root}/docs/api/). "
                             "Typically this is os.getcwd() when the "
-                            "agent is running from the project root."
+                            "agent is running from the project root. "
+                            "Omit this entirely when your runtime has "
+                            "no filesystem Marcus can reach at all "
+                            "(no shared workspace) -- the artifact's "
+                            "content is then stored directly in "
+                            "Marcus's own record instead of a path "
+                            "(ADR-0013 K8 consequence 1, issue #870)."
                         ),
                     },
                     "description": {
@@ -681,7 +687,6 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     "filename",
                     "content",
                     "artifact_type",
-                    "project_root",
                 ],
             },
         ),

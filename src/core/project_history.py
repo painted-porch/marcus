@@ -130,8 +130,12 @@ class ArtifactMetadata:
     """
     Metadata for an artifact produced during task execution.
 
-    Note: The actual artifact file persists in the project workspace.
-    This is just the metadata registry.
+    Note: when a ``project_root`` was given, the actual artifact file
+    persists in the project workspace and this is just the metadata
+    registry. When one was not (ADR-0013 K8 consequence 1), the
+    artifact's own content is stored directly on this record's
+    ``content`` field instead, and this registry is both the
+    metadata and the only durable copy.
 
     Attributes
     ----------
@@ -165,6 +169,18 @@ class ArtifactMetadata:
         Project identifier for validation/debugging. Note: Conversation logs
         are the authoritative source for project-task mapping. This field is
         stored for data integrity verification but is not used for filtering.
+    content : Optional[str]
+        ADR-0013 K8 consequence 1 (issue #868's sibling, "artifacts as
+        content"): the artifact's own text, stored directly in this
+        metadata registry rather than only on a server-side
+        filesystem. Set only when ``log_artifact`` was called with no
+        ``project_root`` -- the content-addressed path a runtime with
+        no shared filesystem with Marcus (Minecraft's harness, for
+        instance) uses instead of a path write. ``None`` for every
+        artifact logged the original way (a ``project_root`` given),
+        where the bytes live only in the project workspace and this
+        registry holds metadata alone, exactly as the class's own
+        note above already states.
     """
 
     artifact_id: str
@@ -181,6 +197,7 @@ class ArtifactMetadata:
     kanban_comment_url: Optional[str] = None
     referenced_by_tasks: list[str] = field(default_factory=list)
     project_id: Optional[str] = None
+    content: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -199,6 +216,7 @@ class ArtifactMetadata:
             "kanban_comment_url": self.kanban_comment_url,
             "referenced_by_tasks": self.referenced_by_tasks,
             "project_id": self.project_id,
+            "content": self.content,
         }
 
     @classmethod
@@ -225,6 +243,7 @@ class ArtifactMetadata:
             kanban_comment_url=data.get("kanban_comment_url"),
             referenced_by_tasks=data.get("referenced_by_tasks", []),
             project_id=data.get("project_id"),
+            content=data.get("content"),
         )
 
 
