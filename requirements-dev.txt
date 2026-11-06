@@ -24,6 +24,12 @@ pytest-mock>=3.10.0
 # pandas has no bundled Parquet engine; without this, 8 tests in that
 # file error at fixture setup rather than running.
 pyarrow>=14.0.0
+# `scikit-learn` is required by `numeric_stage.fit_and_predict`, the
+# real model-fitting step in the staging entrypoint (not test-only):
+# it imports `sklearn.ensemble.HistGradientBoostingRegressor` directly.
+# Without this, 3 tests that exercise that path fail with
+# ModuleNotFoundError.
+scikit-learn>=1.3.0
 
 # Additional development tools
 # `types-aiofiles` is required by CI's `mypy src/` job —
