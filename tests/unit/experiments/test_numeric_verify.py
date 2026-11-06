@@ -76,6 +76,36 @@ class TestMissingOutput:
         assert out["verdict"] == "failed"
         assert "could not be read" in out["parse_error"]
 
+    @pytest.mark.unit
+    def test_malformed_inputs_field_is_a_failure_not_a_crash(self, workspace):
+        """A claim whose "inputs" is a list, not an object, fails gracefully.
+
+        Claim.from_dict calls dict(raw.get("inputs") or {}); a list
+        like ["a"] is valid JSON but dict(["a"]) raises ValueError,
+        which previously escaped uncaught and aborted the whole
+        verify_workspace (and load_condition_b) pass.
+        """
+        (workspace / "report.md").write_text("R2 was 0.9 [c1].")
+        (workspace / "claims.json").write_text(
+            json.dumps(
+                {
+                    "claims": [
+                        {
+                            "id": "c1",
+                            "value": 0.9,
+                            "label": "x",
+                            "kind": "derived",
+                            "expr": "a",
+                            "inputs": ["a"],
+                        }
+                    ]
+                }
+            )
+        )
+        out = verify_workspace(workspace)
+        assert out["verdict"] == "failed"
+        assert "could not be read" in out["parse_error"]
+
 
 class TestCoverage:
     """Coverage is the fraction of stated figures carrying a claim."""

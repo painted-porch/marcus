@@ -144,7 +144,7 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
             raw = json.loads(claims_path.read_text())
             items = raw.get("claims", []) if isinstance(raw, dict) else raw
             declared = [Claim.from_dict(item) for item in items]
-        except (json.JSONDecodeError, AttributeError, TypeError) as exc:
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as exc:
             parse_error = parse_error or f"claims.json could not be read: {exc}"
     else:
         parse_error = parse_error or "claims.json is missing"

@@ -134,11 +134,16 @@ STAGED_SUBDIR = "staged"
 
 
 def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
-    """Lay out a clean workspace holding only the staged evaluation.
+    """Lay out a clean workspace holding the staged evaluation.
 
     The writer is given a copy rather than the original, so a sibling
-    evaluation directory is not reachable by walking upward and the
-    run cannot modify the staged data.
+    evaluation directory is not a path back to the real staged data
+    and the run cannot modify it. A ``stale_sibling`` trap plants a
+    second, slightly-wrong evaluation directory beside the real one
+    (see ``numeric_stage.stage_case``); that sibling, if present, is
+    copied in too as its own separate copy, so the writer can still
+    stumble into reading it. Verification is unaffected either way,
+    since it only ever reads ``staged/``.
 
     Parameters
     ----------
@@ -155,8 +160,14 @@ def build_workspace(staged_dir: Path, out_dir: Path) -> Path:
     out_dir = out_dir.expanduser()
     if out_dir.exists():
         shutil.rmtree(out_dir)
+    staged_dir = staged_dir.expanduser()
     staged_copy = out_dir / STAGED_SUBDIR
-    shutil.copytree(staged_dir.expanduser(), staged_copy)
+    shutil.copytree(staged_dir, staged_copy)
+
+    for sibling in sorted(staged_dir.parent.glob("eval_*")):
+        if sibling.resolve() == staged_dir.resolve():
+            continue
+        shutil.copytree(sibling, out_dir / sibling.name)
     return out_dir
 
 
