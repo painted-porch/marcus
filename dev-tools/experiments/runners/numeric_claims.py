@@ -777,7 +777,10 @@ def _figure_matches_claim_value(
     if f"{as_float:g}" in candidates:
         return True
     if tolerance is not None:
-        return _within_tolerance(as_float, coerced, tolerance)
+        try:
+            return _within_tolerance(as_float, coerced, tolerance)
+        except (TypeError, ValueError):
+            return False
     return False
 
 

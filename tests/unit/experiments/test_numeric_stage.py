@@ -7,6 +7,7 @@ trap promises the grader.
 """
 
 import json
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -166,6 +167,32 @@ class TestRoundingRatioTrap:
         assert len(biased) <= len(case)
         assert set(biased.index).issubset(set(case.index))
 
+    @pytest.mark.unit
+    def test_rounding_keep_count_does_not_overshoot_the_target_fraction(self):
+        """Codex's exact example: 860 maize rows, 40 cotton rows,
+        rng seed 4. Rounding the retained count to an integer pushes
+        the achieved ratio's fraction back above a half (0.6316 for
+        the keep count this draw picks), making the "correct"
+        rounding up to 23 rather than wrong -- the opposite of what
+        the trap exists to create. The function must verify the
+        achieved ratio after picking an integer keep count, not just
+        the pre-rounding target, and decline to plant a broken trap
+        when no safe count exists for this draw -- the same bail-out
+        already used when keep is too small or not actually smaller
+        than the untrimmed count."""
+        rows = [{"crop": "maize"} for _ in range(860)] + [
+            {"crop": "cotton"} for _ in range(40)
+        ]
+        df = pd.DataFrame(rows)
+        biased = _bias_crop_ratio(df, np.random.default_rng(4))
+        if len(biased) == len(df):
+            # No safe trim exists for this exact draw -- declining to
+            # plant a broken trap is the correct outcome.
+            return
+        counts = biased["crop"].value_counts()
+        ratio = counts.iloc[0] / counts.iloc[-1]
+        assert ratio - int(ratio) < 0.5
+
 
 class TestStagedArtifacts:
     """Staging writes the artifact family a report is written from."""
@@ -224,6 +251,27 @@ class TestStagedArtifacts:
         stale = json.loads((siblings[0] / "metrics.json").read_text())
         current = json.loads((staged.staged_dir / "metrics.json").read_text())
         assert stale["r2_overall"] != current["r2_overall"]
+
+    @pytest.mark.unit
+    def test_declined_rounding_ratio_trap_is_not_recorded_as_planted(
+        self, evaluated, tmp_path
+    ):
+        """A rounding_ratio trap that _bias_crop_ratio declines to plant
+        (no safe keep count for its draw) must not appear in the
+        manifest's traps -- otherwise it counts as a mislabeled trap
+        opportunity in the catch-rate denominator for a trap that was
+        never actually created."""
+        with patch(
+            "runners.numeric_stage._bias_crop_ratio", side_effect=lambda df, rng: df
+        ):
+            staged = stage_case(
+                evaluated,
+                tmp_path,
+                "case-000",
+                traps=["rounding_ratio"],
+                rng=np.random.default_rng(4),
+            )
+        assert staged.traps == []
 
     @pytest.mark.unit
     def test_truth_is_returned_not_staged(self, evaluated, tmp_path):

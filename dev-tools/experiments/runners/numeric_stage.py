@@ -401,8 +401,16 @@ def stage_case(
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     df = evaluated.copy()
+    # Planted traps actually applied, which may be fewer than
+    # requested: _bias_crop_ratio can decline to trim when no safe
+    # count exists for its random draw, and a case must not record a
+    # trap opportunity that was never really created.
+    actual_traps = list(traps)
     if "rounding_ratio" in traps:
+        before = len(df)
         df = _bias_crop_ratio(df, rng)
+        if len(df) == before:
+            actual_traps.remove("rounding_ratio")
     df["record_id"] = [f"r{i:06d}" for i in range(len(df))]
     df["tier"] = df["ape"].apply(_tier_for)
 
@@ -530,7 +538,7 @@ def stage_case(
         case_id=case_id,
         staged_dir=eval_dir,
         truth=truth,
-        traps=[{"name": t} for t in traps],
+        traps=[{"name": t} for t in actual_traps],
     )
 
 
@@ -610,6 +618,15 @@ def _bias_crop_ratio(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame
     desired_ratio = math.floor(current) + 1 + target_fraction
     keep = int(round(largest / desired_ratio))
     if keep < 5 or keep >= smallest:
+        return df
+    # Rounding `keep` to an integer can itself push the achieved
+    # ratio's fraction back above a half (a report-sized count can
+    # overshoot by enough to flip which way is "correctly" rounded),
+    # which would plant a trap that no longer makes rounding up
+    # wrong. Verify what trimming to `keep` actually produces, not
+    # just the pre-rounding target.
+    achieved = largest / keep
+    if achieved - math.floor(achieved) >= 0.5:
         return df
     drop_n = smallest - keep
     droppable = df.index[df["crop"] == smallest_crop]

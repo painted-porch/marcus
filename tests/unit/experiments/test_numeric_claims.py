@@ -1559,3 +1559,27 @@ class TestCodexFindingRoundingLeniencyIsBounded:
         )
         res = check_claims([c], sources, report_text="R2 was about 0.8 [c1].")
         assert [r for r in res if r.verdict in ("uncovered", "failed")] == []
+
+    @pytest.mark.unit
+    def test_malformed_tolerance_in_the_coverage_path_does_not_crash(self, sources):
+        """A null tolerance value reached via a tagged figure's explicit-
+        tolerance check must fail that figure gracefully, not crash
+        the whole pass.
+
+        This is a different call path than _check_one's own claim
+        resolution (already hardened): _figure_matches_claim_value
+        calls _within_tolerance directly when a figure falls outside
+        the generic rounding guess, with no exception handling.
+        """
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            source="metrics.json",
+            key="r2_overall",
+            kind="lookup",
+            tolerance={"type": "abs", "value": None},
+        )
+        res = check_claims([c], sources, report_text="Overall R2 is 0.6 [c1].")
+        bad = [r for r in res if r.verdict in ("uncovered", "failed")]
+        assert len(bad) >= 1
