@@ -3225,3 +3225,53 @@ class TestCodexFindingOrderedListMarkersDoNotDriftSentencePositions:
             assert (
                 len(bad) == 1
             ), f"failed to catch the wrong sentence at item {wrong_at}"
+
+
+class TestCodexFindingListAndTableRowsAreSentenceBoundaries:
+    """A list item or table row with no terminal punctuation must not
+    merge with its neighbor into one "sentence" for the prose
+    label-contradiction check."""
+
+    @pytest.mark.unit
+    def test_a_two_item_markdown_list_does_not_merge_rows(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "- Maize R2: 0.886 [c1]\n- Cotton R2: 0.886 [c1]"
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_a_two_row_markdown_table_does_not_merge_rows(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "| Crop | R2 |\n| Maize | 0.886 [c1] |\n| Cotton | 0.886 [c1] |"
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_an_ordinary_two_sentence_paragraph_still_works(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Cotton did poorly overall. Maize's R2 is 0.886 [c1]."
+        res = check_claims([c], sources, report_text=text)
+        assert [r for r in res if r.verdict == "uncovered"] == []

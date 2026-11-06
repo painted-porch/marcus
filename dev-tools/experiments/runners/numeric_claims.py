@@ -657,6 +657,37 @@ def _words_in(text: str) -> Set[str]:
 #: this check needs.
 _SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s+|$)")
 
+#: The start of a markdown list item ("- ", "* ", "+ ", "10. ") or a
+#: table row ("|") is a sentence boundary even with no terminal
+#: punctuation at all -- a writer does not end "- Maize R2: 0.886
+#: [c1]" with a period, so without this, consecutive list items or
+#: table rows merge into one "sentence" spanning the whole list, and
+#: the row-provenance check above sees every item's row as if it
+#: were also every other item's own row.
+_LIST_OR_TABLE_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]\s|\d+\.\s|\|)", re.MULTILINE)
+
+
+def _sentence_boundaries(text: str) -> List[int]:
+    """Collect every position in text that starts or ends a "sentence".
+
+    Parameters
+    ----------
+    text : str
+        The text to scan.
+
+    Returns
+    -------
+    List[int]
+        Sorted character offsets, always including ``0`` and
+        ``len(text)``.
+    """
+    boundaries = {0, len(text)}
+    for m in _SENTENCE_BOUNDARY_RE.finditer(text):
+        boundaries.add(m.end())
+    for m in _LIST_OR_TABLE_LINE_RE.finditer(text):
+        boundaries.add(m.start())
+    return sorted(boundaries)
+
 
 def _sentence_at(text: str, position: int) -> str:
     """Return the sentence enclosing a character position in text.
@@ -672,18 +703,12 @@ def _sentence_at(text: str, position: int) -> str:
     -------
     str
         The sentence containing ``position`` -- from the end of the
-        previous sentence-ending punctuation (or the start of the
-        text) to the next one (or the end of the text).
+        previous boundary (sentence-ending punctuation, or the start
+        of a list item or table row) to the next one.
     """
-    start = 0
-    for m in _SENTENCE_BOUNDARY_RE.finditer(text):
-        if m.end() > position:
-            break
-        start = m.end()
-    end = len(text)
-    tail_match = _SENTENCE_BOUNDARY_RE.search(text, position)
-    if tail_match:
-        end = tail_match.end()
+    boundaries = _sentence_boundaries(text)
+    start = max(b for b in boundaries if b <= position)
+    end = min((b for b in boundaries if b > start), default=len(text))
     return text[start:end]
 
 
