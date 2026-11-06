@@ -14,6 +14,8 @@ import pytest
 from src.core.models import Priority, Task, TaskAssignment, TaskStatus
 from src.marcus_mcp.tools.task import unassign_task
 
+pytestmark = pytest.mark.unit
+
 
 def create_mock_task(
     task_id: str,
@@ -85,9 +87,15 @@ class TestUnassignTask:
         # Mock active operations
         state._active_operations = {"task_assignment_task-1"}
 
-        # Mock lease manager
+        # Mock lease manager. PR #731 ("lease-ownership hardening") changed
+        # unassign_task from deleting state.lease_manager.active_leases[task_id]
+        # directly to awaiting the real release_lease() method -- release_lease
+        # must be an AsyncMock, not the plain Mock() every attribute of a bare
+        # Mock() auto-creates, or awaiting it raises
+        # "object Mock can't be used in 'await' expression".
         mock_lease_manager = Mock()
         mock_lease_manager.active_leases = {"task-1": Mock()}
+        mock_lease_manager.release_lease = AsyncMock()
         state.lease_manager = mock_lease_manager
 
         # Mock kanban client
@@ -140,8 +148,11 @@ class TestUnassignTask:
         # 5. _active_operations cleared
         assert "task_assignment_task-1" not in mock_state._active_operations
 
-        # 6. lease removed
-        assert "task-1" not in mock_state.lease_manager.active_leases
+        # 6. lease released via the real release_lease() method (not a
+        # direct dict delete -- see the mock_state fixture's own comment)
+        mock_state.lease_manager.release_lease.assert_called_once_with(
+            "task-1", reason="unassigned"
+        )
 
         # 7. kanban updated to TODO
         mock_state.kanban_client.update_task.assert_called_once_with(

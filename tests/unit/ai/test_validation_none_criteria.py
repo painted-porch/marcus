@@ -8,6 +8,8 @@ import pytest
 from src.ai.validation.work_analyzer import WorkAnalyzer
 from src.core.models import Priority, Task, TaskStatus
 
+pytestmark = pytest.mark.unit
+
 
 class TestValidationNoneCriteria:
     """Test suite for validation with None completion_criteria."""
@@ -45,6 +47,7 @@ class TestValidationNoneCriteria:
         mock_evidence.decisions = []
         mock_evidence.has_placeholders = False
         mock_evidence.empty_files = []
+        mock_evidence.file_manifest = []
 
         # Act & Assert - Should not raise TypeError
         try:
@@ -69,6 +72,7 @@ class TestValidationNoneCriteria:
         mock_evidence.decisions = []
         mock_evidence.has_placeholders = False
         mock_evidence.empty_files = []
+        mock_evidence.file_manifest = []
 
         # Act
         prompt = work_analyzer._build_validation_prompt(
@@ -94,6 +98,7 @@ class TestValidationNoneCriteria:
         mock_evidence.decisions = []
         mock_evidence.has_placeholders = False
         mock_evidence.empty_files = []
+        mock_evidence.file_manifest = []
 
         # Act
         prompt = work_analyzer._build_validation_prompt(
