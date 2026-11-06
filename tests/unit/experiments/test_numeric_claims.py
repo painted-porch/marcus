@@ -3394,3 +3394,130 @@ class TestCodexFindingSentenceBoundaryGrammar:
         text = "Cotton's R2 lagged behind. Maize's R2 is 0.886 [c1]."
         res = check_claims([c], sources, report_text=text)
         assert [r for r in res if r.verdict == "uncovered"] == []
+
+
+class TestCodexFindingSegmentationSurvivesMaskingAndOpeningMarkers:
+    r"""Round 4: two specific gaps in the round-3 segmenter, plus a
+    matrix proving the fix holds across every combination this
+    checker's own inputs can produce.
+
+    Masking gap: an ordered-list marker ("1. ") is blanked to spaces
+    before _LIST_OR_TABLE_LINE_RE ever runs, so its own \d+\.\s
+    pattern never matches a numbered item's line start, and a
+    numbered list merges into one sentence the same way an
+    unformatted list once did.
+
+    Opening-marker gap: the round-3 fix looked past a *closing*
+    marker sitting between the period and the next sentence's
+    capital letter, but not an *opening* marker sitting between the
+    whitespace and that same capital letter.
+
+    Every case below reuses the maize claim's own tag [c1] on a
+    sentence about cotton -- a right number under the wrong row is
+    exactly what the sibling-row check exists to catch, and it can
+    only catch it when segmentation keeps the two rows apart. Naming
+    both rows in one merged blob is not a violation (a sentence that
+    names its own row earns the right to mention a sibling too), so
+    a stray *untagged* cotton figure would never prove segmentation
+    actually worked -- only a mistagged one does.
+    """
+
+    @pytest.mark.unit
+    def test_an_ordered_list_still_segments_even_though_masking_runs_first(
+        self, sources
+    ):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "1. Maize R2: 0.886 [c1]\n2. Cotton R2: 0.886 [c1]"
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    @pytest.mark.unit
+    def test_an_opening_bold_marker_on_the_next_sentence_still_splits(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = "Maize R2 is 0.886 [c1]. **Cotton R2 is 0.886 [c1].**"
+        res = check_claims([c], sources, report_text=text)
+        bad = [r for r in res if r.verdict == "uncovered"]
+        assert len(bad) == 1
+
+    LINE_FORMS = ("none", "bullet", "ordered", "table")
+    MARKERS = {
+        "none": ("", ""),
+        "bold": ("**", "**"),
+        "italic": ("*", "*"),
+        "quote": ('"', '"'),
+        "paren": ("(", ")"),
+    }
+    TRAPS = {
+        "none": "",
+        "abbreviation": " (vs. cotton)",
+        "decimal": ", within 2.0 of target,",
+    }
+
+    @staticmethod
+    def _build_text(line_form, marker, trap):
+        cls = TestCodexFindingSegmentationSurvivesMaskingAndOpeningMarkers
+        open_m, close_m = cls.MARKERS[marker]
+        trap_text = cls.TRAPS[trap]
+        maize_core = f"Maize's R2{trap_text} is 0.886 [c1]."
+        # Reuses [c1] on a cotton sentence: a right number under the
+        # wrong row, caught only if this sentence is correctly kept
+        # apart from maize's own.
+        cotton_core = "Cotton's R2 is 0.886 [c1]."
+        maize = f"{open_m}{maize_core}{close_m}"
+        cotton = f"{open_m}{cotton_core}{close_m}"
+        if line_form == "none":
+            return f"{maize} {cotton}"
+        if line_form == "bullet":
+            return f"- {maize}\n- {cotton}"
+        if line_form == "ordered":
+            return f"1. {maize}\n2. {cotton}"
+        if line_form == "table":
+            return f"| Crop | R2 |\n| Maize | {maize} |\n| Cotton | {cotton} |"
+        raise ValueError(line_form)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("line_form", LINE_FORMS)
+    @pytest.mark.parametrize("marker", sorted(MARKERS))
+    @pytest.mark.parametrize("trap", sorted(TRAPS))
+    def test_cottons_mistagged_sentence_is_still_caught(
+        self, sources, line_form, marker, trap
+    ):
+        """4 line forms x 5 marker styles x 3 in-sentence traps = 60
+        cases. Every one must still catch cotton's sentence wrongly
+        wearing the maize claim's tag -- regardless of how the two
+        rows are formatted or what sits inside the maize sentence --
+        and must never fail the maize claim itself."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        text = self._build_text(line_form, marker, trap)
+        res = check_claims([c], sources, report_text=text)
+        by_claim_id = {r.claim_id: r for r in res if r.claim_id == "c1"}
+        assert by_claim_id["c1"].verdict == "verified"
+        mistagged_cotton_catches = [
+            r for r in res if r.verdict == "uncovered" and str(r.value) == "0.886"
+        ]
+        assert len(mistagged_cotton_catches) == 1, (
+            f"expected cotton's mistagged sentence to be caught exactly "
+            f"once; got {len(mistagged_cotton_catches)} in {text!r}"
+        )

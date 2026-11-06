@@ -650,31 +650,52 @@ def _words_in(text: str) -> Set[str]:
     return set(re.findall(r"[a-z0-9/]+", (text or "").lower()))
 
 
-#: A closing quotation mark a writer's model might use, named by
-#: codepoint rather than written as a literal glyph -- see the
-#: Unicode block above for why.
+#: A closing or opening quotation mark a writer's model might use,
+#: named by codepoint rather than written as a literal glyph -- see
+#: the Unicode block above for why.
 _RIGHT_DOUBLE_QUOTE = chr(0x201D)
 _RIGHT_SINGLE_QUOTE = chr(0x2019)
+_LEFT_DOUBLE_QUOTE = chr(0x201C)
+_LEFT_SINGLE_QUOTE = chr(0x2018)
+
+#: Markers that can close one sentence's own formatting before the
+#: whitespace that follows it ("0.886 [c1].**" -- the "**" sits
+#: between the period and the next sentence's capital letter).
+_CLOSING_MARKERS_RE = (
+    r'(?:\*\*|\*|_|"|' + _RIGHT_DOUBLE_QUOTE + "|" + _RIGHT_SINGLE_QUOTE + r"|\)|\])*"
+)
+
+#: Markers that can open the *next* sentence's own formatting after
+#: the whitespace ("0.886 [c1]. **Cotton..." -- the "**" sits between
+#: the whitespace and that sentence's capital letter). The mirror of
+#: :data:`_CLOSING_MARKERS_RE`, checked in a lookahead rather than
+#: consumed, since the next sentence's own boundary-finding pass
+#: still needs to see these characters.
+_OPENING_MARKERS_RE = (
+    r'(?:\*\*|\*|_|"|' + _LEFT_DOUBLE_QUOTE + "|" + _LEFT_SINGLE_QUOTE + r"|\(|\[)*"
+)
 
 #: Sentence-ending punctuation, then any closing markdown or
-#: quotation marks (bold, italic, underscore-italic, a straight or
-#: curly closing quote, a closing paren or bracket), then either end
-#: of text or whitespace followed by a token that actually starts a
-#: new sentence: a capital letter, a digit, or a list marker.
-#: Splitting on bare "punctuation then whitespace" (the prior rule)
-#: both over-rejected ("vs. cotton" split at the abbreviation,
-#: because nothing checked what followed) and under-rejected
-#: ("**Maize's R2 is 0.886 [c1].** Cotton's..." never split, because
-#: the closing "**" sat between the period and the next capital
-#: letter). Requiring a sentence-starting token after the whitespace
-#: fixes the first; looking past the closing markers fixes the
-#: second. This is a heuristic, not a parser: it is good enough to
-#: isolate one sentence from its neighbors, which is all this check
-#: needs.
+#: quotation marks, then either end of text or whitespace, any
+#: opening markdown or quotation marks on the *next* sentence, and
+#: finally a token that actually starts a new sentence: a capital
+#: letter, a digit, or a list marker. Splitting on bare "punctuation
+#: then whitespace" (the original rule) both over-rejected ("vs.
+#: cotton" split at the abbreviation, because nothing checked what
+#: followed) and under-rejected a closing marker on the first
+#: sentence ("**Maize's R2 is 0.886 [c1].** Cotton's...") or an
+#: opening marker on the second ("Maize's R2 is 0.886 [c1].
+#: **Cotton's..."). Requiring a sentence-starting token after the
+#: whitespace fixes the first; looking past closing and opening
+#: markers on either side fixes the other two. This is a heuristic,
+#: not a parser: it is good enough to isolate one sentence from its
+#: neighbors, which is all this check needs.
 _SENTENCE_END_RE = re.compile(
     r"[.!?]"
-    r'(?:\*\*|\*|_|"|' + _RIGHT_DOUBLE_QUOTE + "|" + _RIGHT_SINGLE_QUOTE + r"|\)|\])*"
-    r"(?:\s+(?=[A-Z0-9]|[-*+]\s|\|)|\Z)"
+    + _CLOSING_MARKERS_RE
+    + r"(?:\s+(?="
+    + _OPENING_MARKERS_RE
+    + r"(?:[A-Z0-9]|[-*+]\s|\|))|\Z)"
 )
 
 #: A fixed list of abbreviations whose period is never a sentence
@@ -730,8 +751,29 @@ def _ends_with_abbreviation(prefix: str) -> bool:
 _LIST_OR_TABLE_LINE_RE = re.compile(r"^[ \t]*(?:[-*+]\s|\d+\.\s|\|)", re.MULTILINE)
 
 
-def _sentence_boundaries(text: str) -> List[int]:
-    """Collect every position in text that starts or ends a "sentence".
+def _line_boundaries(text: str) -> Set[int]:
+    """Stage 1: positions where a markdown list item or table row begins.
+
+    Operates on ``text`` before any ordered-list-marker masking, since
+    masking blanks the digits an ordered marker needs to match at all
+    -- a caller that masks first, then segments, never finds this
+    boundary for a numbered list.
+
+    Parameters
+    ----------
+    text : str
+        The text to scan, not yet masked.
+
+    Returns
+    -------
+    Set[int]
+        One offset per list item or table row start.
+    """
+    return {m.start() for m in _LIST_OR_TABLE_LINE_RE.finditer(text)}
+
+
+def _punctuation_boundaries(text: str) -> Set[int]:
+    """Stage 2: positions where sentence-ending punctuation closes a sentence.
 
     Parameters
     ----------
@@ -740,17 +782,42 @@ def _sentence_boundaries(text: str) -> List[int]:
 
     Returns
     -------
-    List[int]
-        Sorted character offsets, always including ``0`` and
-        ``len(text)``.
+    Set[int]
+        One offset per sentence-ending match, after the abbreviation
+        list has ruled out a false one.
     """
-    boundaries = {0, len(text)}
+    boundaries = set()
     for m in _SENTENCE_END_RE.finditer(text):
         if text[m.start()] == "." and _ends_with_abbreviation(text[: m.start()]):
             continue
         boundaries.add(m.end())
-    for m in _LIST_OR_TABLE_LINE_RE.finditer(text):
-        boundaries.add(m.start())
+    return boundaries
+
+
+def _sentence_boundaries(text: str) -> List[int]:
+    """Collect every position in text that starts or ends a "sentence".
+
+    The union of both stages: a list item or table row with no
+    terminal punctuation at all still ends where the next one begins
+    (stage 1), and an ordinary sentence still ends at its own
+    punctuation (stage 2) -- the two are independent passes over the
+    same unmasked text, so neither stage needs to know where the
+    other found a boundary.
+
+    Parameters
+    ----------
+    text : str
+        The text to scan, not yet masked -- masking a figure's
+        ordered-list marker must happen only inside number
+        extraction, never before this.
+
+    Returns
+    -------
+    List[int]
+        Sorted character offsets, always including ``0`` and
+        ``len(text)``.
+    """
+    boundaries = {0, len(text)} | _line_boundaries(text) | _punctuation_boundaries(text)
     return sorted(boundaries)
 
 
@@ -1698,13 +1765,14 @@ def check_claims(
     coverage_lookup = {
         c.id: c for c in (coverage_claims if coverage_claims is not None else claims)
     }
-    # Must match exactly what _tag_figures's own positions were
-    # computed against, including the ordered-list-marker masking --
-    # not just _normalize_numeric_text on its own -- or _sentence_at
-    # below reads a different, unmasked text at a position computed
-    # for a shorter, masked one, drifting further out of alignment
-    # with every marker the text has already passed.
-    normalized_text = _mask_ordered_list_markers(_normalize_numeric_text(report_text))
+    # Deliberately NOT masked: _tag_figures masks an ordered-list
+    # marker only for its own number-extraction pass, and that
+    # masking preserves every character's position, so the figure
+    # positions it returns are equally valid against this unmasked
+    # text. _sentence_at needs the marker's digits intact -- masked,
+    # _line_boundaries could never match a numbered list item's own
+    # line start, and a numbered list would merge into one sentence.
+    normalized_text = _normalize_numeric_text(report_text)
     for figure, ref_id, position in _tag_figures(report_text):
         if ref_id is None:
             results.append(
