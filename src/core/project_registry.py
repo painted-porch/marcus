@@ -12,7 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.core.error_framework import ErrorContext, StateConflictError
+from src.core.error_framework import (
+    ErrorContext,
+    InvalidConfigurationError,
+    StateConflictError,
+)
 from src.core.persistence import Persistence
 
 
@@ -99,6 +103,96 @@ class ProjectConfig:
         return cls(**filtered_data)
 
 
+#: The only keys an ADR-0013 K4 injected-check declaration may carry.
+#: Deliberately just a name and a human-readable description -- never
+#: a command, script, or endpoint. K2's own rule is that dispatch is
+#: pull, not call; the kernel must not be handed anything it could run.
+_INJECTED_CHECK_ALLOWED_KEYS = {"name", "description"}
+
+
+def _validate_task_type_registrations(
+    task_type_registrations: Dict[str, Dict[str, Any]],
+) -> None:
+    """Reject a malformed ADR-0013 K4 ``injected_checks`` declaration.
+
+    Checked at registration (``ProjectRegistry.add_project``), not
+    read silently and ignored or silently acted on: a project that
+    gets this wrong should see the error immediately, not discover at
+    assignment time that nothing it declared took effect.
+
+    Parameters
+    ----------
+    task_type_registrations : Dict[str, Dict[str, Any]]
+        The registrations a :class:`ProjectConfig` is about to carry.
+
+    Raises
+    ------
+    InvalidConfigurationError
+        ``injected_checks`` is non-empty while ``checks_injectable``
+        is not explicitly ``True``; a check is missing ``name``; or a
+        check carries any key besides ``name``/``description``.
+    """
+    for task_type, registration in task_type_registrations.items():
+        injected_checks = registration.get("injected_checks") or []
+        if not injected_checks:
+            continue
+        key = f"task_type_registrations.{task_type}.injected_checks"
+        if registration.get("checks_injectable") is not True:
+            raise InvalidConfigurationError(
+                config_key=key,
+                expected_format=(
+                    "checks_injectable must be explicitly true when "
+                    "injected_checks is non-empty"
+                ),
+                context=ErrorContext(
+                    operation="validate_task_type_registrations",
+                    custom_context={"task_type": task_type},
+                ),
+            )
+        for check in injected_checks:
+            name = check.get("name")
+            if not isinstance(name, str) or not name:
+                raise InvalidConfigurationError(
+                    config_key=key,
+                    expected_format=(
+                        "each injected check needs a non-empty string 'name'"
+                    ),
+                    context=ErrorContext(
+                        operation="validate_task_type_registrations",
+                        custom_context={"task_type": task_type, "check": check},
+                    ),
+                )
+            description = check.get("description")
+            if description is not None and not isinstance(description, str):
+                raise InvalidConfigurationError(
+                    config_key=key,
+                    expected_format=(
+                        "an injected check's 'description', if given, must be "
+                        "a string"
+                    ),
+                    context=ErrorContext(
+                        operation="validate_task_type_registrations",
+                        custom_context={"task_type": task_type, "check": check},
+                    ),
+                )
+            extra = set(check) - _INJECTED_CHECK_ALLOWED_KEYS
+            if extra:
+                raise InvalidConfigurationError(
+                    config_key=key,
+                    expected_format=(
+                        "an injected check may only carry "
+                        f"{sorted(_INJECTED_CHECK_ALLOWED_KEYS)}; got extra "
+                        f"key(s) {sorted(extra)} (K2: dispatch is pull, not "
+                        "call -- a check cannot carry anything the kernel "
+                        "would run)"
+                    ),
+                    context=ErrorContext(
+                        operation="validate_task_type_registrations",
+                        custom_context={"task_type": task_type, "check": check},
+                    ),
+                )
+
+
 class ProjectRegistry:
     """
     Registry for managing multiple projects.
@@ -152,7 +246,15 @@ class ProjectRegistry:
         Returns
         -------
             Project ID
+
+        Raises
+        ------
+        InvalidConfigurationError
+            ``config.task_type_registrations`` carries a malformed
+            ADR-0013 K4 ``injected_checks`` declaration (issue #847).
         """
+        _validate_task_type_registrations(config.task_type_registrations)
+
         # Generate ID if not provided
         if not config.id:
             config.id = str(uuid.uuid4())
@@ -249,7 +351,19 @@ class ProjectRegistry:
         Returns
         -------
             True if successful
+
+        Raises
+        ------
+        InvalidConfigurationError
+            ``updates["task_type_registrations"]`` carries a malformed
+            ADR-0013 K4 ``injected_checks`` declaration (issue #847).
+            Checked here too, not just in ``add_project``: a K2
+            registration is routinely written through this call
+            (e.g. seeding a board after it is already registered).
         """
+        if "task_type_registrations" in updates:
+            _validate_task_type_registrations(updates["task_type_registrations"])
+
         project = await self.get_project(project_id)
         if not project:
             return False

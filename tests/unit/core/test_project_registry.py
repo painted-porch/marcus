@@ -19,7 +19,7 @@ from typing import Any, Dict
 
 import pytest
 
-from src.core.error_framework import StateConflictError
+from src.core.error_framework import InvalidConfigurationError, StateConflictError
 from src.core.persistence import FilePersistence, MemoryPersistence, Persistence
 from src.core.project_registry import (
     ProjectConfig,
@@ -280,3 +280,186 @@ class TestRegisterSqliteBoard:
         active = await registry.get_active_project()
         assert active is not None
         assert active.id == "my-board"
+
+
+class TestInjectedChecksAreValidatedAtRegistration:
+    """ADR-0013 K4 (issue #847): declarative, kernel-enforced checks.
+
+    ``injected_checks`` is data under the same K2 registration record
+    -- never a callable or a command to run (K2's own "dispatch is
+    pull, not call" rule) -- naming checks the worker did not author
+    but must show evidence for. A project declaring it wrong is a
+    configuration error caught at registration, not something that
+    silently does nothing or silently runs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_checks_injectable_false_with_a_nonempty_list_is_rejected(
+        self,
+    ) -> None:
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": False,
+                    "injected_checks": [{"name": "cross_check_totals"}],
+                }
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
+    async def test_checks_injectable_absent_with_a_nonempty_list_is_rejected(
+        self,
+    ) -> None:
+        """Absent is not opted-in; only an explicit ``True`` is."""
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {"injected_checks": [{"name": "cross_check_totals"}]}
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
+    async def test_a_check_with_no_name_is_rejected(self) -> None:
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [{"description": "no name given"}],
+                }
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_name", [123, ["cross_check_totals"], "", None, {"nested": True}]
+    )
+    async def test_a_non_string_or_empty_name_is_rejected(self, bad_name) -> None:
+        """Codex P2: a truthy non-string name (an int, a list) would be
+        accepted and persisted today, then blow up at completion time
+        instead of producing an evidence rejection --
+        ``_apply_typed_evidence_gate`` uses it as a dict key (raises for
+        a list) and ``_typed_evidence_rejection`` joins it as a string
+        (raises for an int). Every field of a declared record is
+        validated where it is declared, not where it is consumed."""
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [{"name": bad_name}],
+                }
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
+    async def test_a_non_string_description_is_rejected(self) -> None:
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [
+                        {"name": "cross_check_totals", "description": 123}
+                    ],
+                }
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
+    async def test_a_check_carrying_a_command_field_is_rejected(self) -> None:
+        """K2: dispatch is pull, not call. The data shape must not be
+        able to carry anything the kernel could run -- only a name and
+        a human-readable description, per K4's acceptance."""
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [
+                        {"name": "cross_check_totals", "command": "run_me.sh"}
+                    ],
+                }
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
+    async def test_a_well_formed_declaration_is_accepted(self) -> None:
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [
+                        {
+                            "name": "cross_check_totals",
+                            "description": "Bucket totals sum to the report total",
+                        }
+                    ],
+                }
+            }
+        )
+
+        project_id = await registry.add_project(config)
+
+        stored = await registry.get_project(project_id)
+        assert stored is not None
+        assert stored.task_type_registrations["verify"]["injected_checks"] == [
+            {
+                "name": "cross_check_totals",
+                "description": "Bucket totals sum to the report total",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_list_needs_no_checks_injectable_flag(self) -> None:
+        """An empty or absent list is simply "nothing declared" -- not
+        an error, regardless of the flag."""
+        registry = _registry()
+        config = _config(task_type_registrations={"verify": {"injected_checks": []}})
+
+        project_id = await registry.add_project(config)
+
+        assert project_id == config.id
+
+    @pytest.mark.asyncio
+    async def test_update_project_is_validated_too(self) -> None:
+        """Live-check seeding (and any other extension) routinely
+        writes a K2 registration through ``update_project`` rather
+        than at ``add_project`` time -- it must not be a back door
+        around the same validation."""
+        registry = _registry()
+        config = _config()
+        await registry.add_project(config)
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.update_project(
+                config.id,
+                {
+                    "task_type_registrations": {
+                        "verify": {
+                            "checks_injectable": False,
+                            "injected_checks": [{"name": "cross_check_totals"}],
+                        }
+                    }
+                },
+            )
