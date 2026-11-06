@@ -68,6 +68,17 @@ class KanbanClient:
         # Initialize attributes
         self.board_id: Optional[str] = None
         self.project_id: Optional[str] = None
+        # Issue #854: the registered ProjectConfig's own registry id,
+        # when this client was constructed from one (set by
+        # project_context_manager._build_provider_config, not by
+        # anything in this class). Takes priority over project_id
+        # (Planka's own id) when stamping a task's project_id, so a
+        # task's id matches a registry key directly -- the same
+        # guarantee the SQLite path already has by construction
+        # (GH-306). None for a client built outside that path (a
+        # standalone script, most tests), which keeps falling back
+        # to project_id exactly as before this existed.
+        self.registry_project_id: Optional[str] = None
 
         # Defer kanban-mcp path detection to first use. Resolving eagerly
         # blocked startup for non-Planka providers (SQLite, GitHub, Linear)
@@ -974,11 +985,15 @@ class KanbanClient:
             labels=labels,
             # Codex P1, round 1 on PR #842: a card carries no project
             # id of its own on a Planka board -- the client is scoped
-            # to one project per instance (self.project_id), which is
-            # the single source of truth every K2 lookup already
-            # assumes. Previously left None, silently breaking any
-            # project_id-scoped filter over cards from this provider.
-            project_id=getattr(self, "project_id", None),
+            # to one project per instance. Issue #854: prefer the
+            # registered ProjectConfig's own registry id over
+            # Planka's own project_id when one was carried down at
+            # construction, since the two are different strings and
+            # every K2-keyed lookup needs the registry one.
+            project_id=(
+                getattr(self, "registry_project_id", None)
+                or getattr(self, "project_id", None)
+            ),
         )
 
         # Store original ID as a custom attribute

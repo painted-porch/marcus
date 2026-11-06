@@ -39,6 +39,14 @@ class LinearKanban(KanbanInterface):
         self.mcp_caller: Callable[..., Any] = mcp_func
         self.team_id: Optional[str] = config.get("team_id")
         self.project_id: Optional[str] = config.get("project_id")
+        # Issue #854: the registered ProjectConfig's own registry id,
+        # when this client was constructed from one (set by
+        # project_context_manager._build_provider_config). Takes
+        # priority over project_id (Linear's own id) when stamping a
+        # task's project_id -- see _linear_issue_to_task. None for a
+        # client built outside that path, which falls back to
+        # project_id exactly as before this existed.
+        self.registry_project_id: Optional[str] = config.get("registry_project_id")
 
     async def connect(self) -> bool:
         """Connect to Linear MCP Server."""
@@ -200,10 +208,12 @@ class LinearKanban(KanbanInterface):
             # Codex P1, round 1 on PR #842: an issue carries no project
             # id of its own in the fields this provider reads -- the
             # client already scopes its own queries by self.project_id
-            # (the configured project), which is the single source of
-            # truth every K2 lookup already assumes. Previously left
-            # None, silently breaking any project_id-scoped filter.
-            project_id=self.project_id,
+            # (the configured project). Issue #854: prefer the
+            # registered ProjectConfig's own registry id over
+            # Linear's own project_id when one was carried down at
+            # construction, since every K2-keyed lookup needs the
+            # registry one.
+            project_id=self.registry_project_id or self.project_id,
         )
 
     async def get_task_by_id(self, task_id: str) -> Optional[Task]:
