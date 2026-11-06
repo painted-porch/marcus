@@ -46,6 +46,60 @@ def _wire_release_lease(lease_manager) -> None:
     lease_manager.release_lease = AsyncMock(side_effect=_release)
 
 
+def _make_blocked_state(task: Task) -> Any:
+    """State for a report_task_progress(status="blocked") call that
+
+    reaches the function's full shared tail (update_task_progress,
+    lease renewal, etc.), not just the early guards -- unlike
+    ``_make_state`` (used by the ``report_blocker`` tests above),
+    which never exercises that tail.
+    """
+    state = MagicMock()
+    state.kanban_client = AsyncMock()
+    state.kanban_client.update_task = AsyncMock()
+    state.kanban_client.update_task_progress = AsyncMock()
+    state.kanban_client.add_comment = AsyncMock()
+    state.kanban_client.get_task_by_id = AsyncMock(return_value=task)
+    state.kanban_client.get_all_tasks = AsyncMock(return_value=[task])
+    state.kanban_client._load_workspace_state = MagicMock(return_value=None)
+    state.project_tasks = [task]
+
+    state.initialize_kanban = AsyncMock()
+    state.refresh_project_state = AsyncMock()
+
+    agent = MagicMock()
+    agent.current_tasks = [task]
+    state.agent_status = {"agent-1": agent}
+
+    assignment = MagicMock()
+    assignment.task_id = task.id
+    assignment.assigned_at = datetime.now(timezone.utc)
+    state.agent_tasks = {"agent-1": assignment}
+
+    state.assignment_persistence = AsyncMock()
+    state.assignment_persistence.remove_assignment = AsyncMock()
+
+    lease = MagicMock()
+    lease.agent_id = "agent-1"
+    state.lease_manager = MagicMock()
+    state.lease_manager.active_leases = {task.id: lease}
+    _wire_release_lease(state.lease_manager)
+    state.lease_manager.extend_for_validation = AsyncMock(return_value=None)
+    # The shared tail renews the lease for every non-"completed" status,
+    # including "blocked" -- a bare MagicMock here isn't awaitable, and
+    # it only matters for a test that runs the function all the way to
+    # its normal return instead of stopping at the release block.
+    state.lease_manager.renew_lease = AsyncMock(return_value=None)
+
+    state.code_analyzer = None
+    state.provider = "sqlite"
+    state.subtask_manager = None
+    state.memory = None
+    state.context = None
+
+    return state
+
+
 pytestmark = pytest.mark.unit
 
 
@@ -241,45 +295,7 @@ class TestReportTaskProgressBlockedReleasesCoordination:
     """
 
     def _make_blocked_state(self, task: Task) -> Any:
-        state = MagicMock()
-        state.kanban_client = AsyncMock()
-        state.kanban_client.update_task = AsyncMock()
-        state.kanban_client.update_task_progress = AsyncMock()
-        state.kanban_client.add_comment = AsyncMock()
-        state.kanban_client.get_task_by_id = AsyncMock(return_value=task)
-        state.kanban_client.get_all_tasks = AsyncMock(return_value=[task])
-        state.kanban_client._load_workspace_state = MagicMock(return_value=None)
-        state.project_tasks = [task]
-
-        state.initialize_kanban = AsyncMock()
-        state.refresh_project_state = AsyncMock()
-
-        agent = MagicMock()
-        agent.current_tasks = [task]
-        state.agent_status = {"agent-1": agent}
-
-        assignment = MagicMock()
-        assignment.task_id = task.id
-        assignment.assigned_at = datetime.now(timezone.utc)
-        state.agent_tasks = {"agent-1": assignment}
-
-        state.assignment_persistence = AsyncMock()
-        state.assignment_persistence.remove_assignment = AsyncMock()
-
-        lease = MagicMock()
-        lease.agent_id = "agent-1"
-        state.lease_manager = MagicMock()
-        state.lease_manager.active_leases = {task.id: lease}
-        _wire_release_lease(state.lease_manager)
-        state.lease_manager.extend_for_validation = AsyncMock(return_value=None)
-
-        state.code_analyzer = None
-        state.provider = "sqlite"
-        state.subtask_manager = None
-        state.memory = None
-        state.context = None
-
-        return state
+        return _make_blocked_state(task)
 
     @pytest.mark.asyncio
     async def test_blocked_clears_agent_current_tasks(self) -> None:
@@ -806,3 +822,146 @@ class TestStaleCompletedReportDoesNotClearACurrentTask:
         assert state.agent_tasks["agent-1"].task_id == "task-b"
         state.assignment_persistence.remove_assignment.assert_not_awaited()
         assert "task-b" in state.lease_manager.active_leases
+
+
+class TestBlockedBoardWriteFailureLeavesCoordinationStateIntact:
+    """Issue #858, Codex P2 round 2: the board write for a blocked
+    report must happen BEFORE coordination state is released, so a
+    transient provider failure leaves the assignment and lease intact
+    for a retry, rather than releasing first and discovering the write
+    failed afterward -- the same ordering ``report_blocker``'s
+    terminal give-up path already uses.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_failed_board_write_does_not_clear_current_tasks(self) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        state.kanban_client.update_task = AsyncMock(
+            side_effect=RuntimeError("provider timeout")
+        )
+
+        result = await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck",
+            state=state,
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "board_write_failed"
+        assert state.agent_status["agent-1"].current_tasks == [task], (
+            "A failed board write must not release the agent's hold -- "
+            "otherwise the retry of this same report would be wrongly "
+            "rejected by Guard 3 as a stale report, with no lease left "
+            "for the monitor to recover either."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_board_write_does_not_delete_the_agent_tasks_entry(
+        self,
+    ) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        state.kanban_client.update_task = AsyncMock(
+            side_effect=RuntimeError("provider timeout")
+        )
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck",
+            state=state,
+        )
+
+        assert "agent-1" in state.agent_tasks
+        assert state.agent_tasks["agent-1"].task_id == task.id
+
+    @pytest.mark.asyncio
+    async def test_a_failed_board_write_does_not_touch_persistence(self) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        state.kanban_client.update_task = AsyncMock(
+            side_effect=RuntimeError("provider timeout")
+        )
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck",
+            state=state,
+        )
+
+        state.assignment_persistence.remove_assignment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_board_write_does_not_release_the_lease(self) -> None:
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        state.kanban_client.update_task = AsyncMock(
+            side_effect=RuntimeError("provider timeout")
+        )
+
+        await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck",
+            state=state,
+        )
+
+        assert task.id in state.lease_manager.active_leases
+
+    @pytest.mark.asyncio
+    async def test_a_retry_after_the_board_write_succeeds_releases_normally(
+        self,
+    ) -> None:
+        """The retry an agent is told to make: same report, this time
+        the board write succeeds -- the hold must release exactly as
+        the happy path already does."""
+        from src.marcus_mcp.tools.task import report_task_progress
+
+        task = _make_task()
+        state = _make_blocked_state(task)
+        state.kanban_client.update_task = AsyncMock(
+            side_effect=[RuntimeError("provider timeout"), None]
+        )
+
+        first = await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck",
+            state=state,
+        )
+        assert first["success"] is False
+
+        second = await report_task_progress(
+            agent_id="agent-1",
+            task_id=task.id,
+            status="blocked",
+            progress=30,
+            message="Stuck (retry)",
+            state=state,
+        )
+
+        assert second["success"] is True
+        assert state.agent_status["agent-1"].current_tasks == []
+        assert "agent-1" not in state.agent_tasks
+        assert task.id not in state.lease_manager.active_leases
