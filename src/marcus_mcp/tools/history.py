@@ -43,7 +43,8 @@ async def query_project_history(
         - "tasks": Find tasks (filters: status, agent_id, start_time, end_time)
         - "blocked_tasks": Find tasks with blockers
         - "task_dependencies": Get dependency chain (requires: task_id)
-        - "decisions": Find decisions (filters: task_id, agent_id, affecting_task_id)  # noqa: E501
+        - "decisions": Find decisions (filters: task_id, agent_id, affecting_task_id,
+          kind; ``kind="decision"`` leaves opinions and the primer out)
         - "opinions": Opinions grouped by subject with the distinct-agent count
           (filters: subject, kind, since); pagination is over subjects
         - "artifacts": Find artifacts (filters: task_id, artifact_type, agent_id)
@@ -180,25 +181,52 @@ async def query_project_history(
             }
 
         elif query_type == "decisions":
+            # Opinions and the project primer are decision rows too
+            # (``kind="assessment"`` and ``kind="objective"``), so a reader
+            # that wants the crew's decisions alone asks for
+            # ``kind="decision"`` (#880). Rows written before ``kind``
+            # existed are decisions, the field's default. No ``kind``
+            # keeps the mixed listing.
+            wanted_kind = filters.get("kind")
+
+            def _of_wanted_kind(rows: list[Any]) -> list[Any]:
+                if wanted_kind is None:
+                    return rows
+                return [
+                    r for r in rows if getattr(r, "kind", "decision") == wanted_kind
+                ]
+
             # Check which filter is provided
             if "task_id" in filters:
-                decisions = await query_api.find_decisions_by_task(
-                    project_id, filters["task_id"]
+                decisions = _of_wanted_kind(
+                    await query_api.find_decisions_by_task(
+                        project_id, filters["task_id"]
+                    )
                 )
             elif "agent_id" in filters:
-                decisions = await query_api.find_decisions_by_agent(
-                    project_id, filters["agent_id"]
+                decisions = _of_wanted_kind(
+                    await query_api.find_decisions_by_agent(
+                        project_id, filters["agent_id"]
+                    )
                 )
             elif "affecting_task_id" in filters:
-                decisions = await query_api.find_decisions_affecting_task(
-                    project_id, filters["affecting_task_id"]
+                decisions = _of_wanted_kind(
+                    await query_api.find_decisions_affecting_task(
+                        project_id, filters["affecting_task_id"]
+                    )
                 )
             else:
-                # No filter - get all decisions with pagination
+                # No row filter: the store pages, and when a kind is asked
+                # for it filters in the query so the page is cut from
+                # MATCHING rows. Filtering the returned page would not
+                # work: ``limit`` is a page limit, so a decision behind
+                # more opinions than a page holds would be permanently
+                # invisible at every offset (Codex on PR #881).
                 history = await query_api.get_project_history(
                     project_id,
                     decision_limit=limit,
                     decision_offset=offset,
+                    decision_kind=wanted_kind,
                 )
                 decisions = history.decisions
 

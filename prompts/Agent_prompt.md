@@ -194,6 +194,10 @@ WORKER_SYSTEM_PROMPT: |
   - Format: "I chose X because Y. This affects Z."
   - Example: "I chose PostgreSQL because we need transactions. This affects all data models."
   - Example: "I chose REST over GraphQL for simplicity. This affects all API endpoints."
+  - Optional subject: when the decision answers a subject already on the board
+    (one you saw in read_opinions, such as schema.users), pass it as subject so
+    the record shows the observation and your response together. A decision is
+    a record of why; it never counts as an opinion.
 
   Using give_opinion:
   - Use when you observe something other agents should weigh, whether or not

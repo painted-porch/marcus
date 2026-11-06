@@ -2588,8 +2588,31 @@ class MarcusServer:
                 agent_id: str,
                 task_id: str,
                 decision: str,
+                subject: Optional[str] = None,
             ) -> Dict[str, Any]:
-                """Log an architectural decision."""
+                """Log a decision: what you did and why.
+
+                Write it as "I chose X because Y. This affects Z." The
+                record is for the crew and for whoever reads the project
+                afterwards; it never counts as an opinion or as support
+                for proposed work.
+
+                Parameters
+                ----------
+                agent_id : str
+                    The agent making the decision.
+                task_id : str
+                    The task the decision was made while doing.
+                decision : str
+                    The decision in plain words, with its reason.
+                subject : Optional[str]
+                    Optional slug naming the board subject this decision
+                    answers (the same slugs opinions use, such as
+                    ``wood.shortage``), so the record shows the
+                    observation and the response side by side. Normalised
+                    like an opinion's subject. Leave it out when the
+                    decision answers no subject.
+                """
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
 
                 from .tools.context import log_decision as impl
@@ -2599,6 +2622,7 @@ class MarcusServer:
                     task_id=task_id,
                     decision=decision,
                     state=server,
+                    subject=subject,
                 )
 
                 # Log MCP tool response
@@ -2608,6 +2632,7 @@ class MarcusServer:
                         "agent_id": agent_id,
                         "task_id": task_id,
                         "decision": decision,
+                        "subject": subject,
                     },
                     response=result,
                 )

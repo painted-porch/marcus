@@ -313,8 +313,15 @@ def _make_log_decision() -> Any:
     """Build a stub context whose ``log_decision`` returns a decision."""
 
     async def _log_decision(
-        agent_id: str, task_id: str, what: str, why: str, impact: str
+        agent_id: str,
+        task_id: str,
+        what: str,
+        why: str,
+        impact: str,
+        subject: Optional[str] = None,
     ) -> Any:
+        # The real ``Context.log_decision`` takes ``subject`` (#880); the
+        # stub mirrors its signature so the tool can pass it through.
         return SimpleNamespace(
             decision_id="dec-1",
             agent_id=agent_id,
@@ -322,6 +329,7 @@ def _make_log_decision() -> Any:
             what=what,
             why=why,
             impact=impact,
+            subject=subject,
             to_dict=lambda: {"decision_id": "dec-1"},
         )
 

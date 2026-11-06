@@ -46,9 +46,15 @@ class MockContext:
         return self.mock_context_result
 
     async def log_decision(
-        self, agent_id: str, task_id: str, what: str, why: str, impact: str
+        self,
+        agent_id: str,
+        task_id: str,
+        what: str,
+        why: str,
+        impact: str,
+        subject: Optional[str] = None,
     ) -> Any:
-        """Mock log_decision method."""
+        """Mock log_decision method (mirrors ``Context.log_decision``, #880)."""
         decision = Mock()
         decision.decision_id = "test-decision-id"
         decision.to_dict = Mock(
@@ -59,6 +65,7 @@ class MockContext:
                 "what": what,
                 "why": why,
                 "impact": impact,
+                "subject": subject,
             }
         )
         self.log_decision_calls.append(
@@ -68,6 +75,7 @@ class MockContext:
                 "what": what,
                 "why": why,
                 "impact": impact,
+                "subject": subject,
             }
         )
         return decision

@@ -23,7 +23,11 @@ logger = logging.getLogger(__name__)
 
 
 async def log_decision(
-    agent_id: str, task_id: str, decision: str, state: Any
+    agent_id: str,
+    task_id: str,
+    decision: str,
+    state: Any,
+    subject: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Log an architectural decision made during task implementation.
@@ -31,6 +35,15 @@ async def log_decision(
     Agents use this to document important technical choices that might
     affect other tasks. Decisions are automatically cross-referenced
     to dependent tasks.
+
+    A decision is a record of why the agent did something. It may name
+    the board subject it answers (#880, deliberation layer attribute 11),
+    which lets the record show an observation (an opinion on
+    ``wood.shortage``) and the response to it (a decision on
+    ``wood.shortage``) side by side. The row keeps ``kind="decision"``,
+    so it is never counted as an opinion and never counts toward
+    proposed work; ``group_opinions_by_subject`` groups only the kind it
+    is asked for.
 
     Parameters
     ----------
@@ -42,6 +55,11 @@ async def log_decision(
         Natural language description of the decision
     state : Any
         Marcus server state instance
+    subject : Optional[str]
+        Optional slug naming the board subject this decision answers.
+        Normalised with :func:`normalize_subject`, exactly as an
+        opinion's subject is, so the two land on the same slug. Blank
+        means no subject.
 
     Returns
     -------
@@ -52,6 +70,14 @@ async def log_decision(
         # Check if Context system is available
         if not hasattr(state, "context") or not state.context:
             return {"success": False, "error": "Context system not enabled"}
+
+        # One normaliser for the whole board: a decision answering the
+        # opinion ``Wood Shortage!`` must land on ``wood.shortage`` too.
+        slug: Optional[str] = (
+            normalize_subject(subject) if subject and subject.strip() else None
+        )
+        if slug == "":
+            slug = None
 
         # Parse decision from natural language
         # Expected format: "I chose X because Y. This affects Z."
@@ -75,7 +101,12 @@ async def log_decision(
 
         # Log the decision
         logged_decision = await state.context.log_decision(
-            agent_id=agent_id, task_id=task_id, what=what, why=why, impact=impact
+            agent_id=agent_id,
+            task_id=task_id,
+            what=what,
+            why=why,
+            impact=impact,
+            subject=slug,
         )
 
         # v0.3.8.post1 (Codex P2 on PR #625): invalidate the
@@ -108,6 +139,8 @@ async def log_decision(
                 comment += f"Decision: {what}\\n"
                 comment += f"Reasoning: {why}\\n"
                 comment += f"Impact: {impact}"
+                if slug:
+                    comment += f"\\nSubject: {slug}"
 
                 await state.kanban_client.add_comment(task_id, comment)
             except Exception as e:
