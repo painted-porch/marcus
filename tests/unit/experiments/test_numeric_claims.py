@@ -2122,6 +2122,25 @@ class TestCodexFindingMechanicalFieldSweep:
         assert check_claims([c], sources)[0].verdict == "unresolvable"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("bad_unit", BAD_SHAPES, ids=repr)
+    def test_a_malformed_derived_unit_is_unresolvable_not_a_crash(
+        self, sources, bad_unit
+    ):
+        """unit. An unhashable shape (a list or an object) must be
+        rejected the same way any other bad shape is, not raise a
+        TypeError at a membership check and abort the whole pass."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="derived",
+            expr="a",
+            inputs={"a": "metrics.json:n_records"},
+            unit=bad_unit,
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("bad_inputs", [["x"], "a", 5], ids=repr)
     def test_a_malformed_inputs_field_itself_is_unresolvable(self, sources, bad_inputs):
         """inputs, as a whole, not just the addresses inside it.
@@ -3677,5 +3696,156 @@ class TestCodexFindingDerivedUnitIsDeclaredNeverInferred:
             kind="lookup",
             source="per_crop.csv",
             key="crop=maize:r2",
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+
+class TestCodexFindingPercentConversionFormatsExactly:
+    """A scaled percent figure must round-trip exactly, not through a
+    formatted string that rounds to six significant digits.
+
+    100 * 1 / 3 is 33.33333333333333..., a figure with far more
+    digits than ":g" formatting keeps. The checker's own scaled float
+    is exactly right; only the string built from it to hand to
+    compare() was rounded away before the exact-match slide path
+    ever saw it.
+    """
+
+    @pytest.mark.unit
+    def test_a_repeating_percent_figure_matches_a_slide_cell_exactly(self):
+        value = float("33.333333333333336")
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=value,
+                label="maize share",
+                addresses=(),
+                unit="percent",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": "33.333333333333336%",
+                            "claim": "c1",
+                            "label": "maize share",
+                        }
+                    ]
+                }
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "maize share"}) == []
+
+
+class TestCodexFindingLookupUnitCannotOverrideTheManifest:
+    """A lookup's declared unit must agree with the manifest, not override it.
+
+    "Overall R2 is 0.481% [c1]." against a manifest-fraction
+    r2_overall of 0.481 must fail -- 0.481% is 0.00481, not 0.481 --
+    but declaring the claim's own unit "percent" let it take 0.481%
+    at face value instead, wrongly verifying. The manifest is
+    harness-authored ground truth; a lookup's own declaration is
+    never trusted over it.
+    """
+
+    @pytest.mark.unit
+    def test_a_declared_unit_disagreeing_with_the_manifest_is_rejected(self):
+        sources = {"metrics.json": {"r2_overall": 0.481}}
+        units = {"metrics.json": {"r2_overall": "fraction"}}
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+            unit="percent",
+        )
+        res = check_claims([c], sources, units=units)
+        assert res[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    def test_a_declared_unit_agreeing_with_the_manifest_still_works(self):
+        sources = {"metrics.json": {"r2_overall": 0.481}}
+        units = {"metrics.json": {"r2_overall": "fraction"}}
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+            unit="fraction",
+        )
+        res = check_claims(
+            [c], sources, report_text="Overall R2 is 48.1% [c1].", units=units
+        )
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_declared_unit_with_no_manifest_entry_still_applies(self):
+        """Only when the manifest has no entry for this address at
+        all does the declaration apply -- unaffected by this fix."""
+        sources = {"metrics.json": {"maize_share": 50.0}}
+        c = Claim(
+            id="c1",
+            value=50.0,
+            label="maize share",
+            kind="lookup",
+            source="metrics.json",
+            key="maize_share",
+            unit="percent",
+        )
+        res = check_claims([c], sources, report_text="Maize share is 50% [c1].")
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+
+class TestCodexFindingUnusedDerivedInputIsRejected:
+    """A derived claim cannot borrow a row from an input its own
+    expression never reads.
+
+    expr "a" with inputs {"a": maize R2, "b": wheat R2}, labelled
+    "wheat R2", passed: the label/provenance check read from
+    ``inputs`` as a whole, not from what the expression actually
+    used, so the unused "b" supplied cover for a label the expression
+    never touched. Rejecting a declared-but-unused input outright
+    also catches the writer mistake this represents on its own.
+    """
+
+    @pytest.mark.unit
+    def test_an_unused_input_is_rejected_even_when_it_matches_the_label(self, sources):
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="wheat R2",
+            kind="derived",
+            expr="a",
+            inputs={
+                "a": "per_crop.csv:crop=maize:r2",
+                "b": "per_crop.csv:crop=cotton:r2",
+            },
+            unit="fraction",
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "unresolvable"
+        assert "b" in res.detail
+
+    @pytest.mark.unit
+    def test_every_declared_input_actually_used_still_passes(self, sources):
+        c = Claim(
+            id="c1",
+            value=22.08,
+            label="maize to cotton ratio",
+            kind="derived",
+            expr="a / b",
+            inputs={
+                "a": "per_crop.csv:crop=maize:n_records",
+                "b": "per_crop.csv:crop=cotton:n_records",
+            },
+            tolerance={"type": "abs", "value": 0.01},
+            unit="plain",
         )
         assert check_claims([c], sources)[0].verdict == "verified"

@@ -1139,7 +1139,9 @@ def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
 _VALID_CLAIM_UNITS = frozenset({"fraction", "percent", "count", "plain"})
 
 
-def _malformed_claim_shape(claim: Claim) -> Optional[str]:
+def _malformed_claim_shape(
+    claim: Claim, units: Optional[Dict[str, Dict[str, str]]] = None
+) -> Optional[str]:
     """Check a claim's own fields before any resolution is attempted.
 
     Every one of this file's crash-on-writer-input findings so far
@@ -1156,6 +1158,9 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
     ----------
     claim : Claim
         The claim to check.
+    units : Optional[Dict[str, Dict[str, str]]]
+        The stager's own units manifest, used to reject a lookup's
+        declared unit when it disagrees with the manifest.
 
     Returns
     -------
@@ -1177,6 +1182,33 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
             return f"{claim.label}: lookup claim has no source file"
         if not isinstance(claim.key, str) or not claim.key:
             return f"{claim.label}: lookup claim has no key"
+        if claim.unit is not None:
+            if not isinstance(claim.unit, str) or claim.unit not in (
+                "fraction",
+                "percent",
+            ):
+                return (
+                    f'{claim.label}: unit must be "fraction" or '
+                    f'"percent" when declared, got {claim.unit!r}'
+                )
+            # The manifest is harness-authored ground truth; a
+            # lookup's own declaration is never allowed to override
+            # it when the two disagree -- that is exactly how
+            # "Overall R2 is 0.481% [c1]." against a manifest-fraction
+            # r2_overall of 0.481 could wrongly verify by declaring
+            # unit "percent" and taking 0.481% at face value instead
+            # of scaling it down. A disagreement is rejected outright;
+            # only when the manifest has no entry for this address at
+            # all does the declaration apply.
+            manifest_unit = _column_unit_from_manifest(
+                units, f"{claim.source}:{claim.key}"
+            )
+            if manifest_unit is not None and manifest_unit != claim.unit:
+                return (
+                    f"{claim.label}: declares unit {claim.unit!r} but the "
+                    f"staged manifest says {manifest_unit!r} for "
+                    f"{claim.source}:{claim.key}"
+                )
     if claim.kind in ("derived", "consistency"):
         if not isinstance(claim.expr, str) or not claim.expr.strip():
             return f"{claim.label}: claim has no expression to evaluate"
@@ -1188,6 +1220,26 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
                     f"{claim.label}: input {var!r} is not a usable "
                     f"address: {address!r}"
                 )
+        # A declared input the expression never references could
+        # still supply its own row to the label/provenance check
+        # without the expression ever actually reading its value --
+        # "a" used, "b" declared but unused, labelled with "b"'s own
+        # row. Rejecting it outright is simpler than trying to make
+        # provenance AST-aware everywhere it is read, and it catches
+        # a genuine writer mistake the same way an unused decoy input
+        # already is for a constant-only expression.
+        try:
+            tree = ast.parse(claim.expr, mode="eval")
+            used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        except (SyntaxError, RecursionError, TypeError):
+            used = None
+        if used is not None:
+            for var in claim.inputs or {}:
+                if var not in used:
+                    return (
+                        f"{claim.label}: input {var!r} is declared but never "
+                        f"referenced by expr {claim.expr!r}"
+                    )
         # An expression can change scale in a way its inputs' own
         # units never predict -- "100 * a / b" turns two counts into
         # a percent-scale result, and nothing about "a" or "b" being
@@ -1195,7 +1247,7 @@ def _malformed_claim_shape(claim: Claim) -> Optional[str]:
         # knows what it produces, so that unit is declared here, not
         # inferred from the inputs the way a lookup's is inferred
         # from its own source column.
-        if claim.unit not in _VALID_CLAIM_UNITS:
+        if not isinstance(claim.unit, str) or claim.unit not in _VALID_CLAIM_UNITS:
             return (
                 f"{claim.label}: {claim.kind} claim has no declared unit "
                 f"(one of {sorted(_VALID_CLAIM_UNITS)}); its expression's "
@@ -1234,7 +1286,7 @@ def _check_one(
         The verdict.
     """
     base = {"claim_id": claim.id, "value": claim.value, "label": claim.label}
-    problem = _malformed_claim_shape(claim)
+    problem = _malformed_claim_shape(claim, units)
     if problem:
         return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=problem, **base)
     if claim.kind == "lookup":
@@ -1651,11 +1703,15 @@ def _inferred_claim_unit(
 ) -> Optional[str]:
     """Decide whether a claim's own value is a fraction or a percent.
 
-    A lookup's unit always comes from its own addressing: an
-    explicit ``claim.unit`` first, otherwise every address the claim
-    reads resolved against ``units`` (the stager's own manifest),
-    falling back to the column-name heuristic only for an address
-    the manifest does not cover. A derived or consistency claim's
+    A lookup's unit comes from the manifest first; an explicit
+    ``claim.unit`` applies only for an address the manifest does not
+    cover, falling back further to the column-name heuristic when
+    neither settles it. A manifest entry that disagrees with a
+    declared ``claim.unit`` is rejected outright by
+    :func:`_malformed_claim_shape` before a claim ever reaches this
+    function -- never silently overridden by the declaration -- so
+    by the time this runs, a claim carrying both always agrees. A
+    derived or consistency claim's
     unit comes *only* from its own declaration -- never inferred
     from its inputs' addresses -- because the expression in between
     can change the scale in a way no input's own unit predicts ("100
@@ -1694,16 +1750,17 @@ def _inferred_claim_unit(
     """
     if claim.kind in ("derived", "consistency"):
         return claim.unit if claim.unit in ("fraction", "percent") else None
-    if claim.unit in ("fraction", "percent"):
-        return claim.unit
     addresses = _claim_addresses(claim)
     if not addresses:
-        return None
+        return claim.unit if claim.unit in ("fraction", "percent") else None
     resolved = set()
     for address in addresses:
         manifest_unit = _column_unit_from_manifest(units, address)
         if manifest_unit is not None:
             resolved.add(manifest_unit)
+            continue
+        if claim.unit in ("fraction", "percent"):
+            resolved.add(claim.unit)
             continue
         column = address.rsplit(":", 1)[-1]
         resolved.add("percent" if _is_percent_column(column) else "fraction")
@@ -1777,7 +1834,13 @@ def _percent_aware_match(
     except ValueError:
         return False, None
     scaled = raw if unit == "percent" else raw / 100
-    return compare(f"{scaled:g}", value, tolerance), None
+    # repr, not a formatted string: :g rounds to six significant
+    # digits, so 100/3 percent scaled to a fraction (0.3333333333...)
+    # became the literal string "0.333333" -- close enough to fool a
+    # human, not close enough to pass an exact slide-cell comparison
+    # against the real float. repr is the shortest string that still
+    # round-trips to the exact same float.
+    return compare(repr(scaled), value, tolerance), None
 
 
 def check_claims(
