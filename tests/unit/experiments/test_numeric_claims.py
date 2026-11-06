@@ -2287,3 +2287,87 @@ class TestCodexFindingFiguresEmbeddedInALabelAreUnverified:
         }
         labels = {"c1": "maize R2 (99% confidence)", "c2": "confidence"}
         assert check_slide_spec(spec, accepted, labels) == []
+
+
+class TestCodexFindingDerivedClaimsGetRowLabelProtectionToo:
+    """The wrong-row protection applied to lookups, but not derived claims.
+
+    A derived claim with expr "a" and a single row-selected input is,
+    for every practical purpose, a lookup wearing a different kind --
+    the writer instructions require a rounded restatement to be a
+    derived claim rather than a lookup, so this was not a rare edge
+    case. Against a real maize R2 of 0.886, a derived claim reading
+    crop=maize:r2, labelled "cotton R2," verified: the derived success
+    path never ran label_contradiction at all.
+    """
+
+    @pytest.mark.unit
+    def test_a_single_input_derived_claim_gets_the_lookup_label_check(self, sources):
+        """Codex's scenario, generalized to this file's own fixture
+        values: maize's real R2 claimed under cotton's label."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="cotton R2",
+            kind="derived",
+            expr="a",
+            inputs={"a": "per_crop.csv:crop=maize:r2"},
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"
+
+    @pytest.mark.unit
+    def test_a_correctly_labelled_single_input_derived_claim_still_passes(
+        self, sources
+    ):
+        """The fix must not reject the ordinary, correctly labelled case."""
+        c = Claim(
+            id="c1",
+            value=0.886,
+            label="maize R2",
+            kind="derived",
+            expr="a",
+            inputs={"a": "per_crop.csv:crop=maize:r2"},
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_a_two_crop_ratio_naming_both_crops_is_not_over_rejected(self, sources):
+        """A legitimate ratio label mentions both of its own rows --
+        neither is a sibling being smuggled in under the other's
+        claim, so this must still pass."""
+        c = Claim(
+            id="c1",
+            value=22.08,
+            label="maize to cotton ratio",
+            kind="derived",
+            expr="a / b",
+            inputs={
+                "a": "per_crop.csv:crop=maize:n_records",
+                "b": "per_crop.csv:crop=cotton:n_records",
+            },
+            tolerance={"type": "abs", "value": 0.01},
+        )
+        assert check_claims([c], sources)[0].verdict == "verified"
+
+    @pytest.mark.unit
+    def test_a_two_input_sum_naming_a_sibling_outside_its_own_inputs_fails(
+        self, sources
+    ):
+        """A sum labelled with a tier that is neither input's own row
+        is exactly the contradiction this check exists to catch."""
+        c = Claim(
+            id="c1",
+            value=977,
+            label="Excellent and Average tiers combined",
+            kind="derived",
+            expr="a + b",
+            inputs={
+                "a": "tiers.csv:tier=Excellent:n_records",
+                "b": "tiers.csv:tier=Good:n_records",
+            },
+        )
+        res = check_claims([c], sources)[0]
+        assert res.verdict == "failed"
+        assert res.reason == "label_mismatch"

@@ -666,6 +666,82 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _derived_label_contradiction(
+    claim: Claim, inputs: Any, sources: Dict[str, Any]
+) -> Optional[str]:
+    """Report a label that contradicts the rows a derived claim reads.
+
+    :func:`label_contradiction` only ever ran for ``lookup`` claims,
+    but a derived claim with a single row-selected input is, for
+    every practical purpose, a lookup wearing a different kind -- the
+    writer instructions require a rounded restatement to be a derived
+    claim rather than a lookup, so a label naming the wrong row would
+    otherwise bypass this protection entirely just by being spelled as
+    ``expr="a"``.
+
+    Generalizes the same rule to every input: for each selector
+    column referenced (``crop`` in ``per_crop.csv:crop=maize:...``),
+    the set of values the claim's own inputs actually read is
+    "owned." A label naming a sibling value of that column that is
+    not owned by any input is a contradiction -- a two-crop ratio
+    labelled with both crops it actually reads is not a
+    contradiction, because neither crop is a sibling relative to the
+    other; a label naming a third, uninvolved crop is.
+
+    Parameters
+    ----------
+    claim : Claim
+        The derived or consistency claim to inspect.
+    inputs : Dict[str, str]
+        The claim's own ``inputs`` mapping (variable to address).
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the contradiction, or ``None``.
+    """
+    label_words = _words_in(claim.label)
+    owned_by_column: Dict[Tuple[str, str], Set[str]] = {}
+    for address in inputs.values():
+        if not isinstance(address, str):
+            continue
+        parts = address.split(":")
+        if len(parts) < 2 or "=" not in parts[1]:
+            continue
+        source_file = parts[0]
+        sel_col, sel_val = parts[1].split("=", 1)
+        owned_by_column.setdefault((source_file, sel_col), set()).add(sel_val)
+
+    for (source_file, sel_col), owned in owned_by_column.items():
+        rows = sources.get(source_file)
+        if not isinstance(rows, list) or not rows:
+            continue
+        # Naming every owned row earns the label the right to mention
+        # others (the lookup path's "Q2 ... (Q3 and Q4 also 381)"
+        # allowance, generalized to more than one input). Naming only
+        # SOME of them is not covered by that allowance: a label that
+        # swaps out one real input's row for a sibling's, while still
+        # naming the other input, must not be waved through just
+        # because it mentions something it owns.
+        names_every_owned_row = all(v.lower() in label_words for v in owned)
+        if names_every_owned_row:
+            continue
+        siblings = {
+            str(row.get(sel_col, "")).strip()
+            for row in rows
+            if str(row.get(sel_col, "")).strip() not in owned
+        }
+        for other in siblings:
+            if other and other.lower() in label_words:
+                return (
+                    f"label says {other!r} but the claim reads "
+                    f"{sel_col}={sorted(owned)!r}"
+                )
+    return None
+
+
 def _tolerance_note(tolerance: Optional[Dict[str, Any]]) -> str:
     """Render the tolerance a pass relied on, for the verdict message.
 
@@ -860,28 +936,40 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
                 **base,
             )
         inputs_detail = ", ".join(f"{k}={v}" for k, v in names.items())
-        if ok:
-            # A pass shows its working too: a verdict nobody can
-            # inspect is the shape this design exists to remove, and
-            # explaining only rejections leaves the half a report's
-            # author most wants to defend resting on trust.
+        if not ok:
+            # A wrong number is the more useful message of the two,
+            # so it is reported before any label problem, the same
+            # priority order the lookup path above uses.
             return CheckResult(
-                verdict=VERDICT_VERIFIED,
+                verdict=VERDICT_FAILED,
                 expected=truth,
+                reason="value_mismatch",
                 detail=(
-                    f"{claim.label}: {claim.value} recomputed as {truth} "
+                    f"{claim.label}: stated {claim.value}, recomputed {truth} "
                     f"from {inputs_detail}"
-                    f"{_tolerance_note(claim.tolerance)}"
                 ),
                 **base,
             )
+        contradiction = _derived_label_contradiction(claim, claim.inputs or {}, sources)
+        if contradiction:
+            return CheckResult(
+                verdict=VERDICT_FAILED,
+                expected=truth,
+                reason="label_mismatch",
+                detail=f"{claim.label}: {contradiction}",
+                **base,
+            )
+        # A pass shows its working too: a verdict nobody can inspect
+        # is the shape this design exists to remove, and explaining
+        # only rejections leaves the half a report's author most
+        # wants to defend resting on trust.
         return CheckResult(
-            verdict=VERDICT_FAILED,
+            verdict=VERDICT_VERIFIED,
             expected=truth,
-            reason="value_mismatch",
             detail=(
-                f"{claim.label}: stated {claim.value}, recomputed {truth} "
+                f"{claim.label}: {claim.value} recomputed as {truth} "
                 f"from {inputs_detail}"
+                f"{_tolerance_note(claim.tolerance)}"
             ),
             **base,
         )
