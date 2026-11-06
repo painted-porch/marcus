@@ -53,6 +53,9 @@ from src.integrations.behavior_evidence import (
 from src.logging.agent_events import log_agent_event
 from src.logging.conversation_logger import conversation_logger, log_thinking
 from src.marcus_mcp.coordinator.drain import compute_board_drain
+from src.marcus_mcp.coordinator.task_type_registration import (
+    task_type_registration,
+)
 from src.marcus_mcp.tools.context import give_opinion
 from src.marcus_mcp.utils import serialize_for_mcp
 
@@ -811,8 +814,48 @@ def _escalate_behavior_evidence_response(
 
 # Task types whose completion requires typed evidence (issue #737).
 # The implement type is deliberately absent: it stays on the existing
-# smoke gate and behavior-evidence machinery above.
+# smoke gate and behavior-evidence machinery above. This is the
+# literal fallback for a project that registers nothing (ADR-0013
+# K2) -- see _task_type_requires_typed_evidence, which also honors a
+# project's own registration for a type named something else
+# (issue #830, second half: Codex flagged this exact set, alongside
+# eligibility.py's now-fixed one, as the same hardcoded-literal-names
+# root cause).
 EVIDENCE_REQUIRED_TASK_TYPES = frozenset({"find", "verify", "synthesize"})
+
+
+def _task_type_requires_typed_evidence(
+    task_type: str, state: Any, project_id: Optional[str]
+) -> bool:
+    """Decide whether a task type's completion must carry typed evidence.
+
+    True for the literal :data:`EVIDENCE_REQUIRED_TASK_TYPES` (the
+    fallback for a project that registers nothing), or for any task
+    type a project's ADR-0013 K2 registration names at all -- a
+    registration entry existing is itself the declaration "this type's
+    completion is evidence-gated," independent of what the project
+    happens to call it.
+
+    Parameters
+    ----------
+    task_type : str
+        The candidate task's type.
+    state : Any
+        Marcus server state, passed through to the registration lookup.
+    project_id : Optional[str]
+        The candidate task's own project id (``task.project_id``), so
+        the registration resolved is that project's, matching
+        eligibility.py's identical fix for this same shape (#830).
+
+    Returns
+    -------
+    bool
+        True when the type is evidence-gated.
+    """
+    if task_type in EVIDENCE_REQUIRED_TASK_TYPES:
+        return True
+    return task_type_registration(task_type, state, project_id) is not None
+
 
 # The one evidence field the board never hands to dependents: the
 # upstream agent's raw output. The audit bundle keeps it; the
@@ -959,10 +1002,17 @@ async def _apply_typed_evidence_gate(
         None when the completion may proceed; otherwise the rejection
         or terminal escalation dict to return to the agent.
     """
-    if task.task_type not in EVIDENCE_REQUIRED_TASK_TYPES:
+    project_id = getattr(task, "project_id", None)
+    if not _task_type_requires_typed_evidence(task.task_type, state, project_id):
         return None
 
-    required = list((task.output_schema or {}).get("required", []))
+    # The task's own output_schema (set at creation time) takes
+    # priority; a project's K2 registration's evidence_schema is the
+    # type-wide default for a registered type with no per-task schema
+    # of its own.
+    registration = task_type_registration(task.task_type, state, project_id)
+    schema = task.output_schema or ((registration or {}).get("evidence_schema") or {})
+    required = list(schema.get("required", []))
     evidence_missing = not evidence
     if evidence_missing:
         missing = required
@@ -1007,8 +1057,40 @@ APPROVE_TASK_TYPE = "approve"
 # Task types whose accepted evidence is written to the record (the
 # audit bundle reads it from the completed task's source_context).
 # Approve is recorded but not evidence-gated: the human's decision is
-# the approval; a payload is kept when provided.
+# the approval; a payload is kept when provided. This is the literal
+# fallback -- see _task_type_is_evidence_recorded for the registered
+# case (issue #830, second half).
 EVIDENCE_RECORDED_TASK_TYPES = EVIDENCE_REQUIRED_TASK_TYPES | {APPROVE_TASK_TYPE}
+
+
+def _task_type_is_evidence_recorded(
+    task_type: str, state: Any, project_id: Optional[str]
+) -> bool:
+    """Decide whether a task type's accepted evidence hands off to dependents.
+
+    True for the literal :data:`EVIDENCE_RECORDED_TASK_TYPES`, or for
+    any task type a project's ADR-0013 K2 registration names at all --
+    the same generalization as :func:`_task_type_requires_typed_evidence`,
+    kept as a separate check because ``approve`` is recorded without
+    being evidence-gated.
+
+    Parameters
+    ----------
+    task_type : str
+        The candidate task's type.
+    state : Any
+        Marcus server state, passed through to the registration lookup.
+    project_id : Optional[str]
+        The candidate task's own project id (``task.project_id``).
+
+    Returns
+    -------
+    bool
+        True when accepted evidence for this type is handed off.
+    """
+    if task_type in EVIDENCE_RECORDED_TASK_TYPES:
+        return True
+    return task_type_registration(task_type, state, project_id) is not None
 
 
 def _apply_approval_gate(
@@ -7852,7 +7934,9 @@ async def _record_progress(
             # worker (generalized at the step 7 review, Simon 16c9a4b1).
             if (
                 task is not None
-                and task.task_type in EVIDENCE_RECORDED_TASK_TYPES
+                and _task_type_is_evidence_recorded(
+                    task.task_type, state, getattr(task, "project_id", None)
+                )
                 and evidence
             ):
                 update_data["source_context"] = {"evidence": evidence}

@@ -593,7 +593,12 @@ async def register_board(
             return existing.id
 
     config = ProjectConfig(
-        id="",
+        # GH-306: the kanban project id is the single source of truth,
+        # not an auto-generated registry UUID -- otherwise task.project_id
+        # (written from this same string at task creation) never matches
+        # a registry lookup by id, breaking any per-project K2
+        # registration a seeded board declares (issue #830, second half).
+        id=project_id,
         name=f"{project_id} - Main Board",
         provider="sqlite",
         provider_config={

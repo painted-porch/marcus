@@ -39,64 +39,15 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from src.core.models import Task, TaskStatus, WorkerStatus
-from src.core.project_registry import ProjectRegistry
+from src.marcus_mcp.coordinator.task_type_registration import (
+    task_type_registration as _task_type_registration,
+)
 
 logger = logging.getLogger(__name__)
 
 APPROVE_TYPE = "approve"
 VERIFY_TYPE = "verify"
 FIND_TYPE = "find"
-
-
-def _task_type_registration(
-    task_type: str, state: Any, project_id: Optional[str]
-) -> Optional[Dict[str, Any]]:
-    """Return a project's ADR-0013 K2 registration for a task type.
-
-    Codex P2 on PR #836: a worker can request tasks for a project other
-    than the server's active one (``_find_optimal_task_original_logic``
-    scopes candidates by ``state.agent_project_map``, not by what is
-    active), and a ``Task`` carries its own ``project_id``. Looking up
-    the registration from the active project regardless applied the
-    wrong project's rules -- project A's author stayed eligible for its
-    own ``check`` task whenever some other project B happened to be
-    active, since B's (non-existent) registration returned no producer
-    type. This resolves the candidate's own project first; the active
-    project is a fallback only for a legacy task with no ``project_id``
-    at all.
-
-    Parameters
-    ----------
-    task_type : str
-        The task type to look up.
-    state : Any
-        Marcus server state. Only a real ``ProjectRegistry`` is
-        trusted, the same defensive posture as the ``WorkerStatus``
-        checks elsewhere in this module -- a bare ``Mock`` auto-creates
-        a ``project_registry`` attribute that would otherwise look
-        present without ever being one.
-    project_id : Optional[str]
-        The candidate task's own project id (``task.project_id``).
-        ``None`` falls back to the server's active project.
-
-    Returns
-    -------
-    Optional[Dict[str, Any]]
-        The registration dict, or ``None`` when there is no project
-        registry, no resolvable project, or no registration for this
-        type.
-    """
-    registry = getattr(state, "project_registry", None)
-    if not isinstance(registry, ProjectRegistry):
-        return None
-    project = (
-        registry.get_project_sync(project_id)
-        if project_id
-        else registry.get_active_project_sync()
-    )
-    if project is None:
-        return None
-    return project.task_type_registrations.get(task_type)
 
 
 def _verify_producer_type(

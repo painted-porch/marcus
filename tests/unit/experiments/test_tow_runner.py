@@ -383,6 +383,25 @@ class TestRegisterBoard:
         assert "sqlite" in stored.tags
 
     @pytest.mark.asyncio
+    async def test_registry_id_matches_the_kanban_project_id(
+        self, tmp_path: Path, registry: Any
+    ) -> None:
+        """GH-306: the kanban project id is the single source of truth,
+        not an auto-generated registry UUID -- a task's own
+        ``project_id`` field is written from this same string at
+        creation time, so a registry lookup by that id must find this
+        project. Issue #830, second half: a seeded board's K2
+        registration was unreachable because this id used to be a
+        random UUID instead."""
+        db = tmp_path / "kanban-claude.db"
+
+        project_id = await tow_runner.register_board(
+            "tow-b-claude", str(db), registry=registry
+        )
+
+        assert project_id == "tow-b-claude"
+
+    @pytest.mark.asyncio
     async def test_registration_is_idempotent(
         self, tmp_path: Path, registry: Any
     ) -> None:

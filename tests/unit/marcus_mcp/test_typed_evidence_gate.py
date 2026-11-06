@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from src.core.models import Priority, Task, TaskStatus
+from src.core.persistence import MemoryPersistence, Persistence
+from src.core.project_registry import ProjectConfig, ProjectRegistry
 from src.marcus_mcp.tools import task as task_module
 from src.marcus_mcp.tools.context import get_task_context
 
@@ -180,6 +182,170 @@ class TestTypedEvidenceGate:
         assert third["error"] == "typed_evidence_escalated"
         assert third["success"] is False
         terminalize.assert_awaited_once()
+
+
+async def _registered_state(
+    task: Task, task_type_registrations: Dict[str, Dict[str, Any]]
+) -> Mock:
+    """Build a state whose active project carries a K2 registration.
+
+    Mirrors test_eligibility.py's identical helper for the self-check
+    exclusion half of this issue -- the same real-``ProjectRegistry``
+    setup, now exercising the typed-evidence gate and handoff half
+    (issue #830, reopened after #836 fixed only the first half).
+    """
+    registry = ProjectRegistry(Persistence(MemoryPersistence()))
+    now = datetime.now(timezone.utc)
+    await registry.add_project(
+        ProjectConfig(
+            id="proj-1",
+            name="fifth-extension",
+            provider="sqlite",
+            provider_config={},
+            created_at=now,
+            last_used=now,
+            task_type_registrations=task_type_registrations,
+        )
+    )
+    state = Mock()
+    state.subtask_manager = None
+    state.project_tasks = [task]
+    state.project_registry = registry
+    return state
+
+
+class TestTypedEvidenceGateHonorsRegisteredTypes:
+    """Issue #830, second half: a registered non-literal type is gated too.
+
+    A fifth extension names its evidence-requiring task type ``"check"``
+    instead of reusing ``"find"``/``"verify"``/``"synthesize"``. The
+    typed-evidence gate must still apply, keyed off the project's own
+    ADR-0013 K2 registration rather than a second hardcoded set of
+    literal names.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_registered_type_is_gated_without_evidence(self) -> None:
+        task = _make_task("check-1", task_type="check")
+        state = await _registered_state(
+            task, {"check": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+
+        response = await task_module._apply_typed_evidence_gate(
+            task, "checker-1", None, state
+        )
+
+        assert response is not None
+        assert response["error"] == "typed_evidence_missing"
+        assert response["missing_fields"] == ["verdict"]
+
+    @pytest.mark.asyncio
+    async def test_a_registered_type_passes_with_matching_evidence(self) -> None:
+        task = _make_task("check-1", task_type="check")
+        state = await _registered_state(
+            task, {"check": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+
+        response = await task_module._apply_typed_evidence_gate(
+            task, "checker-1", {"verdict": "ok"}, state
+        )
+
+        assert response is None
+
+    @pytest.mark.asyncio
+    async def test_a_tasks_own_output_schema_overrides_the_registration(
+        self,
+    ) -> None:
+        """The task's own output_schema (set at creation) takes
+        priority over the project-wide registration default."""
+        task = _make_task(
+            "check-1",
+            task_type="check",
+            output_schema={"required": ["custom_field"]},
+        )
+        state = await _registered_state(
+            task, {"check": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+
+        response = await task_module._apply_typed_evidence_gate(
+            task, "checker-1", {"verdict": "ok"}, state
+        )
+
+        assert response is not None
+        assert response["missing_fields"] == ["custom_field"]
+
+    @pytest.mark.asyncio
+    async def test_an_unregistered_type_is_still_ungated(self) -> None:
+        """Registering an unrelated type must not start gating this one."""
+        task = _make_task("impl-1", task_type="implement")
+        state = await _registered_state(
+            task, {"check": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+
+        response = await task_module._apply_typed_evidence_gate(
+            task, "dev-1", None, state
+        )
+
+        assert response is None
+
+    @pytest.mark.asyncio
+    async def test_a_registered_type_is_evidence_recorded(self) -> None:
+        task = _make_task("check-1", task_type="check")
+        state = await _registered_state(
+            task, {"check": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+
+        assert task_module._task_type_is_evidence_recorded("check", state, None) is True
+
+    @pytest.mark.asyncio
+    async def test_an_unregistered_type_is_not_evidence_recorded(self) -> None:
+        task = _make_task("impl-1", task_type="implement")
+        state = await _registered_state(
+            task, {"check": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+
+        assert (
+            task_module._task_type_is_evidence_recorded("implement", state, None)
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_handoff_fires_for_a_registered_type(self) -> None:
+        """A registered type's accepted evidence must still be handed
+        off to dependents, the same way the literal set already is."""
+        upstream = _make_task("check-1", task_type="check")
+        downstream = _make_task(
+            "synth-1", task_type="synthesize", dependencies=["check-1"]
+        )
+        registry = ProjectRegistry(Persistence(MemoryPersistence()))
+        now = datetime.now(timezone.utc)
+        await registry.add_project(
+            ProjectConfig(
+                id="proj-1",
+                name="fifth-extension",
+                provider="sqlite",
+                provider_config={},
+                created_at=now,
+                last_used=now,
+                task_type_registrations={
+                    "check": {"evidence_schema": {"required": ["verdict"]}}
+                },
+            )
+        )
+        state = Mock()
+        state.project_registry = registry
+        state.project_tasks = [upstream, downstream]
+        state.kanban_client = Mock()
+        state.kanban_client.update_task = AsyncMock()
+        state.kanban_client.get_task_by_id = AsyncMock(return_value=None)
+        state.persistence = None
+
+        with patch("src.marcus_mcp.tools.task.log_agent_event"):
+            await task_module._handoff_evidence_to_dependents(
+                upstream, {"verdict": "ok"}, state
+            )
+
+        assert downstream.inputs.get("verdict") == "ok"
 
 
 class TestEscalationSuccessFlag:
