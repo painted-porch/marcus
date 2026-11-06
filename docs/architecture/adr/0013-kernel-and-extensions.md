@@ -1,6 +1,6 @@
 # ADR 0013: The Coordination Kernel and Its Extensions
 
-**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K12 and K13 accepted 2026-11-05**; the other nine remain proposals, each stating a recommendation and its alternative
+**Status:** Partially accepted — **K4 and K11 accepted 2026-11-04; K2, K5, K12 and K13 accepted 2026-11-05**; the other seven remain proposals, each stating a recommendation and its alternative
 
 **Date:** 2026-11-04
 
@@ -71,10 +71,31 @@ Cheaper now, and it leaves the software assumptions in the core where three of f
 
 ### K2 — How an extension registers
 
-**Recommendation.** An extension declares, per project, a named set of task types it serves and, for each, the evidence it requires, the verifier the kernel should call, and whether checks may be injected.
+**Accepted 2026-11-05 (Lawrence Gray).**
+
+**Decision.** An extension declares, per project, a named set of task types it serves and, for each, the evidence it requires and whether checks may be injected.
+Dispatch is pull, not call: the kernel never invokes an extension's code directly; it gates a task of the declared type and offers it on the board, and the extension's own agent, scoped to its project by the registration, claims it through `request_next_task` like any other agent and reports its verdict as evidence.
 Registration is board state, not configuration, so the record of what verified a project is in the project.
 
-**Open.** Whether registration is a first-class MCP tool or part of the project record written at creation.
+**The open question, resolved: the project record, not a new tool.** Both extensions that exist today already write the project record directly — `tow_runner.py` and the numerical-report verifier's `numeric_runner.py` each construct a `ProjectConfig` and call `registry.add_project()` from Python, in-process. Neither goes through `create_project`, the existing MCP tool, because that tool's provider whitelist (`src/marcus_mcp/tools/project_management.py`) does not even accept `sqlite`, the provider both of them use. A new MCP tool for registration would be a *third* surface for something two extensions already do twice, the same way, without one.
+
+K2's own rationale argues the same way from a different direction: "the record of what verified a project is in the project" is a durability claim, and the project record is the only thing in the kernel with project lifetime. A tool call is an event; a registration that must outlive every process that reads it needs a record to land in regardless of what writes it. `register_agent` looked like a precedent for a first-class tool, but its lifetime is the opposite of what K2 needs: per-process, ephemeral, re-asserted on every worker start, where K2's registration must survive the process that wrote it.
+
+**What this is not, yet.** The project record cannot take this as-is. `ProjectConfig.from_dict` filters every incoming dict to a fixed `expected_fields` set (`src/core/project_registry.py`) and silently drops anything outside it — so a registration block in `options` would vanish on the next read unless that set names it explicitly. `tags` is already overloaded for provenance (`["auto-created", "sqlite", "tow-experiment"]`) and `provider_config` is provider-specific by name; stuffing policy into either repeats K3's own mistake, vocabulary doing policy, one level up. The fix is a new, explicit field on `ProjectConfig`, not a reuse of an existing one.
+
+**The sharpest evidence for doing this at all, direct from the numerical-report verifier owner.** Their POC (`~/dev/marcus-worktrees/numeric-verifier`, unpushed, not on `origin/develop`) has `task.py` import `apply_verification_outcome` by name and call it unconditionally in the evidence-close path, for every task matching the kernel's own hardcoded `EVIDENCE_REQUIRED_TASK_TYPES`. Their own words: "our verifier owns no task type; it piggybacks on the system-of-record's four." No `project_id` scoping — two such extensions on one server would share one import slot, and dispatch becomes "whichever function got imported runs globally for both projects," silently. Their verdict: without a registration mechanism, a hardcoded kernel-side import was the *only* way to hook in at all — not a shortcut they chose over a cleaner path, but the only path that existed. This is the identical shape O1 already names for #803 and #805: a defect that corrupts the record the verification product exists to produce, except here it is not a bug landed in the kernel, it is what building against the kernel without K2 required.
+
+**The sub-question the owner raised, and why it resolves without a callable field.** Asked what the hook point actually needs to be, they framed it as "the kernel calls MY function instead of its own, for the task types I handle, scoped to my project" — and flagged, correctly, that no data-only declaration captures *which function runs*; either the registration carries a callable or endpoint reference, or K2 scopes itself to schema and ownership and leaves dispatch to a separate decision.
+
+It resolves without a callable field, because "the kernel calls into extension code" is not what K4 or the shipped citation-verifier chain actually do, and building it that way would reopen K8 (runtime neutrality) and Invariant #1 (agents self-select; the kernel never pushes work into a process). The citation verifier's `find → verify → approve → synthesize` chain already answers "which function runs" today, for the one extension that ships: by registering ownership of a task type, not a function. The kernel gates a task of that type and offers it on the board; the extension's own agent, scoped to its project by the registration, pulls it through the ordinary `request_next_task` loop, computes its own verdict, and reports it as evidence — which the handoff (#807, now kernel-guaranteed) carries to whatever depends on it. Nothing calls into the extension's process; the extension calls into the kernel, the same as every other agent. K2's registration therefore needs exactly what its own Recommendation already says — task types, evidence schema, whether checks are injectable — and no callable or endpoint reference. The numeric verifier's `apply_verification_outcome` import stops being necessary the moment it can register `verify` as a task type it owns, scoped to its own project, instead of piggybacking on the citation chain's four.
+
+**One-time at creation is sufficient.** The owner confirmed directly: claim schema, tolerance rules and the retry bound are fixed before their writer runs; per-case variation is task data, not registration, and nothing in their workstream needs a mid-project policy change.
+
+**The ownership-plus-pull model, confirmed live for two of its three steps.** The owner live-checked reopen and bound against a real server: a verifier agent holding its claimed `verify` task calls the kernel's own `request_task_redo` on the `find` task, and a fourth attempt is correctly refused `max_redo_count_exceeded` — zero extension-to-kernel calls, exactly the pull model this section argues for. The third step, terminal decline, is not covered by anything that exists today; that gap is K5's evidence, not K2's, and K5 is sharpened accordingly below.
+
+**A third confirmation, from the same live check.** An agent registered with role `"approver"` was offered a `verify`-type task anyway — role strings are not enforced anywhere today, and nothing scopes which task types an agent, or an extension, actually owns. That is precisely the gap K2's registration field closes.
+
+**Remaining implementation question, not blocking acceptance.** Whether extensions keep constructing `ProjectConfig` in-process as both do today, or get an MCP write path onto the same field, is a detail of how the record gets written, not of where the record lives. Both are compatible with this decision; neither needs deciding before K2 itself is accepted.
 
 ### K3 — Evidence policy is declared, never inferred from labels
 
@@ -106,11 +127,24 @@ An opinion is a dated observation, not a claim about a deliverable.
 
 ### K5 — A terminal declined outcome
 
-**Recommendation.** The kernel gains a terminal state for "this could not be verified", distinct from done, from failed, and from worker-reported blocked.
+**Accepted 2026-11-05 (Lawrence Gray).**
+
+**Decision.** The kernel gains a terminal state for "this could not be verified", distinct from done, from failed, and from worker-reported blocked.
 
 **Evidence.** Two consumers need it and neither can express it.
 The citation verifier has `unverifiable` with a `decline_reason`, which "counts as declined, never as correct", inside its own evidence vocabulary only.
 The numerical verifier sets dependents to BLOCKED, which reads as a worker reporting an obstruction when no worker did.
+
+**Confirmed live, and decisive.** The numerical-report verifier owner live-checked the reopen-and-decline path against a real server. Reopen and bound are already covered by existing kernel tools with zero extension-to-kernel calls: a verifier agent holding its claimed `verify` task calls `request_task_redo` on the `find` task, and a fourth attempt is correctly refused `max_redo_count_exceeded`. Decline is not. The only thing an agent can call to say "I cannot verify this" is `report_blocker`, and `report_blocker` does not mark the task terminally anything — it returns `requeued_for_repair: true` and sends the task back for up to `MAX_BLOCKER_REPAIR_ATTEMPTS` (2) more agents on a budget (`MAX_BLOCKER_REPAIR_REQUEUES`, 3) that is entirely separate from `request_task_redo`'s own `MAX_TASK_REDO_COUNT` (3). An agent that correctly concludes "this cannot be verified" has no way to say so; the kernel silently treats its decline as "try again," on a second counter the first one's own bound never sees, defeating it.
+
+**The implementation choice, with a recommendation.** Two ways to make a decline stick, and `task_claimability.py`'s own code decides between them:
+
+- **(a) A new terminal status** (e.g. `DECLINED`), reachable by the task's current holder, that `deps_allow_claim` treats as settled-but-not-done: an ordinary (strict-gate) dependent still requires every upstream `DONE` and so correctly stays unclaimable forever, exactly as "distinct from done" demands, while an integration task's best-effort gate (`SETTLED_FOR_BEST_EFFORT`, which already treats `BLOCKED` this way) treats it as settled, the same way a `BLOCKED` upstream already degrades an integration claim today.
+- **(b) Gate on evidence content** instead of status: a completed `verify` task whose evidence carries a declined verdict gates its dependents the same way a status would. Verified directly against the live code: `deps_allow_claim` reads only `task.status` today, never evidence content, so this is new kernel capability, not a missing case in an existing one.
+
+**Recommend (a).** Reading evidence content to decide claimability puts the kernel's gate in the business of understanding an extension's evidence vocabulary — the identical mistake K3 names for labels, one layer down: vocabulary, this time an evidence shape instead of a string, doing policy. A status is already the kernel's own vocabulary, already has a settled/unsettled gate built for it, and already treats one terminal non-done status (`BLOCKED`) as settled for best-effort claims. `DECLINED` extends a mechanism that exists; evidence-content gating invents one.
+
+**The same live check also confirms K2's own evidence a third way.** An agent registered with role `"approver"` was offered the requeued `verify` task — role strings are not enforced anywhere, and there is no task-type ownership scoping at all today. That is exactly the gap K2's registration field closes.
 
 ### K6 — Every board write is stamped from the agent's registration
 
@@ -244,6 +278,9 @@ K1's test, that no kernel change is justified by one consumer alone, is the guar
 - #798, the parked validation gate, designated the first concrete seam
 - #803, #804, #805, the three defects found while gathering these requirements
 - #807, #816, #814, the three independent recurrences of the same stale-in-memory shape K13's evidence rests on
+- #818, which K2 gates and which gathers a worked example from K2's own resolution once it ships
+- The numerical-report verifier owner's direct account of `apply_verification_outcome`, `~/dev/marcus-worktrees/numeric-verifier` (unpushed), K2's evidence
+- The same owner's live check of the reopen/bound/decline model against a real server (`~/marcus-experiments/numeric-verifier/k2-livecheck/RESULT.md`), K2 and K5's evidence
 - #735, #677, #647, the software-building verification bugs that K4's evidence rests on
 - #299, domain-agnostic coordination, which K1 and K3 retire
 - #792, merged as `dc996a6f`, which placed all kernel state under one root
