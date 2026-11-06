@@ -2107,6 +2107,51 @@ class TestCodexFindingMechanicalFieldSweep:
         )
         assert check_claims([c], sources)[0].verdict == "unresolvable"
 
+    #: An address's own shape, independent of any field's Python
+    #: type: too few segments, too many, or a recognized operation
+    #: keyword ("sum", "count") with the wrong segment count around
+    #: it. Every one of these is well-typed (a non-empty string) but
+    #: still not a real address.
+    BAD_ADDRESS_SHAPES = [
+        "metrics.json",
+        "metrics.json:r2_overall:rate_pct",
+        "per_crop.csv:crop=maize:mean_ape:median_ape",
+        "tiers.csv:sum",
+        "tiers.csv:sum:n_records:extra",
+        "per_record.csv:count",
+        "per_record.csv:count:extra",
+        "per_crop.csv:crop=maize",
+    ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_address", BAD_ADDRESS_SHAPES, ids=repr)
+    def test_a_lookup_address_with_a_malformed_shape_is_unresolvable(
+        self, sources, bad_address
+    ):
+        """address shape (lookup) -- Codex's two examples, plus every
+        other way a well-typed address string can still carry the
+        wrong number of segments for its operation."""
+        source, _, key = bad_address.partition(":")
+        c = Claim(id="c1", value=1, label="x", kind="lookup", source=source, key=key)
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("bad_address", BAD_ADDRESS_SHAPES, ids=repr)
+    def test_a_derived_input_address_with_a_malformed_shape_is_unresolvable(
+        self, sources, bad_address
+    ):
+        """address shape (derived input), the same matrix."""
+        c = Claim(
+            id="c1",
+            value=1,
+            label="x",
+            kind="derived",
+            expr="a",
+            inputs={"a": bad_address},
+            unit="plain",
+        )
+        assert check_claims([c], sources)[0].verdict == "unresolvable"
+
     @pytest.mark.unit
     @pytest.mark.parametrize("bad_expr", BAD_SHAPES, ids=repr)
     def test_a_malformed_derived_expr_is_unresolvable(self, sources, bad_expr):
@@ -4388,3 +4433,218 @@ class TestCodexFindingMetricTokenizerUnderstandsRSquaredNotation:
         (figure extraction, not metric tokenizing) must still reject
         merging a true exponent into the base figure."""
         assert extract_numbers("The area is 10² units.") == ["10"]
+
+
+class TestCodexFindingOneAddressParserForEveryConsumer:
+    """Two different parsing rules for the same address could drift
+    apart on anything with more segments than either rule's author
+    had in mind.
+
+    resolve_address read the first key or column; unit inference and
+    metric validation each read the LAST segment. An address with an
+    extra segment changed what the second group of readers thought
+    the address was *about*, without changing what the first one
+    actually *read* -- the value came from one column, the
+    unit/metric metadata came from a different one.
+    """
+
+    @pytest.mark.unit
+    def test_an_extra_json_segment_no_longer_smuggles_a_percent_unit(self):
+        """Codex's first example: a fraction-valued key dressed up
+        with a trailing percent-looking segment the column-name
+        heuristic would read as the unit, while resolution read the
+        real key underneath it."""
+        sources = {"metrics.json": {"r2_overall": 0.481}}
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall:rate_pct",
+        )
+        res = check_claims([c], sources, report_text="Overall R2 is 0.481% [c1].")
+        assert res[0].verdict == "unresolvable"
+        assert [r for r in res if r.verdict == "verified"] == []
+
+    @pytest.mark.unit
+    def test_an_extra_csv_segment_no_longer_smuggles_a_sibling_metric(self):
+        """Codex's second example: a mean_ape value dressed up with a
+        trailing median_ape segment the metric check read as the
+        column, while resolution read mean_ape underneath it."""
+        sources = {
+            "per_crop.csv": [
+                {"crop": "maize", "mean_ape": 20.0, "median_ape": 15.0},
+            ]
+        }
+        c = Claim(
+            id="c1",
+            value=20.0,
+            label="maize median APE",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:mean_ape:median_ape",
+        )
+        res = check_claims([c], sources)
+        assert res[0].verdict == "unresolvable"
+        assert [r for r in res if r.verdict == "verified"] == []
+
+    @pytest.mark.unit
+    def test_every_legitimate_address_form_is_still_accepted(self, sources):
+        """The four real shapes -- a flat key, a column sum, a row
+        count, and a row selector plus column -- are unaffected."""
+        key_lookup = Claim(
+            id="c1",
+            value=0.858,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        sum_lookup = Claim(
+            id="c2",
+            value=1200,
+            label="n_records across tiers",
+            kind="lookup",
+            source="tiers.csv",
+            key="sum:n_records",
+        )
+        select_lookup = Claim(
+            id="c3",
+            value=0.886,
+            label="maize R2",
+            kind="lookup",
+            source="per_crop.csv",
+            key="crop=maize:r2",
+        )
+        count_sources = dict(sources)
+        count_sources["per_record.csv"] = [{"x": 1}] * 5
+        count_lookup = Claim(
+            id="c4",
+            value=5,
+            label="evaluated record count",
+            kind="lookup",
+            source="per_record.csv",
+            key="count:",
+        )
+        results = check_claims(
+            [key_lookup, sum_lookup, select_lookup, count_lookup], count_sources
+        )
+        assert {r.claim_id: r.verdict for r in results} == {
+            "c1": "verified",
+            "c2": "verified",
+            "c3": "verified",
+            "c4": "verified",
+        }
+
+
+class TestCodexFindingWhitespaceBeforePercentSignIsRecognized:
+    """A space between a figure and its '%' must not drop the
+    suffix. "0.481 %" is still a percent-suffixed figure, the same
+    as "0.481%" -- including when the space is a non-breaking or
+    narrow non-breaking space, the kind a model's own tokenizer can
+    produce without it ever looking different on screen.
+    """
+
+    SOURCES = {"metrics.json": {"r2_overall": 0.481}}
+    NBSP = chr(0x00A0)
+    NARROW_NBSP = chr(0x202F)
+
+    @pytest.mark.unit
+    def test_codexs_sentence_with_an_ordinary_space_is_rejected(self):
+        """The figure, read at face value because the space hid the
+        percent sign, would otherwise match the real fraction value
+        0.481 exactly -- the bug is an over-acceptance, so the
+        pinned behavior is that it must now fail."""
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        res = check_claims([c], self.SOURCES, report_text="Overall R2 is 0.481 % [c1].")
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_the_non_breaking_space_variant_is_rejected_too(self):
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        text = f"Overall R2 is 0.481{self.NBSP}% [c1]."
+        res = check_claims([c], self.SOURCES, report_text=text)
+        assert len([r for r in res if r.verdict == "uncovered"]) == 1
+
+    @pytest.mark.unit
+    def test_a_correctly_scaled_spaced_percentage_still_passes(self):
+        """The control: "48.1 %" against the same claim is the
+        correctly scaled figure, and must still pass."""
+        c = Claim(
+            id="c1",
+            value=0.481,
+            label="overall R2",
+            kind="lookup",
+            source="metrics.json",
+            key="r2_overall",
+        )
+        res = check_claims([c], self.SOURCES, report_text="Overall R2 is 48.1 % [c1].")
+        assert [r for r in res if r.verdict == "uncovered"] == []
+
+    @pytest.mark.unit
+    def test_a_slide_title_with_a_spaced_percentage_is_recognized(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="overall R2",
+                addresses=("metrics.json:r2_overall",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Overall R2 is 0.481 %",
+                    "cells": [{"value": 0.481, "claim": "c1", "label": "overall R2"}],
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "overall R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_cell_label_with_a_spaced_embedded_percentage_is_recognized(self):
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.481,
+                label="overall R2 (0.481 % margin)",
+                addresses=("metrics.json:r2_overall",),
+                unit="fraction",
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "cells": [
+                        {
+                            "value": 0.481,
+                            "claim": "c1",
+                            "label": "overall R2 (0.481 % margin)",
+                        }
+                    ]
+                }
+            ]
+        }
+        problems = check_slide_spec(
+            spec, accepted, {"c1": "overall R2 (0.481 % margin)"}
+        )
+        assert problems

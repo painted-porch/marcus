@@ -28,7 +28,18 @@ import operator
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 
 VERDICT_VERIFIED = "verified"
 VERDICT_FAILED = "failed"
@@ -43,6 +54,38 @@ _NUMBER_RE = re.compile(
     r"-?\.\d+" + _EXPONENT + r")"
     r"[xX]?(?![\w])"
 )
+
+#: Horizontal whitespace a model may write between a figure and its
+#: '%' -- an ordinary space, a non-breaking space (the same grouping
+#: separator already recognized inside a number), a narrow
+#: non-breaking space, and a thin space. "0.481 %" and "0.481 %"
+#: both still mean the figure carries a percent sign; neither should
+#: silently fall back to comparing the unscaled magnitude just
+#: because a space sits in between.
+_PERCENT_SIGN_WHITESPACE = " " + chr(0x00A0) + chr(0x202F) + chr(0x2009)
+
+
+def _percent_sign_follows(text: str, position: int) -> bool:
+    """Decide whether a '%' sign follows position, skipping whitespace.
+
+    Parameters
+    ----------
+    text : str
+        The text a figure was matched in.
+    position : int
+        The offset immediately after the figure's own digits.
+
+    Returns
+    -------
+    bool
+        True when a '%' appears at ``position``, or after only
+        horizontal whitespace (:data:`_PERCENT_SIGN_WHITESPACE`).
+    """
+    i = position
+    while i < len(text) and text[i] in _PERCENT_SIGN_WHITESPACE:
+        i += 1
+    return i < len(text) and text[i] == "%"
+
 
 #: Codepoints named explicitly rather than written as literal glyphs:
 #: several of the characters below (no-break spaces especially) are
@@ -409,6 +452,109 @@ def _coerce(text: Any) -> Any:
         return text
 
 
+@dataclass(frozen=True)
+class ParsedAddress:
+    """One staged address, parsed exactly once into a fixed shape.
+
+    Every consumer -- resolution, unit inference, metric identity,
+    row provenance -- reads from this object instead of re-splitting
+    the original address string with its own rules. That was the
+    actual bug two different parsing rules let through:
+    ``"metrics.json:r2_overall:rate_pct"`` resolved against
+    ``r2_overall`` (the first key read wins) while unit inference
+    read ``rate_pct`` (the last segment wins), so an extra segment
+    changed what the address was *treated as* without changing what
+    it *read* -- the same split, run with two different unwritten
+    rules, drifting apart on anything with more segments than either
+    rule's author had in mind. Parsing once, with one rule enforcing
+    an exact number of segments per operation, removes the
+    possibility of two readers disagreeing, rather than reconciling
+    them after the fact.
+
+    Attributes
+    ----------
+    source : str
+        The staged file.
+    operation : str
+        One of ``"key"`` (a flat JSON key), ``"sum"`` (a CSV column
+        total), ``"count"`` (a CSV row count), or ``"select"`` (a
+        CSV row selector plus column).
+    column : Optional[str]
+        The column resolution actually reads; ``None`` only for
+        ``"count"``, which reads no column at all.
+    selector : Optional[Tuple[str, str]]
+        ``(column, value)`` identifying the row; ``None`` except for
+        ``"select"``.
+    """
+
+    source: str
+    operation: str
+    column: Optional[str]
+    selector: Optional[Tuple[str, str]] = None
+
+
+def _parse_address(address: Any) -> Union[ParsedAddress, str]:
+    """Parse a staged address into its one canonical structure.
+
+    Addresses take four forms, each with an exact number of
+    colon-separated segments after the source file -- never fewer,
+    never more:
+
+    =========== ====================================== =========
+    Operation   Example                                 Segments
+    =========== ====================================== =========
+    ``key``     ``metrics.json:r2_overall``             1 (key)
+    ``sum``     ``tiers.csv:sum:n_records``              2
+    ``count``   ``per_record.csv:count:``                2 (empty)
+    ``select``  ``per_crop.csv:crop=maize:r2``           2
+    =========== ====================================== =========
+
+    Called once, at the shape gate (:func:`_malformed_claim_shape`),
+    so a malformed address -- one extra or missing segment -- is a
+    named problem before resolution, unit inference or any
+    contradiction check ever sees it, rather than three of them each
+    quietly reading it a different way.
+
+    Parameters
+    ----------
+    address : Any
+        The address to parse; not assumed to already be a string.
+
+    Returns
+    -------
+    Union[ParsedAddress, str]
+        The parsed address, or a description of why it is malformed.
+    """
+    if not isinstance(address, str) or not address:
+        return f"address is not a usable string: {address!r}"
+    parts = address.split(":")
+    if len(parts) < 2:
+        return f"address has no key: {address!r}"
+    source, rest = parts[0], parts[1:]
+    if not source:
+        return f"address has no source file: {address!r}"
+    if len(rest) == 1:
+        if not rest[0]:
+            return f"address has an empty key: {address!r}"
+        return ParsedAddress(source=source, operation="key", column=rest[0])
+    if len(rest) == 2 and rest[0] == "sum":
+        if not rest[1]:
+            return f"sum address has no column: {address!r}"
+        return ParsedAddress(source=source, operation="sum", column=rest[1])
+    if len(rest) == 2 and rest[0] == "count" and rest[1] == "":
+        return ParsedAddress(source=source, operation="count", column=None)
+    if len(rest) == 2 and "=" in rest[0]:
+        sel_col, sel_val = rest[0].split("=", 1)
+        if sel_col and rest[1]:
+            return ParsedAddress(
+                source=source,
+                operation="select",
+                column=rest[1],
+                selector=(sel_col, sel_val),
+            )
+    return f"address has an unrecognized shape: {address!r}"
+
+
 def resolve_address(address: str, sources: Dict[str, Any]) -> Any:
     """Resolve one address against the source map.
 
@@ -432,51 +578,52 @@ def resolve_address(address: str, sources: Dict[str, Any]) -> Any:
     Raises
     ------
     KeyError
-        When the file, row or column does not exist.
+        When the address is malformed, or the file, row or column
+        does not exist.
     """
-    parts = address.split(":")
-    if len(parts) < 2:
-        raise KeyError(f"malformed address: {address}")
-    filename, rest = parts[0], parts[1:]
-    if filename not in sources:
-        raise KeyError(f"no such staged file: {filename}")
-    data = sources[filename]
+    parsed = _parse_address(address)
+    if isinstance(parsed, str):
+        raise KeyError(parsed)
+    if parsed.source not in sources:
+        raise KeyError(f"no such staged file: {parsed.source}")
+    data = sources[parsed.source]
 
-    if isinstance(data, dict):
-        key = rest[0]
-        if key not in data:
-            raise KeyError(f"no such key: {key} in {filename}")
-        return _coerce(data[key])
+    if parsed.operation == "key":
+        if not isinstance(data, dict):
+            raise KeyError(
+                f"address reads a key but {parsed.source} is not a JSON object"
+            )
+        if parsed.column not in data:
+            raise KeyError(f"no such key: {parsed.column} in {parsed.source}")
+        return _coerce(data[parsed.column])
 
-    # CSV: either an aggregate or a row selector plus a column.
-    if rest[0] == "sum":
-        if len(rest) < 2:
-            raise KeyError(f"malformed sum address, no column given: {address}")
-        column = rest[1]
+    if not isinstance(data, list):
+        raise KeyError(f"address expects a CSV table but {parsed.source} is not one")
+    if parsed.operation == "sum":
         total = 0.0
         for row in data:
-            if column not in row:
-                raise KeyError(f"no such column: {column} in {filename}")
+            if parsed.column not in row:
+                raise KeyError(f"no such column: {parsed.column} in {parsed.source}")
             try:
-                total += float(_coerce(row[column]))
+                total += float(_coerce(row[parsed.column]))
             except (TypeError, ValueError) as exc:
                 raise KeyError(
-                    f"column {column} in {filename} is not numeric, "
-                    f"cannot be summed"
+                    f"column {parsed.column} in {parsed.source} is not "
+                    f"numeric, cannot be summed"
                 ) from exc
         return total
-    if rest[0] == "count":
+    if parsed.operation == "count":
         return float(len(data))
-    if len(rest) < 2 or "=" not in rest[0]:
-        raise KeyError(f"malformed csv address: {address}")
-    sel_col, sel_val = rest[0].split("=", 1)
-    column = rest[1]
+    # operation == "select" -- _parse_address only ever sets selector
+    # (and leaves column non-None) for this operation.
+    assert parsed.selector is not None
+    sel_col, sel_val = parsed.selector
     for row in data:
         if str(row.get(sel_col, "")).strip() == sel_val:
-            if column not in row:
-                raise KeyError(f"no such column: {column} in {filename}")
-            return _coerce(row[column])
-    raise KeyError(f"no row where {sel_col}={sel_val} in {filename}")
+            if parsed.column not in row:
+                raise KeyError(f"no such column: {parsed.column} in {parsed.source}")
+            return _coerce(row[parsed.column])
+    raise KeyError(f"no row where {sel_col}={sel_val} in {parsed.source}")
 
 
 def _safe_eval(node: ast.AST, names: Dict[str, Any]) -> Any:
@@ -853,20 +1000,26 @@ def _metric_contradiction_for_addresses(
     """
     if len(addresses) != 1:
         return None
-    parts = addresses[0].split(":")
-    if len(parts) < 3 or "=" not in parts[1]:
+    parsed = _parse_address(addresses[0])
+    if (
+        isinstance(parsed, str)
+        or parsed.operation != "select"
+        or parsed.selector is None
+    ):
         return None
-    rows = sources.get(parts[0])
+    rows = sources.get(parsed.source)
     if not isinstance(rows, list) or not rows:
         return None
     # The selector column itself ("tier" in "tier=Good:n_records")
     # is a row label, not a metric -- an ordinary sentence naming
     # its own row ("Good tier has 5 [c1].") would otherwise be read
-    # as naming a sibling "metric" called "tier".
-    sel_col = parts[1].split("=", 1)[0]
+    # as naming a sibling "metric" called "tier". A "select"
+    # address always carries a column too.
+    assert parsed.column is not None
+    sel_col, _ = parsed.selector
     row = {column: v for column, v in rows[0].items() if column != sel_col}
     return _metric_contradiction(
-        _words_in(_normalize_metric_notation(text)), parts[-1], row
+        _words_in(_normalize_metric_notation(text)), parsed.column, row
     )
 
 
@@ -1134,12 +1287,15 @@ def _prose_label_contradiction(
 
     owned_by_column: Dict[Tuple[str, str], Set[str]] = {}
     for address in addresses:
-        parts = address.split(":")
-        if len(parts) < 2 or "=" not in parts[1]:
+        parsed = _parse_address(address)
+        if (
+            isinstance(parsed, str)
+            or parsed.operation != "select"
+            or parsed.selector is None
+        ):
             continue
-        source_file = parts[0]
-        sel_col, sel_val = parts[1].split("=", 1)
-        owned_by_column.setdefault((source_file, sel_col), set()).add(sel_val)
+        sel_col, sel_val = parsed.selector
+        owned_by_column.setdefault((parsed.source, sel_col), set()).add(sel_val)
 
     sentence_words = _words_in(sentence)
     for (source_file, sel_col), owned in owned_by_column.items():
@@ -1204,13 +1360,17 @@ def label_contradiction(claim: Claim, sources: Dict[str, Any]) -> Optional[str]:
     """
     if claim.kind != "lookup" or not claim.source or not claim.key:
         return None
-    rows = sources.get(claim.source)
+    parsed = _parse_address(f"{claim.source}:{claim.key}")
+    if (
+        isinstance(parsed, str)
+        or parsed.operation != "select"
+        or parsed.selector is None
+    ):
+        return None
+    rows = sources.get(parsed.source)
     if not isinstance(rows, list) or not rows:
         return None
-    parts = claim.key.split(":")
-    if len(parts) < 2 or "=" not in parts[0]:
-        return None
-    sel_col, sel_val = parts[0].split("=", 1)
+    sel_col, sel_val = parsed.selector
     label_words = _words_in(claim.label)
 
     # Naming its own row earns a label the right to mention others.
@@ -1313,12 +1473,15 @@ def _derived_label_contradiction(
     for address in inputs.values():
         if not isinstance(address, str):
             continue
-        parts = address.split(":")
-        if len(parts) < 2 or "=" not in parts[1]:
+        parsed = _parse_address(address)
+        if (
+            isinstance(parsed, str)
+            or parsed.operation != "select"
+            or parsed.selector is None
+        ):
             continue
-        source_file = parts[0]
-        sel_col, sel_val = parts[1].split("=", 1)
-        owned_by_column.setdefault((source_file, sel_col), set()).add(sel_val)
+        sel_col, sel_val = parsed.selector
+        owned_by_column.setdefault((parsed.source, sel_col), set()).add(sel_val)
 
     for (source_file, sel_col), owned in owned_by_column.items():
         rows = sources.get(source_file)
@@ -1426,6 +1589,14 @@ def _malformed_claim_shape(
             return f"{claim.label}: lookup claim has no source file"
         if not isinstance(claim.key, str) or not claim.key:
             return f"{claim.label}: lookup claim has no key"
+        # Parsed once, here, so an address with an extra or missing
+        # segment ("metrics.json:r2_overall:rate_pct") is a named
+        # problem before resolution or unit inference ever reads it
+        # -- not a shape two different readers could each still
+        # partially understand their own way.
+        parsed_own = _parse_address(f"{claim.source}:{claim.key}")
+        if isinstance(parsed_own, str):
+            return f"{claim.label}: {parsed_own}"
         if claim.unit is not None:
             if not isinstance(claim.unit, str) or claim.unit not in (
                 "fraction",
@@ -1444,9 +1615,7 @@ def _malformed_claim_shape(
             # of scaling it down. A disagreement is rejected outright;
             # only when the manifest has no entry for this address at
             # all does the declaration apply.
-            manifest_unit = _column_unit_from_manifest(
-                units, f"{claim.source}:{claim.key}"
-            )
+            manifest_unit = _column_unit_from_manifest(units, parsed_own)
             if manifest_unit is not None and manifest_unit != claim.unit:
                 return (
                     f"{claim.label}: declares unit {claim.unit!r} but the "
@@ -1464,6 +1633,9 @@ def _malformed_claim_shape(
                     f"{claim.label}: input {var!r} is not a usable "
                     f"address: {address!r}"
                 )
+            parsed_input = _parse_address(address)
+            if isinstance(parsed_input, str):
+                return f"{claim.label}: input {var!r} {parsed_input}"
         # A declared input the expression never references could
         # still supply its own row to the label/provenance check
         # without the expression ever actually reading its value --
@@ -1734,7 +1906,7 @@ def _tag_figures(text: str) -> List[Tuple[str, Optional[str], int]]:
         # extract_numbers (which many other things rely on returning
         # the bare digits) is unaffected; only this function's own
         # figures carry it forward.
-        if cleaned[m.end() : m.end() + 1] == "%":
+        if _percent_sign_follows(cleaned, m.end()):
             figure += "%"
         tokens.append((m.start(), "num", figure))
     for m in _CLAIM_REF_RE.finditer(cleaned):
@@ -1884,53 +2056,10 @@ def _claim_addresses(claim: Claim) -> List[str]:
     return [address for address in addresses if address]
 
 
-def _is_row_count_address(address: str) -> bool:
-    """Decide whether an address is a row-count operation, not a column read.
-
-    ``"per_record.csv:count:"`` counts the rows of a table; the
-    trailing segment after ``count`` is always empty, because a row
-    count has no single column to report -- unlike
-    ``"tiers.csv:sum:n_records"``, which totals one named column and
-    is not a row count by this definition.
-
-    Parameters
-    ----------
-    address : str
-        A staged address.
-
-    Returns
-    -------
-    bool
-        True when the address is exactly ``<file>:count:``.
-    """
-    parts = address.split(":")
-    return len(parts) == 3 and parts[1] == "count" and parts[2] == ""
-
-
-def _claim_source_columns(claim: Claim) -> List[str]:
-    """Collect the trailing column name of every address a claim reads.
-
-    An address is always ``<file>:<...>:<column>``, so the column is
-    whatever follows the last ``:``.
-
-    Parameters
-    ----------
-    claim : Claim
-        The claim to inspect.
-
-    Returns
-    -------
-    List[str]
-        One entry per address the claim reads; empty when the claim
-        has no usable addressing at all.
-    """
-    return [address.rsplit(":", 1)[-1] for address in _claim_addresses(claim)]
-
-
 def _column_unit_from_manifest(
-    units: Optional[Dict[str, Dict[str, str]]], address: str
+    units: Optional[Dict[str, Dict[str, str]]], parsed: ParsedAddress
 ) -> Optional[str]:
-    """Look up an address's unit in the stager's own units manifest.
+    """Look up a parsed address's unit in the stager's own units manifest.
 
     The manifest is harness-authored ground truth (written by
     ``numeric_stage.stage_case``, retained outside the writer's
@@ -1943,13 +2072,18 @@ def _column_unit_from_manifest(
     "fraction" or "percent") is how a manifest-declared count column
     like ``n_records`` ended up guessed as a fraction.
 
+    Takes the address already parsed by :func:`_parse_address`, not
+    the original string -- re-splitting it here, separately, is
+    exactly the kind of second parsing rule that could drift from
+    the first one's idea of which segment is the column.
+
     Parameters
     ----------
     units : Optional[Dict[str, Dict[str, str]]]
         ``{file: {column: unit}}``, or ``None``/empty when no
         manifest is available.
-    address : str
-        A staged address, e.g. ``"metrics.json:median_ape"``.
+    parsed : ParsedAddress
+        The address, already parsed.
 
     Returns
     -------
@@ -1957,16 +2091,12 @@ def _column_unit_from_manifest(
         The manifest's own declared unit for this address's file and
         column, otherwise ``None``.
     """
-    if not units or ":" not in address:
+    if not units or parsed.column is None:
         return None
-    file_name, _, rest = address.partition(":")
-    if not rest:
-        return None
-    column = rest.rsplit(":", 1)[-1]
-    file_units = units.get(file_name)
+    file_units = units.get(parsed.source)
     if not isinstance(file_units, dict):
         return None
-    unit = file_units.get(column)
+    unit = file_units.get(parsed.column)
     return unit if unit in _VALID_CLAIM_UNITS else None
 
 
@@ -2030,23 +2160,31 @@ def _inferred_claim_unit(
         return claim.unit if claim.unit in ("fraction", "percent") else None
     resolved = set()
     for address in addresses:
+        parsed = _parse_address(address)
+        if isinstance(parsed, str):
+            # _malformed_claim_shape already rejects this before a
+            # claim reaches here; a claim built by hand for a test,
+            # bypassing that gate, finds the same answer: undetermined.
+            return None
         # A row-count address ("per_record.csv:count:") has no
         # column at all to look up in the manifest or guess a name
         # for -- the "count:" operation is intrinsically count-
         # valued, decided before either, not left to fall through to
         # the fraction default a missing column would otherwise hit.
-        if _is_row_count_address(address):
+        if parsed.operation == "count":
             resolved.add("count")
             continue
-        manifest_unit = _column_unit_from_manifest(units, address)
+        manifest_unit = _column_unit_from_manifest(units, parsed)
         if manifest_unit is not None:
             resolved.add(manifest_unit)
             continue
         if claim.unit in ("fraction", "percent"):
             resolved.add(claim.unit)
             continue
-        column = address.rsplit(":", 1)[-1]
-        resolved.add("percent" if _is_percent_column(column) else "fraction")
+        # Every operation but "count" (already handled above) sets
+        # a column.
+        assert parsed.column is not None
+        resolved.add("percent" if _is_percent_column(parsed.column) else "fraction")
     if len(resolved) == 1:
         return resolved.pop()
     return None
@@ -2439,12 +2577,15 @@ def _owned_rows_for_addresses(
     """
     owned: Dict[Tuple[str, str], Set[str]] = {}
     for address in addresses:
-        parts = address.split(":")
-        if len(parts) < 2 or "=" not in parts[1]:
+        parsed = _parse_address(address)
+        if (
+            isinstance(parsed, str)
+            or parsed.operation != "select"
+            or parsed.selector is None
+        ):
             continue
-        source_file = parts[0]
-        sel_col, sel_val = parts[1].split("=", 1)
-        owned.setdefault((source_file, sel_col), set()).add(sel_val)
+        sel_col, sel_val = parsed.selector
+        owned.setdefault((parsed.source, sel_col), set()).add(sel_val)
     return owned
 
 
@@ -2522,7 +2663,7 @@ def _extract_figures_with_percent(text: str) -> List[str]:
     figures = []
     for m in _NUMBER_RE.finditer(cleaned):
         figure = m.group(1)
-        if cleaned[m.end() : m.end() + 1] == "%":
+        if _percent_sign_follows(cleaned, m.end()):
             figure += "%"
         figures.append(figure)
     return figures
