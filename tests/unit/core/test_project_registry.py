@@ -341,6 +341,48 @@ class TestInjectedChecksAreValidatedAtRegistration:
             await registry.add_project(config)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_name", [123, ["cross_check_totals"], "", None, {"nested": True}]
+    )
+    async def test_a_non_string_or_empty_name_is_rejected(self, bad_name) -> None:
+        """Codex P2: a truthy non-string name (an int, a list) would be
+        accepted and persisted today, then blow up at completion time
+        instead of producing an evidence rejection --
+        ``_apply_typed_evidence_gate`` uses it as a dict key (raises for
+        a list) and ``_typed_evidence_rejection`` joins it as a string
+        (raises for an int). Every field of a declared record is
+        validated where it is declared, not where it is consumed."""
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [{"name": bad_name}],
+                }
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
+    async def test_a_non_string_description_is_rejected(self) -> None:
+        registry = _registry()
+        config = _config(
+            task_type_registrations={
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [
+                        {"name": "cross_check_totals", "description": 123}
+                    ],
+                }
+            }
+        )
+
+        with pytest.raises(InvalidConfigurationError):
+            await registry.add_project(config)
+
+    @pytest.mark.asyncio
     async def test_a_check_carrying_a_command_field_is_rejected(self) -> None:
         """K2: dispatch is pull, not call. The data shape must not be
         able to carry anything the kernel could run -- only a name and

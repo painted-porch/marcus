@@ -150,10 +150,26 @@ def _validate_task_type_registrations(
                 ),
             )
         for check in injected_checks:
-            if not check.get("name"):
+            name = check.get("name")
+            if not isinstance(name, str) or not name:
                 raise InvalidConfigurationError(
                     config_key=key,
-                    expected_format="each injected check needs a non-empty 'name'",
+                    expected_format=(
+                        "each injected check needs a non-empty string 'name'"
+                    ),
+                    context=ErrorContext(
+                        operation="validate_task_type_registrations",
+                        custom_context={"task_type": task_type, "check": check},
+                    ),
+                )
+            description = check.get("description")
+            if description is not None and not isinstance(description, str):
+                raise InvalidConfigurationError(
+                    config_key=key,
+                    expected_format=(
+                        "an injected check's 'description', if given, must be "
+                        "a string"
+                    ),
                     context=ErrorContext(
                         operation="validate_task_type_registrations",
                         custom_context={"task_type": task_type, "check": check},
