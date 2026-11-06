@@ -78,8 +78,30 @@ def _block_external_network(
     marker-only guard left the majority of unit tests able to reach a
     paid service in CI.
 
-    Loopback stays open so local-socket fixtures keep working; anything
-    else raises with a pointer to the boundary that needs mocking.
+    Issue #857: ``connect_ex`` (the non-raising variant some clients
+    use to probe a socket, e.g. a readiness check) is guarded the same
+    way as ``connect`` -- found while auditing the suite for exactly
+    this fixture's own blind spots after #856 round 4 exposed a test
+    file that reached a real, reachable local Planka instance with
+    nothing in the test declaring that dependency.
+
+    Loopback is now blocked by default too, closing the case #857 was
+    actually filed on: the #856 incident was a real Planka reachable
+    on loopback (``127.0.0.1``), not a non-loopback host, so the prior
+    "loopback stays open" design would have let that exact incident
+    through this guard unchanged. Auditing it: one full
+    ``pytest -m unit`` run with loopback also blocked (4401 of 4402
+    tests, the lone expected failure being this fixture's own
+    loopback-stays-open test, since replaced) found zero other tests
+    that bind or connect to a real loopback socket -- re-confirmed
+    with the real ``marcus-planka``/``marcus-postgres`` Docker
+    containers stopped, so the clean result is not itself an artifact
+    of a service happening to be up. The opt-in list is therefore
+    empty today; a future unit test that legitimately needs a real
+    loopback socket (binding its own in-process listener, say) opts
+    back in explicitly with ``@pytest.mark.allows_loopback_network``
+    and a reason, rather than the guard silently exempting the
+    address class a reachable-by-accident service already lives on.
     """
     node_path = Path(str(request.node.fspath)).as_posix()
     is_unit = (
@@ -92,23 +114,36 @@ def _block_external_network(
     import socket
 
     real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    allows_loopback = request.node.get_closest_marker("allows_loopback_network")
+    loopback_hosts = {"127.0.0.1", "::1", "localhost"} if allows_loopback else set()
+
+    def _is_blocked(host: Any) -> bool:
+        return isinstance(host, str) and host not in loopback_hosts
+
+    def _blocked_error(host: Any) -> RuntimeError:
+        return RuntimeError(
+            f"Unit test attempted a network connection to {host!r}. "
+            "Unit tests must mock ALL external dependencies — patch the "
+            "client/helper that makes this call (see the spec_coverage "
+            "LLM boundaries for a worked example)."
+        )
 
     def _guarded_connect(self: socket.socket, address: Any) -> Any:
         host = address[0] if isinstance(address, tuple) else address
-        if isinstance(host, str) and host not in {
-            "127.0.0.1",
-            "::1",
-            "localhost",
-        }:
-            raise RuntimeError(
-                f"Unit test attempted a network connection to {host!r}. "
-                "Unit tests must mock ALL external dependencies — patch the "
-                "client/helper that makes this call (see the spec_coverage "
-                "LLM boundaries for a worked example)."
-            )
+        if _is_blocked(host):
+            raise _blocked_error(host)
         return real_connect(self, address)
 
+    def _guarded_connect_ex(self: socket.socket, address: Any) -> Any:
+        host = address[0] if isinstance(address, tuple) else address
+        if _is_blocked(host):
+            raise _blocked_error(host)
+        return real_connect_ex(self, address)
+
     monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
 
 
 @pytest.fixture(autouse=True, scope="session")

@@ -13,6 +13,8 @@ import pytest
 
 from src.worker.inspector import Inspector, create_inspector
 
+pytestmark = pytest.mark.unit
+
 
 class MockTool:
     """Mock tool with name attribute."""
@@ -118,6 +120,14 @@ class TestInspectorAgentMethods:
                 "name": "Test Agent",
                 "role": "Developer",
                 "skills": ["python", "testing"],
+                # project_id (GH-388) and vendor/principal (issue #737,
+                # PR #739) were added to the real call after this test
+                # was written; register_agent's own defaults ("", "",
+                # "agent") are what a caller who doesn't pass them (as
+                # this test's own call below doesn't) actually sends.
+                "project_id": "",
+                "vendor": "",
+                "principal": "agent",
             },
         )
 
