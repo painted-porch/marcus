@@ -4186,10 +4186,21 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                     },
                 )
 
-                # Add project context if available
-                active_project = None
+                # Add project context if available. ADR-0013 K6 (issue
+                # #849): resolved from the TASK's own project_id, not
+                # the server's active project -- the same shape #845
+                # fixed for conversation-log context, a different
+                # field in the same response block. A legacy task with
+                # no project_id at all falls back to the active
+                # project, matching every other K2-keyed lookup's rule.
+                response_project = None
                 if hasattr(state, "project_registry") and state.project_registry:
-                    active_project = await state.project_registry.get_active_project()
+                    task_project_id = getattr(optimal_task, "project_id", None)
+                    response_project = (
+                        await state.project_registry.get_project(task_project_id)
+                        if task_project_id
+                        else await state.project_registry.get_active_project()
+                    )
 
                 # Serialize the response properly
                 response: Dict[str, Any] = {
@@ -4204,8 +4215,12 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         "instructions": instructions,
                         "priority": optimal_task.priority.value,
                         "implementation_context": previous_implementations,
-                        "project_id": active_project.id if active_project else None,
-                        "project_name": active_project.name if active_project else None,
+                        "project_id": (
+                            response_project.id if response_project else None
+                        ),
+                        "project_name": (
+                            response_project.name if response_project else None
+                        ),
                         "labels": (
                             optimal_task.labels
                             if hasattr(optimal_task, "labels")
