@@ -144,8 +144,12 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
     -------
     Dict[str, Any]
         ``verdict`` (verified or failed), the per-claim ``results``,
-        the ``failed_claims`` a retry would be handed, and the
-        ``summary`` counts the grader reads.
+        the ``failed_claims`` a retry would be handed, the
+        ``summary`` counts the grader reads, and ``sources`` --
+        the staged data itself (empty on an integrity failure), so a
+        caller checking a later artifact against the same report (the
+        slide deck) can reuse it rather than reloading staged files
+        the manifest never trusted.
     """
     workspace = Path(workspace).expanduser()
     staged = workspace / STAGED_SUBDIR
@@ -159,6 +163,7 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
             "parse_error": integrity_error,
             "results": [],
             "failed_claims": [],
+            "sources": {},
             "summary": {
                 "claims_declared": 0,
                 "claims_required": 0,
@@ -214,6 +219,7 @@ def verify_workspace(workspace: Path) -> Dict[str, Any]:
         "parse_error": parse_error,
         "results": results,
         "failed_claims": [{"claim_id": r.claim_id, "detail": r.detail} for r in bad],
+        "sources": sources,
         "summary": {
             "claims_declared": len(declared),
             "claims_required": len(results)

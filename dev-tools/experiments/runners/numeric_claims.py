@@ -285,6 +285,13 @@ class CheckResult:
         verdict. A false decline is only a correct figure wrongly
         rejected on its value; a label mismatch is the checker
         working as intended and must not be scored as one.
+    addresses : Tuple[str, ...]
+        Every staged address the claim actually read: one for a
+        lookup, one per input for a derived or consistency claim.
+        Carries the claim's own row provenance forward to a consumer
+        (the slide mapping check) that has only this result to work
+        from, not the original ``Claim`` or the staged ``sources``
+        it was resolved against.
     """
 
     claim_id: str
@@ -294,6 +301,7 @@ class CheckResult:
     detail: str = ""
     label: str = ""
     reason: str = ""
+    addresses: Tuple[str, ...] = ()
 
 
 def load_sources(
@@ -856,6 +864,7 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         return CheckResult(verdict=VERDICT_UNRESOLVABLE, detail=problem, **base)
     if claim.kind == "lookup":
         address = f"{claim.source}:{claim.key}"
+        base = {**base, "addresses": (address,)}
         try:
             truth = resolve_address(address, sources)
         except KeyError as exc:
@@ -900,6 +909,12 @@ def _check_one(claim: Claim, sources: Dict[str, Any]) -> CheckResult:
         )
 
     if claim.kind in ("derived", "consistency"):
+        base = {
+            **base,
+            "addresses": tuple(
+                v for v in (claim.inputs or {}).values() if isinstance(v, str)
+            ),
+        }
         names: Dict[str, Any] = {}
         for var, address in (claim.inputs or {}).items():
             try:
@@ -1330,10 +1345,121 @@ def check_report(
     )
 
 
+def _owned_rows_for_addresses(
+    addresses: Sequence[str],
+) -> Dict[Tuple[str, str], Set[str]]:
+    """Collect which rows a set of staged addresses actually reads.
+
+    The same extraction :func:`_derived_label_contradiction` and
+    :func:`_prose_label_contradiction` each do for a claim's own
+    inputs, factored out so a consumer that only has a
+    :class:`CheckResult`'s ``addresses`` -- not the original
+    ``Claim`` -- can run the same sibling-row check.
+
+    Parameters
+    ----------
+    addresses : Sequence[str]
+        Staged addresses, e.g. ``"per_crop.csv:crop=maize:r2"``.
+
+    Returns
+    -------
+    Dict[Tuple[str, str], Set[str]]
+        ``(source file, selector column)`` to the selector values
+        actually read.
+    """
+    owned: Dict[Tuple[str, str], Set[str]] = {}
+    for address in addresses:
+        parts = address.split(":")
+        if len(parts) < 2 or "=" not in parts[1]:
+            continue
+        source_file = parts[0]
+        sel_col, sel_val = parts[1].split("=", 1)
+        owned.setdefault((source_file, sel_col), set()).add(sel_val)
+    return owned
+
+
+def _text_contradicts_owned_rows(
+    text: str,
+    owned_by_column: Dict[Tuple[str, str], Set[str]],
+    sources: Dict[str, Any],
+) -> Optional[str]:
+    """Report text naming a sibling row of something it does not own.
+
+    The shared core of :func:`label_contradiction`,
+    :func:`_derived_label_contradiction` and
+    :func:`_prose_label_contradiction`: naming every row a claim
+    actually reads earns the text the right to mention others; naming
+    only some of them does not.
+
+    Parameters
+    ----------
+    text : str
+        The text to check (a label, a sentence, a slide title).
+    owned_by_column : Dict[Tuple[str, str], Set[str]]
+        From :func:`_owned_rows_for_addresses`.
+    sources : Dict[str, Any]
+        Output of :func:`load_sources`.
+
+    Returns
+    -------
+    Optional[str]
+        A description of the contradiction, or ``None``.
+    """
+    text_words = _words_in(text)
+    for (source_file, sel_col), owned in owned_by_column.items():
+        rows = sources.get(source_file)
+        if not isinstance(rows, list) or not rows:
+            continue
+        if all(v.lower() in text_words for v in owned):
+            continue
+        siblings = {
+            str(row.get(sel_col, "")).strip()
+            for row in rows
+            if str(row.get(sel_col, "")).strip() not in owned
+        }
+        for other in siblings:
+            if other and other.lower() in text_words:
+                return (
+                    f"text says {other!r} but the claim reads "
+                    f"{sel_col}={sorted(owned)!r}"
+                )
+    return None
+
+
+def _percent_scaled(value: Any) -> Any:
+    """Scale a percent-suffixed literal down by 100 before comparison.
+
+    A slide cell's own ``value`` field can be a string carrying a
+    literal ``%``, and that character changes what number is being
+    asserted: "0.481%" is 0.00481, not 0.481. ``_coerce`` (used by
+    ``_within_tolerance``) strips the ``%`` without scaling, which
+    let a deck publish a figure 100x smaller or larger than the claim
+    it cites as if the two were the same number.
+
+    Parameters
+    ----------
+    value : Any
+        A slide cell's ``value`` field, as written.
+
+    Returns
+    -------
+    Any
+        ``value`` unchanged, unless it is a string ending in ``%``,
+        in which case the percentage, divided by 100.
+    """
+    if isinstance(value, str) and value.strip().endswith("%"):
+        try:
+            return float(value.strip()[:-1].replace(",", "")) / 100
+        except ValueError:
+            return value
+    return value
+
+
 def check_slide_spec(
     spec: Dict[str, Any],
     accepted: Dict[str, CheckResult],
     labels: Dict[str, str],
+    sources: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Check that every slide figure maps to an accepted claim.
 
@@ -1350,6 +1476,15 @@ def check_slide_spec(
         Results by claim id; only ``verified`` entries are usable.
     labels : Dict[str, str]
         Claim id to the label the claim was verified under.
+    sources : Optional[Dict[str, Any]]
+        Output of :func:`load_sources`. When given, a title figure
+        bound to exactly one backing claim is also checked against
+        that claim's own row provenance, the same sibling-row rule a
+        cell's label already gets -- "Wheat R2 is 0.481" must not
+        pass just because 0.481 happens to be an accepted cell's
+        value, if that cell's claim actually reads maize. Omitting it
+        preserves the old membership-only behavior for callers that
+        have no staged data to check against.
 
     Returns
     -------
@@ -1364,20 +1499,43 @@ def check_slide_spec(
         # and would crash that lookup. Treat it the same as "no claim
         # id" for the purposes of the title check, and report it
         # explicitly in the main loop below.
-        backed_values = [
-            result.value
+        backed: List[Tuple[str, Any, Tuple[str, ...]]] = [
+            (cell["claim"], result.value, result.addresses)
             for cell in slide.get("cells", [])
             if isinstance(cell.get("claim"), str)
             for result in [accepted.get(cell["claim"])]
             if result is not None and result.verdict == VERDICT_VERIFIED
         ]
-        for figure in extract_numbers(str(slide.get("title") or "")):
-            if not any(
-                _within_tolerance(figure, value, None) for value in backed_values
-            ):
+        title = str(slide.get("title") or "")
+        for figure in extract_numbers(title):
+            matches = [
+                (claim_id, addresses)
+                for claim_id, value, addresses in backed
+                if _within_tolerance(figure, value, None)
+            ]
+            if not matches:
                 problems.append(
                     f"{where_slide}: title states {figure}, which no "
                     f"accepted cell on this slide backs"
+                )
+                continue
+            if sources is None:
+                continue
+            # A figure matching more than one cell's value is bound
+            # to whichever of them the title's own words do not rule
+            # out -- it is only a contradiction when every candidate
+            # claim this figure could be is contradicted.
+            contradictions = [
+                _text_contradicts_owned_rows(
+                    title, _owned_rows_for_addresses(addresses), sources
+                )
+                for _, addresses in matches
+            ]
+            if all(contradictions):
+                problems.append(
+                    f"{where_slide}: title states {figure}, but its own "
+                    f"words contradict every claim that could back it: "
+                    f"{contradictions[0]}"
                 )
         for cell in slide.get("cells", []):
             value = cell.get("value")
@@ -1398,7 +1556,7 @@ def check_slide_spec(
                     f"{where}: claim {claim_id} did not pass " f"({result.verdict})"
                 )
                 continue
-            if not _within_tolerance(value, result.value, None):
+            if not _within_tolerance(_percent_scaled(value), result.value, None):
                 problems.append(
                     f"{where}: shows {value} but claim {claim_id} "
                     f"was verified as {result.value}"
@@ -1434,8 +1592,8 @@ def check_slide_spec(
                 # already have to clear.
                 for figure in extract_numbers(cell_label):
                     if not any(
-                        _within_tolerance(figure, backed, None)
-                        for backed in backed_values
+                        _within_tolerance(figure, backed_value, None)
+                        for _, backed_value, _ in backed
                     ):
                         problems.append(
                             f"{where}: label {cell_label!r} states "

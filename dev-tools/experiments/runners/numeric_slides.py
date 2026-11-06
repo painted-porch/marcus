@@ -223,7 +223,9 @@ def load_slide_spec(workspace: Path) -> Dict[str, Any]:
 
 
 def verify_slide_workspace(
-    slide_workspace: Path, accepted: Dict[str, CheckResult]
+    slide_workspace: Path,
+    accepted: Dict[str, CheckResult],
+    sources: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Check a slide spec against the claims it was allowed to use.
 
@@ -238,6 +240,12 @@ def verify_slide_workspace(
     accepted : Dict[str, CheckResult]
         The claims the slide worker was given, from
         :func:`accepted_claims`.
+    sources : Optional[Dict[str, Any]]
+        Output of :func:`runners.numeric_claims.load_sources`. Passed
+        straight through to :func:`check_slide_spec`, so a slide
+        title bound to one accepted claim is also checked against
+        that claim's own row provenance, not just whether the figure
+        happens to match some accepted value on the slide.
 
     Returns
     -------
@@ -251,7 +259,7 @@ def verify_slide_workspace(
         problems.append(spec["_problem"])
 
     labels = {cid: r.label for cid, r in accepted.items()}
-    problems.extend(check_slide_spec(spec, accepted, labels))
+    problems.extend(check_slide_spec(spec, accepted, labels, sources=sources))
 
     cells_total = sum(len(s.get("cells", [])) for s in spec.get("slides", []))
     return {
@@ -314,7 +322,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if run["returncode"] != 0:
         print(run["stderr_tail"], file=sys.stderr)
 
-    checked = verify_slide_workspace(workspace, accepted)
+    checked = verify_slide_workspace(workspace, accepted, sources=outcome["sources"])
     print(f"slide verdict: {checked['verdict'].upper()}")
     print(f"cells on deck: {checked['cells_total']}")
     for problem in checked["problems"]:

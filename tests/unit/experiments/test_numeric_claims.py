@@ -2447,3 +2447,146 @@ class TestCodexFindingOverflowAfterEvaluationStillUnresolvable:
         res = check_claims([c], sources)
         assert len(res) == 1
         assert res[0].verdict == "unresolvable"
+
+
+class TestCodexFindingSlideCellPercentScaleIsRespected:
+    """A percent-suffixed slide cell is a different number than the raw one.
+
+    _coerce strips a trailing '%' without scaling, so a cell showing
+    "0.481%" (really 0.00481) passed against a claim verified as the
+    raw 0.481 -- the deck could publish a figure 100x smaller than
+    what the claim actually says, under a literal that looks close
+    enough to pass a naive string-insensitive comparison.
+    """
+
+    @pytest.mark.unit
+    def test_a_correctly_converted_percentage_passes(self):
+        """ "48.1%" is 0.481 -- the same number the claim verified,
+        just rendered the other conventional way."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.481, label="maize R2"
+            )
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": "48.1%", "claim": "c1", "label": "maize R2"}]}
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "maize R2"}) == []
+
+    @pytest.mark.unit
+    def test_an_unscaled_percentage_is_caught(self):
+        """Codex's exact scenario: "0.481%" is 0.00481, not 0.481, and
+        must not pass just because stripping the '%' leaves the same
+        digits."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.481, label="maize R2"
+            )
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": "0.481%", "claim": "c1", "label": "maize R2"}]}
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"})
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_plain_numeric_cell_is_unaffected(self):
+        """The fix must not disturb a cell with no '%' in it at all."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1", verdict="verified", value=0.481, label="maize R2"
+            )
+        }
+        spec = {
+            "slides": [
+                {"cells": [{"value": 0.481, "claim": "c1", "label": "maize R2"}]}
+            ]
+        }
+        assert check_slide_spec(spec, accepted, {"c1": "maize R2"}) == []
+
+
+class TestCodexFindingSlideTitleBindsToASpecificClaimsProvenance:
+    """A title figure must not borrow legitimacy from an unrelated claim.
+
+    "Wheat R2 is 0.481" passed because 0.481 happened to match some
+    accepted cell's value on the slide -- membership, not binding.
+    The title's own words were never checked against the specific
+    claim's row provenance the way a cell's label already is. A
+    maize claim correctly backing 0.481 does not make a title about
+    wheat true.
+    """
+
+    @pytest.mark.unit
+    def test_a_title_naming_a_sibling_crop_is_caught(self, sources):
+        """Codex's exact scenario: the title's own words name a crop
+        the backing claim does not read."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.886,
+                label="maize R2",
+                addresses=("per_crop.csv:crop=maize:r2",),
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Cotton R2 is 0.886",
+                    "cells": [{"value": 0.886, "claim": "c1", "label": "maize R2"}],
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"}, sources=sources)
+        assert problems
+
+    @pytest.mark.unit
+    def test_a_title_naming_the_correct_crop_still_passes(self, sources):
+        """The fix must not reject the ordinary, correctly worded case."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.886,
+                label="maize R2",
+                addresses=("per_crop.csv:crop=maize:r2",),
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Maize R2 is 0.886",
+                    "cells": [{"value": 0.886, "claim": "c1", "label": "maize R2"}],
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"}, sources=sources)
+        assert problems == []
+
+    @pytest.mark.unit
+    def test_omitting_sources_preserves_the_old_membership_only_behavior(self):
+        """A caller with no staged data to check against (every
+        existing test in this file) must see unchanged behavior."""
+        accepted = {
+            "c1": CheckResult(
+                claim_id="c1",
+                verdict="verified",
+                value=0.886,
+                label="maize R2",
+                addresses=("per_crop.csv:crop=maize:r2",),
+            )
+        }
+        spec = {
+            "slides": [
+                {
+                    "title": "Cotton R2 is 0.886",
+                    "cells": [{"value": 0.886, "claim": "c1", "label": "maize R2"}],
+                }
+            ]
+        }
+        problems = check_slide_spec(spec, accepted, {"c1": "maize R2"})
+        assert problems == []
