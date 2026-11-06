@@ -78,6 +78,14 @@ async def log_artifact(
     project_root : Optional[str], optional
         Absolute path to the project root directory where artifacts
         will be created. All agents should use the same path.
+        ADR-0013 K8 consequence 1 (issue #868's sibling): omit this
+        entirely when your runtime has no filesystem Marcus can
+        reach (no shared workspace at all, the Minecraft harness's
+        own shape). The artifact's content is then stored directly
+        in Marcus's own record instead of being written to a path --
+        no project-root validation, no git-tracked-file guard, no
+        stub-overwrite size guard, since none of those make sense
+        without a file to compare against.
     description : Optional[str], optional
         Optional description of the artifact
     location : Optional[str], optional
@@ -110,28 +118,30 @@ async def log_artifact(
         if isinstance(content, (dict, list)):
             content = json.dumps(content, indent=2)
 
-        # Validate project_root is provided
-        if not project_root:
-            return {
-                "success": False,
-                "error": "project_root is required",
-                "data": {"task_id": task_id, "filename": filename},
-            }
-
-        # Validate project_root is absolute and exists
-        project_root_path = Path(project_root)
-        if not project_root_path.is_absolute():
-            return {
-                "success": False,
-                "error": "project_root must be an absolute path",
-                "data": {"task_id": task_id, "filename": filename},
-            }
-        if not project_root_path.exists():
-            return {
-                "success": False,
-                "error": f"project_root directory does not exist: {project_root}",
-                "data": {"task_id": task_id, "filename": filename},
-            }
+        # ADR-0013 K8 consequence 1 (issue #868's sibling, "artifacts as
+        # content"): a runtime with no filesystem Marcus can reach (the
+        # Minecraft harness, for instance) omits project_root entirely.
+        # That is the one and only switch between the two modes -- every
+        # existing caller already always supplied project_root, so this
+        # is purely additive: nothing about the filesystem path below
+        # changes for a single existing caller.
+        _content_addressed = project_root is None
+        project_root_path: Optional[Path] = None
+        if not _content_addressed:
+            # Validate project_root is absolute and exists
+            project_root_path = Path(project_root)  # type: ignore[arg-type]
+            if not project_root_path.is_absolute():
+                return {
+                    "success": False,
+                    "error": "project_root must be an absolute path",
+                    "data": {"task_id": task_id, "filename": filename},
+                }
+            if not project_root_path.exists():
+                return {
+                    "success": False,
+                    "error": f"project_root directory does not exist: {project_root}",
+                    "data": {"task_id": task_id, "filename": filename},
+                }
 
         # Log info for non-standard artifact types (but still accept them!)
         standard_types = [
@@ -164,113 +174,122 @@ async def log_artifact(
             base_dir = ARTIFACT_PATHS.get(artifact_type, "docs/artifacts")
             artifact_path = Path(base_dir) / filename
 
-        # Create full path using project_root instead of Path.cwd()
-        full_path = project_root_path / artifact_path
+        full_path: Optional[Path] = None
+        if not _content_addressed:
+            assert project_root_path is not None  # guarded by _content_addressed
 
-        # Normalise away any ".." traversal segments so the artifact-root
-        # bypass check cannot be subverted via paths like
-        # "docs/../src/theme.css".  strict=False because the target file
-        # may not exist yet.
-        try:
-            _resolved_root = project_root_path.resolve()
-            _resolved_full = full_path.resolve()
-            _normalized_relative = _resolved_full.relative_to(_resolved_root)
-        except ValueError:
-            # Path resolves outside project root — reject unconditionally.
-            return {
-                "success": False,
-                "error": (
-                    f"Location resolves outside project root: {artifact_path}. "
-                    "Use a path that stays within the project directory."
-                ),
-                "data": {"task_id": task_id, "filename": filename},
-            }
-        # Use the canonicalised paths for all downstream operations so
-        # that filesystem writes and the git check target the same file.
-        artifact_path = _normalized_relative
-        full_path = _resolved_full
+            # Create full path using project_root instead of Path.cwd()
+            full_path = project_root_path / artifact_path
 
-        # Guard: refuse to overwrite git-tracked source files.
-        # log_artifact's contract is to persist artifacts (docs, reports,
-        # design outputs) — not to overwrite source code managed by git.
-        # dashboard-v82 post-mortem: Agent 1 overwrote theme.css and
-        # design-tokens.json via log_artifact and had to restore from git
-        # (commit d44dd5a). ``git ls-files --error-unmatch`` exits 0 only
-        # when the path is tracked; non-zero means untracked or outside
-        # the repo — both safe to write.
-        #
-        # Scope: only enforce for paths outside the known artifact output
-        # roots (docs/ and tmp/). Files under those roots may legitimately
-        # be tracked — a previous run committed them — and iterative
-        # artifact refreshes must be allowed. Paths under src/, lib/, or
-        # any other root are not artifact outputs and are guarded.
-        # NOTE: artifact_path is already normalised above — parts[0] reflects
-        # the true root even when the caller supplied ".." segments.
-        _artifact_output_roots = {"docs", "tmp"}
-        _in_artifact_dir = (
-            len(artifact_path.parts) > 0
-            and artifact_path.parts[0] in _artifact_output_roots
-        )
-        if not _in_artifact_dir:
+            # Normalise away any ".." traversal segments so the artifact-root
+            # bypass check cannot be subverted via paths like
+            # "docs/../src/theme.css".  strict=False because the target file
+            # may not exist yet.
             try:
-                git_result = subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(project_root_path),
-                        "ls-files",
-                        "--error-unmatch",
-                        str(full_path),
-                    ],
-                    capture_output=True,
-                )
-                if git_result.returncode == 0:
-                    return {
-                        "success": False,
-                        "error": (
-                            f"Refusing to overwrite git-tracked file: {artifact_path}. "
-                            "log_artifact is for documentation artifacts, not source "
-                            "files. Use a docs/ or tmp/ path for this artifact."
-                        ),
-                        "data": {"task_id": task_id, "filename": filename},
-                    }
-            except FileNotFoundError:
-                # git not available in this environment — skip the guard.
-                logger.debug(
-                    "git not found; skipping tracked-file guard for %s", full_path
-                )
-
-        # Ensure directory exists
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Guard: refuse to silently replace a large docs/ file with
-        # substantially smaller content (stub-overwrite prevention).
-        # Threshold: existing >= 8 KB AND new < 50 % of existing.
-        # Scoped to docs/ only — tmp/ artifacts are legitimately replaced
-        # with compact summaries and must not be gated.
-        # Bypassed when force=True so intentional downsizes are allowed.
-        _SIZE_GUARD_THRESHOLD = 8_000  # bytes
-        _in_docs_dir = len(artifact_path.parts) > 0 and artifact_path.parts[0] == "docs"
-        if not force and _in_docs_dir and full_path.exists():
-            existing_size = full_path.stat().st_size
-            new_size = len(content.encode("utf-8"))
-            if (
-                existing_size >= _SIZE_GUARD_THRESHOLD
-                and new_size < existing_size * 0.5
-            ):
+                _resolved_root = project_root_path.resolve()
+                _resolved_full = full_path.resolve()
+                _normalized_relative = _resolved_full.relative_to(_resolved_root)
+            except ValueError:
+                # Path resolves outside project root — reject unconditionally.
                 return {
                     "success": False,
                     "error": (
-                        f"Refusing to overwrite '{artifact_path}': existing file "
-                        f"is {existing_size:,} bytes but new content is only "
-                        f"{new_size:,} bytes (< 50 %). This looks like an accidental "
-                        "stub overwrite. Pass force=True if this is intentional."
+                        f"Location resolves outside project root: {artifact_path}. "
+                        "Use a path that stays within the project directory."
                     ),
                     "data": {"task_id": task_id, "filename": filename},
                 }
+            # Use the canonicalised paths for all downstream operations so
+            # that filesystem writes and the git check target the same file.
+            artifact_path = _normalized_relative
+            full_path = _resolved_full
 
-        # Write content to file
-        full_path.write_text(content, encoding="utf-8")
+            # Guard: refuse to overwrite git-tracked source files.
+            # log_artifact's contract is to persist artifacts (docs, reports,
+            # design outputs) — not to overwrite source code managed by git.
+            # dashboard-v82 post-mortem: Agent 1 overwrote theme.css and
+            # design-tokens.json via log_artifact and had to restore from git
+            # (commit d44dd5a). ``git ls-files --error-unmatch`` exits 0 only
+            # when the path is tracked; non-zero means untracked or outside
+            # the repo — both safe to write.
+            #
+            # Scope: only enforce for paths outside the known artifact output
+            # roots (docs/ and tmp/). Files under those roots may legitimately
+            # be tracked — a previous run committed them — and iterative
+            # artifact refreshes must be allowed. Paths under src/, lib/, or
+            # any other root are not artifact outputs and are guarded.
+            # NOTE: artifact_path is already normalised above — parts[0] reflects
+            # the true root even when the caller supplied ".." segments.
+            _artifact_output_roots = {"docs", "tmp"}
+            _in_artifact_dir = (
+                len(artifact_path.parts) > 0
+                and artifact_path.parts[0] in _artifact_output_roots
+            )
+            if not _in_artifact_dir:
+                try:
+                    git_result = subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(project_root_path),
+                            "ls-files",
+                            "--error-unmatch",
+                            str(full_path),
+                        ],
+                        capture_output=True,
+                    )
+                    if git_result.returncode == 0:
+                        return {
+                            "success": False,
+                            "error": (
+                                f"Refusing to overwrite git-tracked file: "
+                                f"{artifact_path}. log_artifact is for "
+                                "documentation artifacts, not source files. "
+                                "Use a docs/ or tmp/ path for this artifact."
+                            ),
+                            "data": {"task_id": task_id, "filename": filename},
+                        }
+                except FileNotFoundError:
+                    # git not available in this environment — skip the guard.
+                    logger.debug(
+                        "git not found; skipping tracked-file guard for %s",
+                        full_path,
+                    )
+
+            # Ensure directory exists
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Guard: refuse to silently replace a large docs/ file with
+            # substantially smaller content (stub-overwrite prevention).
+            # Threshold: existing >= 8 KB AND new < 50 % of existing.
+            # Scoped to docs/ only — tmp/ artifacts are legitimately replaced
+            # with compact summaries and must not be gated.
+            # Bypassed when force=True so intentional downsizes are allowed.
+            _SIZE_GUARD_THRESHOLD = 8_000  # bytes
+            _in_docs_dir = (
+                len(artifact_path.parts) > 0 and artifact_path.parts[0] == "docs"
+            )
+            if not force and _in_docs_dir and full_path.exists():
+                existing_size = full_path.stat().st_size
+                new_size = len(content.encode("utf-8"))
+                if (
+                    existing_size >= _SIZE_GUARD_THRESHOLD
+                    and new_size < existing_size * 0.5
+                ):
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Refusing to overwrite '{artifact_path}': existing "
+                            f"file is {existing_size:,} bytes but new content is "
+                            f"only {new_size:,} bytes (< 50 %). This looks like "
+                            "an accidental stub overwrite. Pass force=True if "
+                            "this is intentional."
+                        ),
+                        "data": {"task_id": task_id, "filename": filename},
+                    }
+
+            # Write content to file
+            full_path.write_text(content, encoding="utf-8")
 
         # Initialize task_artifacts if not exists
         if not hasattr(state, "task_artifacts"):
@@ -349,19 +368,25 @@ async def log_artifact(
             full_path=full_path,
             description=description,
             state=state,
+            content=content if _content_addressed else None,
         )
+
+        response_data: Dict[str, Any] = {
+            "task_id": task_id,
+            "filename": filename,
+            "location": str(artifact_path),
+            "artifact_type": artifact_type,
+            "is_default_location": location is None,
+            "description": description,
+        }
+        if _content_addressed:
+            response_data["content_stored"] = True
+        else:
+            response_data["full_path"] = str(full_path)
 
         return {
             "success": True,
-            "data": {
-                "task_id": task_id,
-                "filename": filename,
-                "location": str(artifact_path),
-                "full_path": str(full_path),
-                "artifact_type": artifact_type,
-                "is_default_location": location is None,
-                "description": description,
-            },
+            "data": response_data,
         }
 
     except Exception as e:
@@ -418,15 +443,18 @@ async def _persist_artifact_to_history(
     filename: str,
     artifact_type: str,
     artifact_path: Path,
-    full_path: Path,
+    full_path: Optional[Path],
     description: Optional[str],
     state: Any,
+    content: Optional[str] = None,
 ) -> None:
     """
     Persist artifact metadata to project history for post-project analysis.
 
-    Stores metadata about the artifact (not the content) to enable tracing
-    what was produced during project execution.
+    Stores metadata about the artifact, and -- for a content-addressed
+    artifact (ADR-0013 K8 consequence 1, issue #868's sibling) -- the
+    artifact's own content too, since there is no filesystem copy for
+    this registry to merely describe.
 
     Parameters
     ----------
@@ -438,12 +466,18 @@ async def _persist_artifact_to_history(
         Type of artifact
     artifact_path : Path
         Relative path to artifact
-    full_path : Path
-        Absolute path to artifact
+    full_path : Optional[Path]
+        Absolute path to artifact, or ``None`` for a content-addressed
+        artifact that was never written to any filesystem.
     description : Optional[str]
         Description of the artifact
     state : Any
         Marcus server state
+    content : Optional[str]
+        The artifact's own content, when it was stored content-
+        addressed rather than written to ``full_path``. Size and hash
+        are computed from this directly rather than by reading a file
+        that does not exist.
 
     Notes
     -----
@@ -465,10 +499,17 @@ async def _persist_artifact_to_history(
         if not hasattr(state, "project_history_persistence"):
             state.project_history_persistence = ProjectHistoryPersistence()
 
-        # Calculate file size and hash for integrity checking
+        # Calculate file size and hash for integrity checking. A
+        # content-addressed artifact (no full_path) hashes its own
+        # content string directly rather than reading a file that was
+        # never written.
         file_size_bytes = 0
         sha256_hash = None
-        if full_path.exists():
+        if content is not None:
+            content_bytes = content.encode("utf-8")
+            file_size_bytes = len(content_bytes)
+            sha256_hash = hashlib.sha256(content_bytes).hexdigest()
+        elif full_path is not None and full_path.exists():
             file_size_bytes = full_path.stat().st_size
             # Calculate SHA256 hash
             sha256 = hashlib.sha256()
@@ -495,12 +536,13 @@ async def _persist_artifact_to_history(
             filename=filename,
             artifact_type=artifact_type,
             relative_path=str(artifact_path),
-            absolute_path=str(full_path),
+            absolute_path=str(full_path) if full_path is not None else "",
             description=description or "",
             file_size_bytes=file_size_bytes,
             sha256_hash=sha256_hash,
             kanban_comment_url=kanban_comment_url,
             project_id=project_id,
+            content=content,
         )
 
         # Persist to project history
