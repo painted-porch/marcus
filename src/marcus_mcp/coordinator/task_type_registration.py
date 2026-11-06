@@ -11,7 +11,7 @@ server's active project only for a legacy task with no ``project_id``
 -- so it lives here once rather than drifting between two copies.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.project_registry import ProjectRegistry
 
@@ -52,3 +52,41 @@ def task_type_registration(
     if project is None:
         return None
     return project.task_type_registrations.get(task_type)
+
+
+def injected_checks_for_task_type(
+    task_type: str, state: Any, project_id: Optional[str]
+) -> List[Dict[str, str]]:
+    """Return a task type's ADR-0013 K4 injected checks, if any.
+
+    Issue #847: K4's recommendation is a kernel mechanism letting a
+    verification extension require a check the worker did not
+    author, with injection itself a per-type policy choice. Reads
+    through the same registration lookup every other K2-keyed field
+    uses, so a candidate task's own project is always checked first.
+
+    Parameters
+    ----------
+    task_type : str
+        The candidate task's type.
+    state : Any
+        Marcus server state, passed through to the registration
+        lookup.
+    project_id : Optional[str]
+        The candidate task's own project id (``task.project_id``).
+
+    Returns
+    -------
+    List[Dict[str, str]]
+        Each check as declared (``name``, and ``description`` when
+        given) -- never a callable or a command. Empty when
+        ``checks_injectable`` is not explicitly ``True``, matching
+        the validation ``ProjectRegistry.add_project`` already
+        enforces at registration: a project cannot declare checks
+        without the flag, and a project with the flag but no checks
+        has simply declared nothing.
+    """
+    registration = task_type_registration(task_type, state, project_id)
+    if not registration or registration.get("checks_injectable") is not True:
+        return []
+    return list(registration.get("injected_checks") or [])

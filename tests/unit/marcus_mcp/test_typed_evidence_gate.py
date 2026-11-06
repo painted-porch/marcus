@@ -252,6 +252,102 @@ class TestTypedEvidenceGateHonorsRegisteredTypes:
 
         assert response is None
 
+
+class TestTypedEvidenceGateEnforcesInjectedChecks:
+    """ADR-0013 K4 (issue #847): a declared injected check is enforced
+
+    at the same completion-time point as a schema's required field --
+    deliberately the only enforcement point, not a second gate.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_missing_injected_check_is_rejected_by_name(self) -> None:
+        task = _make_task("verify-1", task_type="verify")
+        state = await _registered_state(
+            task,
+            {
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [{"name": "cross_check_totals"}],
+                }
+            },
+        )
+
+        response = await task_module._apply_typed_evidence_gate(
+            task, "worker-1", {}, state
+        )
+
+        assert response is not None
+        assert "cross_check_totals" in response["missing_fields"]
+
+    @pytest.mark.asyncio
+    async def test_evidence_satisfying_the_injected_check_passes(self) -> None:
+        task = _make_task("verify-1", task_type="verify")
+        state = await _registered_state(
+            task,
+            {
+                "verify": {
+                    "checks_injectable": True,
+                    "injected_checks": [{"name": "cross_check_totals"}],
+                }
+            },
+        )
+
+        response = await task_module._apply_typed_evidence_gate(
+            task, "worker-1", {"cross_check_totals": "0.904 agrees with 0.904"}, state
+        )
+
+        assert response is None
+
+    @pytest.mark.asyncio
+    async def test_an_injected_check_combines_with_the_schemas_own_fields(
+        self,
+    ) -> None:
+        """Both the schema's required fields and the injected check's
+        name must be present; satisfying only one is still a rejection."""
+        task = _make_task("verify-1", task_type="verify")
+        state = await _registered_state(
+            task,
+            {
+                "verify": {
+                    "evidence_schema": {"required": ["verdict"]},
+                    "checks_injectable": True,
+                    "injected_checks": [{"name": "cross_check_totals"}],
+                }
+            },
+        )
+
+        only_schema = await task_module._apply_typed_evidence_gate(
+            task, "worker-1", {"verdict": "ok"}, state
+        )
+        only_check = await task_module._apply_typed_evidence_gate(
+            task, "worker-1", {"cross_check_totals": "ok"}, state
+        )
+        both = await task_module._apply_typed_evidence_gate(
+            task, "worker-1", {"verdict": "ok", "cross_check_totals": "ok"}, state
+        )
+
+        assert only_schema is not None
+        assert "cross_check_totals" in only_schema["missing_fields"]
+        assert only_check is not None
+        assert "verdict" in only_check["missing_fields"]
+        assert both is None
+
+    @pytest.mark.asyncio
+    async def test_no_injected_checks_declared_is_unaffected(self) -> None:
+        """A project with no injected_checks at all behaves exactly as
+        the pre-#847 gate already did."""
+        task = _make_task("verify-1", task_type="verify")
+        state = await _registered_state(
+            task, {"verify": {"evidence_schema": {"required": ["verdict"]}}}
+        )
+
+        response = await task_module._apply_typed_evidence_gate(
+            task, "worker-1", {"verdict": "ok"}, state
+        )
+
+        assert response is None
+
     @pytest.mark.asyncio
     async def test_a_tasks_own_output_schema_overrides_the_registration(
         self,

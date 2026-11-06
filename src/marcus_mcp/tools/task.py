@@ -55,6 +55,7 @@ from src.logging.conversation_logger import conversation_logger, log_thinking
 from src.marcus_mcp.coordinator.agent_project import project_for_agent
 from src.marcus_mcp.coordinator.drain import compute_board_drain
 from src.marcus_mcp.coordinator.task_type_registration import (
+    injected_checks_for_task_type,
     task_type_registration,
 )
 from src.marcus_mcp.tools.context import give_opinion
@@ -1014,6 +1015,16 @@ async def _apply_typed_evidence_gate(
     registration = task_type_registration(task.task_type, state, project_id)
     schema = task.output_schema or ((registration or {}).get("evidence_schema") or {})
     required = list(schema.get("required", []))
+    # ADR-0013 K4 (issue #847): a declared injected check is enforced
+    # here too, exactly as an output_schema's required field is -- the
+    # worker's evidence must carry a (non-empty) value under the
+    # check's own name, or the completion is rejected the same way a
+    # missing schema field already is. This is deliberately the ONLY
+    # enforcement point; no second gate exists for injected checks.
+    required += [
+        check["name"]
+        for check in injected_checks_for_task_type(task.task_type, state, project_id)
+    ]
     evidence_missing = not evidence
     if evidence_missing:
         missing = required
@@ -4223,6 +4234,21 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         "task_type": getattr(optimal_task, "task_type", "implement"),
                         "inputs": dict(getattr(optimal_task, "inputs", {}) or {}),
                         "output_schema": getattr(optimal_task, "output_schema", None),
+                        # ADR-0013 K4 (issue #847): a required check the
+                        # worker did not author, declared under the
+                        # project's K2 registration. Delivered here as an
+                        # obligation to satisfy and show evidence for --
+                        # never a command, since the kernel never calls
+                        # into extension code (K2's "dispatch is pull,
+                        # not call"). Resolved against the task's OWN
+                        # project_id, not the server's active project
+                        # (ADR-0013 K6; see issue #849 for the same gap
+                        # still open elsewhere in this response).
+                        "injected_checks": injected_checks_for_task_type(
+                            getattr(optimal_task, "task_type", "implement"),
+                            state,
+                            getattr(optimal_task, "project_id", None),
+                        ),
                     },
                 }
 
