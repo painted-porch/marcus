@@ -12,26 +12,11 @@ from typing import Any, Dict, Optional
 
 from src.core.assignment_persistence import AssignmentPersistence
 from src.core.assignment_reconciliation import AssignmentReconciler
+from src.core.kanban_project_scope import bound_project_id as _bound_project_id
 from src.core.models import Task, TaskStatus
 from src.integrations.kanban_interface import KanbanInterface
 
 logger = logging.getLogger(__name__)
-
-
-def _bound_project_id(kanban_client: Any) -> Optional[str]:
-    """Resolve the project scope the given kanban client is bound to.
-
-    Mirrors the same precedence ``KanbanClient._card_to_task`` uses to
-    stamp a task's own ``project_id`` (registry id wins when present;
-    the provider's own id otherwise), so an assignment's stamped
-    ``project_id`` can be compared against it directly (#856 round 4).
-    Works across providers: SQLite has no separate registry id (its
-    own ``project_id`` already *is* the registry id, GH-306); Planka
-    and Linear expose ``registry_project_id`` since #854.
-    """
-    return getattr(kanban_client, "registry_project_id", None) or getattr(
-        kanban_client, "project_id", None
-    )
 
 
 class AssignmentMonitor:

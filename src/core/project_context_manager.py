@@ -255,6 +255,40 @@ class ProjectContextManager:
 
         return context.kanban_client
 
+    async def get_kanban_client_for_project(
+        self, project_id: str
+    ) -> Optional[KanbanInterface]:
+        """Get the kanban client for a SPECIFIC project, active or not.
+
+        Issue #863, Codex P1: ``should_recover_expired_lease``
+        (``src/core/assignment_lease.py``) needs to check a lease's
+        task against its OWN project's board, not whichever project
+        the server's single lease manager happens to be bound to
+        right now. Resolving through the SAME per-project context
+        cache ``switch_project``/``get_kanban_client`` already use
+        means a project that was ever active still returns its own
+        correctly-scoped client, without disturbing the server's
+        actual active project.
+
+        Parameters
+        ----------
+        project_id : str
+            The project whose client to resolve.
+
+        Returns
+        -------
+        Optional[KanbanInterface]
+            That project's own kanban client, or ``None`` when the
+            project cannot be resolved from the registry.
+        """
+        async with self.lock:
+            project = await self.registry.get_project(project_id)
+            if project is None:
+                return None
+            context = await self._get_or_create_context(project)
+            context.last_accessed = datetime.now(timezone.utc)
+            return context.kanban_client
+
     async def get_active_context(self) -> Optional[Context]:
         """Get the context for the active project."""
         if not self.active_project_id:
