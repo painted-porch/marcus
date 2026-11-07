@@ -487,6 +487,10 @@ class MarcusConfig:
         Data directory path
     cache_dir : str
         Cache directory path
+    source_path : Optional[str]
+        Absolute path of the file this configuration was loaded from, or
+        ``None`` when built-in defaults were used because no file existed.
+        A server start announces it before anything calls out (issue #905).
     """
 
     mcp: MCPSettings = field(default_factory=MCPSettings)
@@ -511,6 +515,7 @@ class MarcusConfig:
     log_level: str = "INFO"
     data_dir: str = "./data"
     cache_dir: str = "./cache"
+    source_path: Optional[str] = None
 
     @classmethod
     def from_file(cls, path: str = "config_marcus.json") -> "MarcusConfig":
@@ -557,8 +562,11 @@ class MarcusConfig:
         # Substitute environment variables
         data = cls._substitute_env_vars(data)
 
-        # Create nested configs
-        return cls._from_dict(data)
+        # Create nested configs, then record where they came from (issue #905):
+        # a server start announces this path before anything calls out.
+        config = cls._from_dict(data)
+        config.source_path = str(config_path.absolute())
+        return config
 
     @classmethod
     def _substitute_env_vars(cls, data: Any) -> Any:

@@ -86,6 +86,9 @@ Configure AI providers and models:
 - `openai`: GPT models (requires `openai_api_key`)
 - `local`: Ollama or other local models (requires `local_model`)
 
+`"enabled": false` switches every AI feature off and guarantees the server makes no provider call, including at startup, whatever key the file holds.
+The server's startup log states the resolved configuration file, whether a key is present and whether AI is enabled, in one line beginning `AI engine:`.
+
 ### Kanban Settings
 
 Configure your project management backend:

@@ -20,6 +20,7 @@ Examples
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -40,6 +41,8 @@ from src.core.models import (
 from src.cost_tracking.ai_usage_middleware import (
     ai_usage_middleware,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AIAnalysisEngine:
@@ -73,26 +76,52 @@ class AIAnalysisEngine:
     shell switches Claude Code from subscription to API billing, so Marcus
     uses ``CLAUDE_API_KEY`` to leave Claude Code's auth untouched. Works in
     fallback mode without the API key.
+
+    Honours ``ai.enabled``: when it is false no client is built at all, so a
+    server start cannot contact a provider, whatever key is present (issue
+    #905). Neither construction nor :meth:`initialize` sends a request.
     """
 
     def __init__(self) -> None:
         """
-        Initialize the AI Analysis Engine.
+        Initialize the AI Analysis Engine without contacting any provider.
 
-        Attempts to set up the Anthropic client with various compatibility
-        approaches for different library versions.
+        Reads the AI section of the loaded configuration and decides, locally,
+        whether a client exists at all:
+
+        - ``ai.enabled`` false: no client is built, whatever key is present.
+        - Enabled with a key (config first, then ``CLAUDE_API_KEY``): a client
+          is built. Constructing one sends nothing.
+        - Enabled without a key: fallback mode, no client.
+
+        The resolved state is kept on the instance so :meth:`initialize` can
+        announce it in one line (issue #905).
         """
-        # Initialize Anthropic client with better error handling
         self.client: Optional[anthropic.Anthropic] = None
         self.current_project_id: Optional[str] = None
         self.current_agent_id: Optional[str] = None
+        self.ai_enabled: bool = True
+        self.api_key_present: bool = False
+        self.provider: str = "anthropic"
+        self.config_source: Optional[str] = None
+        config: Any = None
         try:
-            # Get API key from config first, fall back to environment
             from src.config.marcus_config import get_config
 
             config = get_config()
-            api_key = config.ai.anthropic_api_key or os.environ.get("CLAUDE_API_KEY")
-            if not api_key:
+            ai_settings = config.ai
+            self.ai_enabled = bool(getattr(ai_settings, "enabled", True))
+            self.provider = str(getattr(ai_settings, "provider", None) or "anthropic")
+            self.config_source = getattr(config, "source_path", None)
+            # Config key first, environment fallback second
+            api_key = ai_settings.anthropic_api_key or os.environ.get("CLAUDE_API_KEY")
+            self.api_key_present = bool(api_key)
+
+            if not self.ai_enabled:
+                # Disabled by configuration: build nothing, so nothing can
+                # call out. A placeholder key is irrelevant here.
+                self.client = None
+            elif not api_key:
                 print(
                     "⚠️  Anthropic API key not found - "
                     "AI features will use fallback mode",
@@ -110,13 +139,15 @@ class AIAnalysisEngine:
                     if "proxies" in str(te):
                         # Retry without any extra parameters
                         self.client = anthropic.Anthropic(api_key=api_key)
-                        # Successfully initialized
                     else:
                         raise te
+                # Token-usage tracking used to be attached only after a
+                # successful startup probe. Constructing a client sends
+                # nothing, so attach it here instead.
+                self.client = ai_usage_middleware.wrap_ai_provider(self.client)
 
         except Exception:
-            # Failed to initialize Anthropic client
-            # AI features will use fallback responses
+            # Failed to read config or build the client: fallback responses.
             # Don't print to stderr as it interferes with MCP stdio protocol
             self.client = None
             config = None
@@ -253,37 +284,44 @@ Identify risks and provide JSON:
 
     async def initialize(self) -> None:
         """
-        Initialize the AI engine and test connectivity.
+        Announce the engine's resolved state. Never contacts the provider.
 
-        Verifies the Anthropic client can communicate with the API by
-        sending a test message. Disables the client if the test fails.
+        Before issue #905 this sent a real ``messages.create`` request as a
+        connectivity probe, regardless of ``ai.enabled``, and silently
+        disabled the client for the server's lifetime when the probe failed.
+        A server start now makes no provider call at all: the first real call
+        is the first use, and every call site already falls back on failure.
+
+        The one log line states the resolved config file, whether a key is
+        present, whether AI is enabled, the provider and the model, so a live
+        check can read one line and know whether this server can spend.
 
         Examples
         --------
         >>> engine = AIAnalysisEngine()
         >>> await engine.initialize()
-        ✅ AI Engine connection verified
+        AI engine: enabled=False key_present=True provider=anthropic ...
         """
-        if not self.client:
-            print(
-                "⚠️  AI Engine running in fallback mode (no Anthropic client)",
-                file=sys.stderr,
+        if not self.ai_enabled:
+            outcome = (
+                "AI disabled by config: no client built, "
+                "no provider call at startup or later"
             )
-            return
-
-        # Test connection
-        try:
-            self.client.messages.create(
-                model=self.model,
-                max_tokens=10,
-                messages=[{"role": "user", "content": "test"}],
-            )
-            # Connection verified - wrap client for token tracking
-            self.client = ai_usage_middleware.wrap_ai_provider(self.client)
-        except Exception:
-            # AI Engine test failed - will use fallback responses
-            # Don't print to stderr as it interferes with MCP stdio protocol
-            self.client = None  # Disable client if test fails
+        elif not self.api_key_present:
+            outcome = "no API key: fallback mode, no provider call"
+        elif self.client is None:
+            outcome = "client could not be constructed: fallback mode, no provider call"
+        else:
+            outcome = "no provider call at startup; the first call happens on first use"
+        logger.info(
+            "AI engine: enabled=%s key_present=%s provider=%s model=%s config=%s; %s",
+            self.ai_enabled,
+            self.api_key_present,
+            self.provider,
+            self.model,
+            self.config_source or "built-in defaults",
+            outcome,
+        )
 
     async def match_task_to_agent(
         self,
@@ -1812,7 +1850,8 @@ Return JSON with this format:
         Raises
         ------
         RuntimeError
-            If no AI client is available (no API key configured)
+            If AI is disabled by configuration (``ai.enabled`` false), or no
+            AI client is available (no API key configured)
 
         Examples
         --------
@@ -1822,6 +1861,18 @@ Return JSON with this format:
         ...     response_format={"type": "object", "properties": {...}}
         ... )
         """
+        # Issue #905 (Codex P2 on PR #906): this path builds its own
+        # LLMAbstraction, so the startup client being absent never stopped
+        # it; with ``ai.enabled`` false and a valid-looking key the
+        # decomposer and dependency wiring could still call out while the
+        # startup line promised otherwise. Refuse here first (the
+        # abstraction refuses too; this is the earlier, clearer line).
+        if not self.ai_enabled:
+            raise RuntimeError(
+                "AI is disabled by configuration (ai.enabled=false): "
+                "generate_structured_response makes no provider call"
+            )
+
         # Use LLM abstraction layer to support all providers (Anthropic, OpenAI, local)
         try:
             from src.ai.providers.llm_abstraction import LLMAbstraction
