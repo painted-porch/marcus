@@ -271,6 +271,33 @@ class TestUnassignTask:
         )
 
     @pytest.mark.asyncio
+    async def test_unassign_task_reads_the_provider_when_the_cache_lacks_the_card(
+        self, mock_state
+    ):
+        """Before the first board refresh the cache is empty; the provider's get_task_by_id answers.
+
+        Codex on PR #907: providers implement ``get_task_by_id`` (the
+        ``KanbanInterface`` method), not ``get_task``, so a lookup guarded on
+        the wrong name never reached the board.
+        """
+        mock_state.agent_tasks = {}
+        mock_state.agent_status = {}
+        mock_state.lease_manager.active_leases = {}
+        mock_state.project_tasks = []
+        mock_state.kanban_client.get_task_by_id = AsyncMock(
+            return_value=create_mock_task(
+                "task-9", "Stranded", assigned_to="agent-vanished"
+            )
+        )
+
+        result = await unassign_task(task_id="task-9", agent_id=None, state=mock_state)
+
+        assert result["success"] is True
+        assert result["agent_id"] == "agent-vanished"
+        assert result["assignee_source"] == "board"
+        mock_state.kanban_client.get_task_by_id.assert_awaited_once_with("task-9")
+
+    @pytest.mark.asyncio
     async def test_unassign_task_releases_a_coordinator_owned_ghost(self, mock_state):
         """A TODO design ghost still named to Marcus is released the same way."""
         mock_state.agent_tasks = {}

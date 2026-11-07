@@ -11305,9 +11305,13 @@ async def _board_assignee(state: Any, task_id: str) -> Optional[str]:
     board_task = None
     if isinstance(tasks, list):
         board_task = next((t for t in tasks if t.id == task_id), None)
-    if board_task is None and hasattr(state.kanban_client, "get_task"):
+    # The cache is empty before the first board refresh; ask the provider
+    # through the KanbanInterface method every provider implements
+    # (Codex on PR #907: it is ``get_task_by_id``, not ``get_task``).
+    lookup = getattr(getattr(state, "kanban_client", None), "get_task_by_id", None)
+    if board_task is None and callable(lookup):
         try:
-            board_task = await state.kanban_client.get_task(task_id)
+            board_task = await lookup(task_id)
         except Exception as e:  # noqa: BLE001 - absence, not an error, is the answer
             logger.debug(f"Board lookup for {task_id} failed: {e}")
             board_task = None
