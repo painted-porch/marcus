@@ -12,8 +12,8 @@ a verifier or record failure.
 from typing import Optional
 
 import pytest
-from runners.tow_fetch import FetchResult
-from runners.tow_rot_sweep import classify_fetch, summarize
+from citation_verifier.fetch import FetchResult
+from citation_verifier.rot_sweep import classify_fetch, summarize
 
 pytestmark = pytest.mark.unit
 

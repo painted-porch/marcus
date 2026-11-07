@@ -18,7 +18,7 @@ PAID CALLS: every non-fake engine call costs money. Do not run with
 a real engine outside the approved pilot (issue #737 rule 5). The
 ``fake`` engine is free and exists for end-to-end shakeouts::
 
-    python dev-tools/experiments/runners/tow_finder.py \
+    python -m citation_verifier.finder \
         --url http://localhost:4777/mcp --project tow-smoke \
         --agent-id finder-fake-1 --vendor fakevendor --engine fake
 """
@@ -26,18 +26,11 @@ a real engine outside the approved pilot (issue #737 rule 5). The
 import argparse
 import asyncio
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-
-from runners.tow_engines import ENGINES, BaseEngine, FakeEngine  # noqa: E402
-from runners.tow_worker_common import (  # noqa: E402
+from citation_verifier.engines import ENGINES, BaseEngine, FakeEngine  # noqa: E402
+from citation_verifier.worker_common import (  # noqa: E402
     WorkerConfig,
     append_usage_row,
     render_case_answer,

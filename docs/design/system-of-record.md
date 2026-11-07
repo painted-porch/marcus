@@ -344,7 +344,7 @@ Dependents wait through the existing dependency resolution.
 Provide the smallest possible human interface: a CLI command that lists open approve tasks and completes one, calling the same tool path.
 Tests: an agent cannot close an approve task; a human can; the synthesize task is not offered until it is closed.
 
-**6. Case seeding without decomposition.** Add `dev-tools/experiments/runners/tow_runner.py` that reads the dataset and, per excerpt, creates a find, verify, approve (sampled), and synthesize task through the kanban interface with dependencies wired, bypassing `_analyze_prd_deeply` and the planner model entirely.
+**6. Case seeding without decomposition.** Add `extensions/citation_verifier/citation_verifier/runner.py` that reads the dataset and, per excerpt, creates a find, verify, approve (sampled), and synthesize task through the kanban interface with dependencies wired, bypassing `_analyze_prd_deeply` and the planner model entirely.
 This is also the proof that decomposition is optional.
 
 **7. Workers.** Two small pull-loop workers in the same directory, using the HTTP MCP tools exactly as a coding agent would: a finder that wraps one engine's API and reports the claim, and a verifier that fetches, checks, and reports the verdict.

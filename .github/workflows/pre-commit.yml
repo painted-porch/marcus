@@ -67,7 +67,7 @@ jobs:
         pip install -r requirements-dev.txt
 
     - name: Type check with MyPy
-      run: mypy src/ --config-file=pyproject.toml
+      run: mypy src/ extensions/citation_verifier/citation_verifier --config-file=pyproject.toml
 
     - name: Check docstrings with pydocstyle
       run: pydocstyle src/ --config=pyproject.toml
@@ -95,7 +95,7 @@ jobs:
         echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
 
         # MyPy check
-        if mypy src/ --config-file=pyproject.toml > /dev/null 2>&1; then
+        if mypy src/ extensions/citation_verifier/citation_verifier --config-file=pyproject.toml > /dev/null 2>&1; then
           echo "| MyPy Type Check | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
         else
           echo "| MyPy Type Check | ❌ Failed |" >> $GITHUB_STEP_SUMMARY

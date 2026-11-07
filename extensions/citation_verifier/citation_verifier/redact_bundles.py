@@ -15,7 +15,7 @@ redacted output, and exits non-zero if any does.
 
 Usage::
 
-    python dev-tools/experiments/runners/redact_bundles.py \
+    python -m citation_verifier.redact_bundles \
         --in-dir  /path/to/bundles-openai \
         --out-dir /path/to/redacted/bundles-openai
 """

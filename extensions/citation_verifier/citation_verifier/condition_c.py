@@ -15,7 +15,7 @@ be shown to a third party.
 
 Free to run: page fetches only, no model calls::
 
-    python dev-tools/experiments/runners/tow_condition_c.py \
+    python -m citation_verifier.condition_c \
         --a-responses /path/to/condition-a.jsonl \
         --dataset /path/to/GenAISearch_Data.csv \
         --cache-dir /path/to/fetch-cache \
@@ -24,19 +24,12 @@ Free to run: page fetches only, no model calls::
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any, Dict
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-
-from runners.tow_checks import decide_verdict  # noqa: E402
-from runners.tow_fetch import FetchCache, FetchResult  # noqa: E402
-from runners.tow_runner import load_excerpts  # noqa: E402
+from citation_verifier.checks import decide_verdict  # noqa: E402
+from citation_verifier.fetch import FetchCache, FetchResult  # noqa: E402
+from citation_verifier.runner import load_excerpts  # noqa: E402
 
 CLAIM_FIELDS = ("headline", "publisher", "date", "url")
 

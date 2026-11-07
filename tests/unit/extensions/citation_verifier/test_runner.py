@@ -20,7 +20,7 @@ from typing import Any, Dict, List
 import pytest
 
 # ``conftest.py`` puts ``dev-tools/experiments/`` on ``sys.path``.
-from runners import tow_runner
+from citation_verifier import runner as tow_runner
 
 pytestmark = pytest.mark.unit
 

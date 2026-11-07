@@ -18,7 +18,7 @@ declines caused by rot indict neither the verifier nor the record.
 Free to run (page fetches only), and the fetches land in the shared
 cache, so the pilot's verifier replays these exact observations::
 
-    python dev-tools/experiments/runners/tow_rot_sweep.py \
+    python -m citation_verifier.rot_sweep \
         --dataset /path/to/GenAISearch_Data.csv \
         --limit 50 \
         --cache-dir /path/to/pilot/fetch-cache \
@@ -31,20 +31,13 @@ out of the repository like the dataset itself.
 
 import argparse
 import json
-import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-
-from runners.tow_checks import excerpt_on_page  # noqa: E402
-from runners.tow_fetch import FetchCache, FetchResult  # noqa: E402
+from citation_verifier.checks import excerpt_on_page  # noqa: E402
+from citation_verifier.fetch import FetchCache, FetchResult  # noqa: E402
 
 OUTCOMES = (
     "verifiable",
@@ -114,7 +107,7 @@ def summarize(classes: List[str]) -> Dict[str, Any]:
 
 def main() -> None:
     """Sweep the pilot's ground-truth URLs and write the baseline."""
-    from runners.tow_runner import load_excerpts, select_excerpts
+    from citation_verifier.runner import load_excerpts, select_excerpts
 
     parser = argparse.ArgumentParser(prog="tow_rot_sweep")
     parser.add_argument("--dataset", required=True)

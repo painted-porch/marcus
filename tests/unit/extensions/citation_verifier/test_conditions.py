@@ -11,9 +11,9 @@ identical observations. No test touches the network or any engine.
 from typing import Any, Optional
 
 import pytest
-from runners.tow_condition_a import build_a_row
-from runners.tow_condition_c import filter_answer
-from runners.tow_engines import EngineAnswer
+from citation_verifier.condition_a import build_a_row
+from citation_verifier.condition_c import filter_answer
+from citation_verifier.engines import EngineAnswer
 
 pytestmark = pytest.mark.unit
 
@@ -28,7 +28,7 @@ class FakeCache:
         self.text = text
 
     def fetch(self, url: str) -> Any:
-        from runners.tow_fetch import FetchResult
+        from citation_verifier.fetch import FetchResult
 
         return FetchResult(
             url=url,

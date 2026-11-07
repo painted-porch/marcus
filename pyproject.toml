@@ -111,6 +111,9 @@ include = ["src", "src.*", "marcus_mcp", "marcus_mcp.*"]
 
 [tool.mypy]
 python_version = "3.11"
+# Extensions live beside the kernel; resolve them by package name so their
+# imports are typed rather than degrading to Any (ADR-0013 K11).
+mypy_path = "extensions/citation_verifier"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

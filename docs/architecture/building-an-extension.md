@@ -65,6 +65,7 @@ See the next section for why.
 
 K2 is Accepted, and `ProjectConfig.task_type_registrations` (#831) is the field your declaration lives on.
 The two extensions that exist today (the AI-citation verifier and the numerical-report verifier) both construct their project's record directly in Python and call `registry.add_project()` — the same mechanism, used in-process rather than through a tool call. Writing your own declaration there today works the same way.
+The exact kernel surface an extension may import, and why in-process construction is still required today, is written down in `docs/architecture/extension-contract.md`; the citation verifier's `extensions/citation_verifier/citation_verifier/kernel.py` is the worked example.
 
 **What writing a registration does not yet do.** Having a registration on the project record does not, by itself, make the kernel's own evidence and handoff mechanisms recognize your task types. `_apply_typed_evidence_gate` and the evidence-handoff path in `src/marcus_mcp/tools/task.py` still check a task's type against two hardcoded sets — `EVIDENCE_REQUIRED_TASK_TYPES = {"find", "verify", "synthesize"}` and that set plus `"approve"` — not against any project's registration.
 Concretely: a custom task type like `"check"` can report `completed` with no evidence at all and nothing refuses it, and evidence your worker does submit, matching your own `output_schema`, never reaches a dependent task through the handoff, because neither mechanism looks at an unrecognized type.
@@ -103,10 +104,10 @@ It runs a four-step chain of task types: `find` → `verify` → `approve` → `
 
 ### Seeding the chain
 
-`dev-tools/experiments/runners/tow_runner.py` seeds the board directly, writing each task with its `task_type` and an `output_schema` describing the evidence it expects:
+`extensions/citation_verifier/citation_verifier/runner.py` seeds the board directly, writing each task with its `task_type` and an `output_schema` describing the evidence it expects:
 
 ```python
-# dev-tools/experiments/runners/tow_runner.py, the "find" task
+# extensions/citation_verifier/citation_verifier/runner.py, the "find" task
 {
     "name": f"Find the source of {case}",
     "task_type": "find",
@@ -123,7 +124,7 @@ This is the registration step, today's version of it: the task type and its evid
 
 ### The worker's pull loop
 
-`dev-tools/experiments/runners/tow_worker_common.py`'s `work_loop` is the agent side — the part your own extension's worker would mirror:
+`extensions/citation_verifier/citation_verifier/worker_common.py`'s `work_loop` is the agent side — the part your own extension's worker would mirror:
 
 ```python
 while idle < cfg.idle_exits:
@@ -173,8 +174,8 @@ This is enforced at the point the kernel decides what to offer (`filter_eligible
 | `src/marcus_mcp/coordinator/eligibility.py` | `filter_eligible_tasks` — K12's "no one checks their own work" guarantee |
 | `src/marcus_mcp/tools/task.py` | `request_next_task`, `report_task_progress`, `request_task_redo` — the tools every agent, including your extension's, calls |
 | `src/marcus_mcp/kanban_task_sync.py` | K13's guarantee that a board write is immediately visible to the kernel's own in-memory state — not something your extension needs to call, just something it can now rely on |
-| `dev-tools/experiments/runners/tow_runner.py` | A real, shipping extension's board-seeding code |
-| `dev-tools/experiments/runners/tow_worker_common.py` | A real, shipping extension's pull-loop worker |
+| `extensions/citation_verifier/citation_verifier/runner.py` | A real, shipping extension's board-seeding code |
+| `extensions/citation_verifier/citation_verifier/worker_common.py` | A real, shipping extension's pull-loop worker |
 
 ## How to verify your extension is built correctly
 
@@ -189,5 +190,5 @@ This is enforced at the point the kernel decides what to offer (`filter_eligible
 - ADR-0013 — the architecture decisions this guide documents, particularly K1 (what the kernel is), K2 (how an extension registers), K4 (check authorship), K7 (handoff), K8 (runtime neutrality), K12 (offer-time eligibility), K13 (write consistency)
 - `CLAUDE.md`'s `MULTIAGENCY_PROCLAMATION` section — the Three Agent Invariants in full
 - #818 — the issue this guide answers
-- The AI-citation verifier (`dev-tools/experiments/runners/tow_runner.py`, `tow_worker_common.py`) — this guide's worked example
+- The AI-citation verifier (`extensions/citation_verifier/citation_verifier/runner.py`, `tow_worker_common.py`) — this guide's worked example
 - The numerical-report verifier's proof-of-concept — this guide's counter-example of what registration replaces

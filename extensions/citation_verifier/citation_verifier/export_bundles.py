@@ -12,7 +12,7 @@ dataset to keep it away from crawlers).
 
 Usage::
 
-    python dev-tools/experiments/runners/export_bundles.py \
+    python -m citation_verifier.export_bundles \
         --url http://localhost:4777/mcp \
         --manifest /path/to/manifest.json \
         --out-dir /path/to/bundles
@@ -25,13 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-
-from src.worker.inspector import Inspector, _extract_text_from_result  # noqa: E402
+from citation_verifier.kernel import Inspector, extract_text_from_result
 
 
 async def export_all(url: str, manifest_path: str, out_dir: str) -> int:
@@ -65,7 +59,7 @@ async def export_all(url: str, manifest_path: str, out_dir: str) -> int:
             result = await client.session.call_tool(
                 "export_case", arguments={"case_id": case_id}
             )
-            text = _extract_text_from_result(result)
+            text = extract_text_from_result(result)
             bundle: Dict[str, Any] = json.loads(text) if text else {}
             (out / f"{case_id}.json").write_text(
                 json.dumps(bundle, indent=1, ensure_ascii=False),

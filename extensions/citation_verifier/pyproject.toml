@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marcus-citation-verifier"
+version = "0.1.0"
+description = "The AI-citation verifier: a find -> verify -> approve -> synthesize chain run as a Marcus extension (ADR-0013 K11)"
+requires-python = ">=3.11"
+dependencies = ["marcus-ai"]
+
+[project.scripts]
+tow-seed = "citation_verifier.runner:main"
+tow-finder = "citation_verifier.finder:main"
+tow-verifier = "citation_verifier.verifier:main"
+tow-export = "citation_verifier.export_bundles:main"
+tow-redact = "citation_verifier.redact_bundles:main"
+tow-grade = "citation_verifier.grader:main"
+tow-condition-a = "citation_verifier.condition_a:main"
+tow-condition-c = "citation_verifier.condition_c:main"
+tow-rot-sweep = "citation_verifier.rot_sweep:main"
+
+[tool.setuptools]
+packages = ["citation_verifier"]
