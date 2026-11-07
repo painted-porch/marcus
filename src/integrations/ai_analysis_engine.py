@@ -1850,7 +1850,8 @@ Return JSON with this format:
         Raises
         ------
         RuntimeError
-            If no AI client is available (no API key configured)
+            If AI is disabled by configuration (``ai.enabled`` false), or no
+            AI client is available (no API key configured)
 
         Examples
         --------
@@ -1860,6 +1861,18 @@ Return JSON with this format:
         ...     response_format={"type": "object", "properties": {...}}
         ... )
         """
+        # Issue #905 (Codex P2 on PR #906): this path builds its own
+        # LLMAbstraction, so the startup client being absent never stopped
+        # it; with ``ai.enabled`` false and a valid-looking key the
+        # decomposer and dependency wiring could still call out while the
+        # startup line promised otherwise. Refuse here first (the
+        # abstraction refuses too; this is the earlier, clearer line).
+        if not self.ai_enabled:
+            raise RuntimeError(
+                "AI is disabled by configuration (ai.enabled=false): "
+                "generate_structured_response makes no provider call"
+            )
+
         # Use LLM abstraction layer to support all providers (Anthropic, OpenAI, local)
         try:
             from src.ai.providers.llm_abstraction import LLMAbstraction

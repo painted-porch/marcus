@@ -199,6 +199,26 @@ class LLMAbstraction:
         # exported in the user's shell — so OpenAI silently joined the
         # fallback chain even when ``provider: anthropic`` was set, and
         # cascaded billing to OpenAI when Anthropic momentarily failed.
+        # Issue #905 (Codex P2 on PR #906): ``ai.enabled: false`` is a
+        # promise that nothing calls a provider, and this class is how every
+        # consumer that wants a model reaches one: the decomposer and
+        # dependency wiring through ``generate_structured_response``, the
+        # advanced parser, the enricher, the work analyzer, the NLP tools,
+        # spec coverage. Gate here, once, so a valid-looking key alone is
+        # never a licence to call. RuntimeError is the type every caller
+        # already handles for "no provider could be initialised". The
+        # initialised flag stays False so each later call refuses with this
+        # same clear line rather than a misleading "all providers failed".
+        if not bool(getattr(config.ai, "enabled", True)):
+            logger.info(
+                "LLM abstraction: ai.enabled is false; no provider initialised "
+                "and no provider call will be made"
+            )
+            raise RuntimeError(
+                "AI is disabled by configuration (ai.enabled=false): no LLM "
+                "provider is initialised and no provider call is made"
+            )
+
         configured_provider = config.ai.provider or ""
 
         def _allowed(name: str) -> bool:

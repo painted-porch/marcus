@@ -228,3 +228,22 @@ class TestInitializeAnnouncesTheResolvedState:
 
         [line] = _ai_engine_lines(caplog)
         assert "config=built-in defaults" in line
+
+
+class TestDisabledAIHasNoSideDoor:
+    """``ai.enabled: false`` gates every path, not only the startup client (Codex P2 on #906)."""
+
+    @pytest.mark.asyncio
+    async def test_structured_response_is_refused_without_building_a_provider(
+        self, anthropic_module: Mock, no_env_key: None
+    ) -> None:
+        """generate_structured_response builds its own LLMAbstraction; disabled means it never does."""
+        with patch(
+            GET_CONFIG,
+            return_value=_config(enabled=False, key="sk-ant-valid-looking-0123456789"),
+        ):
+            engine = AIAnalysisEngine()
+        with patch("src.ai.providers.llm_abstraction.LLMAbstraction") as abstraction:
+            with pytest.raises(RuntimeError, match="disabled"):
+                await engine.generate_structured_response("decompose this")
+        abstraction.assert_not_called()
