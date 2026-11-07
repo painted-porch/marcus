@@ -56,12 +56,14 @@ from typing import Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
+# The tokenizer this scan shares with the verifier lives in the citation
+# extension (ADR-0013 K11), beside the kernel rather than inside it.
+EXTENSION_DIR = REPO_ROOT / "extensions" / "citation_verifier"
+for entry in (str(REPO_ROOT), str(EXTENSION_DIR)):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
-from runners.tow_checks import words  # noqa: E402
+from citation_verifier.checks import words  # noqa: E402
 
 WINDOW = 6
 DEFAULT_DATASET = "~/marcus-experiments/tow/dataset/GenAISearch_Data.csv"

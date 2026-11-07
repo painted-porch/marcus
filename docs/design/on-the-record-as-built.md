@@ -29,9 +29,9 @@ The runner seeds it as a dependency chain of typed tasks: **find** (produce a cl
 1. A finder agent calls `request_next_task` and is offered a find task.
 2. It reports completion with an `evidence` payload; the typed gate rejects the close if a required field is missing, and after repeated failures terminalizes the task instead of looping (the #677 retry ceiling, reused by #737).
 3. The verify task unlocks; eligibility guarantees whoever takes it is neither the author nor the author's vendor, and the evidence handoff seeds the verifier's inputs so that seeded values win over anything a later writer supplies (the anti-gaming merge in `task.py`).
-4. The verifier fetches the claimed URL itself — `dev-tools/experiments/runners/tow_fetch.py` enforces an address guard (no private, loopback, link-local, or reserved targets), robots.txt, and a re-check of both on any cross-origin redirect — and closes with its checks as evidence.
+4. The verifier fetches the claimed URL itself — `extensions/citation_verifier/citation_verifier/fetch.py` enforces an address guard (no private, loopback, link-local, or reserved targets), robots.txt, and a re-check of both on any cross-origin redirect — and closes with its checks as evidence.
 5. The approve task is completed by a person through `src/cli/approvals.py`; dependents wait on ordinary dependency resolution until the signature lands.
-6. `export_case` (exposed via `dev-tools/experiments/runners/export_bundles.py`) writes the audit bundle; `redact_bundles.py` produces the publishable copy with dataset text stripped.
+6. `export_case` (exposed via `extensions/citation_verifier/citation_verifier/export_bundles.py`) writes the audit bundle; `redact_bundles.py` produces the publishable copy with dataset text stripped.
 
 ## Evidence contracts
 
@@ -76,8 +76,8 @@ Run the free rehearsal in [REPRODUCING.md, "The free rehearsal"](../../REPRODUCI
 | `src/marcus_mcp/tools/task.py` | `_apply_typed_evidence_gate`, `_apply_approval_gate`, the seeded-inputs-win handoff. |
 | `src/marcus_mcp/tools/audit_tools.py` | `export_case`: the audit bundle. |
 | `src/cli/approvals.py` | The human signature CLI. |
-| `dev-tools/experiments/runners/tow_fetch.py` | Fetch safety: address guard, robots, redirect re-check. |
-| `dev-tools/experiments/runners/tow_runner.py` | Case seeding, board registration, id prefixing, task metadata. |
+| `extensions/citation_verifier/citation_verifier/fetch.py` | Fetch safety: address guard, robots, redirect re-check. |
+| `extensions/citation_verifier/citation_verifier/runner.py` | Case seeding, board registration, id prefixing, task metadata. |
 | `tests/unit/` (`test_typed_evidence_gate`, eligibility, fetch tests) | The behavior, specified executable. |
 
 ## Known gaps

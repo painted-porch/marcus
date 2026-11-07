@@ -15,7 +15,7 @@ from datetime import date
 from typing import List, Optional
 
 import pytest
-from runners.tow_checks import (
+from citation_verifier.checks import (
     MIN_EXCERPT_COVERAGE,
     MIN_EXCERPT_RUN,
     classify_slug_relationship,
@@ -30,7 +30,7 @@ from runners.tow_checks import (
     published_date_from_html,
     site_name_from_html,
 )
-from runners.tow_fetch import FetchResult
+from citation_verifier.fetch import FetchResult
 
 pytestmark = pytest.mark.unit
 
@@ -561,7 +561,7 @@ class TestCanonicalUrl:
 
     def test_reads_rel_canonical_link(self) -> None:
         """The link tag is the primary signal."""
-        from runners.tow_checks import canonical_url_from_html
+        from citation_verifier.checks import canonical_url_from_html
 
         html = '<link rel="canonical" href="https://www.latimes.com/environment/story/2022-07-31/original"/>'
         assert (
@@ -571,7 +571,7 @@ class TestCanonicalUrl:
 
     def test_falls_back_to_og_url(self) -> None:
         """og:url stands in when no link tag exists."""
-        from runners.tow_checks import canonical_url_from_html
+        from citation_verifier.checks import canonical_url_from_html
 
         html = '<meta property="og:url" content="https://missouriindependent.com/2024/04/29/original/"/>'
         assert (
@@ -581,7 +581,7 @@ class TestCanonicalUrl:
 
     def test_relative_canonical_resolves_against_the_page(self) -> None:
         """A relative href is same-site by construction."""
-        from runners.tow_checks import canonical_url_from_html
+        from citation_verifier.checks import canonical_url_from_html
 
         html = '<link rel="canonical" href="/2024/03/14/local/ferry/"/>'
         assert (
@@ -591,7 +591,7 @@ class TestCanonicalUrl:
 
     def test_absent_canonical_is_empty(self) -> None:
         """No declaration, no signal."""
-        from runners.tow_checks import canonical_url_from_html
+        from citation_verifier.checks import canonical_url_from_html
 
         assert canonical_url_from_html("<p>hello</p>", "https://x.org/a") == ""
 

@@ -13,7 +13,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 import pytest
-from runners.tow_worker_common import (
+from citation_verifier.worker_common import (
     WorkerConfig,
     build_verify_evidence,
     render_case_answer,
@@ -292,7 +292,7 @@ class TestBuildVerifyEvidence:
 
         class OneShotCache:
             def fetch(self, url: str) -> Any:
-                from runners.tow_fetch import FetchResult
+                from citation_verifier.fetch import FetchResult
 
                 return FetchResult(
                     url=url,

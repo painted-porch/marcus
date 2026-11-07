@@ -11,7 +11,7 @@ without ``--confirm-paid``, which exists so issue #737's rule 5 (no
 paid API call without an approved estimate) cannot be tripped by
 accident. Get the estimate approved first, then::
 
-    python dev-tools/experiments/runners/tow_condition_a.py \
+    python -m citation_verifier.condition_a \
         --dataset /path/to/GenAISearch_Data.csv \
         --engines perplexity openai \
         --limit 50 \
@@ -27,14 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-
-from runners.tow_engines import ENGINES, EngineAnswer  # noqa: E402
-from runners.tow_runner import (  # noqa: E402
+from citation_verifier.engines import ENGINES, EngineAnswer  # noqa: E402
+from citation_verifier.runner import (  # noqa: E402
     QUERY_FORMAT,
     load_excerpts,
     select_excerpts,

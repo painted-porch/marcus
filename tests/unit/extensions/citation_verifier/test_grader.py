@@ -14,7 +14,7 @@ rejoining on a blind id.
 from typing import Any, Dict, Optional
 
 import pytest
-from runners.tow_grader import (
+from citation_verifier.grader import (
     AnswerRecord,
     blind_pool,
     categorize,
@@ -42,7 +42,7 @@ class FakeFetcher:
         self.text = text
 
     def fetch(self, url: str) -> Any:
-        from runners.tow_fetch import FetchResult
+        from citation_verifier.fetch import FetchResult
 
         return FetchResult(
             url=url,
@@ -772,7 +772,7 @@ class TestFabricatedUrl:
 
     def test_dead_url_is_fabricated(self) -> None:
         """A claimed URL that 404s is fabricated or broken."""
-        from runners.tow_grader import url_is_fabricated
+        from citation_verifier.grader import url_is_fabricated
 
         record = _record(
             {"publisher": "Harbor Gazette", "date": "", "url": "https://x.org/gone"}
@@ -784,7 +784,7 @@ class TestFabricatedUrl:
 
     def test_right_url_is_not_fabricated(self) -> None:
         """The ground-truth URL is never flagged, whatever the page says."""
-        from runners.tow_grader import url_is_fabricated
+        from citation_verifier.grader import url_is_fabricated
 
         record = _record({"publisher": "", "date": "", "url": TRUTH["source_url"]})
 
@@ -795,7 +795,7 @@ class TestFabricatedUrl:
 
     def test_live_wrong_page_without_excerpt_is_fabricated(self) -> None:
         """A live page that is not the article counts as the wrong page."""
-        from runners.tow_grader import url_is_fabricated
+        from citation_verifier.grader import url_is_fabricated
 
         record = _record(
             {"publisher": "", "date": "", "url": "https://x.org/some-other-page"}

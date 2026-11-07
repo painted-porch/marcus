@@ -13,7 +13,7 @@ conditions see identical observations (protocol step 9).
 Run it AFTER the finder has drained the board's find tasks; see the
 phase order in ``tow_finder.py``'s docstring::
 
-    python dev-tools/experiments/runners/tow_verifier.py \
+    python -m citation_verifier.verifier \
         --url http://localhost:4777/mcp --project tow-smoke \
         --agent-id verifier-fetch-1 --vendor fetchcheck \
         --cache-dir /path/to/fetch-cache
@@ -21,18 +21,10 @@ phase order in ``tow_finder.py``'s docstring::
 
 import argparse
 import asyncio
-import sys
-from pathlib import Path
 from typing import Any, Dict
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-
-from runners.tow_fetch import FetchCache  # noqa: E402
-from runners.tow_worker_common import (  # noqa: E402
+from citation_verifier.fetch import FetchCache  # noqa: E402
+from citation_verifier.worker_common import (  # noqa: E402
     WorkerConfig,
     build_verify_evidence,
     render_case_answer,

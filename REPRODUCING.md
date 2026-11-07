@@ -40,10 +40,14 @@ Cross-engine cost is not comparable, because each provider counts the web conten
 
 1. **The dataset.** The study uses `GenAISearch_Data.csv`, 200 excerpts across 20 publishers. We do not redistribute it. Get it from the Tow Center and decrypt it locally; the passphrase is in their README. Do not commit the CSV, and do not commit the manifests the runner writes, because both contain the excerpts and answers.
 2. **Marcus installed.** Python 3.11 or newer, and a working Marcus checkout. See the project README for setup.
-3. **Engine API keys.** The run uses four engines: an OpenAI model, Google Gemini, Perplexity, and Anthropic Claude Haiku. The exact `--engines` keys are defined in `dev-tools/experiments/runners/tow_engines.py`. Grounded engines bill for web search or grounding separately from tokens; the runner now records those fees as `search_fee_usd` on every answer, so the cost log no longer undercounts OpenAI's search or Gemini's grounding the way the first full run did.
+3. **Engine API keys.** The run uses four engines: an OpenAI model, Google Gemini, Perplexity, and Anthropic Claude Haiku. The exact `--engines` keys are defined in `extensions/citation_verifier/citation_verifier/engines.py`. Grounded engines bill for web search or grounding separately from tokens; the runner now records those fees as `search_fee_usd` on every answer, so the cost log no longer undercounts OpenAI's search or Gemini's grounding the way the first full run did.
 4. **Cost.** A clean run of the full study costs about $35, roughly $0.18 per question across the four engines and the two paid conditions; our own run cost about $65 all-in, because pilots and re-running a rate-limit-flaky Gemini added overhead a clean run avoids. Gemini's grounding dominated, about $44 of the all-in total against a few cents of tokens, so grounded-engine fees are the thing to budget for. Conditions A and B each make roughly 800 paid engine calls (four engines times 200 questions); Condition C is free, because it only fetches pages. Get a cost estimate approved before running; the Condition A runner refuses to start without `--confirm-paid` for exactly this reason.
 
 ## The free rehearsal (start here)
+
+The citation verifier is a Marcus extension packaged under `extensions/citation_verifier/` (ADR-0013 K11).
+Every command below runs it by package name: either `pip install -e extensions/citation_verifier` once, or export `PYTHONPATH=extensions/citation_verifier` from the repository root.
+The console scripts `tow-seed`, `tow-finder`, `tow-verifier`, `tow-export`, `tow-redact`, `tow-grade`, `tow-condition-a`, `tow-condition-c` and `tow-rot-sweep` are the same entry points after the install.
 
 Every moving part runs end to end with a fake engine and zero API calls, so you can see the board enforce its rules before spending anything.
 The commands below were run as written on 2026-11-01: four cases, thirteen tasks, every one reached done, and each exported bundle named the finder, the verifier's checks, the refusals, and the human approval.
@@ -52,7 +56,7 @@ The commands below were run as written on 2026-11-01: four cases, thirteen tasks
 EXP=~/marcus-experiments/tow/rehearsal && mkdir -p $EXP/run
 
 # 1. Seed a 4-case board; this also registers it in Marcus's project registry.
-python dev-tools/experiments/runners/tow_runner.py \
+python -m citation_verifier.runner \
   --dataset /path/to/GenAISearch_Data.csv \
   --db $EXP/kanban.db --project tow-rehearsal \
   --limit 4 --approval-rate 0.25 --seed 737 --manifest $EXP/manifest.json
@@ -70,19 +74,19 @@ env -u OPENAI_API_KEY -u GEMINI_API_KEY -u PERPLEXITY_API_KEY -u CLAUDE_API_KEY 
 # 4. In another shell (a new shell starts without EXP, so set it again): the fake
 #    finder, the verifier, the human approval, the verifier again.
 EXP=~/marcus-experiments/tow/rehearsal
-python dev-tools/experiments/runners/tow_finder.py --url http://localhost:4777/mcp \
+python -m citation_verifier.finder --url http://localhost:4777/mcp \
   --project tow-rehearsal --agent-id finder-fake-1 --vendor fakevendor --engine fake --idle-exits 3
-python dev-tools/experiments/runners/tow_verifier.py --url http://localhost:4777/mcp \
+python -m citation_verifier.verifier --url http://localhost:4777/mcp \
   --project tow-rehearsal --agent-id verifier-fetch-1 --vendor fetchcheck \
   --cache-dir $EXP/fetch-cache --idle-exits 3
 python -m src.cli.approvals --url http://localhost:4777/mcp --project tow-rehearsal \
   --reviewer you --decide approved
-python dev-tools/experiments/runners/tow_verifier.py --url http://localhost:4777/mcp \
+python -m citation_verifier.verifier --url http://localhost:4777/mcp \
   --project tow-rehearsal --agent-id verifier-fetch-1 --vendor fetchcheck \
   --cache-dir $EXP/fetch-cache --idle-exits 2
 
 # 5. Export the audit bundles.
-python dev-tools/experiments/runners/export_bundles.py --url http://localhost:4777/mcp \
+python -m citation_verifier.export_bundles --url http://localhost:4777/mcp \
   --manifest $EXP/manifest.json --out-dir $EXP/bundles
 ```
 
@@ -103,7 +107,7 @@ Pick an output directory outside the repository, for example `~/marcus-experimen
 **1. Condition A (paid).** One request per engine per excerpt; the raw response, the parsed claim, the model, token counts, and cost land in one JSONL row per answer.
 
 ```
-python dev-tools/experiments/runners/tow_condition_a.py \
+python -m citation_verifier.condition_a \
     --dataset /path/to/GenAISearch_Data.csv \
     --engines openai gemini perplexity claude-haiku \
     --limit 200 \
@@ -114,7 +118,7 @@ python dev-tools/experiments/runners/tow_condition_a.py \
 **2. Condition B (paid), one board per engine.** The board never assigns work, so attribution comes from environment design: seed one project per finder vendor, and register only that vendor's finder plus a different-vendor verifier. Repeat this for each of the four engines, changing `--project` and `--manifest`.
 
 ```
-python dev-tools/experiments/runners/tow_runner.py \
+python -m citation_verifier.runner \
     --dataset /path/to/GenAISearch_Data.csv \
     --db ~/marcus-experiments/tow/repro/kanban.db \
     --project tow-b-openai \
@@ -128,12 +132,12 @@ Then start the Marcus server for that board on port 4777, which is the port the 
 ./marcus start --http --port 4777
 ```
 
-Run the finder and the verifier pull-loop workers against it (`tow_finder.py` and `tow_verifier.py`, both default to `--url http://localhost:4777/mcp`). The board drains in a fixed order, because the `synthesize` task that renders a case's final answer depends on the human `approve` task. So run the finder and verifier until they idle, sign the sampled approvals with the approvals CLI (`python -m src.cli.approvals`), then run the verifier once more so the now-eligible `synthesize` tasks complete. Skipping that second verifier pass leaves the approved sample without final answers, and the grader scores them as declines.
+Run the finder and the verifier pull-loop workers against it (`citation_verifier.finder` and `citation_verifier.verifier`, both default to `--url http://localhost:4777/mcp`). The board drains in a fixed order, because the `synthesize` task that renders a case's final answer depends on the human `approve` task. So run the finder and verifier until they idle, sign the sampled approvals with the approvals CLI (`python -m src.cli.approvals`), then run the verifier once more so the now-eligible `synthesize` tasks complete. Skipping that second verifier pass leaves the approved sample without final answers, and the grader scores them as declines.
 
 Export the audit bundles (the refusal log is written through to `data/marcus.db` as it happens, so a restart between the run and the export no longer empties it; the October 2026 full-200 bundles predate that fix and were exported with empty refusal lists):
 
 ```
-python dev-tools/experiments/runners/export_bundles.py \
+python -m citation_verifier.export_bundles \
     --url http://localhost:4777/mcp \
     --manifest ~/marcus-experiments/tow/repro/manifest-openai.json \
     --out-dir ~/marcus-experiments/tow/repro/bundles-openai
@@ -142,28 +146,28 @@ python dev-tools/experiments/runners/export_bundles.py \
 **3. Condition C (free).** The same checks as B, applied to Condition A's answers as a filter. C and B share one fetch cache, which is a preregistered requirement so a page that moves between runs is scored identically in both.
 
 ```
-python dev-tools/experiments/runners/tow_condition_c.py \
+python -m citation_verifier.condition_c \
     --a-responses ~/marcus-experiments/tow/repro/condition-a.jsonl \
     --dataset /path/to/GenAISearch_Data.csv \
     --cache-dir ~/marcus-experiments/tow/repro/fetch-cache \
     --out ~/marcus-experiments/tow/repro/condition-c.jsonl
 ```
 
-**4. Grade, label-blind.** The grader normalizes every answer from every condition into one record shape, assigns a blind id, shuffles with a fixed seed, and scores with one function that never sees the condition or the engine. It reads ground truth only from the manifests, which never touched the board. It emits the preregistered rates: confident-wrong, fabricated-URL, decline, correct, and cost per case. See `dev-tools/experiments/runners/tow_grader.py` for its arguments.
+**4. Grade, label-blind.** The grader normalizes every answer from every condition into one record shape, assigns a blind id, shuffles with a fixed seed, and scores with one function that never sees the condition or the engine. It reads ground truth only from the manifests, which never touched the board. It emits the preregistered rates: confident-wrong, fabricated-URL, decline, correct, and cost per case. See `extensions/citation_verifier/citation_verifier/grader.py` for its arguments.
 
 ## Where to look in the code
 
 | File | Purpose |
 |---|---|
-| `dev-tools/experiments/runners/tow_runner.py` | Seeds Condition B cases onto a Marcus board, writes the ground-truth manifest |
-| `dev-tools/experiments/runners/tow_condition_a.py` | Condition A: each engine alone |
-| `dev-tools/experiments/runners/tow_condition_c.py` | Condition C: verifier-only control |
-| `dev-tools/experiments/runners/tow_checks.py` | The five deterministic checks (`decide_verdict`) |
-| `dev-tools/experiments/runners/tow_grader.py` | Label-blind grader, emits the preregistered rates |
-| `dev-tools/experiments/runners/tow_engines.py` | Engine adapters and the `--engines` keys |
-| `dev-tools/experiments/runners/tow_fetch.py` | The shared fetch cache used by B and C |
-| `dev-tools/experiments/runners/export_bundles.py` | Exports one audit bundle per case |
-| `dev-tools/experiments/runners/tow_finder.py`, `tow_verifier.py` | The finder and verifier pull-loop workers |
+| `extensions/citation_verifier/citation_verifier/runner.py` | Seeds Condition B cases onto a Marcus board, writes the ground-truth manifest |
+| `extensions/citation_verifier/citation_verifier/condition_a.py` | Condition A: each engine alone |
+| `extensions/citation_verifier/citation_verifier/condition_c.py` | Condition C: verifier-only control |
+| `extensions/citation_verifier/citation_verifier/checks.py` | The five deterministic checks (`decide_verdict`) |
+| `extensions/citation_verifier/citation_verifier/grader.py` | Label-blind grader, emits the preregistered rates |
+| `extensions/citation_verifier/citation_verifier/engines.py` | Engine adapters and the `--engines` keys |
+| `extensions/citation_verifier/citation_verifier/fetch.py` | The shared fetch cache used by B and C |
+| `extensions/citation_verifier/citation_verifier/export_bundles.py` | Exports one audit bundle per case |
+| `extensions/citation_verifier/citation_verifier/finder.py`, `tow_verifier.py` | The finder and verifier pull-loop workers |
 | `python -m src.cli.approvals` | The approvals CLI a human uses to sign the sampled cases |
 
 ## The rules that keep it honest

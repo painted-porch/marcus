@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
-from runners.tow_fetch import FetchCache, html_to_text
+from citation_verifier.fetch import FetchCache, html_to_text
 
 pytestmark = pytest.mark.unit
 

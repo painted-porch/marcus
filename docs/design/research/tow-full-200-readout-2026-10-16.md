@@ -43,7 +43,7 @@ The number in this readout is left exactly as published, under the rule that sco
 Re-scoring this same full-200 run under the new rule would move the pooled Condition B confident-wrong rate from 12.1% to about 9.2%, about 2.8 percentage points (4 of the 141 delivered answers).
 Of the 5 known-network matches identified in the original classification, only 4 pass the rule's own safeguard: a network pairing is not treated as proof that the cited article is the right one, so the promotion additionally requires the claim's date, when present, not to contradict the ground truth (a network match does not excuse a wrong date).
 One of the 5 (a States Newsroom sister-site match, publisher correct, date five days off the tolerance) fails that check and stays wrong, which is the honest result of a review finding caught before this shipped, not a relaxed standard afterward.
-This is a methodology change stated honestly, not a quiet restatement of a published figure; `dev-tools/experiments/runners/tow_grader.py`'s `grade()` keeps reproducing the number above by default (`scoring_version="v1"`) and only applies the new rule when a caller explicitly asks for `scoring_version="v2"`.
+This is a methodology change stated honestly, not a quiet restatement of a published figure; `extensions/citation_verifier/citation_verifier/grader.py`'s `grade()` keeps reproducing the number above by default (`scoring_version="v1"`) and only applies the new rule when a caller explicitly asks for `scoring_version="v2"`.
 
 ## Condition A — engines alone (complete, all four engines)
 

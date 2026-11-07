@@ -62,7 +62,7 @@ intake:
 
 Each section compiles onto machinery that already exists.
 `evidence` becomes the task's `output_schema`, which the typed-evidence gate already enforces.
-`verify` composes deterministic check primitives; the Tow verifier (`dev-tools/experiments/runners/tow_checks.py`) decomposes into exactly such primitives (fetch, text-on-page, field-match, date-within, canonical-source), and a script escape hatch (claim plus evidence on stdin, verdict JSON on stdout) covers everything else.
+`verify` composes deterministic check primitives; the Tow verifier (`extensions/citation_verifier/citation_verifier/checks.py`) decomposes into exactly such primitives (fetch, text-on-page, field-match, date-within, canonical-source), and a script escape hatch (claim plus evidence on stdin, verdict JSON on stdout) covers everything else.
 Checks are authored at setup time as part of the task contract, never by the agent, per Invariant 2 v2.
 `approve` is policy over the existing human-only gate.
 `intake` generalizes the Tow seeder's `build_case_spec`: anything may call `create_case(claim_type, payload)` and get the find, verify, approve chain seeded with dependencies wired.

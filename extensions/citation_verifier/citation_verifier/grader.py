@@ -28,20 +28,13 @@ import argparse
 import csv
 import json
 import random
-import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-for entry in (str(REPO_ROOT), str(EXPERIMENTS_DIR)):
-    if entry not in sys.path:
-        sys.path.insert(0, entry)
-
-from runners.tow_checks import (  # noqa: E402
+from citation_verifier.checks import (  # noqa: E402
     _compact,
     classify_slug_relationship,
     date_within_tolerance,
@@ -702,7 +695,7 @@ def main() -> None:
 
     fetcher = None
     if args.cache_dir:
-        from runners.tow_fetch import FetchCache
+        from citation_verifier.fetch import FetchCache
 
         fetcher = FetchCache(cache_dir=args.cache_dir)
 

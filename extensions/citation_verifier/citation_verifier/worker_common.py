@@ -17,18 +17,13 @@ never silently held.
 
 import asyncio
 import json
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from runners.tow_checks import decide_verdict  # noqa: E402
-from runners.tow_fetch import FetchResult  # noqa: E402
+from citation_verifier.checks import decide_verdict  # noqa: E402
+from citation_verifier.fetch import FetchResult  # noqa: E402
 
 CLAIM_FIELDS = ("headline", "publisher", "date", "url")
 
@@ -204,7 +199,7 @@ async def work_loop(
         Counters: completed, blocked, polls.
     """
     if client is None:
-        from src.worker.inspector import Inspector
+        from citation_verifier.kernel import Inspector
 
         inspector = Inspector(connection_type="http")
         async with inspector.connect(url=cfg.marcus_url):

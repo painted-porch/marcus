@@ -122,7 +122,7 @@ Runner, two workers, export, grader; then the fifty-excerpt pilot across A, B, a
 
 ### What it is
 
-Step 6, the runner. dev-tools/experiments/runners/tow_runner.py reads the Tow dataset and creates, per excerpt, a find task, a verify task depending on it, a sampled approve task, and a close task, through the kanban interface, with no decomposer and no planner model.
+Step 6, the runner. extensions/citation_verifier/citation_verifier/runner.py reads the Tow dataset and creates, per excerpt, a find task, a verify task depending on it, a sampled approve task, and a close task, through the kanban interface, with no decomposer and no planner model.
 
 Step 7, the workers.
 Two pull-loop programs that use the HTTP MCP tools exactly as a coding agent would: a finder that wraps one engine (Perplexity's Agent API first; OpenAI with web search, Gemini with grounding, and Grok after) and reports the claim; a verifier that fetches the URL respecting robots.txt, matches the excerpt, checks publisher and date, and reports the verdict.

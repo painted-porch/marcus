@@ -31,7 +31,7 @@ Three rules the seeding enforces by construction:
 
 Usage::
 
-    python dev-tools/experiments/runners/tow_runner.py \
+    python -m citation_verifier.runner \
         --dataset /path/to/GenAISearch_Data.csv \
         --db /path/to/kanban.db \
         --project tow-b-perplexity \
@@ -44,22 +44,18 @@ import asyncio
 import csv
 import json
 import random
-import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from src.core.project_registry import (  # noqa: E402
+from citation_verifier.kernel import (
+    REPO_ROOT,
     ProjectRegistry,
+    SQLiteKanban,
     register_sqlite_board,
 )
-from src.integrations.providers.sqlite_kanban import SQLiteKanban  # noqa: E402
 
 # The study's query, verbatim from the Tow Center README, so the
 # finder sends exactly what the original engines received.
@@ -493,7 +489,7 @@ async def _persist_task_metadata(metadata_db: str, rows: List[Dict[str, Any]]) -
         One prepared metadata row per seeded task, ids already
         prefixed.
     """
-    from src.core.persistence import write_task_metadata_rows
+    from citation_verifier.kernel import write_task_metadata_rows
 
     await write_task_metadata_rows(metadata_db, rows)
 

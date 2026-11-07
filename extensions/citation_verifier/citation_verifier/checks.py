@@ -26,7 +26,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from runners.tow_fetch import FetchResult
+from citation_verifier.fetch import FetchResult
 
 # Characters normalized to their plain equivalents before comparison.
 _REPLACEMENTS = {
