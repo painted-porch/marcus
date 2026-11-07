@@ -128,7 +128,11 @@ class TestFrontierReflectsTheRealBoard:
 
         frontier = await _frontier_for_agent("alice", state)
 
-        assert frontier == {"tasks_claimable": 5, "tasks_in_flight": 0}
+        assert frontier == {
+            "tasks_claimable": 5,
+            "tasks_in_flight": 0,
+            "tasks_stranded": 0,
+        }
 
     @pytest.mark.asyncio
     async def test_a_narrowing_frontier_is_reported_each_time(self) -> None:
@@ -158,7 +162,11 @@ class TestFrontierReflectsTheRealBoard:
 
         frontier = await _frontier_for_agent("alice", state)
 
-        assert frontier == {"tasks_claimable": 1, "tasks_in_flight": 1}
+        assert frontier == {
+            "tasks_claimable": 1,
+            "tasks_in_flight": 1,
+            "tasks_stranded": 0,
+        }
 
 
 class TestItUsesTheAgentsOwnProject:
@@ -176,7 +184,11 @@ class TestItUsesTheAgentsOwnProject:
 
         frontier = await _frontier_for_agent("alice", state)
 
-        assert frontier == {"tasks_claimable": 1, "tasks_in_flight": 0}
+        assert frontier == {
+            "tasks_claimable": 1,
+            "tasks_in_flight": 0,
+            "tasks_stranded": 0,
+        }
 
     @pytest.mark.asyncio
     async def test_an_unregistered_agent_gets_no_frontier(self) -> None:
@@ -247,4 +259,5 @@ class TestItMatchesTheSameRuleTheNoWorkPathUses:
         assert frontier == {
             "tasks_claimable": verdict.tasks_claimable,
             "tasks_in_flight": verdict.tasks_in_flight,
+            "tasks_stranded": verdict.tasks_stranded,
         }

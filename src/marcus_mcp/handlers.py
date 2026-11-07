@@ -35,6 +35,7 @@ from .tools import (  # Agent tools; Task tools; Project tools; System tools; NL
     request_next_task,
     request_task_decline,
     request_task_redo,
+    unassign_task,
 )
 from .tools.analytics import (  # Analytics tools
     get_agent_metrics,
@@ -1208,6 +1209,39 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                 "required": [],
             },
         ),
+        # Operator remedy for a stranded or stuck assignment (issue #900).
+        # The BOARD_DRAINED message names stranded cards and this tool;
+        # until #907 the function existed but no client could call it.
+        types.Tool(
+            name="unassign_task",
+            description=(
+                "Release a task's assignment and reset it to TODO so it can be "
+                "claimed again. Operator tool: use it on a card the "
+                "BOARD_DRAINED message names as stranded (TODO, still named to "
+                "an assignee, held by no live lease), or on a stuck "
+                "assignment. Clears the in-memory assignment, the persisted "
+                "row, the lease and the board's assignee. agent_id is "
+                "optional: when omitted the holder is read from memory, then "
+                "from the board's own assigned_to."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task to release",
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": (
+                            "The holder to release it from. Optional; "
+                            "inferred from memory, then the board, when omitted."
+                        ),
+                    },
+                },
+                "required": ["task_id"],
+            },
+        ),
         # Pattern Learning Tools removed - only accessible via visualization UI API
         # Audit and analytics tools
         USAGE_REPORT_TOOL,
@@ -1746,6 +1780,16 @@ async def handle_tool_call(
             result = await remove_project(state, arguments)
         elif name == "update_project":
             result = await update_project(state, arguments)
+        elif name == "unassign_task":
+            task_id = arguments.get("task_id") if arguments else None
+            if not task_id:
+                result = {"success": False, "error": "task_id is required"}
+            else:
+                result = await unassign_task(
+                    task_id=str(task_id),
+                    agent_id=arguments.get("agent_id"),
+                    state=state,
+                )
 
         # Prediction and AI intelligence tools
         elif name == "predict_completion_time":

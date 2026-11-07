@@ -40,7 +40,7 @@ from src.core.models import (
     TaskStatus,
     WorkerStatus,
 )
-from src.core.task_claimability import build_slug_to_id
+from src.core.task_claimability import COORDINATOR_ASSIGNEE, build_slug_to_id
 from src.core.task_claimability import deps_allow_claim as _deps_allow_claim
 from src.core.task_claimability import is_integration_task as _is_integration_task
 from src.core.task_claimability import phase_satisfied_by
@@ -3696,6 +3696,119 @@ def _fire_cost_summary_for_project(project_id: str, store: Any) -> None:
         logger.debug("project_cost_summary not emitted for %s: %s", project_id, exc)
 
 
+def _warn_stranded_once(state: Any, task: Task) -> None:
+    """
+    Warn once per card that a stranded assignment is being reclaimed (#900).
+
+    Agents poll every 30 seconds, so a per-poll warning would be noise; the
+    card id is remembered on the server state for the process lifetime. The
+    durable record is the ``stranded_assignment`` stamp the assignment
+    write puts on the card (``reclaim_stamp``); this line is the heads-up.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state; ``_stranded_warned`` is created on it lazily.
+    task : Task
+        The stranded card about to be offered.
+    """
+    warned = getattr(state, "_stranded_warned", None)
+    if not isinstance(warned, set):
+        warned = set()
+        try:
+            state._stranded_warned = warned
+        except Exception:  # noqa: BLE001 - a read-only state still gets the line
+            pass
+    if task.id in warned:
+        return
+    warned.add(task.id)
+    logger.warning(
+        f"[#900] Stranded assignment reclaimed: task {task.id} '{task.name}' is "
+        f"TODO but names '{task.assigned_to}' with no live lease, reservation or "
+        "persisted assignment; it is claimable again and the stale assignee is "
+        "replaced on assignment."
+    )
+
+
+def reclaim_stamp(task: Task, agent_id: str, now: datetime) -> Optional[Dict[str, Any]]:
+    """
+    Return the card's record with a reclaim stamp, or None if nothing was reclaimed.
+
+    Issue #900. When a stranded card (TODO, named to someone, held by
+    nothing) is handed to ``agent_id``, the board write that replaces the
+    stale assignee must keep who was holding it, who took it and when;
+    otherwise the only evidence of what went wrong is overwritten by the
+    fix. The stamp is merged into ``source_context`` so every existing key
+    survives.
+
+    Parameters
+    ----------
+    task : Task
+        The card about to be assigned, as read before the write.
+    agent_id : str
+        The agent receiving it.
+    now : datetime
+        Timezone-aware timestamp of the reclaim.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        The merged ``source_context`` to write, or None when the card was
+        not stranded (no assignee, already named to this agent, or not
+        TODO), in which case the record is left untouched.
+    """
+    if (
+        task.status != TaskStatus.TODO
+        or not task.assigned_to
+        or task.assigned_to == agent_id
+    ):
+        return None
+    return {
+        **(task.source_context or {}),
+        "stranded_assignment": {
+            "previous_assignee": task.assigned_to,
+            "reclaimed_by": agent_id,
+            "reclaimed_at": now.isoformat(),
+        },
+    }
+
+
+def assignment_write_payload(
+    task: Task, agent_id: str, now: datetime
+) -> Dict[str, Any]:
+    """
+    Build the one board write that lands an assignment.
+
+    Status and assignee always; and, when the card was stranded (#900), the
+    reclaim stamp in the same payload, so the record of who held the card
+    cannot be lost between two writes or dropped by a failure after the
+    first.
+
+    Parameters
+    ----------
+    task : Task
+        The card about to be assigned, as read before the write.
+    agent_id : str
+        The agent receiving it.
+    now : datetime
+        Timezone-aware timestamp used for the stamp.
+
+    Returns
+    -------
+    Dict[str, Any]
+        ``{"status": IN_PROGRESS, "assigned_to": agent_id}`` plus
+        ``"source_context"`` when ``reclaim_stamp`` produced one.
+    """
+    payload: Dict[str, Any] = {
+        "status": TaskStatus.IN_PROGRESS,
+        "assigned_to": agent_id,
+    }
+    stamped = reclaim_stamp(task, agent_id, now)
+    if stamped is not None:
+        payload["source_context"] = stamped
+    return payload
+
+
 async def _frontier_for_agent(agent_id: str, state: Any) -> Optional[Dict[str, int]]:
     """Report the board's claimable-work count for the agent's project.
 
@@ -3728,10 +3841,10 @@ async def _frontier_for_agent(agent_id: str, state: Any) -> Optional[Dict[str, i
     Returns
     -------
     Optional[Dict[str, int]]
-        ``tasks_claimable`` and ``tasks_in_flight``, or ``None`` when the
-        agent has no registered project or the count could not be
-        computed. Observational only: a failure here must never affect
-        whether the assignment itself succeeds.
+        ``tasks_claimable``, ``tasks_in_flight`` and ``tasks_stranded``
+        (issue #900), or ``None`` when the agent has no registered project
+        or the count could not be computed. Observational only: a failure
+        here must never affect whether the assignment itself succeeds.
     """
     project_id = (
         state.agent_project_map.get(agent_id, "")
@@ -3751,6 +3864,7 @@ async def _frontier_for_agent(agent_id: str, state: Any) -> Optional[Dict[str, i
     return {
         "tasks_claimable": verdict.tasks_claimable,
         "tasks_in_flight": verdict.tasks_in_flight,
+        "tasks_stranded": verdict.tasks_stranded,
     }
 
 
@@ -4178,14 +4292,19 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                                 "retry_reason": "file_lock_race",
                             }
 
+                # Issue #900: a stranded card (TODO, named to a vanished
+                # holder, held by nothing) is reclaimed here. The same
+                # write that replaces the stale assignee stamps who held
+                # it, who took it and when onto the card's record, so the
+                # transition is on the board and not only in a log line.
+                _assignment_update = assignment_write_payload(
+                    optimal_task, agent_id, datetime.now(timezone.utc)
+                )
+                _reclaimed_context = _assignment_update.get("source_context")
                 # Update kanban FIRST (fail fast if kanban is down)
                 try:
                     await state.kanban_client.update_task(
-                        optimal_task.id,
-                        {
-                            "status": TaskStatus.IN_PROGRESS,
-                            "assigned_to": agent_id,
-                        },
+                        optimal_task.id, _assignment_update
                     )
                 except Exception:
                     # Kanban write failed AFTER we acquired file locks.
@@ -4214,6 +4333,8 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                 # this reply is built.
                 optimal_task.status = TaskStatus.IN_PROGRESS
                 optimal_task.assigned_to = agent_id
+                if _reclaimed_context is not None:
+                    optimal_task.source_context = _reclaimed_context
 
                 # Sync subtask manager's assigned_to so Cato/analytics
                 # see attribution immediately on pickup, not only at
@@ -4588,6 +4709,25 @@ async def request_next_task(agent_id: str, state: Any) -> Any:
                         "work) and nothing is in flight. An operator must "
                         "intervene; there is nothing more for you to do."
                     )
+                    if _drain_verdict.tasks_stranded:
+                        # Issue #900: name the cards and who the board
+                        # still says holds them, so the operator knows
+                        # what is stuck and what releasing it would mean.
+                        _by_id = {t.id: t for t in (state.project_tasks or [])}
+                        _named = ", ".join(
+                            f"{tid} (named to "
+                            f"{getattr(_by_id.get(tid), 'assigned_to', None)})"
+                            for tid in _drain_verdict.stranded_task_ids[:10]
+                        )
+                        detail += (
+                            f" {_drain_verdict.tasks_stranded} task(s) are "
+                            "stranded: TODO on the board, still named to an "
+                            f"assignee, held by no live lease: {_named}. A card "
+                            f"named to {COORDINATOR_ASSIGNEE} is coordinator-owned "
+                            "and never offered to agents; an operator can "
+                            "release any stranded card with "
+                            "unassign_task(task_id)."
+                        )
                 logger.info(
                     f"BOARD DRAINED for {agent_id} (project {_drain_project_id}): "
                     f"{_drain_verdict.to_dict()}"
@@ -10737,6 +10877,17 @@ async def _find_optimal_task_original_logic(
         all_assigned_ids = (
             set(assigned_task_ids) | persisted_assigned_ids | state.tasks_being_assigned
         )
+        # Issue #900 (Codex P2 on PR #907): a live lease is a hold too, and
+        # it is the one hold that need not appear in ``agent_tasks`` or the
+        # persisted rows (a restart rehydrates the lease store before the
+        # roster). The drain verdict counts it as held; the filter must
+        # too, or a TODO card under a live lease would be reclaimed from
+        # its holder and the holder's epoch rotated.
+        _live_leases = getattr(
+            getattr(state, "lease_manager", None), "active_leases", None
+        )
+        if isinstance(_live_leases, dict):
+            all_assigned_ids |= set(_live_leases)
 
         # Get completed task IDs for dependency checking
         completed_task_ids = {t.id for t in scoped_tasks if t.status == TaskStatus.DONE}
@@ -10762,17 +10913,31 @@ async def _find_optimal_task_original_logic(
                 filtering_stats["already_assigned"] += 1
                 continue
 
-            # Skip tasks owned on the board (assigned_to is set).
-            # Design tasks are assigned to "Marcus" and handled
-            # internally. Agent tasks get assigned_to set on
-            # assignment. Recovery clears assigned_to to release
-            # tasks back to the pool.
             if t.assigned_to:
-                filtering_stats["board_assigned"] += 1
-                logger.debug(
-                    f"Skipping '{t.name}' — assigned to " f"'{t.assigned_to}' on board"
+                if t.assigned_to == COORDINATOR_ASSIGNEE:
+                    # Design tasks are assigned to the coordinator itself
+                    # and handled internally; agents are never offered
+                    # one, even when its completion never landed (#619).
+                    filtering_stats["board_assigned"] += 1
+                    logger.debug(
+                        f"Skipping '{t.name}' — assigned to "
+                        f"'{t.assigned_to}' on board"
+                    )
+                    continue
+                # Issue #900: this card is TODO (checked above), still
+                # names an agent, and is held by nothing the kernel knows
+                # (``all_assigned_ids`` above: no live assignment, no
+                # persisted row, no reservation). Every kernel path that
+                # resets a card to TODO also clears its assignee, so the
+                # name is residue, and skipping it here made the card
+                # unofferable, uncompletable, and a permanent block on
+                # its dependents. It is claimable; the assignment write
+                # replaces the stale name and stamps the transition on the
+                # card's record (``assignment_write_payload``).
+                filtering_stats["stranded_reclaimed"] = (
+                    filtering_stats.get("stranded_reclaimed", 0) + 1
                 )
-                continue
+                _warn_stranded_once(state, t)
 
             # GH-XX: Skip parent tasks that have subtasks
             # Parent tasks should not be assigned - only their subtasks
@@ -11114,6 +11279,46 @@ async def get_all_board_tasks(
         return {"success": False, "error": str(e), "tasks": [], "count": 0}
 
 
+async def _board_assignee(state: Any, task_id: str) -> Optional[str]:
+    """
+    Return the assignee the board itself records for ``task_id``, if any.
+
+    Issue #900. Used by ``unassign_task`` when no in-memory holder exists:
+    a stranded card's only record of who held it is the board row. Reads
+    the cached project tasks first, then the provider, and degrades to
+    ``None`` on any failure so the caller's "not currently assigned" path
+    is unchanged when the board has nothing to say.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state (``project_tasks``, ``kanban_client``).
+    task_id : str
+        The card to look up.
+
+    Returns
+    -------
+    Optional[str]
+        The board's ``assigned_to`` for the card, or ``None``.
+    """
+    tasks = getattr(state, "project_tasks", None)
+    board_task = None
+    if isinstance(tasks, list):
+        board_task = next((t for t in tasks if t.id == task_id), None)
+    # The cache is empty before the first board refresh; ask the provider
+    # through the KanbanInterface method every provider implements
+    # (Codex on PR #907: it is ``get_task_by_id``, not ``get_task``).
+    lookup = getattr(getattr(state, "kanban_client", None), "get_task_by_id", None)
+    if board_task is None and callable(lookup):
+        try:
+            board_task = await lookup(task_id)
+        except Exception as e:  # noqa: BLE001 - absence, not an error, is the answer
+            logger.debug(f"Board lookup for {task_id} failed: {e}")
+            board_task = None
+    assignee = getattr(board_task, "assigned_to", None) if board_task else None
+    return assignee if isinstance(assignee, str) and assignee else None
+
+
 async def unassign_task(
     task_id: str, agent_id: Optional[str], state: Any
 ) -> Dict[str, Any]:
@@ -11141,6 +11346,7 @@ async def unassign_task(
         - agent_id: str (the agent it was unassigned from)
         - task_id: str
     """
+    assignee_source = "memory" if agent_id is None else "caller"
     try:
         # Initialize kanban if needed
         await state.initialize_kanban()
@@ -11161,6 +11367,17 @@ async def unassign_task(
                     ):
                         agent_id = a_id
                         break
+
+            # Issue #900 (Codex P2 on PR #907): a stranded card names its
+            # holder only on the board (TODO, assignee set, held by no
+            # lease, reservation or row). The BOARD_DRAINED message sends an
+            # operator here to release exactly such cards, so read the
+            # board's own assignee before giving up.
+            if not agent_id:
+                board_assignee = await _board_assignee(state, task_id)
+                if board_assignee:
+                    agent_id = board_assignee
+                    assignee_source = "board"
 
         if not agent_id:
             # Task not currently assigned
@@ -11186,20 +11403,53 @@ async def unassign_task(
 
         logger.info(f"Unassigning task {task_id} from agent {agent_id}")
 
-        # 1. Remove from state.agent_tasks
-        if agent_id in state.agent_tasks:
+        # Issue #900 (Codex P2 on PR #907): release only the records that
+        # reference THIS task. A stranded card's stale name may belong to
+        # an agent that is alive and holding a different card; wiping that
+        # agent's assignment, current_tasks and persisted row would corrupt
+        # tracking for live work and clear the workload guard
+        # request_next_task relies on. The same rule holds on every path.
+        in_memory = (
+            state.agent_tasks.get(agent_id)
+            if isinstance(getattr(state, "agent_tasks", None), dict)
+            else None
+        )
+        referenced_in_memory = getattr(in_memory, "task_id", None) == task_id
+        referenced_in_current = False
+
+        # 1. Remove from state.agent_tasks, if that entry is this task
+        if referenced_in_memory:
             del state.agent_tasks[agent_id]
             logger.debug(f"Removed task from state.agent_tasks for {agent_id}")
 
-        # 2. Clear agent's current_tasks
+        # 2. Drop this task from the agent's current_tasks, keep the rest
         if agent_id in state.agent_status:
             agent = state.agent_status[agent_id]
-            agent.current_tasks = []
-            logger.debug(f"Cleared current_tasks for agent {agent_id}")
+            current = list(agent.current_tasks or [])
+            referenced_in_current = any(
+                getattr(t, "id", None) == task_id for t in current
+            )
+            agent.current_tasks = [
+                t for t in current if getattr(t, "id", None) != task_id
+            ]
+            if referenced_in_current:
+                logger.debug(f"Removed {task_id} from current_tasks of {agent_id}")
 
-        # 3. Remove from assignment_persistence
-        await state.assignment_persistence.remove_assignment(agent_id)
-        logger.debug(f"Removed from assignment_persistence for {agent_id}")
+        # 3. Remove the persisted row only when it is for this task
+        persisted_task_id = None
+        try:
+            persisted = await state.assignment_persistence.get_assignment(agent_id)
+            if isinstance(persisted, dict):
+                persisted_task_id = persisted.get("task_id")
+        except Exception as e:  # noqa: BLE001 - absence is the answer
+            logger.debug(f"Persisted assignment lookup for {agent_id} failed: {e}")
+        if (
+            referenced_in_memory
+            or referenced_in_current
+            or persisted_task_id == task_id
+        ):
+            await state.assignment_persistence.remove_assignment(agent_id)
+            logger.debug(f"Removed from assignment_persistence for {agent_id}")
 
         # 4. Remove from tasks_being_assigned
         state.tasks_being_assigned.discard(task_id)
@@ -11249,6 +11499,7 @@ async def unassign_task(
             "success": True,
             "message": f"Task {task_id} successfully unassigned from {agent_id}",
             "agent_id": agent_id,
+            "assignee_source": assignee_source,
             "task_id": task_id,
         }
 

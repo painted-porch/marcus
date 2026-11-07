@@ -21,6 +21,7 @@ from .task import (
     request_next_task,
     request_task_decline,
     request_task_redo,
+    unassign_task,
 )
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "report_task_progress",
     "report_blocker",
     "request_task_redo",
+    "unassign_task",
     "request_task_decline",
     # Artifact tools
     "log_artifact",

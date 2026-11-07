@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from src.core.models import Task, TaskStatus
 from src.logging.conversation_logger import conversation_logger
+from src.marcus_mcp.coordinator.drain import find_stranded_assignments
 from src.marcus_mcp.utils import serialize_for_mcp
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,25 @@ async def get_project_status(state: Any) -> Any:
                 state, {t.id for t in (state.project_tasks or [])}
             )
 
+            # Issue #900: cards the kernel can neither offer nor finish. A
+            # TODO card that still names an assignee but is held by no
+            # live lease, reservation or persisted row used to be
+            # invisible: skipped by the eligibility filter, counted as
+            # in-flight by the drain verdict, reported nowhere. Same rule
+            # as both of those, so the three cannot disagree. Observational:
+            # a failure here is logged and the field is omitted.
+            stranded_payload: Optional[Dict[str, Any]] = None
+            try:
+                stranded = await find_stranded_assignments(
+                    state, active_project.id if active_project else None
+                )
+                stranded_payload = {
+                    "count": len(stranded),
+                    "task_ids": [t.id for t in stranded],
+                }
+            except Exception as e:  # noqa: BLE001 - observational, never blocking
+                logger.warning(f"[#900] Stranded-assignment count failed: {e}")
+
             unfinished = None
             if hasattr(state, "kanban_client") and state.kanban_client:
                 unfinished = await list_unfinished_tasks(
@@ -289,6 +309,8 @@ async def get_project_status(state: Any) -> Any:
             }
             if unfinished is not None:
                 response["project"]["unfinished_tasks"] = unfinished
+            if stranded_payload is not None:
+                response["project"]["stranded_assignments"] = stranded_payload
             return serialize_for_mcp(response)
         else:
             return {

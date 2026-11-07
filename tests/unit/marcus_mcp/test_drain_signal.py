@@ -171,14 +171,23 @@ class TestVerdictWhenWorkRemains:
         assert verdict.reason == "in_flight"
 
     @pytest.mark.asyncio
-    async def test_todo_still_assigned_on_board_is_pending_recovery(self) -> None:
-        """TODO with assigned_to set is an orphan the reconciler will clear."""
+    async def test_todo_still_assigned_on_board_is_stranded_not_in_flight(
+        self,
+    ) -> None:
+        """TODO with an assignee and no hold is residue, not live work (#900).
+
+        This used to count as in flight on the theory that the reconciler
+        would clear it; the reconciler only touches IN_PROGRESS orphans and
+        persisted rows, so one such card kept a board from ever draining.
+        """
         state = _state([_task("a", assigned_to="agent-gone")])
 
         verdict = await compute_board_drain(state, PROJECT)
 
         assert verdict.drained is False
-        assert verdict.reason == "in_flight"
+        assert verdict.reason == "claimable"
+        assert verdict.tasks_in_flight == 0
+        assert verdict.tasks_stranded == 1
 
     @pytest.mark.asyncio
     async def test_empty_board_is_never_drained(self) -> None:
