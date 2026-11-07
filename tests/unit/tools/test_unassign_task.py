@@ -192,6 +192,48 @@ class TestUnassignTask:
         assert result["agent_id"] == "agent-1"
 
     @pytest.mark.asyncio
+    async def test_unassign_task_releases_a_stranded_card_named_only_on_the_board(
+        self, mock_state
+    ):
+        """A stranded card (#900) has no in-memory holder; the board's assignee is the one to release.
+
+        The BOARD_DRAINED message sends an operator here for exactly such
+        cards (Codex P2 on PR #907), so refusing with "not currently
+        assigned" would advertise a remedy that does not work.
+        """
+        mock_state.agent_tasks = {}
+        mock_state.agent_status = {}
+        mock_state.lease_manager.active_leases = {}
+        mock_state.project_tasks = [
+            create_mock_task("task-9", "Stranded", assigned_to="agent-vanished")
+        ]
+
+        result = await unassign_task(task_id="task-9", agent_id=None, state=mock_state)
+
+        assert result["success"] is True
+        assert result["agent_id"] == "agent-vanished"
+        assert result["assignee_source"] == "board"
+        mock_state.kanban_client.update_task.assert_called_once_with(
+            "task-9", {"status": TaskStatus.TODO, "assigned_to": None, "progress": 0}
+        )
+
+    @pytest.mark.asyncio
+    async def test_unassign_task_releases_a_coordinator_owned_ghost(self, mock_state):
+        """A TODO design ghost still named to Marcus is released the same way."""
+        mock_state.agent_tasks = {}
+        mock_state.agent_status = {}
+        mock_state.lease_manager.active_leases = {}
+        mock_state.project_tasks = [
+            create_mock_task("ghost-1", "Design the lexer", assigned_to="Marcus")
+        ]
+
+        result = await unassign_task(task_id="ghost-1", agent_id=None, state=mock_state)
+
+        assert result["success"] is True
+        assert result["agent_id"] == "Marcus"
+        mock_state.kanban_client.update_task.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_unassign_task_not_currently_assigned(self, mock_state):
         """Test error when task is not currently assigned."""
         # Clear all assignments

@@ -73,6 +73,7 @@ ROLE_TOOLS = {
         "switch_project",  # Change active project
         "add_project",  # Add existing project
         "update_project",  # Modify project config
+        "unassign_task",  # Release a stranded or stuck assignment (#900)
         # Task context (read-only)
         "get_task_context",  # View task details
     ],

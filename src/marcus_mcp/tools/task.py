@@ -10877,6 +10877,17 @@ async def _find_optimal_task_original_logic(
         all_assigned_ids = (
             set(assigned_task_ids) | persisted_assigned_ids | state.tasks_being_assigned
         )
+        # Issue #900 (Codex P2 on PR #907): a live lease is a hold too, and
+        # it is the one hold that need not appear in ``agent_tasks`` or the
+        # persisted rows (a restart rehydrates the lease store before the
+        # roster). The drain verdict counts it as held; the filter must
+        # too, or a TODO card under a live lease would be reclaimed from
+        # its holder and the holder's epoch rotated.
+        _live_leases = getattr(
+            getattr(state, "lease_manager", None), "active_leases", None
+        )
+        if isinstance(_live_leases, dict):
+            all_assigned_ids |= set(_live_leases)
 
         # Get completed task IDs for dependency checking
         completed_task_ids = {t.id for t in scoped_tasks if t.status == TaskStatus.DONE}
@@ -11268,6 +11279,42 @@ async def get_all_board_tasks(
         return {"success": False, "error": str(e), "tasks": [], "count": 0}
 
 
+async def _board_assignee(state: Any, task_id: str) -> Optional[str]:
+    """
+    Return the assignee the board itself records for ``task_id``, if any.
+
+    Issue #900. Used by ``unassign_task`` when no in-memory holder exists:
+    a stranded card's only record of who held it is the board row. Reads
+    the cached project tasks first, then the provider, and degrades to
+    ``None`` on any failure so the caller's "not currently assigned" path
+    is unchanged when the board has nothing to say.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state (``project_tasks``, ``kanban_client``).
+    task_id : str
+        The card to look up.
+
+    Returns
+    -------
+    Optional[str]
+        The board's ``assigned_to`` for the card, or ``None``.
+    """
+    tasks = getattr(state, "project_tasks", None)
+    board_task = None
+    if isinstance(tasks, list):
+        board_task = next((t for t in tasks if t.id == task_id), None)
+    if board_task is None and hasattr(state.kanban_client, "get_task"):
+        try:
+            board_task = await state.kanban_client.get_task(task_id)
+        except Exception as e:  # noqa: BLE001 - absence, not an error, is the answer
+            logger.debug(f"Board lookup for {task_id} failed: {e}")
+            board_task = None
+    assignee = getattr(board_task, "assigned_to", None) if board_task else None
+    return assignee if isinstance(assignee, str) and assignee else None
+
+
 async def unassign_task(
     task_id: str, agent_id: Optional[str], state: Any
 ) -> Dict[str, Any]:
@@ -11295,6 +11342,7 @@ async def unassign_task(
         - agent_id: str (the agent it was unassigned from)
         - task_id: str
     """
+    assignee_source = "memory" if agent_id is None else "caller"
     try:
         # Initialize kanban if needed
         await state.initialize_kanban()
@@ -11315,6 +11363,17 @@ async def unassign_task(
                     ):
                         agent_id = a_id
                         break
+
+            # Issue #900 (Codex P2 on PR #907): a stranded card names its
+            # holder only on the board (TODO, assignee set, held by no
+            # lease, reservation or row). The BOARD_DRAINED message sends an
+            # operator here to release exactly such cards, so read the
+            # board's own assignee before giving up.
+            if not agent_id:
+                board_assignee = await _board_assignee(state, task_id)
+                if board_assignee:
+                    agent_id = board_assignee
+                    assignee_source = "board"
 
         if not agent_id:
             # Task not currently assigned
@@ -11403,6 +11462,7 @@ async def unassign_task(
             "success": True,
             "message": f"Task {task_id} successfully unassigned from {agent_id}",
             "agent_id": agent_id,
+            "assignee_source": assignee_source,
             "task_id": task_id,
         }
 

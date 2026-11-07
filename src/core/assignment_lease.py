@@ -1788,10 +1788,18 @@ class AssignmentLeaseManager:
                     await self.kanban_client.update_task_status(
                         lease.task_id, TaskStatus.TODO
                     )
+                    # Issue #900: this leaves the card TODO with its
+                    # assignee still on it, which is the stranded state the
+                    # eligibility filter now reclaims. No shipped provider
+                    # takes this branch (all implement update_task); if one
+                    # ever does, the reclaim's stamp names this agent as the
+                    # card's previous_assignee, and this line names the cause.
                     logger.warning(
                         f"Kanban client lacks update_task — "
                         f"assigned_to not cleared on board for "
-                        f"{lease.task_id}"
+                        f"{lease.task_id}; the card is left stranded "
+                        f"(TODO, named to {lease.agent_id}, held by nothing) "
+                        "and will be reclaimed by the next request_next_task"
                     )
                 else:
                     logger.warning(

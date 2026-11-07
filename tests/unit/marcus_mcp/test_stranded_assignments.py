@@ -34,7 +34,9 @@ from src.marcus_mcp.coordinator.drain import (
     compute_board_drain,
     find_stranded_assignments,
 )
+from src.marcus_mcp.handlers import get_tool_definitions, handle_tool_call
 from src.marcus_mcp.tools import task as task_module
+from src.marcus_mcp.tools.auth import ROLE_TOOLS
 from src.marcus_mcp.tools.task import (
     _find_optimal_task_original_logic,
     _frontier_for_agent,
@@ -347,6 +349,21 @@ class TestFilterReclaimsStrandedCards:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_a_todo_card_under_a_live_lease_is_never_offered(self) -> None:
+        """A live lease is a hold even with no in-memory or persisted row (Codex P2 on #907).
+
+        The filter's held set must agree with the drain verdict's: lease,
+        reservation, persisted row. Without the lease in it, a TODO card
+        whose holder is alive (status reset externally under a live lease)
+        would be handed to a second agent and the first one's epoch rotated.
+        """
+        state = _state([_task("a", assigned_to="agent-2")], leases={"a": "agent-2"})
+
+        result = await _find_optimal_task_original_logic("agent-1", state)
+
+        assert result is None
+
+    @pytest.mark.asyncio
     async def test_a_coordinator_owned_card_is_never_offered(self) -> None:
         """A TODO design ghost stays Marcus's; agents are not handed design work (#619 unchanged)."""
         state = _state([_task("ghost", assigned_to=COORDINATOR_ASSIGNEE)])
@@ -506,3 +523,46 @@ class TestDrainedMessageNamesStrandedCards:
         assert "ghost" in message
         assert COORDINATOR_ASSIGNEE in message
         assert "unassign_task" in message
+
+
+# ---------------------------------------------------------------------------
+# The advertised remedy is a tool an operator can actually call
+# ---------------------------------------------------------------------------
+
+
+class TestUnassignTaskIsAnOperatorTool:
+    """``unassign_task`` existed as a function only; the drained message advertised it (Codex P2 on #907)."""
+
+    def test_operators_see_it_and_agents_do_not(self) -> None:
+        """Developers and admins release cards; agents self-select and never release others' work."""
+        assert "unassign_task" in {t.name for t in get_tool_definitions("human")}
+        assert "unassign_task" not in {t.name for t in get_tool_definitions("agent")}
+        assert "unassign_task" in ROLE_TOOLS["developer"]
+        assert "unassign_task" not in ROLE_TOOLS["agent"]
+
+    def test_schema_requires_only_the_task_id(self) -> None:
+        """The drained message says unassign_task(task_id); the holder is inferred."""
+        tool = next(
+            t for t in get_tool_definitions("human") if t.name == "unassign_task"
+        )
+
+        assert tool.inputSchema["required"] == ["task_id"]
+        assert set(tool.inputSchema["properties"]) == {"task_id", "agent_id"}
+
+    @pytest.mark.asyncio
+    async def test_dispatch_reaches_the_tool(self) -> None:
+        """An authenticated admin's call lands on unassign_task with the id and no holder."""
+        state = Mock()
+        state._current_client_id = "operator"
+        state._registered_clients = {"operator": {"client_type": "admin"}}
+        with (
+            patch(
+                "src.marcus_mcp.handlers.unassign_task",
+                new=AsyncMock(return_value={"success": True}),
+            ) as tool,
+            patch("src.marcus_mcp.handlers.rehydrate_on_tool_call", new=AsyncMock()),
+            patch("src.marcus_mcp.handlers.get_audit_logger", return_value=AsyncMock()),
+        ):
+            await handle_tool_call("unassign_task", {"task_id": "t-ghost"}, state)
+
+        tool.assert_awaited_once_with(task_id="t-ghost", agent_id=None, state=state)
