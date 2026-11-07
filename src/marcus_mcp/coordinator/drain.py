@@ -16,11 +16,20 @@ gate (strict for ordinary tasks, hard-only for subtasks, exactly as the
 two selectors apply them) and the board-wide README and phase gates,
 through the very function the assignment filter uses.
 In flight is judged conservatively: a live lease, an ``IN_PROGRESS``
-card, a task being assigned right now, a persisted assignment, or a
-``TODO`` card that still names an assignee (an orphan the reconciler
-will clear) all mean "wait, then ask again". This leans on ADR-0012 D3:
-a dead worker's lease is recovered within the silence timeout, so its
-task returns to claimable and the drain never fires over abandoned work.
+card, a task being assigned right now, or a persisted assignment all
+mean "wait, then ask again". This leans on ADR-0012 D3: a dead worker's
+lease is recovered within the silence timeout, so its task returns to
+claimable and the drain never fires over abandoned work.
+
+A ``TODO`` card that still names an assignee but is held by none of
+those is *stranded* (issue #900): residue, not live work. It used to
+count as in flight on the theory that the reconciler would clear it,
+which the reconciler never did (it touches ``IN_PROGRESS`` orphans and
+persisted rows only), so one such card kept a board from ever draining.
+It is now counted separately (``tasks_stranded``) and otherwise judged
+like any ``TODO`` card, except that a card the coordinator itself still
+names (``COORDINATOR_ASSIGNEE``, a design ghost whose completion never
+landed) is never offered to an agent and so is unclaimable.
 
 One ``BLOCKED`` card is not a dead lane: a completion whose branch failed
 to merge into ``main`` is marked ``BLOCKED`` with a ``merge_conflict``
@@ -33,15 +42,17 @@ early on exactly this card the first time it happened.
 """
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from src.core.lease_invariants import DEFAULT_SILENCE_TIMEOUT_MINUTES
 from src.core.models import Task, TaskStatus
 from src.core.task_claimability import (
+    COORDINATOR_ASSIGNEE,
     build_slug_to_id,
     deps_allow_claim,
+    is_stranded_assignment,
     resolve_dependency_ids,
 )
 from src.marcus_mcp.coordinator.subtask_assignment import (
@@ -68,7 +79,14 @@ class DrainVerdict:
     tasks_done, tasks_blocked, tasks_claimable, tasks_in_flight : int
         Tasks in each state.
     tasks_unclaimable : int
-        TODO work whose dependency gate cannot pass, or a decomposed parent.
+        TODO work whose dependency gate cannot pass, a decomposed parent, or
+        a stranded card the coordinator itself still names.
+    tasks_stranded : int
+        TODO cards naming an assignee that nothing in the kernel holds
+        (issue #900). A diagnostic overlay, not a bucket: each such card is
+        also counted claimable or unclaimable by the ordinary gates.
+    stranded_task_ids : List[str]
+        The ids behind ``tasks_stranded``, in board order.
     """
 
     drained: bool
@@ -79,6 +97,8 @@ class DrainVerdict:
     tasks_claimable: int
     tasks_in_flight: int
     tasks_unclaimable: int
+    tasks_stranded: int = 0
+    stranded_task_ids: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the verdict as plain data for an MCP response."""
@@ -201,22 +221,10 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
 
     scoped_ids = {t.id for t in scoped}
     tasks_by_id = {t.id: t for t in scoped}
-
-    leased: Set[str] = set()
     lease_manager = getattr(state, "lease_manager", None)
-    if lease_manager is not None:
-        for task_id in getattr(lease_manager, "active_leases", None) or {}:
-            if task_id in scoped_ids:
-                leased.add(task_id)
-
-    reserved: Set[str] = set(getattr(state, "tasks_being_assigned", None) or set())
-    persisted: Set[str] = set()
-    persistence = getattr(state, "assignment_persistence", None)
-    if persistence is not None:
-        try:
-            persisted = set(await persistence.get_all_assigned_task_ids())
-        except Exception as error:  # noqa: BLE001 - treat as unknown, not as idle
-            logger.warning(f"[drain] could not read persisted assignments: {error}")
+    held = await held_task_ids(state, scoped_ids)
+    stranded = [t for t in scoped if is_stranded_assignment(t, held)]
+    stranded_ids = {t.id for t in stranded}
 
     slug_to_id = build_slug_to_id(scoped)
     done_ids = {t.id for t in scoped if t.status == TaskStatus.DONE}
@@ -257,14 +265,15 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
         if _is_decomposed_parent(task, state, scoped):
             unclaimable += 1
             continue
-        if (
-            task.id in leased
-            or task.id in reserved
-            or task.id in persisted
-            or task.status == TaskStatus.IN_PROGRESS
-            or (task.status == TaskStatus.TODO and bool(task.assigned_to))
-        ):
+        if task.id in held or task.status == TaskStatus.IN_PROGRESS:
             in_flight += 1
+            continue
+        if task.id in stranded_ids and task.assigned_to == COORDINATOR_ASSIGNEE:
+            # Issue #900: a TODO card the coordinator itself still names is
+            # never offered to an agent (the filter's rule), so it can
+            # never become claimable from here: unclaimable, not in flight,
+            # and the board drains instead of waiting on it forever.
+            unclaimable += 1
             continue
         # Only TODO remains: TaskStatus is exactly TODO, IN_PROGRESS, DONE,
         # BLOCKED and DECLINED, and the other four are handled above.
@@ -318,4 +327,78 @@ async def compute_board_drain(state: Any, project_id: str) -> DrainVerdict:
         tasks_claimable=claimable,
         tasks_in_flight=in_flight,
         tasks_unclaimable=unclaimable,
+        tasks_stranded=len(stranded),
+        stranded_task_ids=[t.id for t in stranded],
     )
+
+
+async def held_task_ids(state: Any, scoped_ids: Set[str]) -> Set[str]:
+    """
+    Return the task ids the kernel holds: leased, reserved or persisted.
+
+    This is the kernel's own definition of "someone has this card" (issue
+    #900), shared by the drain verdict and ``find_stranded_assignments`` so
+    the two cannot disagree about what is held.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state (``lease_manager``, ``tasks_being_assigned``,
+        ``assignment_persistence``).
+    scoped_ids : Set[str]
+        The project's task ids; leases are filtered to these.
+
+    Returns
+    -------
+    Set[str]
+        Task ids with a live lease, a reservation while an assignment is in
+        flight, or a persisted assignment row. A persistence read failure
+        is logged and treated as "nothing persisted", never as an error.
+    """
+    held: Set[str] = set()
+    lease_manager = getattr(state, "lease_manager", None)
+    if lease_manager is not None:
+        for task_id in getattr(lease_manager, "active_leases", None) or {}:
+            if task_id in scoped_ids:
+                held.add(task_id)
+    held |= set(getattr(state, "tasks_being_assigned", None) or set())
+    persistence = getattr(state, "assignment_persistence", None)
+    if persistence is not None:
+        try:
+            held |= set(await persistence.get_all_assigned_task_ids())
+        except Exception as error:  # noqa: BLE001 - treat as unknown, not as idle
+            logger.warning(f"[drain] could not read persisted assignments: {error}")
+    return held
+
+
+async def find_stranded_assignments(
+    state: Any, project_id: Optional[str]
+) -> List[Task]:
+    """
+    Return the stranded cards of a project, in board order (issue #900).
+
+    A stranded card is TODO, names an assignee, and is held by nothing the
+    kernel knows: see ``is_stranded_assignment``. The eligibility filter
+    never offers the coordinator-owned ones and the drain verdict no longer
+    counts any of them as live work, so this is the list an operator reads
+    to learn what is stuck and what ``unassign_task`` would release.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state (``project_tasks`` plus what ``held_task_ids``
+        reads).
+    project_id : Optional[str]
+        Scope to this project (legacy cards without a project are shared,
+        as the verdict scopes them); ``None`` means the whole board, which
+        is what the status tool has when no project is active.
+
+    Returns
+    -------
+    List[Task]
+        The stranded cards.
+    """
+    tasks = list(getattr(state, "project_tasks", None) or [])
+    scoped = _scope(tasks, project_id) if project_id else tasks
+    held = await held_task_ids(state, {t.id for t in scoped})
+    return [t for t in scoped if is_stranded_assignment(t, held)]

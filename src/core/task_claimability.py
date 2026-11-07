@@ -198,3 +198,48 @@ def phase_satisfied_by(task: Task) -> Set[TaskStatus]:
     if is_integration_task(task):
         return set(SETTLED_FOR_BEST_EFFORT)
     return {TaskStatus.DONE}
+
+
+# Issue #900: the coordinator's own name as a card's assignee. Design ghosts
+# are born DONE with this assignee (``src/integrations/nlp_tools.py``); one
+# left TODO is coordinator-owned residue that agents are never offered (the
+# eligibility filter's call), but it is still stranded by the rule below,
+# so the drain verdict and the status tool count it instead of treating it
+# as live work.
+COORDINATOR_ASSIGNEE = "Marcus"
+
+
+def is_stranded_assignment(task: Task, held: Set[str]) -> bool:
+    """
+    Return True when ``task`` is TODO, names an assignee, and nothing holds it.
+
+    Issue #900. The kernel's own definition of "held" is a live lease, a
+    reservation while an assignment is in flight, or a persisted assignment
+    row; ``held`` is the set of task ids with any of those. Every kernel
+    path that resets a card to TODO also clears its assignee (lease
+    recovery, ``unassign_task``, ``request_task_redo``, decline, the
+    verification retry), so a TODO card that still names one and is held
+    by nothing is residue left by something outside those paths: an
+    external board edit, a best-effort adapter that ignored the clear, or
+    a design ghost whose completion never landed. A card someone is working
+    on is IN_PROGRESS with its assignee, written in one update, so this
+    never fires for live work.
+
+    Parameters
+    ----------
+    task : Task
+        The card to test.
+    held : Set[str]
+        Task ids the kernel holds: leased, reserved or persisted.
+
+    Returns
+    -------
+    bool
+        True for a stranded card. Ownership-blind: whether to OFFER such a
+        card (never for ``COORDINATOR_ASSIGNEE``) is the caller's decision.
+    """
+    return (
+        task.status == TaskStatus.TODO
+        and bool(task.assigned_to)
+        and task.id not in held
+    )
