@@ -218,6 +218,59 @@ class TestUnassignTask:
         )
 
     @pytest.mark.asyncio
+    async def test_unassign_task_board_fallback_preserves_the_agents_unrelated_live_work(
+        self, mock_state
+    ):
+        """Releasing stranded card A named to agent-1 must not touch agent-1's live task B.
+
+        Codex P2 on PR #907: the board fallback resolved the stale name as
+        the holder and then ran agent-wide cleanup, deleting agent-1's
+        agent_tasks entry for B, emptying its current_tasks and removing
+        B's persisted row while B's lease stayed live. Only records that
+        reference the requested task may be removed.
+        """
+        live_b = create_mock_task("task-B", "Live work", assigned_to="agent-1")
+        mock_state.agent_tasks = {
+            "agent-1": create_mock_assignment("task-B", "Live work", "agent-1")
+        }
+        agent = Mock()
+        agent.current_tasks = [live_b]
+        mock_state.agent_status = {"agent-1": agent}
+        mock_state.lease_manager.active_leases = {"task-B": Mock()}
+        mock_state.tasks_being_assigned = set()
+        mock_state.project_tasks = [
+            create_mock_task("task-A", "Stranded", assigned_to="agent-1"),
+            live_b,
+        ]
+
+        result = await unassign_task(task_id="task-A", agent_id=None, state=mock_state)
+
+        assert result["success"] is True
+        assert result["agent_id"] == "agent-1"
+        assert "agent-1" in mock_state.agent_tasks
+        assert mock_state.agent_tasks["agent-1"].task_id == "task-B"
+        assert agent.current_tasks == [live_b]
+        mock_state.assignment_persistence.remove_assignment.assert_not_called()
+        mock_state.lease_manager.release_lease.assert_not_called()
+        mock_state.kanban_client.update_task.assert_called_once_with(
+            "task-A", {"status": TaskStatus.TODO, "assigned_to": None, "progress": 0}
+        )
+
+    @pytest.mark.asyncio
+    async def test_unassign_task_still_clears_records_that_reference_the_task(
+        self, mock_state
+    ):
+        """The ordinary path: the agent's records for THIS task are removed, as before."""
+        result = await unassign_task(task_id="task-1", agent_id=None, state=mock_state)
+
+        assert result["success"] is True
+        assert "agent-1" not in mock_state.agent_tasks
+        assert mock_state.agent_status["agent-1"].current_tasks == []
+        mock_state.assignment_persistence.remove_assignment.assert_called_once_with(
+            "agent-1"
+        )
+
+    @pytest.mark.asyncio
     async def test_unassign_task_releases_a_coordinator_owned_ghost(self, mock_state):
         """A TODO design ghost still named to Marcus is released the same way."""
         mock_state.agent_tasks = {}
@@ -325,8 +378,12 @@ class TestUnassignTask:
 
     @pytest.mark.asyncio
     async def test_unassign_task_with_multiple_tasks_in_current_tasks(self, mock_state):
-        """Test unassignment when agent has multiple current_tasks (edge case)."""
-        # Add multiple tasks to current_tasks
+        """Releasing one task leaves the agent's other current task in place (#900).
+
+        This used to assert the whole list was emptied, pinning the
+        agent-wide wipe Codex flagged on PR #907: releasing one card must
+        not erase the agent's record of unrelated work.
+        """
         mock_task_1 = create_mock_task("task-1", "Task 1", assigned_to="agent-1")
         mock_task_2 = create_mock_task("task-2", "Task 2", assigned_to="agent-1")
         mock_state.agent_status["agent-1"].current_tasks = [mock_task_1, mock_task_2]
@@ -335,9 +392,8 @@ class TestUnassignTask:
             task_id="task-1", agent_id="agent-1", state=mock_state
         )
 
-        # Should still clear all current_tasks (as per implementation)
         assert result["success"] is True
-        assert mock_state.agent_status["agent-1"].current_tasks == []
+        assert mock_state.agent_status["agent-1"].current_tasks == [mock_task_2]
 
     @pytest.mark.asyncio
     @patch("src.marcus_mcp.tools.task.conversation_logger")

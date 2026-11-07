@@ -11399,20 +11399,53 @@ async def unassign_task(
 
         logger.info(f"Unassigning task {task_id} from agent {agent_id}")
 
-        # 1. Remove from state.agent_tasks
-        if agent_id in state.agent_tasks:
+        # Issue #900 (Codex P2 on PR #907): release only the records that
+        # reference THIS task. A stranded card's stale name may belong to
+        # an agent that is alive and holding a different card; wiping that
+        # agent's assignment, current_tasks and persisted row would corrupt
+        # tracking for live work and clear the workload guard
+        # request_next_task relies on. The same rule holds on every path.
+        in_memory = (
+            state.agent_tasks.get(agent_id)
+            if isinstance(getattr(state, "agent_tasks", None), dict)
+            else None
+        )
+        referenced_in_memory = getattr(in_memory, "task_id", None) == task_id
+        referenced_in_current = False
+
+        # 1. Remove from state.agent_tasks, if that entry is this task
+        if referenced_in_memory:
             del state.agent_tasks[agent_id]
             logger.debug(f"Removed task from state.agent_tasks for {agent_id}")
 
-        # 2. Clear agent's current_tasks
+        # 2. Drop this task from the agent's current_tasks, keep the rest
         if agent_id in state.agent_status:
             agent = state.agent_status[agent_id]
-            agent.current_tasks = []
-            logger.debug(f"Cleared current_tasks for agent {agent_id}")
+            current = list(agent.current_tasks or [])
+            referenced_in_current = any(
+                getattr(t, "id", None) == task_id for t in current
+            )
+            agent.current_tasks = [
+                t for t in current if getattr(t, "id", None) != task_id
+            ]
+            if referenced_in_current:
+                logger.debug(f"Removed {task_id} from current_tasks of {agent_id}")
 
-        # 3. Remove from assignment_persistence
-        await state.assignment_persistence.remove_assignment(agent_id)
-        logger.debug(f"Removed from assignment_persistence for {agent_id}")
+        # 3. Remove the persisted row only when it is for this task
+        persisted_task_id = None
+        try:
+            persisted = await state.assignment_persistence.get_assignment(agent_id)
+            if isinstance(persisted, dict):
+                persisted_task_id = persisted.get("task_id")
+        except Exception as e:  # noqa: BLE001 - absence is the answer
+            logger.debug(f"Persisted assignment lookup for {agent_id} failed: {e}")
+        if (
+            referenced_in_memory
+            or referenced_in_current
+            or persisted_task_id == task_id
+        ):
+            await state.assignment_persistence.remove_assignment(agent_id)
+            logger.debug(f"Removed from assignment_persistence for {agent_id}")
 
         # 4. Remove from tasks_being_assigned
         state.tasks_being_assigned.discard(task_id)
