@@ -134,7 +134,7 @@ The simplest way to get started. No Docker, no external services.
 | Option | Type | Default | Env Override | Description |
 |--------|------|---------|--------------|-------------|
 | `ai.provider` | string | "openai" | `MARCUS_LLM_PROVIDER` | Provider: openai, anthropic, or local |
-| `ai.enabled` | boolean | true | `MARCUS_AI_ENABLED` | Enable/disable AI features globally |
+| `ai.enabled` | boolean | true | `MARCUS_AI_ENABLED` | Enable/disable AI features globally. When false the server builds no provider client and makes no provider call, including at startup; the startup log line `AI engine: enabled=... config=...` states the resolved file and key presence |
 | `ai.model` | string | - | `MARCUS_AI_MODEL` | Default model name |
 | `ai.anthropic_api_key` | string | - | `MARCUS_AI_ANTHROPIC_API_KEY` | Anthropic API key |
 | `ai.openai_api_key` | string | - | `MARCUS_AI_OPENAI_API_KEY` | OpenAI API key |

@@ -11,6 +11,7 @@ external dependencies during testing.
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -1231,19 +1232,28 @@ Write unit tests for auth flow
                 assert engine.client is not None
 
     @pytest.mark.asyncio
-    async def test_initialize_no_client(self, capsys):
-        """Test initialize with no client"""
+    async def test_initialize_no_client_announces_fallback(self, caplog):
+        """With no client, initialize() announces the state and sends nothing (#905)."""
+        caplog.set_level(logging.INFO, logger="src.integrations.ai_analysis_engine")
         engine = AIAnalysisEngine()
         engine.client = None
 
         await engine.initialize()
 
-        captured = capsys.readouterr()
-        assert "AI Engine running in fallback mode" in captured.err
+        lines = [
+            r.getMessage() for r in caplog.records if "AI engine" in r.getMessage()
+        ]
+        assert len(lines) == 1
+        assert "no provider call" in lines[0]
 
     @pytest.mark.asyncio
-    async def test_initialize_connection_failure(self, capsys):
-        """Test initialize when connection test fails"""
+    async def test_initialize_does_not_probe_and_keeps_the_client(self):
+        """A failing provider cannot disable the client at startup: no probe is sent (#905).
+
+        Before the fix, initialize() sent a real ``messages.create`` and set
+        ``client = None`` when it raised, silently turning AI off for the
+        server's lifetime after one transient startup error.
+        """
         with patch("src.integrations.ai_analysis_engine.anthropic") as mock_anthropic:
             mock_client = Mock()
             mock_client.messages.create.side_effect = Exception("Connection failed")
@@ -1254,9 +1264,8 @@ Write unit tests for auth flow
                 engine.client = mock_client
                 await engine.initialize()
 
-                # Note: Error logging removed to avoid MCP stdio interference
-                # Verify client is disabled on failure
-                assert engine.client is None
+                mock_client.messages.create.assert_not_called()
+                assert engine.client is mock_client
 
 
 @pytest.mark.unit
