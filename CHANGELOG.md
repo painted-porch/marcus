@@ -38,6 +38,8 @@ Gating on self-reported virtue invites the compliance theatre that forced Invari
 `AIAnalysisEngine` now honours `ai.enabled`: when it is false no provider client is built at all, so a placeholder key can no longer produce a request.
 The startup connectivity probe is gone rather than made opt-in.
 Its only effect on failure was to disable AI silently for the server's lifetime after one transient error, and on success it attached a usage wrapper that wraps none of the Anthropic client's methods, so nothing is lost; the first real call already falls back on failure.
+The cost is that a wrong key now surfaces at first use rather than at startup.
+The startup line below is what makes that acceptable: a misconfiguration is visible without a probe.
 `initialize()` instead logs one line, `AI engine: enabled=... key_present=... provider=... model=... config=...`, naming the configuration file actually loaded (`MarcusConfig.source_path`, new) so a live check can read one line and know whether a server can spend.
 - Corrected a stale claim in `docs/source/systems/architecture/15-service-registry.md` that Cato calls `MarcusServiceRegistry.discover_services()`.
 Cato does not: it is pointed at Marcus by `marcus_data_path` in its own `config.json`, reads the data directory directly, and already distinguishes parallel instances through `marcus_data_paths`.
