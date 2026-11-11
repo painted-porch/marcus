@@ -37,6 +37,13 @@ Every import of Marcus's own code goes through one module, `citation_verifier/ke
 The written contract is `docs/architecture/extension-contract.md`; `REPRODUCING.md` runs the chain by package name (`python -m citation_verifier.runner`, `.finder`, `.verifier`, `.export_bundles`, or the `tow-*` console scripts after `pip install -e extensions/citation_verifier`).
 Nothing is left at the old `dev-tools/experiments/runners/tow_*` paths.
 
+- The run-side toolkit extensions share, `runner/marcus_runner` (#914).
+An extension is a program that seeds a Marcus board and runs agents against it for one purpose, and every extension so far rebuilt the same scaffolding: a private server for the run, seeding, the cost watchdog, the board sampler, measures and the run record.
+The numerical verifier's watchdog and the Minecraft harness's were different programs (84 and 232 lines) for the same job, and one of them read its dollar stop line once at process start, so a raised cap took effect only after a restart.
+The toolkit is that scaffolding lifted from the Minecraft plumbing with the defects its runs found fixed once: a server under test that strips every model-provider key, switches the model off with an empty key, refuses a port someone else holds and proves the port's owner is this run's server; seeding through `create_project(options.tasks)` that refuses an unknown spec key, a `build`-family label, a dependency naming no task and a project name containing "test" before the call; a watchdog whose stop line is re-read on every poll; one price table; usage rows in both the pi-transcript layout and a one-row-per-call layout any runtime can write; the board sampler; run guards and the version record; the run record; and the pull, frontier and board measures.
+Nothing in it imports Marcus's code under `src/`; it talks to a server over MCP and reads its files, as an extension must.
+Its first consumer is the No Hand on the Table wargame rehearsal, which ran model-free against two private servers with every card closed and every reply read back.
+That rehearsal also found that on one server holding two projects, agents registered to the project that is not the active one are served the active project's board (#79, evidence on the issue).
 ### Fixed
 - A Marcus server start never calls the model provider (#905).
 `AIAnalysisEngine` now honours `ai.enabled`: when it is false no provider client is built at all, so a placeholder key can no longer produce a request.
