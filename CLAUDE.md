@@ -122,6 +122,7 @@ FILE_MANAGEMENT:
   - Only merge PRs into the develop branch, NEVER into main
   - When creating pull requests, always target the develop branch as the base
   - Main branch is protected and reserved for production releases only
+  - Every session works in its own git worktree under ~/dev/marcus-worktrees/<topic> (git worktree add). Never check out a branch or hold uncommitted changes in /Users/lwgray/dev/marcus itself; leave the root on develop, clean, because other sessions use it as their working directory too. Point live-check scripts at the worktree. Commit before any long wait.
 
   COMMUNICATION_GUIDELINES:
   - Always tell me what you are going to do and why
