@@ -50,6 +50,7 @@ Five arms are preregistered in `~/marcus-experiments/hospital/METHODS.md`, inclu
 The zero-spend gate (`python -m clinical_review.rehearsal`) drives a real Marcus with every vendor key stripped and the model off, and passes 13 of 13 checks: every card closed through the typed-evidence gate, the adviser refused every verify card, an unparseable check declined its card terminally (K5), a flagged chain rejected at its approve card, and no label from the answer key seeded onto any card.
 The paid run refuses to start without `--confirm-paid` and checks its stop line before every model call.
 It also strips its own provider key from the environment for the lifetime of each board arm's server, because `marcus_toolkit.server.STRIPPED_KEYS` covers five providers and not the one this extension uses (filed as painted-porch/marcus-toolkit#3); a test asserts that gap is real, so the local guard cannot be dropped silently.
+Two findings from review are fixed with the tests that would have caught them: the hypothesis readout computes its false-flag condition once and requires it alongside the catch-rate gap, so a reported SUPPORTED can never contradict its own safety condition, and the hand-checker's worksheet carries no arm and no chain id, with that mapping written to a separate key file joined only after their verdicts are recorded.
 Nothing in it is a clinical tool, and no patient data is involved; the cases live outside the repository, as the Tow dataset does.
 
 ### Fixed

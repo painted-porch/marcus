@@ -207,8 +207,75 @@ class TestOutcomes:
         assert set(result["outcomes"]["arms"]) == {"A1", "C"}
         sheet = list(csv.DictReader((tmp_path / "grading" / "hand-check.csv").open()))
         assert len(sheet) == 6 and all(row["hand_verdict"] == "" for row in sheet)
+        assert list(sheet[0]) == list(grader.BLIND_SHEET_COLUMNS)
         text = grader.render_results(
             result["outcomes"], result["readout"], result["q4"], 1.5, ["run x"]
         )
         assert "| A1 |" in text and "Total model spend: $1.5000." in text
         assert "Nothing here is a clinical tool" in text
+
+
+class TestCodexFindings:
+    """The two findings Codex raised on PR #922, each with its failing case."""
+
+    def test_h1_cannot_pass_while_violating_its_false_flag_condition(self) -> None:
+        """Codex P1: a zero false-flag rate in A1 used to waive the condition.
+
+        A1 catching 10% with no false flags against A2 catching 90% while
+        flagging every aligned recommendation must not read as supported.
+        """
+        chains = _chains()
+        judge = _judge(chains)
+        outcomes = grader.primary_outcomes(
+            chains,
+            judge,
+            {
+                "A1": _verdicts(chains, 1, 0, "A1"),
+                "A2": _verdicts(chains, 9, 10, "A2"),
+            },
+        )
+        readout = grader.hypothesis_readout(outcomes)
+        assert readout["H1"]["gap_points"] >= 20.0, "the catch-rate gap is real"
+        assert readout["H1"]["false_flag_ok"] is False
+        assert readout["H1"]["supported"] is False, "the gap alone must not carry H1"
+        assert readout["H1"]["false_flag_rates"] == [0.0, 1.0]
+
+    def test_h1_holds_when_both_conditions_are_met(self) -> None:
+        """The same gap with no false flags on either side is supported."""
+        chains = _chains()
+        readout = grader.hypothesis_readout(
+            grader.primary_outcomes(
+                chains,
+                _judge(chains),
+                {
+                    "A1": _verdicts(chains, 1, 0, "A1"),
+                    "A2": _verdicts(chains, 9, 0, "A2"),
+                },
+            )
+        )
+        assert readout["H1"]["false_flag_ok"] is True
+        assert readout["H1"]["supported"] is True
+
+    def test_the_hand_check_sheet_carries_no_arm_and_the_key_is_separate(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex P2: the reviewer's worksheet used to name the arm in `_arm`."""
+        chains = _chains()
+        verdicts = {
+            "A1": _verdicts(chains, 2, 0, "A1"),
+            "A3": _verdicts(chains, 9, 1, "A3"),
+        }
+        generation = [{"chain_id": c, "recommendation": f"text {c}"} for c in chains]
+        sheet = tmp_path / "hand-check.csv"
+        written = grader.blind_sheet(verdicts, generation, 4, 918, sheet)
+        assert written == 8
+        rows = list(csv.DictReader(sheet.open()))
+        assert list(rows[0]) == list(grader.BLIND_SHEET_COLUMNS)
+        body = sheet.read_text()
+        for leaked in ("_arm", "A1", "A3", "_chain_id"):
+            assert leaked not in body.split("\n")[0], f"{leaked} is in the header"
+        assert "arm" not in {k.lower() for k in rows[0]}
+        key = json.loads((tmp_path / "hand-check-key.json").read_text())
+        assert set(key["ids"]) == {r["blind_id"] for r in rows}
+        assert {v["arm"] for v in key["ids"].values()} == {"A1", "A3"}
+        assert "must not open this file" in key["note"]
