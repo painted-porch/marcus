@@ -6,6 +6,7 @@ This module contains tools for natural language project/task creation:
 """
 
 import asyncio
+import inspect
 import logging
 import threading
 from datetime import datetime, timezone
@@ -639,6 +640,69 @@ def _validate_tasks_option(
         return None
     logger.warning(
         f"create_project for {project_name!r} rejected: invalid tasks option: "
+        + "; ".join(problems)
+    )
+    return {
+        "success": False,
+        "error": "options.tasks is not a valid seeded task list: "
+        + "; ".join(problems),
+        "error_code": "tasks_invalid",
+        "error_type": "InvalidConfigurationError",
+        "problems": problems,
+    }
+
+
+async def _reject_seed_ids_already_on_the_board(
+    kanban_client: Any, options: Optional[Dict[str, Any]], project_name: str
+) -> Optional[Dict[str, Any]]:
+    """Refuse a seeded list whose caller-supplied ``id`` is already a card.
+
+    ``validate_seed_specs`` checks an ``id`` against the caller's own
+    project's tasks, but the SQLite board file is shared by every
+    project on the server and ``create_project`` mints a project with
+    no tasks to pass (Codex P2 on PR #919). Without this the insert of
+    that one card failed, the batch went on without it, and the reply
+    said success for a board missing a card and the edges into it. So
+    each supplied id is looked up on the board itself, before any card
+    is created.
+
+    Parameters
+    ----------
+    kanban_client : Any
+        The board the cards would be created on; must offer
+        ``get_task_by_id``.
+    options : Optional[Dict[str, Any]]
+        The tool options; only ``tasks`` entries carrying an ``id`` are
+        looked up.
+    project_name : str
+        For the log line.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A rejection with ``error_code: "tasks_invalid"`` naming every
+        taken id, or None when no supplied id is on the board.
+    """
+    specs = options.get("tasks") if isinstance(options, dict) else None
+    lookup = getattr(kanban_client, "get_task_by_id", None)
+    if not isinstance(specs, list) or lookup is None:
+        return None
+    problems: List[str] = []
+    for index, spec in enumerate(specs):
+        task_id = spec.get("id") if isinstance(spec, dict) else None
+        if not task_id:
+            continue
+        existing = lookup(str(task_id))
+        if inspect.isawaitable(existing):
+            existing = await existing
+        if existing is not None:
+            problems.append(
+                f"tasks[{index}].id {task_id!r} already identifies a board task"
+            )
+    if not problems:
+        return None
+    logger.warning(
+        f"seeded tasks for {project_name!r} rejected: id(s) already on the board: "
         + "; ".join(problems)
     )
     return {
@@ -1354,6 +1418,16 @@ async def _create_project_inner(
                     ),
                 }
 
+        # Codex P2 on PR #919: a seeded card's id already held by another
+        # project's card on the shared board is refused here, before the
+        # creator runs, not discovered as one failed insert mid-batch.
+        _collision = await _reject_seed_ids_already_on_the_board(
+            state.kanban_client, options, project_name
+        )
+        if _collision is not None:
+            _recent_create_project_calls.pop(dedup_key, None)
+            return _collision
+
         logger.info(f"Creating NEW project '{project_name}' (complexity={complexity})")
 
         # Initialize project creator
@@ -1945,6 +2019,13 @@ async def create_tasks(
     )
     if _tasks_rejection is not None:
         return _tasks_rejection
+    # Codex P2 on PR #919: the board is shared across projects, so a
+    # supplied id is also checked against cards outside this project.
+    _collision = await _reject_seed_ids_already_on_the_board(
+        kanban_client, options, project_name or "active project"
+    )
+    if _collision is not None:
+        return _collision
 
     project_id = current_project.provider_config.get("project_id")
     board_id = current_project.provider_config.get("board_id")
