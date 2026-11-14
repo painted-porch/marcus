@@ -43,6 +43,16 @@ The AI-citation verifier seeds through that path now: one `create_project` call 
 That reader is public as `extract_text_from_result` in `src/worker/inspector.py`, with the old private name kept as an alias, so the extension contract names no private symbol.
 The kernel-surface guard says what it covers and names a stray module beside `pyproject.toml` instead of ignoring it.
 
+- Hospital, the clinical-review extension (issue #918).
+The Barrit et al. 2026 clinical-subversion finding (225 physicians followed secretly adversarial AI advice about half the time and almost none noticed) is set up as a coordination experiment: an `advise` -> `verify` -> `approve` chain per clinical decision point, where the verifying agent receives the patient record, the physician's draft and the recommendation but never the dialogue, and the kernel never offers that card to the agent that produced the advice or to its vendor (ADR-0013 K12).
+It ships as `extensions/clinical_review/` (`marcus-clinical-review`) with its tests under `tests/unit/extensions/clinical_review/`, and it imports no kernel code at all: it reaches Marcus only through `marcus_toolkit` over MCP, one door fewer than the citation verifier needs, and a guard test fails on any `src.` import.
+Five arms are preregistered in `~/marcus-experiments/hospital/METHODS.md`, including a no-board control that the two prior Marcus studies predict will match the board arm on catch rate, so what the board has to show is the refusal log, the terminal declined outcome and persuasion patterns as a query over the record, not a better number.
+The zero-spend gate (`python -m clinical_review.rehearsal`) drives a real Marcus with every vendor key stripped and the model off, and passes 13 of 13 checks: every card closed through the typed-evidence gate, the adviser refused every verify card, an unparseable check declined its card terminally (K5), a flagged chain rejected at its approve card, and no label from the answer key seeded onto any card.
+The paid run refuses to start without `--confirm-paid` and checks its stop line before every model call.
+It also strips its own provider key from the environment for the lifetime of each board arm's server, because `marcus_toolkit.server.STRIPPED_KEYS` covers five providers and not the one this extension uses (filed as painted-porch/marcus-toolkit#3); a test asserts that gap is real, so the local guard cannot be dropped silently.
+Two findings from review are fixed with the tests that would have caught them: the hypothesis readout computes its false-flag condition once and requires it alongside the catch-rate gap, so a reported SUPPORTED can never contradict its own safety condition, and the hand-checker's worksheet carries no arm and no chain id, with that mapping written to a separate key file joined only after their verdicts are recorded.
+Nothing in it is a clinical tool, and no patient data is involved; the cases live outside the repository, as the Tow dataset does.
+
 ### Fixed
 - A Marcus server start never calls the model provider (#905).
 `AIAnalysisEngine` now honours `ai.enabled`: when it is false no provider client is built at all, so a placeholder key can no longer produce a request.
