@@ -11,23 +11,36 @@ Every line range in §5 was regenerated from the file's own syntax tree on this 
 
 ## Summary
 
-**Total estimate: 35-53 engineer-days** across six concerns.
+**Total estimate: 41-63 engineer-days** across seven concerns.
 
-The decision of 2026-11-13 is what changed this number.
+Two things moved this number, and only one of them is the decision of 2026-11-13.
+
+The decision removed an unbuilt prerequisite.
 The earlier total of 31-43 days assumed the two verification gates stayed inside the kernel behind an in-process shim, with a further 8-12 days to build a "deferred-completion" mechanism if anyone wanted them genuinely out.
 Verification as a card needs no such mechanism, because nothing is held pending a verdict: the `implement` card closes on its own evidence and a dependent `verify` card carries the verdict.
-So the 8-12 day branch is gone, the shim is gone, and in its place is one shared concern (declaring the task types, emitting the verify cards, moving the merge gate, wiring the redo loop) at 8-12 days that both gates then build on.
-Set against the earlier numbers: this finishes the job for about 2-4 days less than building the deferred-completion mechanism would have cost, and about 4-10 days more than stopping at a shim.
-What the extra days buy is the thing the shim never did, which is the gate actually leaving the kernel.
+So that branch is gone and the shim is gone, replaced by one shared concern at 8-12 days (declare the task types, emit the verify cards, stand up the verifier process, wire the redo loop) that both gates then build on, with each gate's own estimate reduced because its call seam is deleted rather than wrapped.
+
+The second thing is a gap this revision found while working out who lands verified work (§2, "Who lands the work").
+The kernel's evidence gate checks that a verdict is *present*, not what it *says*, and it must stay that way, because a kernel that reads a verdict's meaning is a kernel that understands one extension's semantics.
+So the merge to `main` cannot be a kernel action gated on a verdict; the verifier has to land the work itself.
+That takes 1,435 lines of git plumbing across 15 functions of `task.py` out of the kernel.
+Every one of those functions is already marked Extension in §5, and **none of the six concerns owned any of them**.
+That gap predates this revision and would have been just as real under the shim; the landing question is what surfaced it.
+
+So the honest comparison is not 41-63 against 31-43.
+It is that 41-63 is the first number in this document that covers the whole job: the earlier totals were low by the cost of the landing no matter which option had been chosen.
 
 | # | Concern | Engineer-days | Blocked on |
 | --- | --- | --- | --- |
 | 1 | Cost tracking (§4) | 3-5 remaining | Nothing. The generic transport shipped in PR #867; what is left is moving the two vendor-coupled modules and deciding the legacy duplicate's fate |
 | 2 | Decomposition & planning, clean half (§1, `nlp_task_utils.py`) | 1 | Nothing. Can start immediately |
-| 3 | **Verification as a card: the shared basis for both gates (described in §2)** | 8-12 | Nothing. The kernel precondition (declaring task types over MCP) landed on 2026-11-14 in PR #919 |
-| 4 | Validation gate (§2) | 10-15 | Concern 3 |
-| 5 | Product smoke gate (§3) | 6-9 | Concern 3. Shares `report_task_progress`'s completion path with #4, so do not run the two concurrently on parallel branches |
-| 6 | Decomposition & planning, hard half (§1, `nlp.py` and `nlp_base.py`) | 7-11 | Nothing. The seeded `create_tasks` graph-authoring path already exists (K10 narrow accept); the remaining work is schema extension, not new kernel capability |
+| 3 | **Verification as a card: the shared basis (described in §2)** | 8-12 | Nothing. The kernel precondition, declaring task types over MCP, landed 2026-11-14 in PR #919 |
+| 7 | **The landing: 1,435 lines of git plumbing, and who merges (§2)** | 6-10 | Concern 3, which stands up the verifier that will own it |
+| 4 | Validation gate (§2) | 10-15 | Concerns 3 and 7 |
+| 5 | Product smoke gate (§3) | 6-9 | Concerns 3 and 7. Shares `report_task_progress`'s completion path with #4, so do not run the two concurrently on parallel branches |
+| 6 | Decomposition & planning, hard half (§1, `nlp.py` and `nlp_base.py`) | 7-11 | Nothing |
+
+The table is in execution order rather than numeric order; concern 7 was added by this revision and keeps its number so the earlier six are still citable by theirs.
 
 **Recommended order, and why:**
 
@@ -36,17 +49,20 @@ What the extra days buy is the thing the shim never did, which is the gate actua
    The vendor-coupled half has zero `src/` callers today, so nothing waits on it and it waits on nothing.
 2. **The decomposer's clean half in parallel (§1).**
    `nlp_task_utils.py` touches no kernel state at all and can move almost mechanically.
-3. **Verification as a card, before either gate moves (§2).**
-   Both gates' destination is a `verify` card that has to exist, be declared, and be reachable before anything can be moved onto it.
-   Doing this first also means each gate's own extraction is then a body of logic finding a new home, not a restructuring of the completion path at the same time.
-4. **The validation gate (§2).**
-   This reverses the earlier version's order, which put the smoke gate first because K5 was already built.
-   K5 no longer differentiates them, and the validation gate is now the better first move for a different reason: a verifier agent that claims a `verify` card, runs its checks and reports a verdict is exactly the shape the AI-citation verifier has been running in production since October, so it is the lower-novelty half of the pair.
+3. **The shared basis, before either gate moves (§2).**
+   Both gates' destination is a `verify` card that has to exist, be declared, and be claimable by a verifier process that exists, before anything can be moved onto it.
+4. **The landing, immediately after, and before any gate's body moves (§2).**
+   This ordering is not a preference, it is a hazard.
+   The moment verification leaves the completion path, the completion path's merge is unguarded: the kernel would still merge on an `implement` card's close with nothing checking the work first.
+   Moving a gate out before the landing moves opens a window in which unverified work lands on `main`.
+5. **The validation gate (§2).**
+   This reverses the earlier version's order, which put the smoke gate first because ADR-0013 K5 was already built for it.
+   K5 no longer distinguishes them, and the validation gate is now the better first move for a different reason: a verifier agent that claims a `verify` card, runs its checks and reports a verdict is exactly the shape the AI-citation verifier has been running in production since October, so it is the lower-novelty half of the pair.
    Prove the pattern there.
-5. **The smoke gate after it, not concurrently (§3).**
+6. **The smoke gate after it, not concurrently (§3).**
    Both gates are concentrated in the same region of `report_task_progress`, and parallel branches will produce conflicting rewrites of it.
-   The smoke gate is also the one that adds genuinely new pieces on top of the pattern: the product runner as a subprocess the verifier owns, the operator-park path, and the consequence for how a run reports success (§3).
-6. **The decomposer's hard half last (§1).**
+   The smoke gate is also the one that adds genuinely new pieces on top of the pattern: the product runner as a subprocess the verifier owns, the operator-park path, and the consequence for how a run reports success.
+7. **The decomposer's hard half last (§1).**
    The graph-authoring mechanism it needs already exists, so this is ordinary extension work rather than a first cut against an undesigned mechanism.
    It is still the largest remaining single piece and it benefits from the other concerns' patterns being proven first.
 
@@ -143,7 +159,7 @@ This changes concern #5's sizing materially — see its own section below.
 ## 2. The validation gate (`src/ai/validation/`)
 
 **Files:** `__init__.py` (27 lines), `task_filter.py` (90), `validation_models.py` (262), `retry_tracker.py` (216), `task_completeness_validator.py` (515, effectively dead code — no `src/` caller), `work_analyzer.py` (2246).
-**Sizing: 10-15 engineer-days**, on top of the shared 8-12 days of concern 3 below.
+**Sizing: 10-15 engineer-days**, on top of concern 3 (the shared basis, 8-12 days) and concern 7 (the landing, 6-10 days), both described below.
 Revised down from 12-18 by the decision of 2026-11-13: the earlier number carried the shim seam and its escalation machinery (`_handle_validation_failure`, `_alert_validation_unavailable`, `_stamp_validation_unavailable`, `_build_escalation_error_response`), which are now deleted rather than wrapped, and the gate's kernel reads become inputs the card carries rather than reads an out-of-process checker still somehow has to make.
 The earlier "+8-12 days if full pull-mode dispatch is attempted" branch is withdrawn; see below for why no such mechanism is needed.
 
@@ -196,28 +212,77 @@ Every kernel piece the software-building version needs is the same piece, alread
 
 ### What actually changes, and what it costs
 
-Four things change, and none of them is a new kernel mechanism.
+Five things change.
+Four of them need no new kernel mechanism.
+The fifth, the landing, needs no new kernel mechanism either, but only because the landing stops being the kernel's job at all; that is the subject of its own subsection below, and it is the largest single consequence of the decision.
 
 1. **`DONE` on an `implement` card stops meaning "verified."**
    It means the builder reported the evidence its type requires.
    The verdict lives on the dependent `verify` card.
    This is the real content of the decision and everything below follows from it.
-2. **The merge to `main` moves.**
+2. **The merge to `main` moves, and it leaves the kernel.**
    Today `_merge_agent_branch_to_main` is reached from the completion path (`task.py:8506`) and from merge recovery (`task.py:5476`), so an unverified implementation lands on `main` and the gate's refusal is what keeps bad work out.
-   Under verification as a card the merge belongs to the `verify` card's close, not the `implement` card's.
-   This is the single riskiest piece of the whole extraction, because it sits in `_record_progress`, the worst-tangled function in the file (§5).
+   Under verification as a card the verifier lands the work itself, on a passing verdict, as its own action.
+   It cannot become a kernel merge triggered by the verify card's close, for the reason in "Who lands the work" below.
+   This is the single riskiest piece of the whole extraction: the trigger sits in `_record_progress`, the worst-tangled function in the file (§5), and the machinery behind it is 1,435 lines.
 3. **The in-process refusal becomes a redo.**
    Today a failed verdict refuses the completion and the same agent, still holding the task, tries again.
    Under a card the verifier reports its verdict and calls `request_task_redo` on the card it checked.
 4. **A run's success signal has to read the verify cards.**
    The experiment runners and `RESULTS.md` records count completed cards today.
    With verification on its own cards, a board of closed `implement` cards and failed `verify` cards would read as a successful run.
+5. **The landing moves out of the kernel with the verdict.**
+   See "Who lands the work" below.
 
 One piece of new wiring is genuinely needed, and it is small.
 The verifier needs the baseline commit of the work it is checking, which the kernel captures at claim time (`_capture_baseline_commit`) and holds in `state.agent_tasks[agent_id].baseline_commit`, the sharpest kernel read in the whole gate.
 The handoff copies the closing card's evidence, so either the builder reports its own branch and commit range as evidence (agent-reported, and the verifier can check it against the board), or the kernel stamps the baseline it already holds into the handoff payload.
 The second is one key in `_handoff_evidence_to_dependents` and is the more honest of the two, since the baseline is the kernel's own record of when the claim started rather than something the builder should be trusted to report about itself.
 Either way it is a key in a payload, not a mechanism.
+
+### Who lands the work: the verdict cannot be the kernel's to read
+
+This subsection answers a hole Codex review found in the first draft of this revision, and it is the most important paragraph in the document.
+
+**The kernel's typed-evidence gate is a shape check, by design.**
+`_apply_typed_evidence_gate` builds `missing = [f for f in required if f not in evidence]` (`task.py:1090-1113`) and passes anything whose declared keys are present.
+A verdict of `"rejected"` has a `verdict` key and therefore closes the verify card successfully.
+So "the merge moves to the verify card's close" is wrong as written: on its own it would land rejected work, because nothing in the kernel looks at what the verdict says.
+
+**The kernel must not look.**
+Reading the verdict's value would mean the kernel understanding one extension's semantics, which is the thing ADR-0013 K2 exists to prevent.
+There is no version of this where the kernel decides what a passing verdict is.
+
+**So the verifier lands the work itself.**
+On a passing verdict the verifier merges and then closes its card; on a failing verdict it merges nothing and sends the work back.
+The merge is the verifier's action, the same way the verdict is, and the kernel's only job stays what it already is: refusing a close whose evidence does not carry the declared keys, and refusing to offer the card to the author of the work it checks.
+
+This is architecturally better than the shim and more expensive than the earlier draft implied, for the same reason: it takes the git plumbing out of the kernel rather than leaving it there behind a verdict the kernel inspects.
+That plumbing is **1,435 lines across 15 top-level functions** of `task.py` (`_merge_agent_branch_to_main`, `_merge_card_range`, `_attempt_merge_recovery`, `_card_footprint`, `_apply_footprint_three_way`, `_take_tip_paths`, `_blob_at`, `_remove_paths_the_task_deleted`, `_is_ancestor`, `_commit_exists`, `_card_commit_range`, `_worktree_path_for_branch`, `_capture_baseline_commit`, `_verify_agent_has_commits`, `_sweep_blocked_merge_conflicts`), every one of which §5 already marks Extension and **none of which any of the six concerns owned**.
+That gap predates this revision; the landing question is what surfaced it.
+It is costed as concern 7 in the summary, at 6-10 days, and it has to move immediately after the shared basis and **before either gate's body moves**.
+That ordering is a hazard, not a preference: the moment verification leaves the completion path, the kernel is still merging on an `implement` card's close with nothing checking the work first, so a gate that moves out ahead of the landing opens a window in which unverified work lands on `main`.
+
+### The verifier's protocol on a rejected verdict, in order
+
+The order matters, and getting it wrong leaves the rejected work closed and unrepaired.
+Codex review found this too: closing a card releases the holder, because `_record_progress` deletes `state.agent_tasks[agent_id]` (`task.py:8475`), and `request_task_redo` refuses a caller that holds nothing (`caller_not_active`).
+A verifier that reports its verdict first and asks for the redo second gets refused, and the rejected implementation stays `DONE`.
+
+So, while it still holds its verify card:
+
+1. `request_task_redo` on the `implement` card it checked, with the reason and the defect kind.
+   This resets that card to `TODO` with a redo diagnostic, and the bound is the card's own `MAX_TASK_REDO_COUNT`.
+2. `create_tasks` with one new `verify` card whose `depends_on` names the `implement` card.
+   A runtime card may depend on a card already on the board, which is exactly K10's narrow accept (#841, PR #855), so this needs no new mechanism.
+3. Only then report its own verdict and close.
+
+Step 2 exists because `request_task_redo` resets the card it is given and nothing else.
+A verify card that has already closed stays closed, so without a successor nothing would ever re-check the repaired work.
+The alternative is a kernel change making a redo reopen its dependent verify cards, which is the same family as #803 (a redo leaving a stale claim in its dependents, fixed in PR #807 for the evidence but not for the status).
+The successor card is the better of the two on the merits and not just because it needs no kernel change: each verification attempt keeps its own card and its own evidence, so the board shows attempt one rejected and attempt two passing, where a reopened card would overwrite its own history.
+
+Whichever is chosen, it belongs in concern 3 and is in its estimate.
 
 ### The declaration concern 3 would write
 
@@ -260,7 +325,7 @@ The three Agent Invariants are unaffected: the verifier self-selects its card, d
 ## 3. The product smoke gate
 
 **Code:** `_run_product_smoke_gate` (`task.py:2289-2598`, 310 lines) and `_terminalize_escalated_smoke_task` (`task.py:1495-1560`), plus `src/integrations/product_smoke.py` (~1180 lines, the subprocess/server/probe runner).
-**Sizing: 6-9 engineer-days**, on top of the shared 8-12 days of concern 3, and including roughly a day to migrate `_terminalize_escalated_smoke_task` onto the existing `DECLINED` status.
+**Sizing: 6-9 engineer-days**, on top of concerns 3 and 7 (§2), and including roughly a day to migrate `_terminalize_escalated_smoke_task` onto the existing `DECLINED` status.
 Revised from a flat 8 days, which assumed an in-process shim stayed at the completion call site.
 There is no shim now (§2), so the call seam is deleted rather than wrapped; against that, this gate carries two pieces the validation gate does not, named below.
 
@@ -348,6 +413,9 @@ Fixed here by stating this concern's remaining 3-5 days as what is left *after* 
 Every line range in the table below was regenerated from the file's own syntax tree on 2026-11-14, so the coordinates are current rather than carried over from the first pass; the four functions PR #907 added since (`_warn_stranded_once`, `reclaim_stamp`, `assignment_write_payload`, `_board_assignee`, all kernel) are classified here for the first time.
 This is the complete marking issue #862 asked for, so the eventual module-split's shape is visible from this document.
 **TANGLED** marks a function whose body interleaves kernel and extension logic so tightly that it needs its own internal split before any kernel/extension cut is expressible at all — these are the functions to budget the most review time against, independent of the per-concern sizing above.
+
+Fifteen of the rows below are git and merge plumbing (`_merge_agent_branch_to_main`, `_merge_card_range`, `_attempt_merge_recovery`, `_card_footprint`, `_apply_footprint_three_way`, `_take_tip_paths`, `_blob_at`, `_remove_paths_the_task_deleted`, `_is_ancestor`, `_commit_exists`, `_card_commit_range`, `_worktree_path_for_branch`, `_capture_baseline_commit`, `_verify_agent_has_commits`, `_sweep_blocked_merge_conflicts`), 1,435 lines in total.
+They were marked Extension on the first pass and owned by no concern until this revision made the landing a concern of its own (concern 7, §2).
 
 | Function | Lines | Kernel / Extension / Mixed | One-line why |
 | --- | --- | --- | --- |
@@ -483,7 +551,7 @@ Neither remaining consequence blocks the other concerns from moving.
 **On additivity (Codex review on PR #866, still correct):** K8's three-consequence total of 6-8 engineer-days is not fully additive to this document's total.
 Consequence 3 (3-4 of those days) is the same deliverable §4 scopes and is now built, and §4's own 3-5-day remainder already reflects that.
 Consequence 2 remains genuinely additive at roughly 2-3 days; consequence 1's remaining weight is `log_artifact` alone, which this document does not scope.
-Net: this document's 35-53 days, plus K8 consequence 2, plus whatever `log_artifact` costs on its own schedule.
+Net: this document's 41-63 days, plus K8 consequence 2, plus whatever `log_artifact` costs on its own schedule.
 
 ## 7. Confirmation
 
@@ -492,6 +560,11 @@ No code was moved, renamed, or behavior-changed by this document.
 On the first pass (2026-11-06) every file:line reference was read directly from `develop` rather than reconstructed from memory or from the issue's own worked example.
 On this pass (2026-11-14, `develop` at `b33dad5f`) §5's 105 line ranges were regenerated from `task.py`'s own syntax tree, and every reference cited in §1, §2, §3 and §6 was re-read at that commit.
 The claims the revision turns on were each checked against the code rather than inferred from the decision: that `request_task_redo`'s only caller guard is holding a claimed task (`task.py:9271`), that the handoff copies a closing card's `inputs` plus evidence minus `raw` into its dependents (`task.py:1245`), that the merge to `main` is reached from the completion path (`task.py:8506`) and from merge recovery (`task.py:5476`), and that the redo bound is `MAX_TASK_REDO_COUNT = 3` on the card (`task.py:126`).
+
+Three claims in this revision's own first draft were wrong, found by Codex review on PR #921 and corrected here against the code.
+The draft said the merge could simply move to the verify card's close; the evidence gate passes any verdict whose keys are present (`task.py:1090-1113`), so that would have landed rejected work, and the correction is "Who lands the work" (§2) along with concern 7.
+The draft left the verifier's rejection path unordered; closing a card releases its holder (`task.py:8475`) and `request_task_redo` refuses a caller holding nothing, so the order is now stated explicitly (§2).
+The draft did not say what re-checks repaired work; `request_task_redo` resets the card it is given and nothing else, so a successor verify card is now part of the protocol.
 
 ## Related
 
