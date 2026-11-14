@@ -320,3 +320,93 @@ class TestDependsOnAnExistingBoardTask:
         )
 
         assert torches.dependencies == ["board-1"]
+
+
+class TestTypedSeedSpecs:
+    """Issue #911: a seed spec may carry ``task_type``, ``inputs`` and ``id``.
+
+    These are the three fields an extension seeding a typed chain over
+    MCP needs and could not send before: every seeded card was an
+    ``implement`` card with no inputs and a board-minted id.
+    """
+
+    def test_task_type_and_inputs_are_carried(self) -> None:
+        """The builder stamps the type and the inputs on the Task as given."""
+        (task,) = build_seeded_tasks(
+            [
+                _spec(
+                    name="Find the source of tow-0001",
+                    task_type="find",
+                    inputs={"case_id": "tow-0001", "query": "who said it"},
+                )
+            ],
+            "demo",
+        )
+        assert task.task_type == "find"
+        assert task.inputs == {"case_id": "tow-0001", "query": "who said it"}
+
+    def test_defaults_are_unchanged_when_the_fields_are_absent(self) -> None:
+        """A spec without the new keys builds exactly as before #911."""
+        (task,) = build_seeded_tasks([_spec()], "demo")
+        assert task.task_type == "implement"
+        assert task.inputs == {}
+        assert task.id.startswith("seed-1-")
+        assert task.source_context == {"seeded": True}
+
+    def test_a_caller_supplied_id_is_the_tasks_id(self) -> None:
+        """The id the caller chose is the Task's id and is flagged as caller-supplied."""
+        (task,) = build_seeded_tasks([_spec(id="tow-0001-find")], "demo")
+        assert task.id == "tow-0001-find"
+        assert task.source_context == {"seeded": True, "caller_id": True}
+
+    def test_dependencies_resolve_to_caller_supplied_ids(self) -> None:
+        """A depends_on by name resolves to the dependency's caller-chosen id."""
+        find, verify = build_seeded_tasks(
+            [
+                _spec(name="Find", id="c1-find", task_type="find"),
+                _spec(
+                    name="Verify",
+                    id="c1-verify",
+                    task_type="verify",
+                    depends_on=["Find"],
+                ),
+            ],
+            "demo",
+        )
+        assert find.id == "c1-find"
+        assert verify.dependencies == ["c1-find"]
+
+    def test_depends_on_may_name_an_in_batch_task_by_its_id(self) -> None:
+        """A caller that chose ids may wire dependencies by those ids too."""
+        _, verify = build_seeded_tasks(
+            [
+                _spec(name="Find", id="c1-find"),
+                _spec(name="Verify", id="c1-verify", depends_on=["c1-find"]),
+            ],
+            "demo",
+        )
+        assert verify.dependencies == ["c1-find"]
+
+    def test_malformed_typed_fields_are_each_one_named_problem(self) -> None:
+        """Bad type, bad inputs, bad id charset and a repeated id all appear."""
+        errors = validate_seed_specs(
+            [
+                {"name": "A", "task_type": "", "inputs": ["not", "a", "mapping"]},
+                {"name": "B", "id": "has spaces"},
+                {"name": "C", "id": "dup"},
+                {"name": "D", "id": "dup"},
+            ]
+        )
+        joined = "\n".join(errors)
+        assert "tasks[0].task_type must be a non-empty string" in joined
+        assert "tasks[0].inputs must be a mapping" in joined
+        assert "tasks[1].id must match [A-Za-z0-9_-]" in joined
+        assert "tasks[3] repeats the id 'dup'" in joined
+
+    def test_an_id_already_on_the_board_is_refused(self) -> None:
+        """The board would refuse the duplicate at creation; name it up front instead."""
+        errors = validate_seed_specs(
+            [{"name": "A", "id": "taken"}],
+            existing_tasks=[_board_task("taken", "Older task")],
+        )
+        assert errors == ["tasks[0].id 'taken' already identifies a board task"]

@@ -2,13 +2,19 @@
 Unit tests for the Tow case runner (#737, step 6).
 
 The runner reads the Tow Center dataset (200 excerpts, 1,600 rows of
-original 2025 engine answers) and seeds one case per excerpt through
-the kanban interface: a find task, a dependent verify task, an
-approve task on a deterministic sample, and a synthesize task.  No
-decomposer and no planner model are involved, which is the proof
-that decomposition is optional.  Ground truth never reaches the
-board: it lives in a manifest file for the grader (step 9), because
-a worker that can see the answer is not being tested.
+original 2025 engine answers) and seeds one case per excerpt: a find
+task, a dependent verify task, an approve task on a deterministic
+sample, and a synthesize task.  No decomposer and no planner model are
+involved, which is the proof that decomposition is optional.  Ground
+truth never reaches the board: it lives in a manifest file for the
+grader (step 9), because a worker that can see the answer is not being
+tested.
+
+Since issue #911 the cards reach the board over MCP only: one
+``create_project`` call carrying every seed spec and the chain's K2
+task-type declaration (#909). These tests drive that call through a
+fake, record what the runner sends, and check it is exactly what the
+kernel's own seed-spec validator accepts. No board file is written.
 """
 
 import csv
@@ -19,7 +25,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-# ``conftest.py`` puts ``dev-tools/experiments/`` on ``sys.path``.
+# ``pytest.ini`` puts ``extensions/citation_verifier`` on ``pythonpath``.
 from citation_verifier import runner as tow_runner
 
 pytestmark = pytest.mark.unit
@@ -169,25 +175,46 @@ class TestApprovalSampling:
         assert sampled <= set(numbers)
 
 
+class _FakeMarcus:
+    """A recording stand-in for the one MCP call the seeder makes."""
+
+    def __init__(self, reply: Dict[str, Any] | None = None) -> None:
+        self.calls: List[tuple[str, Dict[str, Any]]] = []
+        self.reply = (
+            reply
+            if reply is not None
+            else {
+                "success": True,
+                "project_id": "reg-abc123",
+                "tasks_created": 0,
+            }
+        )
+
+    async def __call__(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        self.calls.append((name, arguments))
+        return self.reply
+
+
+def _excerpt(number: int = 7) -> Any:
+    return tow_runner.Excerpt(
+        number=number,
+        excerpt=f"Synthetic excerpt number {number} for testing.",
+        publication=f"Publisher {number}",
+        date=f"1/{number}/2024",
+        source_url=f"https://example-{number}.org/article",
+        crawler="Allowed",
+        paywalled="No",
+        affiliation="None",
+    )
+
+
 class TestCaseSpec:
     """Test suite for the per-excerpt task wiring."""
-
-    def _excerpt(self) -> Any:
-        return tow_runner.Excerpt(
-            number=7,
-            excerpt="Synthetic excerpt number 7 for testing.",
-            publication="Publisher 7",
-            date="1/7/2024",
-            source_url="https://example-7.org/article",
-            crawler="Allowed",
-            paywalled="No",
-            affiliation="None",
-        )
 
     def test_sampled_case_has_four_tasks_in_a_chain(self) -> None:
         """find -> verify -> approve -> synthesize when sampled."""
         spec = tow_runner.build_case_spec(
-            self._excerpt(), approval_sampled=True, project_id="tow-b"
+            _excerpt(), approval_sampled=True, project_name="tow-b"
         )
 
         roles = [role for role, _, _ in spec]
@@ -200,7 +227,7 @@ class TestCaseSpec:
     def test_unsampled_case_skips_approve(self) -> None:
         """find -> verify -> synthesize when not in the sample."""
         spec = tow_runner.build_case_spec(
-            self._excerpt(), approval_sampled=False, project_id="tow-b"
+            _excerpt(), approval_sampled=False, project_name="tow-b"
         )
 
         roles = [role for role, _, _ in spec]
@@ -208,453 +235,241 @@ class TestCaseSpec:
         assert roles == ["find", "verify", "synthesize"]
         assert deps["synthesize"] == ["verify"]
 
-    def test_task_types_schemas_and_case_id(self) -> None:
-        """Tasks carry their type, schema, and zero-padded case id."""
+    def test_each_card_carries_type_inputs_and_a_final_id(self) -> None:
+        """Issue #911: the three fields the MCP path could not carry before."""
         spec = tow_runner.build_case_spec(
-            self._excerpt(), approval_sampled=True, project_id="tow-b"
+            _excerpt(), approval_sampled=True, project_name="tow-b"
         )
-        data = {role: task_data for role, task_data, _ in spec}
+        data = {role: seed for role, seed, _ in spec}
 
         assert data["find"]["task_type"] == "find"
-        assert set(data["find"]["output_schema"]["required"]) == {
-            "headline",
-            "publisher",
-            "date",
-            "url",
-        }
+        assert data["find"]["id"] == "tow-b-tow-0007-find"
         assert data["find"]["inputs"]["case_id"] == "tow-0007"
-        assert set(data["verify"]["output_schema"]["required"]) == {
-            "verdict",
-            "checks",
-        }
+        assert "query" in data["find"]["inputs"]
+        assert data["verify"]["id"] == "tow-b-tow-0007-verify"
         assert data["approve"]["task_type"] == "approve"
-        assert data["synthesize"]["output_schema"]["required"] == ["answer"]
+        assert data["synthesize"]["id"] == "tow-b-tow-0007-synthesize"
+        assert all("case:tow-0007" in seed["labels"] for seed in data.values())
+
+    def test_evidence_shape_is_declared_per_project_not_per_card(self) -> None:
+        """Issue #909: no card carries an output_schema; the registration does."""
+        spec = tow_runner.build_case_spec(
+            _excerpt(), approval_sampled=True, project_name="tow-b"
+        )
+        assert all("output_schema" not in seed for _, seed, _ in spec)
+
+    def test_ids_use_the_boards_charset_whatever_the_project_is_called(self) -> None:
+        """A project name with spaces or dots still yields a legal id."""
+        assert tow_runner.task_id_for("Tow B (gemini) v1.2", "tow-0001", "find") == (
+            "Tow-B-gemini-v1-2-tow-0001-find"
+        )
 
     def test_ground_truth_never_reaches_the_board(self) -> None:
-        """No task payload contains the answer the workers must find.
+        """No seed spec contains the answer the workers must find.
 
         The publisher name, the source URL, and the article date are
         the grader's secret; a finder or verifier that can read them
         from the board is not being tested.
         """
-        excerpt = self._excerpt()
+        excerpt = _excerpt()
         spec = tow_runner.build_case_spec(
-            excerpt, approval_sampled=True, project_id="tow-b"
+            excerpt, approval_sampled=True, project_name="tow-b"
         )
 
-        board_payload = json.dumps([task for _, task, _ in spec])
+        board_payload = json.dumps([seed for _, seed, _ in spec])
 
         assert excerpt.source_url not in board_payload
         assert excerpt.publication not in board_payload
         assert excerpt.date not in board_payload
 
 
-class TestSeeding:
-    """Test suite for seeding cases onto a SQLite board."""
+class TestTaskTypeRegistrations:
+    """Issue #909: the chain declares its four types the way the kernel reads them."""
 
-    @pytest.mark.asyncio
-    async def test_seeds_cases_with_wired_dependencies(
-        self, dataset: Path, tmp_path: Path
-    ) -> None:
-        """Every case lands with real task ids wired as dependencies."""
-        from src.integrations.providers.sqlite_kanban import SQLiteKanban
-
-        db = str(tmp_path / "kanban.db")
-        manifest_path = tmp_path / "manifest.json"
-
-        manifest = await tow_runner.seed_cases(
-            csv_path=str(dataset),
-            db_path=db,
-            project_id="tow-b",
-            limit=3,
-            approval_rate=1.0,
-            seed=737,
-            manifest_path=str(manifest_path),
-        )
-
-        board = SQLiteKanban({"db_path": db, "project_name": "t"})
-        await board.connect()
-        tasks = {t.id: t for t in await board.get_all_tasks()}
-        await board.disconnect()
-
-        assert len(manifest["cases"]) == 3
-        case = manifest["cases"]["tow-0001"]
-        assert case["approval_sampled"] is True
-        ids = case["tasks"]
-        assert tasks[ids["verify"]].dependencies == [ids["find"]]
-        assert tasks[ids["approve"]].dependencies == [ids["verify"]]
-        assert tasks[ids["synthesize"]].dependencies == [ids["approve"]]
-        assert tasks[ids["find"]].task_type == "find"
-        assert tasks[ids["find"]].project_id == "tow-b"
-
-    @pytest.mark.asyncio
-    async def test_unsampled_seeding_wires_synthesize_to_verify(
-        self, dataset: Path, tmp_path: Path
-    ) -> None:
-        """With no approval sample, three tasks per case, chain intact."""
-        from src.integrations.providers.sqlite_kanban import SQLiteKanban
-
-        db = str(tmp_path / "kanban.db")
-        manifest = await tow_runner.seed_cases(
-            csv_path=str(dataset),
-            db_path=db,
-            project_id="tow-b",
-            limit=3,
-            approval_rate=0.0,
-            seed=737,
-            manifest_path=str(tmp_path / "m.json"),
-        )
-
-        board = SQLiteKanban({"db_path": db, "project_name": "t"})
-        await board.connect()
-        tasks = {t.id: t for t in await board.get_all_tasks()}
-        await board.disconnect()
-
-        assert len(tasks) == 9
-        case = manifest["cases"]["tow-0002"]
-        assert case["approval_sampled"] is False
-        assert "approve" not in case["tasks"]
-        ids = case["tasks"]
-        assert tasks[ids["synthesize"]].dependencies == [ids["verify"]]
-
-    @pytest.mark.asyncio
-    async def test_manifest_keeps_ground_truth_off_the_board(
-        self, dataset: Path, tmp_path: Path
-    ) -> None:
-        """The manifest holds the answers; the board holds the work."""
-        db = str(tmp_path / "kanban.db")
-        manifest_path = tmp_path / "manifest.json"
-
-        await tow_runner.seed_cases(
-            csv_path=str(dataset),
-            db_path=db,
-            project_id="tow-b",
-            limit=2,
-            approval_rate=0.0,
-            seed=737,
-            manifest_path=str(manifest_path),
-        )
-
-        written = json.loads(manifest_path.read_text())
-        truth = written["cases"]["tow-0001"]["ground_truth"]
-
-        assert truth["source_url"] == "https://example-1.org/article"
-        assert truth["publication"] == "Publisher 1"
-        assert truth["date"] == "1/1/2024"
-
-
-class TestRegisterBoard:
-    """Test suite for registering seeded boards with Marcus.
-
-    Seeding writes tasks straight into the SQLite board, bypassing
-    create_project, the normal path that introduces a project to
-    Marcus's ProjectRegistry. Consumers of the registry (the Cato
-    dashboard's project list, single_project_mode's binding) never
-    learn a bypassed board exists, so the runner registers each board
-    it seeds, idempotently, under the board's real name.
-    """
-
-    @pytest.fixture
-    def registry(self, tmp_path: Path) -> Any:
-        """Create a file-backed registry in a temporary directory."""
-        from src.core.persistence import FilePersistence, Persistence
-        from src.core.project_registry import ProjectRegistry
-
-        backend = FilePersistence(storage_dir=tmp_path / "state")
-        return ProjectRegistry(persistence=Persistence(backend=backend))
-
-    @pytest.mark.asyncio
-    async def test_registers_board_under_its_real_name(
-        self, tmp_path: Path, registry: Any
-    ) -> None:
-        """The entry carries the board's name and absolute db path."""
-        db = tmp_path / "kanban-claude.db"
-
-        project_id = await tow_runner.register_board(
-            "tow-b-claude", str(db), registry=registry
-        )
-
-        stored = await registry.get_project(project_id)
-        assert stored is not None
-        assert stored.name == "tow-b-claude - Main Board"
-        assert stored.provider == "sqlite"
-        assert stored.provider_config["project_name"] == "tow-b-claude"
-        assert Path(stored.provider_config["db_path"]).is_absolute()
-        assert "auto-created" in stored.tags
-        assert "sqlite" in stored.tags
-
-    @pytest.mark.asyncio
-    async def test_registry_id_matches_the_kanban_project_id(
-        self, tmp_path: Path, registry: Any
-    ) -> None:
-        """GH-306: the kanban project id is the single source of truth,
-        not an auto-generated registry UUID -- a task's own
-        ``project_id`` field is written from this same string at
-        creation time, so a registry lookup by that id must find this
-        project. Issue #830, second half: a seeded board's K2
-        registration was unreachable because this id used to be a
-        random UUID instead."""
-        db = tmp_path / "kanban-claude.db"
-
-        project_id = await tow_runner.register_board(
-            "tow-b-claude", str(db), registry=registry
-        )
-
-        assert project_id == "tow-b-claude"
-
-    @pytest.mark.asyncio
-    async def test_registration_is_idempotent(
-        self, tmp_path: Path, registry: Any
-    ) -> None:
-        """Re-seeding the same board never duplicates the entry."""
-        db = str(tmp_path / "kanban-claude.db")
-
-        first = await tow_runner.register_board("tow-b-claude", db, registry=registry)
-        second = await tow_runner.register_board("tow-b-claude", db, registry=registry)
-
-        assert first == second
-        assert len(await registry.list_projects(provider="sqlite")) == 1
-
-    @pytest.mark.asyncio
-    async def test_the_same_project_id_against_a_different_db_is_refused(
-        self, tmp_path: Path, registry: Any
-    ) -> None:
-        """Codex P2, round 1 on PR #838: ProjectConfig.id is now the
-        kanban project id (GH-306), so seeding the same project_id
-        into a second database must not silently overwrite the first
-        registration -- add_project() replaces both persistence and
-        the cache under that id unconditionally, discarding the
-        original board's path and any K2 registration it carried, and
-        redirecting anything already holding this project id to the
-        new board."""
-        from src.core.error_framework import StateConflictError
-
-        first_db = str(tmp_path / "kanban-first.db")
-        second_db = str(tmp_path / "kanban-second.db")
-
-        await tow_runner.register_board("tow-b-claude", first_db, registry=registry)
-
-        with pytest.raises(StateConflictError):
-            await tow_runner.register_board(
-                "tow-b-claude", second_db, registry=registry
-            )
-
-        stored = await registry.get_project("tow-b-claude")
-        assert stored is not None
-        assert Path(stored.provider_config["db_path"]) == Path(first_db).resolve()
-
-    @pytest.mark.asyncio
-    async def test_a_legacy_uuid_record_is_migrated_not_duplicated(
-        self, tmp_path: Path, registry: Any
-    ) -> None:
-        """Codex P2, round 2 on PR #838: a board registered by the
-        pre-GH-306 code carries a generated UUID as its registry id,
-        not project_id. Re-registering it must not create a second,
-        empty-registrations project while the original (carrying real
-        K2 registrations and the active-project slot) stays live under
-        the UUID -- it must migrate in place: one record, under
-        project_id, with the registrations and active status carried
-        over, the UUID record gone."""
-        from src.core.project_registry import ProjectConfig
-
-        db = str(tmp_path / "kanban-claude.db")
-        absolute = str(Path(db).resolve())
-        now = datetime.now(timezone.utc)
-        legacy_id = "ad71d867-8384-4db7-b125-d84d6d2acf8c"
-        legacy = ProjectConfig(
-            id=legacy_id,
-            name="tow-b-claude - Main Board",
-            provider="sqlite",
-            provider_config={
-                "db_path": absolute,
-                "project_name": "tow-b-claude",
-                "attachments_dir": str(Path(absolute).parent / "attachments"),
-                "project_id": "tow-b-claude",
-            },
-            created_at=now,
-            last_used=now,
-            tags=["auto-created", "sqlite", "tow-experiment"],
-            task_type_registrations={
-                "verify": {"evidence_schema": {"required": ["verdict"]}}
-            },
-        )
-        await registry.add_project(legacy)
-        await registry.set_active_project(legacy_id)
-
-        new_id = await tow_runner.register_board("tow-b-claude", db, registry=registry)
-
-        assert new_id == "tow-b-claude"
-        boards = await registry.list_projects(provider="sqlite")
-        assert len(boards) == 1
-        canonical = boards[0]
-        assert canonical.id == "tow-b-claude"
-        assert canonical.task_type_registrations == {
-            "verify": {"evidence_schema": {"required": ["verdict"]}}
+    def test_all_four_types_are_declared(self) -> None:
+        """find, verify, approve and synthesize each have an entry."""
+        assert set(tow_runner.TASK_TYPE_REGISTRATIONS) == {
+            "find",
+            "verify",
+            "approve",
+            "synthesize",
         }
-        active = await registry.get_active_project()
-        assert active is not None
-        assert active.id == "tow-b-claude"
+
+    def test_verify_declares_what_it_checks(self) -> None:
+        """Offer-time eligibility reads ``verifies_task_type`` to protect the finder's claim."""
+        assert (
+            tow_runner.TASK_TYPE_REGISTRATIONS["verify"]["verifies_task_type"] == "find"
+        )
+
+    def test_evidence_schemas_match_what_the_workers_report(self) -> None:
+        """The required fields are the ones worker_common and the approvals CLI send."""
+        from citation_verifier.worker_common import CLAIM_FIELDS
+
+        from src.cli.approvals import _decision_evidence
+
+        reg = tow_runner.TASK_TYPE_REGISTRATIONS
+        assert set(reg["find"]["evidence_schema"]["required"]) == set(CLAIM_FIELDS)
+        assert set(reg["verify"]["evidence_schema"]["required"]) == {
+            "verdict",
+            "checks",
+        }
+        assert set(reg["synthesize"]["evidence_schema"]["required"]) == {"answer"}
+        assert set(reg["approve"]["evidence_schema"]["required"]) <= set(
+            _decision_evidence("reviewer", "approved")
+        )
+
+    def test_the_declaration_passes_the_kernels_own_validator(self) -> None:
+        """What the seeder sends is exactly what ``create_project`` accepts."""
+        from src.core.project_registry import validate_task_type_registrations
+
+        validate_task_type_registrations(tow_runner.TASK_TYPE_REGISTRATIONS)
+
+    def test_no_kernel_check_injection_is_requested(self) -> None:
+        """ADR-0013 K4: the kernel adds nothing to this chain's evidence."""
+        assert all(
+            reg["checks_injectable"] is False
+            for reg in tow_runner.TASK_TYPE_REGISTRATIONS.values()
+        )
 
 
-class TestProjectPrefixedTaskIds:
-    """Test suite for Cato-visible task ids.
+class TestSeedingOverMcp:
+    """Issue #911: one create_project call carries the whole board."""
 
-    Cato associates a task with a registered project when the task id
-    starts with the registry id plus an underscore (the exact-match
-    fallback in its matcher). Issue #741: the SQLite provider now
-    honors a caller-supplied id, so the seeder gives each task its
-    final, prefixed id at creation time -- no post-creation rewrite of
-    tasks/task_dependencies/task_labels ever runs.
-    """
-
-    @pytest.mark.asyncio
-    async def test_task_ids_carry_prefix_and_dependencies_follow(
-        self, tmp_path: Path
-    ) -> None:
-        """Every seeded id is born with the prefix; dependencies follow."""
-        import sqlite3
-
-        dataset = _write_dataset(tmp_path / "data.csv", [_row(1), _row(2)])
-        db = str(tmp_path / "kanban.db")
-
-        manifest = await tow_runner.seed_cases(
+    async def _seed(
+        self, tmp_path: Path, fake: _FakeMarcus, *, approval_rate: float, rows: int = 3
+    ) -> Dict[str, Any]:
+        dataset = _write_dataset(
+            tmp_path / "data.csv", [_row(n) for n in range(1, rows + 1)]
+        )
+        return await tow_runner.seed_cases(
             csv_path=str(dataset),
-            db_path=db,
-            project_id="tow-x",
-            limit=2,
-            approval_rate=0.0,
+            url="http://127.0.0.1:1/mcp",
+            project_name="tow-b",
+            limit=rows,
+            approval_rate=approval_rate,
             seed=737,
             manifest_path=str(tmp_path / "m.json"),
-            id_prefix="reg-123",
+            project_root=str(tmp_path / "root"),
+            call_tool=fake,
         )
-
-        con = sqlite3.connect(db)
-        ids = [r[0] for r in con.execute("SELECT id FROM tasks")]
-        assert ids and all(i.startswith("reg-123_") for i in ids)
-        deps = con.execute(
-            "SELECT task_id, depends_on_id FROM task_dependencies"
-        ).fetchall()
-        assert deps and all(
-            a.startswith("reg-123_") and b.startswith("reg-123_") for a, b in deps
-        )
-        known = set(ids)
-        assert all(a in known and b in known for a, b in deps)
-        labels = con.execute("SELECT task_id FROM task_labels").fetchall()
-        assert labels and all(t.startswith("reg-123_") for (t,) in labels)
-        for case in manifest["cases"].values():
-            assert all(t.startswith("reg-123_") for t in case["tasks"].values())
-
-
-class TestSeededTaskMetadata:
-    """Test suite for task_metadata persistence at seed time.
-
-    Cato's task universe is Marcus's ``task_metadata`` persistence
-    collection; tasks created through the NLP pipeline land there,
-    tasks seeded straight onto a kanban board do not, so a seeded
-    board renders empty. The seeder therefore persists one honest
-    metadata row per task it creates, through the sanctioned write
-    (``src.core.persistence.write_task_metadata_rows``, issue #741
-    step 3), keyed by the prefixed task id and carrying the registry
-    project id.
-    """
 
     @pytest.mark.asyncio
-    async def test_metadata_rows_written_with_prefixed_ids(
+    async def test_exactly_one_create_project_call_carries_every_card(
         self, tmp_path: Path
     ) -> None:
-        """Each seeded task gets a task_metadata row Cato can read."""
-        import json as jsonlib
-        import sqlite3
+        """Three sampled cases: one call, twelve specs, the declaration, a sqlite project."""
+        fake = _FakeMarcus()
+        await self._seed(tmp_path, fake, approval_rate=1.0)
 
-        dataset = _write_dataset(tmp_path / "data.csv", [_row(1), _row(2)])
-        meta_db = tmp_path / "marcus.db"
+        assert [name for name, _ in fake.calls] == ["create_project"]
+        _, args = fake.calls[0]
+        options = args["options"]
+        assert args["project_name"] == "tow-b"
+        assert options["provider"] == "sqlite"
+        assert options["project_root"] == str((tmp_path / "root").resolve())
+        assert options["task_type_registrations"] == tow_runner.TASK_TYPE_REGISTRATIONS
+        assert len(options["tasks"]) == 12
 
-        await tow_runner.seed_cases(
-            csv_path=str(dataset),
-            db_path=str(tmp_path / "kanban.db"),
-            project_id="tow-x",
-            limit=2,
-            approval_rate=0.0,
-            seed=737,
-            manifest_path=str(tmp_path / "m.json"),
-            id_prefix="reg-123",
-            metadata_db=str(meta_db),
-        )
+    @pytest.mark.asyncio
+    async def test_the_specs_pass_the_kernels_seed_validator(
+        self, tmp_path: Path
+    ) -> None:
+        """The runner sends what ``validate_seed_specs`` accepts, problem-free."""
+        from src.integrations.seeded_tasks import validate_seed_specs
 
-        con = sqlite3.connect(meta_db)
-        rows = [
-            jsonlib.loads(r[0])
-            for r in con.execute(
-                "SELECT data FROM persistence WHERE collection='task_metadata'"
-            )
+        fake = _FakeMarcus()
+        await self._seed(tmp_path, fake, approval_rate=1.0)
+
+        assert validate_seed_specs(fake.calls[0][1]["options"]["tasks"]) == []
+
+    @pytest.mark.asyncio
+    async def test_dependencies_are_wired_by_name_within_the_call(
+        self, tmp_path: Path
+    ) -> None:
+        """verify depends on its case's find by name; approve on verify; synthesize on approve."""
+        fake = _FakeMarcus()
+        await self._seed(tmp_path, fake, approval_rate=1.0)
+
+        by_id = {spec["id"]: spec for spec in fake.calls[0][1]["options"]["tasks"]}
+        assert by_id["tow-b-tow-0001-verify"]["depends_on"] == [
+            "Find the source of tow-0001"
         ]
-        assert len(rows) == 6  # 2 cases x (find, verify, synthesize)
-        assert all(r["task_id"].startswith("reg-123_") for r in rows)
-        assert all(r["project_id"] == "reg-123" for r in rows)
-        assert all(r["name"] for r in rows)
-        deps = [d for r in rows for d in r.get("dependencies", [])]
-        assert deps and all(d.startswith("reg-123_") for d in deps)
-
-
-class TestSeededBoardEndToEnd:
-    """Issue #741 step 5: a seeded board is visible end to end --
-
-    registry entry, prefixed task ids, and task_metadata rows -- using
-    only the sanctioned calls (``register_sqlite_board`` for the
-    registry, the provider's own caller-supplied id for prefixed ids,
-    ``write_task_metadata_rows`` for Cato's rows), with no raw SQL
-    anywhere in the path.
-    """
+        assert by_id["tow-b-tow-0001-approve"]["depends_on"] == [
+            "Verify the claim for tow-0001"
+        ]
+        assert by_id["tow-b-tow-0001-synthesize"]["depends_on"] == [
+            "Approve the verified claim for tow-0001"
+        ]
 
     @pytest.mark.asyncio
-    async def test_registry_prefixed_ids_and_metadata_all_agree(
+    async def test_unsampled_cases_wire_synthesize_to_verify(
         self, tmp_path: Path
     ) -> None:
-        from src.core.persistence import (
-            FilePersistence,
-            Persistence,
-            SQLitePersistence,
-        )
-        from src.core.project_registry import ProjectRegistry, register_sqlite_board
+        """No approvals: nine specs, no approve card, synthesize follows verify."""
+        fake = _FakeMarcus()
+        manifest = await self._seed(tmp_path, fake, approval_rate=0.0)
 
-        dataset = _write_dataset(tmp_path / "data.csv", [_row(1), _row(2)])
-        db_path = str(tmp_path / "kanban.db")
-        meta_db = str(tmp_path / "marcus.db")
-        registry = ProjectRegistry(
-            persistence=Persistence(
-                backend=FilePersistence(storage_dir=tmp_path / "registry")
-            )
-        )
-
-        registry_id = await register_sqlite_board("reg-456", db_path, registry=registry)
-
-        manifest = await tow_runner.seed_cases(
-            csv_path=str(dataset),
-            db_path=db_path,
-            project_id="tow-x",
-            limit=2,
-            approval_rate=0.0,
-            seed=737,
-            manifest_path=str(tmp_path / "m.json"),
-            id_prefix=registry_id,
-            metadata_db=meta_db,
-        )
-
-        # Registry entry exists and matches the board that was seeded.
-        stored_project = await registry.get_project(registry_id)
-        assert stored_project is not None
-        assert stored_project.provider_config["db_path"] == str(Path(db_path).resolve())
-
-        # Task ids carry the registry id as their prefix.
-        all_ids = [
-            t for case in manifest["cases"].values() for t in case["tasks"].values()
+        specs = fake.calls[0][1]["options"]["tasks"]
+        assert len(specs) == 9
+        assert not any(spec["task_type"] == "approve" for spec in specs)
+        by_id = {spec["id"]: spec for spec in specs}
+        assert by_id["tow-b-tow-0002-synthesize"]["depends_on"] == [
+            "Verify the claim for tow-0002"
         ]
-        assert all_ids and all(i.startswith(f"{registry_id}_") for i in all_ids)
+        assert "approve" not in manifest["cases"]["tow-0002"]["tasks"]
 
-        # Each task has a task_metadata row Cato can read, under its
-        # final (already-prefixed) id.
-        meta_store = Persistence(backend=SQLitePersistence(db_path=Path(meta_db)))
-        for task_id in all_ids:
-            row = await meta_store.retrieve("task_metadata", task_id)
-            assert row is not None
-            assert row["project_id"] == registry_id
+    @pytest.mark.asyncio
+    async def test_manifest_records_the_registry_id_and_the_card_ids(
+        self, tmp_path: Path
+    ) -> None:
+        """Workers and the exporter find the project and its cards from the manifest."""
+        fake = _FakeMarcus({"success": True, "project_id": "reg-xyz789"})
+        manifest = await self._seed(tmp_path, fake, approval_rate=1.0)
+
+        written = json.loads((tmp_path / "m.json").read_text())
+        assert written["project_id"] == "reg-xyz789"
+        assert written["project_name"] == "tow-b"
+        assert written["tasks_seeded"] == 12
+        assert written["cases"]["tow-0001"]["tasks"] == {
+            "find": "tow-b-tow-0001-find",
+            "verify": "tow-b-tow-0001-verify",
+            "approve": "tow-b-tow-0001-approve",
+            "synthesize": "tow-b-tow-0001-synthesize",
+        }
+        assert manifest == written
+
+    @pytest.mark.asyncio
+    async def test_ground_truth_is_in_the_manifest_and_not_in_the_call(
+        self, tmp_path: Path
+    ) -> None:
+        """The manifest holds the answers; the board payload never does."""
+        fake = _FakeMarcus()
+        manifest = await self._seed(tmp_path, fake, approval_rate=0.0)
+
+        truth = manifest["cases"]["tow-0001"]["ground_truth"]
+        assert truth == {
+            "publication": "Publisher 1",
+            "date": "1/1/2024",
+            "source_url": "https://example-1.org/article",
+        }
+        payload = json.dumps(fake.calls[0][1])
+        assert "https://example-1.org/article" not in payload
+        assert "Publisher 1" not in payload
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_is_raised_with_the_reply_body(
+        self, tmp_path: Path
+    ) -> None:
+        """Marcus's rejection reaches the operator verbatim, and no manifest is written."""
+        fake = _FakeMarcus(
+            {"success": False, "error_code": "tasks_invalid", "error": "tasks[0] bad"}
+        )
+        with pytest.raises(RuntimeError, match="tasks_invalid"):
+            await self._seed(tmp_path, fake, approval_rate=0.0)
+        assert not (tmp_path / "m.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_the_project_root_is_created(self, tmp_path: Path) -> None:
+        """The kernel refuses a sqlite project without a root; the seeder makes one."""
+        await self._seed(tmp_path, _FakeMarcus(), approval_rate=0.0)
+        assert (tmp_path / "root").is_dir()

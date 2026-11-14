@@ -662,6 +662,59 @@ OBJECTIVE_AUTHOR = "marcus"
 _OBJECTIVE_MAX_CHARS = 4000
 
 
+def _validate_task_type_registrations_option(
+    options: Optional[Dict[str, Any]], project_name: str
+) -> Optional[Dict[str, Any]]:
+    """Reject a malformed ``options.task_type_registrations`` before any state.
+
+    Issue #911 (ADR-0013 K2): an extension seeding a typed chain over
+    MCP declares its task types in the same ``create_project`` call
+    that mints the project record, and the declaration is stamped on
+    that record (``ProjectConfig.task_type_registrations``). The
+    kernel's own rule for what a declaration may say lives in
+    ``src/core/project_registry.py``; it is applied here, up front, so
+    the refusal arrives before a board exists rather than as a warning
+    in the server log after the cards are already on it.
+
+    Parameters
+    ----------
+    options : Optional[Dict[str, Any]]
+        The ``create_project`` options.
+    project_name : str
+        For the log line.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A rejection response with ``error_code:
+        "task_type_registrations_invalid"``, or None when there is no
+        ``task_type_registrations`` option or it is valid.
+    """
+    if not isinstance(options, dict) or "task_type_registrations" not in options:
+        return None
+    from src.core.error_framework import InvalidConfigurationError
+    from src.core.project_registry import validate_task_type_registrations
+
+    try:
+        validate_task_type_registrations(options.get("task_type_registrations"))
+    except InvalidConfigurationError as exc:
+        problem = str(exc)
+        logger.warning(
+            f"create_project for {project_name!r} rejected: invalid "
+            f"task_type_registrations option: {problem}"
+        )
+        return {
+            "success": False,
+            "error": (
+                "options.task_type_registrations is not a valid task-type "
+                f"declaration: {problem}"
+            ),
+            "error_code": "task_type_registrations_invalid",
+            "error_type": "InvalidConfigurationError",
+        }
+    return None
+
+
 def _validate_objective_option(
     options: Optional[Dict[str, Any]], project_name: str
 ) -> Optional[Dict[str, Any]]:
@@ -1222,6 +1275,14 @@ async def _create_project_inner(
             _recent_create_project_calls.pop(dedup_key, None)
             return _objective_rejection
 
+        # Issue #911: a malformed K2 task-type declaration is refused here too.
+        _registrations_rejection = _validate_task_type_registrations_option(
+            options, project_name
+        )
+        if _registrations_rejection is not None:
+            _recent_create_project_calls.pop(dedup_key, None)
+            return _registrations_rejection
+
         # Log before calling the function
         state.log_event("create_project_calling", {"project_name": project_name})
 
@@ -1418,6 +1479,12 @@ async def _create_project_inner(
                         "project_id",
                         getattr(state.kanban_client, "project_id", ""),
                     )
+                    # Issue #911 (ADR-0013 K2): the caller's task-type
+                    # declaration, validated before any state was
+                    # touched, is stamped on the record it belongs to.
+                    declared_types: Dict[str, Dict[str, Any]] = dict(
+                        (options or {}).get("task_type_registrations") or {}
+                    )
                     project_config = ProjectConfig(
                         id=str(kanban_project_id) if kanban_project_id else "",
                         name=f"{provider_project_name} - {provider_board_name}",
@@ -1426,6 +1493,7 @@ async def _create_project_inner(
                         created_at=datetime.now(timezone.utc),
                         last_used=datetime.now(timezone.utc),
                         tags=["auto-created", provider],
+                        task_type_registrations=declared_types,
                     )
 
                     # Register with Marcus registry

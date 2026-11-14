@@ -144,6 +144,62 @@ class ProjectConfig:
 _INJECTED_CHECK_ALLOWED_KEYS = {"name", "description"}
 
 
+def validate_task_type_registrations(task_type_registrations: Any) -> None:
+    """Reject a malformed ADR-0013 K2 task-type declaration.
+
+    The public entry point (issue #911): ``create_project`` applies it
+    to ``options.task_type_registrations`` before any state is touched,
+    so an extension declaring its types over MCP hears the same rule the
+    in-process ``add_project`` path enforces, and hears it up front.
+    Checks the shape (a mapping of non-empty task-type names to
+    mappings), then the K4 ``injected_checks`` rule below.
+
+    Parameters
+    ----------
+    task_type_registrations : Any
+        The declaration as received.
+
+    Raises
+    ------
+    InvalidConfigurationError
+        The declaration is not a mapping of task type to mapping, a
+        task type name is not a non-empty string, or the K4 rule in
+        :func:`_validate_task_type_registrations` is broken.
+    """
+    if not isinstance(task_type_registrations, dict):
+        raise InvalidConfigurationError(
+            config_key="task_type_registrations",
+            expected_format=(
+                "task_type_registrations must be a mapping of task type to "
+                f"registration, got {type(task_type_registrations).__name__}"
+            ),
+            context=ErrorContext(operation="validate_task_type_registrations"),
+        )
+    for task_type, registration in task_type_registrations.items():
+        if not isinstance(task_type, str) or not task_type.strip():
+            raise InvalidConfigurationError(
+                config_key="task_type_registrations",
+                expected_format="each task type name must be a non-empty string",
+                context=ErrorContext(
+                    operation="validate_task_type_registrations",
+                    custom_context={"task_type": task_type},
+                ),
+            )
+        if not isinstance(registration, dict):
+            raise InvalidConfigurationError(
+                config_key=f"task_type_registrations.{task_type}",
+                expected_format=(
+                    f"the registration for {task_type!r} must be a mapping, got "
+                    f"{type(registration).__name__}"
+                ),
+                context=ErrorContext(
+                    operation="validate_task_type_registrations",
+                    custom_context={"task_type": task_type},
+                ),
+            )
+    _validate_task_type_registrations(task_type_registrations)
+
+
 def _validate_task_type_registrations(
     task_type_registrations: Dict[str, Dict[str, Any]],
 ) -> None:

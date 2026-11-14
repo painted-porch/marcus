@@ -5,6 +5,16 @@ The extension may read the kernel only through ``citation_verifier.kernel``.
 If any other module imports ``src.`` the extension has grown a side door;
 if ``kernel`` imports more than the declared list, the contract in
 ``docs/architecture/extension-contract.md`` is out of date.
+
+What the guard covers, and what it deliberately does not (issue #913).
+It walks every ``.py`` file inside the *package* directory,
+``extensions/citation_verifier/citation_verifier/``, because those are the
+modules importable as ``citation_verifier.<name>``; a kernel import in any of
+them is a side door. A file dropped one level up, beside the distribution's
+``pyproject.toml``, is outside its view on purpose: it is not part of the
+package, cannot be reached as ``citation_verifier.something``, and so cannot
+be a door into the package. ``test_no_stray_module_beside_the_package``
+names such a file as a packaging mistake instead of silently ignoring it.
 """
 
 import ast
@@ -20,12 +30,14 @@ from citation_verifier import kernel
 pytestmark = pytest.mark.unit
 
 PACKAGE_DIR = Path(citation_verifier.__file__).parent
+#: The whole surface since the MCP-only write path (ADR-0013 K2 decided
+#: 2026-11-13; #911 closed the seed-spec gaps, #910 made the reply reader
+#: public): the MCP client and its public reply reader. Nothing private.
 DECLARED: Dict[str, Set[str]] = {
-    "src.core.persistence": {"write_task_metadata_rows"},
-    "src.core.project_registry": {"ProjectRegistry", "register_sqlite_board"},
-    "src.integrations.providers.sqlite_kanban": {"SQLiteKanban"},
-    "src.worker.inspector": {"Inspector", "_extract_text_from_result"},
+    "src.worker.inspector": {"Inspector", "extract_text_from_result"},
 }
+#: The distribution directory, holding ``pyproject.toml`` and the package.
+DIST_DIR = PACKAGE_DIR.parent
 
 
 def _kernel_imports(path: Path) -> Dict[str, Set[str]]:
@@ -70,3 +82,19 @@ class TestOneDoorToTheKernel:
         """Packaging smoke test: each module loads under its new name."""
         for info in pkgutil.iter_modules([str(PACKAGE_DIR)]):
             importlib.import_module(f"citation_verifier.{info.name}")
+
+    def test_nothing_on_the_surface_is_private(self) -> None:
+        """Issue #910: the contract names public API only."""
+        assert not any(
+            name.startswith("_") for names in DECLARED.values() for name in names
+        )
+
+    def test_no_stray_module_beside_the_package(self) -> None:
+        """Issue #913: a ``.py`` beside ``pyproject.toml`` is a packaging mistake.
+
+        Such a file is outside the import guard's view by design (see the
+        module docstring); this names it rather than letting it sit there
+        looking like an unguarded hole.
+        """
+        strays = sorted(p.name for p in DIST_DIR.glob("*.py"))
+        assert strays == []

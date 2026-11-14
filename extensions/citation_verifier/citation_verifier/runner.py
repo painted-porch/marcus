@@ -5,12 +5,20 @@ articles and asked each engine to identify the headline, publisher,
 publication date, and URL.
 This runner reads that study's public dataset (200 excerpts across 20
 publishers; 1,600 rows once each of the original eight engines'
-answers are counted) and seeds one case per excerpt through the
-kanban interface: a ``find`` task, a dependent ``verify`` task, an
-``approve`` task on a deterministic sample, and a ``synthesize`` task.
+answers are counted) and seeds one case per excerpt: a ``find`` task, a
+dependent ``verify`` task, an ``approve`` task on a deterministic
+sample, and a ``synthesize`` task.
 No decomposer and no planner model are involved, which is the live
 proof that decomposition is optional (the strip column of the issue's
 keep/add/strip table).
+
+The cards reach the board over MCP only (ADR-0013 K2, decided
+2026-11-13, issue #911): one ``create_project`` call carries every
+seed spec with its ``task_type``, ``inputs`` and final ``id``, plus the
+project's task-type declaration (``task_type_registrations``, issue
+#909), and Marcus mints the project record, the board and Cato's
+metadata rows itself. This module imports no kernel code; it talks to a
+running server the way every worker does.
 
 Three rules the seeding enforces by construction:
 
@@ -23,20 +31,24 @@ Three rules the seeding enforces by construction:
   (the passphrase is in their README) and point ``--dataset`` at the
   CSV. Do not commit the CSV, and do not commit manifests, which
   contain the excerpts and answers.
-- One board per finder vendor. Condition B attributes each case to
+- One project per finder vendor. Condition B attributes each case to
   the vendor whose finder worked it, and the board never assigns, so
   attribution comes from environment design: seed one project per
   vendor (e.g. ``--project tow-b-perplexity``) and register only that
   vendor's finder plus a different-vendor verifier against it.
 
-Usage::
+Usage (against a running Marcus)::
 
     python -m citation_verifier.runner \
         --dataset /path/to/GenAISearch_Data.csv \
-        --db /path/to/kanban.db \
+        --url http://127.0.0.1:4777/mcp \
         --project tow-b-perplexity \
         --limit 50 --approval-rate 0.1 --seed 737 \
         --manifest /path/to/manifest-perplexity.json
+
+The manifest records the registry project id Marcus returned; the
+workers, the approvals CLI and the exporter take that id as
+``--project``.
 """
 
 import argparse
@@ -44,18 +56,13 @@ import asyncio
 import csv
 import json
 import random
-import uuid
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
-from citation_verifier.kernel import (
-    REPO_ROOT,
-    ProjectRegistry,
-    SQLiteKanban,
-    register_sqlite_board,
-)
+from citation_verifier.kernel import Inspector, extract_text_from_result
 
 # The study's query, verbatim from the Tow Center README, so the
 # finder sends exactly what the original engines received.
@@ -67,8 +74,44 @@ QUERY_FORMAT = (
     "include a proper citation for the source."
 )
 
-# One task spec: (role, task_data without dependencies, depends-on roles).
+# One task spec: (role, seed spec without depends_on, depends-on roles).
 TaskSpec = Tuple[str, Dict[str, Any], List[str]]
+
+#: An MCP tool call: ``(tool_name, arguments) -> parsed reply``.
+ToolCall = Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]
+
+#: The chain's ADR-0013 K2 declaration (issue #909): what each task type's
+#: completion must report as evidence, and that ``verify`` checks ``find``
+#: (so the board never offers a verify card to the finder whose claim it
+#: checks, nor to that finder's vendor). ``checks_injectable`` is false
+#: throughout: the kernel adds no checks of its own to this chain (K4).
+#: The evidence shapes are the ones the workers report
+#: (``worker_common.py``) and the approvals CLI sends
+#: (``src/cli/approvals.py``).
+TASK_TYPE_REGISTRATIONS: Dict[str, Dict[str, Any]] = {
+    "find": {
+        "evidence_schema": {
+            "type": "object",
+            "required": ["headline", "publisher", "date", "url"],
+        },
+        "checks_injectable": False,
+    },
+    "verify": {
+        "evidence_schema": {"type": "object", "required": ["verdict", "checks"]},
+        "verifies_task_type": "find",
+        "checks_injectable": False,
+    },
+    "approve": {
+        "evidence_schema": {"type": "object", "required": ["decision", "approved_by"]},
+        "checks_injectable": False,
+    },
+    "synthesize": {
+        "evidence_schema": {"type": "object", "required": ["answer"]},
+        "checks_injectable": False,
+    },
+}
+
+_ID_SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 @dataclass
@@ -230,10 +273,31 @@ def sample_approvals(numbers: List[int], rate: float, seed: int) -> Set[int]:
     return set(rng.sample(sorted(numbers), min(count, len(numbers))))
 
 
+def task_id_for(project_name: str, case_id: str, role: str) -> str:
+    """Return the final board id of one card.
+
+    Parameters
+    ----------
+    project_name : str
+        The project the card belongs to; several projects may share one
+        board file, so the id carries it.
+    case_id : str
+        The case, e.g. ``tow-0007``.
+    role : str
+        ``find``, ``verify``, ``approve`` or ``synthesize``.
+
+    Returns
+    -------
+    str
+        An id over ``[A-Za-z0-9_-]``, the charset the board accepts.
+    """
+    return _ID_SAFE.sub("-", f"{project_name}-{case_id}-{role}").strip("-")
+
+
 def build_case_spec(
-    excerpt: Excerpt, approval_sampled: bool, project_id: str
+    excerpt: Excerpt, approval_sampled: bool, project_name: str
 ) -> List[TaskSpec]:
-    """Build the task chain for one case.
+    """Build the task chain for one case as seed specs.
 
     Parameters
     ----------
@@ -243,96 +307,90 @@ def build_case_spec(
     approval_sampled : bool
         True when this case gets a human approve task between verify
         and synthesize.
-    project_id : str
-        Project id every task carries (GH-388 scoping).
+    project_name : str
+        The project the cards belong to; part of every card's id.
 
     Returns
     -------
     List[TaskSpec]
-        Ordered (role, task_data, depends_on_roles) triples.
+        Ordered (role, seed spec, depends_on_roles) triples. Each seed
+        spec is what ``create_project(options.tasks)`` accepts
+        (``src/integrations/seeded_tasks.py``): name, description,
+        labels, estimated_hours, priority, ``task_type``, ``inputs``
+        and ``id``. The evidence each type must report is declared once
+        per project (:data:`TASK_TYPE_REGISTRATIONS`), not per card.
     """
     case = excerpt.case_id
-    labels = ["tow", f"case:{case}"]
     common = {
         "priority": "high",
         "estimated_hours": 0.1,
-        "labels": labels,
-        "project_id": project_id,
+        "labels": ["tow", f"case:{case}"],
     }
+
+    def _spec(
+        role: str, name: str, description: str, inputs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return {
+            **common,
+            "id": task_id_for(project_name, case, role),
+            "name": name,
+            "description": description,
+            "task_type": role,
+            "inputs": inputs,
+        }
 
     find: TaskSpec = (
         "find",
-        {
-            **common,
-            "name": f"Find the source of {case}",
-            "description": (
-                "Send the query in inputs['query'] to your engine and "
-                "report the claim as evidence: headline, publisher, "
-                "date, url, and raw (the engine's full response)."
-            ),
-            "task_type": "find",
-            "inputs": {
+        _spec(
+            "find",
+            f"Find the source of {case}",
+            "Send the query in inputs['query'] to your engine and "
+            "report the claim as evidence: headline, publisher, "
+            "date, url, and raw (the engine's full response).",
+            {
                 "case_id": case,
                 "excerpt": excerpt.excerpt,
                 "query": QUERY_FORMAT.format(excerpt=excerpt.excerpt),
             },
-            "output_schema": {
-                "type": "object",
-                "required": ["headline", "publisher", "date", "url"],
-            },
-        },
+        ),
         [],
     )
     verify: TaskSpec = (
         "verify",
-        {
-            **common,
-            "name": f"Verify the claim for {case}",
-            "description": (
-                "Fetch the claimed URL respecting robots.txt, check "
-                "the excerpt appears on the page, check the publisher "
-                "against the domain and the date within one day, and "
-                "report verdict (verified | contradicted | "
-                "unverifiable) and checks."
-            ),
-            "task_type": "verify",
-            "inputs": {"case_id": case, "excerpt": excerpt.excerpt},
-            "output_schema": {
-                "type": "object",
-                "required": ["verdict", "checks"],
-            },
-        },
+        _spec(
+            "verify",
+            f"Verify the claim for {case}",
+            "Fetch the claimed URL respecting robots.txt, check "
+            "the excerpt appears on the page, check the publisher "
+            "against the domain and the date within one day, and "
+            "report verdict (verified | contradicted | "
+            "unverifiable) and checks.",
+            {"case_id": case, "excerpt": excerpt.excerpt},
+        ),
         ["find"],
     )
     approve: TaskSpec = (
         "approve",
-        {
-            **common,
-            "name": f"Approve the verified claim for {case}",
-            "description": (
-                "A person reviews the claim and the verdict side by "
-                "side and approves or rejects (calibration sample)."
-            ),
-            "task_type": "approve",
-            "inputs": {"case_id": case},
-        },
+        _spec(
+            "approve",
+            f"Approve the verified claim for {case}",
+            "A person reviews the claim and the verdict side by "
+            "side and approves or rejects (calibration sample).",
+            {"case_id": case},
+        ),
         ["verify"],
     )
     synthesize: TaskSpec = (
         "synthesize",
-        {
-            **common,
-            "name": f"Render the case answer for {case}",
-            "description": (
-                "Assemble the case answer from the claim and the "
-                "verdict: verified claims become the answer; "
-                "contradicted or unverifiable claims close the case "
-                "as declined with the reason attached."
-            ),
-            "task_type": "synthesize",
-            "inputs": {"case_id": case},
-            "output_schema": {"type": "object", "required": ["answer"]},
-        },
+        _spec(
+            "synthesize",
+            f"Render the case answer for {case}",
+            "Assemble the case answer from the claim and the "
+            "verdict: verified claims become the answer; "
+            "contradicted or unverifiable claims close the case "
+            "as declined with the reason attached.",
+            {"case_id": case},
+        ),
         ["approve"] if approval_sampled else ["verify"],
     )
 
@@ -343,28 +401,89 @@ def build_case_spec(
     return spec
 
 
+def build_seed_specs(
+    excerpts: List[Excerpt], sampled: Set[int], project_name: str
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, str]]]:
+    """Turn every case's chain into one flat seed-spec list.
+
+    Parameters
+    ----------
+    excerpts : List[Excerpt]
+        The selected excerpts, one case each.
+    sampled : Set[int]
+        Prompt numbers whose case gets a human approve task.
+    project_name : str
+        The project the cards belong to.
+
+    Returns
+    -------
+    Tuple[List[Dict[str, Any]], Dict[str, Dict[str, str]]]
+        The specs, with ``depends_on`` resolved to the dependency's
+        name, and a map of case id to ``{role: task id}``.
+    """
+    specs: List[Dict[str, Any]] = []
+    ids_by_case: Dict[str, Dict[str, str]] = {}
+    for excerpt in excerpts:
+        chain = build_case_spec(excerpt, excerpt.number in sampled, project_name)
+        names_by_role = {role: spec["name"] for role, spec, _ in chain}
+        ids_by_case[excerpt.case_id] = {role: spec["id"] for role, spec, _ in chain}
+        for role, spec, depends_on_roles in chain:
+            specs.append(
+                {**spec, "depends_on": [names_by_role[r] for r in depends_on_roles]}
+            )
+    return specs, ids_by_case
+
+
+async def call_marcus(url: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Call one Marcus tool over HTTP MCP and parse its JSON reply.
+
+    Parameters
+    ----------
+    url : str
+        Marcus HTTP MCP endpoint.
+    name : str
+        The tool name.
+    arguments : Dict[str, Any]
+        The tool arguments.
+
+    Returns
+    -------
+    Dict[str, Any]
+        The reply body, or ``{}`` when the reply carried no text.
+    """
+    client = Inspector(connection_type="http")
+    async with client.connect(url=url):
+        if client.session is None:
+            raise RuntimeError("Not connected to Marcus")
+        result = await client.session.call_tool(name, arguments=arguments)
+    text = extract_text_from_result(result)
+    parsed = json.loads(text) if text else {}
+    return parsed if isinstance(parsed, dict) else {"result": parsed}
+
+
 async def seed_cases(
     csv_path: str,
-    db_path: str,
-    project_id: str,
+    url: str,
+    project_name: str,
     limit: int,
     approval_rate: float,
     seed: int,
     manifest_path: str,
+    project_root: str,
     stratify: bool = False,
-    id_prefix: "str | None" = None,
-    metadata_db: "str | None" = None,
+    call_tool: Optional[ToolCall] = None,
 ) -> Dict[str, Any]:
-    """Seed cases onto the board and write the grader's manifest.
+    """Create the project and its cards over MCP, and write the manifest.
 
     Parameters
     ----------
     csv_path : str
         The decrypted dataset CSV.
-    db_path : str
-        SQLite board file (created if absent).
-    project_id : str
-        Project id for every task; one project per finder vendor.
+    url : str
+        Marcus HTTP MCP endpoint of the running server.
+    project_name : str
+        The project's name; one project per finder vendor. Marcus
+        returns the registry id, which the manifest records.
     limit : int
         Seed the first ``limit`` excerpts (50 for the pilot, 200 for
         the full run); 0 means all.
@@ -374,69 +493,65 @@ async def seed_cases(
         RNG seed for the approval sample.
     manifest_path : str
         Where to write the manifest JSON (ground truth, task ids,
-        approval flags). Keep it out of the repository.
+        approval flags, the registry project id). Keep it out of the
+        repository.
+    project_root : str
+        The directory Marcus files the project's artifacts under; the
+        kernel refuses a sqlite project without one (#588). Created
+        if missing. This chain writes nothing there.
     stratify : bool
         Select excerpts round-robin across publishers instead of
         first-N, so every publisher's crawler posture is represented.
-    id_prefix : str | None
-        When set (normally the registry project id), every seeded
-        task is born with a final id of ``<prefix>_<uuid4 hex>``
-        (issue #741: the SQLite provider honors a caller-supplied id,
-        so no post-creation rewrite is needed) so registry consumers
-        such as Cato can attribute the tasks to the board.
-    metadata_db : str | None
-        Marcus persistence database to write ``task_metadata`` rows
-        into (requires ``id_prefix``). Cato's task universe is this
-        collection; tasks created through the NLP pipeline land there
-        and directly seeded boards do not, so the seeder persists one
-        honest row per task it creates.
+    call_tool : Optional[ToolCall]
+        The MCP call to use; defaults to :func:`call_marcus` against
+        ``url``. Injected in tests.
 
     Returns
     -------
     Dict[str, Any]
         The manifest that was written.
+
+    Raises
+    ------
+    RuntimeError
+        Marcus refused the project (the reply body is in the message)
+        or returned no project id.
     """
     excerpts = select_excerpts(load_excerpts(csv_path), limit, stratify)
     sampled = sample_approvals([e.number for e in excerpts], approval_rate, seed)
+    specs, ids_by_case = build_seed_specs(excerpts, sampled, project_name)
 
-    board = SQLiteKanban(
+    root = Path(project_root).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    if call_tool is None:
+
+        async def call_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+            return await call_marcus(url, name, arguments)
+
+    reply = await call_tool(
+        "create_project",
         {
-            "db_path": db_path,
-            "project_name": project_id,
-            "attachments_dir": str(Path(db_path).parent / "attachments"),
-        }
+            "description": (
+                f"On the Record: verify the AI-cited sources of {len(excerpts)} "
+                "news excerpts through a find -> verify -> approve -> "
+                "synthesize chain."
+            ),
+            "project_name": project_name,
+            "options": {
+                "provider": "sqlite",
+                "complexity": "prototype",
+                "project_root": str(root),
+                "tasks": specs,
+                "task_type_registrations": TASK_TYPE_REGISTRATIONS,
+            },
+        },
     )
-    await board.connect()
+    if not reply.get("success") or not reply.get("project_id"):
+        raise RuntimeError(f"create_project refused the seeded board: {reply}")
+    registry_id = str(reply["project_id"])
 
     cases: Dict[str, Any] = {}
-    seeded_rows: List[Dict[str, Any]] = []
     for excerpt in excerpts:
-        approval_sampled = excerpt.number in sampled
-        spec = build_case_spec(excerpt, approval_sampled, project_id)
-        ids_by_role: Dict[str, str] = {}
-        for role, task_data, depends_on in spec:
-            task_data = dict(task_data)
-            task_data["dependencies"] = [ids_by_role[r] for r in depends_on]
-            if id_prefix:
-                # Final, registry-prefixed id at creation (issue #741):
-                # the provider honors it, so no post-creation rewrite
-                # of tasks/task_dependencies/task_labels ever happens.
-                task_data["id"] = f"{id_prefix}_{uuid.uuid4().hex}"
-            created = await board.create_task(task_data)
-            ids_by_role[role] = created.id
-            seeded_rows.append(
-                {
-                    "task_id": created.id,
-                    "name": task_data.get("name", ""),
-                    "description": str(task_data.get("description", ""))[:400],
-                    "priority": str(task_data.get("priority", "medium")),
-                    "estimated_hours": 0.5,
-                    "labels": [task_data.get("task_type", "")],
-                    "dependencies": list(task_data["dependencies"]),
-                    "project_id": id_prefix or project_id,
-                    "source_type": "tow_experiment_seed",
-                }
-            )
         cases[excerpt.case_id] = {
             "prompt_number": excerpt.number,
             "excerpt": excerpt.excerpt,
@@ -448,21 +563,18 @@ async def seed_cases(
             "crawler": excerpt.crawler,
             "paywalled": excerpt.paywalled,
             "affiliation": excerpt.affiliation,
-            "approval_sampled": approval_sampled,
-            "tasks": ids_by_role,
+            "approval_sampled": excerpt.number in sampled,
+            "tasks": ids_by_case[excerpt.case_id],
         }
 
-    await board.disconnect()
-
-    if id_prefix and metadata_db:
-        await _persist_task_metadata(metadata_db, seeded_rows)
-
     manifest = {
-        "project_id": project_id,
-        "db_path": db_path,
+        "project_id": registry_id,
+        "project_name": project_name,
+        "url": url,
         "seed": seed,
         "approval_rate": approval_rate,
         "stratified": stratify,
+        "tasks_seeded": len(specs),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "cases": cases,
     }
@@ -472,77 +584,29 @@ async def seed_cases(
     return manifest
 
 
-async def _persist_task_metadata(metadata_db: str, rows: List[Dict[str, Any]]) -> None:
-    """Write one ``task_metadata`` row per seeded task.
-
-    Thin wrapper over the sanctioned write (issue #741, step 3),
-    ``src.core.persistence.write_task_metadata_rows`` -- kept here
-    under its original name so this seeder's own call sites and tests
-    don't need to change.
-
-    Parameters
-    ----------
-    metadata_db : str
-        Path to the persistence SQLite database (normally
-        ``<marcus root>/data/marcus.db``).
-    rows : List[Dict[str, Any]]
-        One prepared metadata row per seeded task, ids already
-        prefixed.
-    """
-    from citation_verifier.kernel import write_task_metadata_rows
-
-    await write_task_metadata_rows(metadata_db, rows)
-
-
-async def register_board(
-    project_id: str, db_path: str, registry: "ProjectRegistry | None" = None
-) -> str:
-    """Register a seeded board in Marcus's project registry.
-
-    Thin wrapper over the sanctioned registration path (issue #741,
-    step 2), ``src.core.project_registry.register_sqlite_board`` --
-    kept here under its original name so this seeder's own tests and
-    call sites don't need to change. See that function's docstring
-    for the full behavior (idempotency, the different-db-path refusal,
-    and the pre-GH-306 migration path).
-
-    Parameters
-    ----------
-    project_id : str
-        The board's project id, which seeding also uses as the kanban
-        project name (e.g. ``tow-b-claude``).
-    db_path : str
-        SQLite board file.
-    registry : ProjectRegistry | None
-        Injected in tests; defaults to Marcus's file-backed registry
-        under the package root.
-
-    Returns
-    -------
-    str
-        The registry project id (the existing one when the board was
-        already registered).
-
-    Raises
-    ------
-    StateConflictError
-        ``project_id`` is already registered against a *different*
-        database path.
-    """
-    return await register_sqlite_board(project_id, db_path, registry=registry)
-
-
 def main() -> None:
-    """Parse arguments and seed the cases."""
+    """Parse arguments and seed the cases over MCP."""
     parser = argparse.ArgumentParser(prog="tow_runner")
     parser.add_argument(
         "--dataset", required=True, help="Decrypted GenAISearch_Data.csv"
     )
-    parser.add_argument("--db", required=True, help="SQLite board file")
+    parser.add_argument(
+        "--url",
+        default="http://localhost:4777/mcp",
+        help="Marcus HTTP MCP endpoint of the running server (default: %(default)s)",
+    )
     parser.add_argument(
         "--project",
         required=True,
-        help="Project id; one per finder vendor (e.g. tow-b-perplexity)",
+        help="Project name; one per finder vendor (e.g. tow-b-perplexity)",
+    )
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help=(
+            "Directory Marcus files the project under; defaults to "
+            "<manifest dir>/project-root. The chain writes nothing there."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -575,52 +639,31 @@ def main() -> None:
             "first-N, so every publisher's crawler posture is represented"
         ),
     )
-    parser.add_argument(
-        "--metadata-db",
-        default=str(REPO_ROOT / "data" / "marcus.db"),
-        help=(
-            "Marcus persistence db for task_metadata rows, which Cato "
-            "renders tasks from (default: %(default)s)"
-        ),
-    )
-    parser.add_argument(
-        "--no-register",
-        action="store_true",
-        help=(
-            "Skip registering the board in Marcus's project registry "
-            "(registration is the default so the board shows up in "
-            "registry consumers such as Cato)"
-        ),
-    )
     args = parser.parse_args()
-
-    registry_id = None
-    if not args.no_register:
-        registry_id = asyncio.run(register_board(args.project, args.db))
-        print(
-            f"Registered {args.project} in Marcus's project registry "
-            f"as {registry_id}"
-        )
+    project_root = args.project_root or str(
+        Path(args.manifest).resolve().parent / "project-root"
+    )
 
     manifest = asyncio.run(
         seed_cases(
             csv_path=args.dataset,
-            db_path=args.db,
-            project_id=args.project,
+            url=args.url,
+            project_name=args.project,
             limit=args.limit,
             approval_rate=args.approval_rate,
             seed=args.seed,
             manifest_path=args.manifest,
+            project_root=project_root,
             stratify=args.stratify,
-            id_prefix=registry_id,
-            metadata_db=args.metadata_db if registry_id else None,
         )
     )
     total = len(manifest["cases"])
     approvals = sum(1 for c in manifest["cases"].values() if c["approval_sampled"])
     print(
-        f"Seeded {total} cases ({approvals} with human approval) into "
-        f"{args.db} as project {args.project}; manifest at {args.manifest}"
+        f"Seeded {total} cases ({approvals} with human approval, "
+        f"{manifest['tasks_seeded']} tasks) over MCP at {args.url} as project "
+        f"{args.project}; registry id {manifest['project_id']}; manifest at "
+        f"{args.manifest}"
     )
 
 

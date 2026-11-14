@@ -184,6 +184,11 @@ class NaturalLanguageTaskCreator(ABC):
                                 "dependencies": task.dependencies,
                                 "project_id": self.active_project_id,
                                 "source_type": getattr(task, "source_type", None),
+                                # Issue #911: the card's type, so a
+                                # typed chain seeded over MCP renders
+                                # as find/verify/... and not as a row of
+                                # untyped cards.
+                                "task_type": task_data.get("task_type", "implement"),
                                 "created_at": datetime.now(timezone.utc).isoformat(),
                             },
                         )
