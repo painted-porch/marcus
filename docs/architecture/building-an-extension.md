@@ -81,6 +81,19 @@ Build and test your extension against the `sqlite` provider.
 If a review finding against your PR touches only Planka-, Linear-, or GitHub-specific adapter code, it gets filed as a follow-up issue tagged `adapter` rather than blocking your merge.
 A kernel bug that happens to surface through one of those adapters is not covered by this exception and still needs fixing before merge.
 
+## What the kernel will not decide for you: a verdict's meaning
+
+The kernel's evidence gate checks that a declared type's required fields are **present**.
+It never reads what they say.
+So a `verify` card whose evidence reports a rejection closes just as successfully as one reporting a pass.
+
+This is deliberate: a kernel that knows which verdict values are good would have to understand your extension's semantics, which is what ADR-0013 K2 rules out.
+
+**What it means for you:** anything that should happen only when verification passes is your agent's own action.
+You cannot declare it and have the kernel do it when the card closes.
+The software-building extension hit this with its merge to `main` and the answer was that its verifier does the merging (issue #862).
+If your extension has an action of that shape, plan to take it yourself.
+
 ## What an extension must never do: the pull model (ADR-0013 K4, K8)
 
 The single most common mistake building against Marcus is assuming the kernel calls into your extension's code — the way a plugin system usually works.

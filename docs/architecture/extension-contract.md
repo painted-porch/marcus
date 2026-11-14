@@ -72,21 +72,35 @@ The in-process door is closed for new extensions; `kernel.py` shows what remains
 
 ## What packaging exercised, and what it did not
 
-The extraction scope for software-building (`docs/architecture/software-extension-extraction.md`) carries an optional branch of 8 to 12 engineer-days for a "pull-mode verdict return path" that, it says, does not exist anywhere in Marcus today.
-Packaging the citation verifier is evidence about that branch.
-
 **Exercised, on every task close, in the live rehearsal:** the kernel's typed-evidence gate.
 Every `report_task_progress` the finder and verifier send carries `evidence`, the seeded cards are typed `find`, `verify` and `synthesize`, and those are exactly the types the gate checks at close (`_apply_typed_evidence_gate`, `src/marcus_mcp/tools/task.py`).
 The `approve` card went through the human approval gate (`src/cli/approvals`).
 Thirteen of thirteen cards closed through those gates with zero kernel callbacks into extension code.
 
-**So the pull-mode verdict path does exist, for verification done by an agent.**
+**So the pull-mode verdict path exists, for verification done by an agent.**
 The citation chain's verifier is itself a pull-loop agent that claims a `verify` card, computes the verdict, and reports it as evidence; the kernel never calls the verifier, it only checks the shape of what came back.
 That is the pull model ADR-0013 K4 and K8 require, running in production since October.
 
-**Not exercised:** the software-building validation gate (`src/ai/validation/`), which today runs in-process at completion and never has a card of its own.
-Packaging the citation verifier therefore does not tell us that gate can move behind a shim; it tells us the alternative is already built and proven: make software-building's verification a `verify` card owned by a verifier agent, as the citation chain does, and the "missing mechanism" is not missing.
-Whether software-building keeps an in-process gate behind a shim or adopts verification-as-a-card is the choice behind the 8 to 12 days, and it is Larry's.
+**Larry decided on 2026-11-13 that software-building verification works the same way**: a `verify` card owned by a verifier agent, with no shim around `src/ai/validation/`.
+An earlier version of this section described that as an open choice worth 8 to 12 engineer-days, and the extraction scope priced a "pull-mode verdict return path" it believed did not exist.
+Both are settled: the mechanism was never missing, the branch is withdrawn, and `docs/architecture/software-extension-extraction.md` now scopes the extraction on the card basis.
+
+## The verdict's meaning is never the kernel's to read
+
+This rule came out of scoping the software-building cut (issue #862, PR #921) and it applies to every extension, so it belongs here rather than only there.
+
+The typed-evidence gate is a **shape** check.
+It builds the list of fields a declared type requires and refuses a close that is missing any of them; it never looks at what a field says.
+A `verify` card whose evidence reads `{"verdict": "rejected", "checks": [...]}` therefore closes successfully, exactly as a passing one does.
+
+That is deliberate and it must stay that way, because a kernel that knows which verdict values mean "good" is a kernel that understands one extension's semantics, which is the thing ADR-0013 K2 exists to prevent.
+
+**The consequence for an extension:** anything that should happen only on a passing verdict is the extension's own action, not something it can ask the kernel to do when the card closes.
+The citation chain never noticed this, because a contradicted claim simply becomes a declined case answer and nothing else happens.
+The software-building cut noticed immediately: it lands work on `main`, so if the merge were a kernel action triggered by the verify card's close, rejected work would land.
+The verifier has to do the landing itself.
+
+If your extension has an action like that, plan for your own agent to take it.
 
 ## How a second extension uses this contract
 
@@ -100,5 +114,6 @@ Whether software-building keeps an in-process gate behind a shim or adopts verif
 
 - ADR-0013 K1 (what the kernel is), K2 (how an extension registers), K4 and K8 (the pull model), K11 (verification first): `docs/architecture/adr/0013-kernel-and-extensions.md`.
 - The extension guide: `docs/architecture/building-an-extension.md`.
-- The software-building extraction scope: `docs/architecture/software-extension-extraction.md`.
+- The software-building extraction scope: `docs/architecture/software-extension-extraction.md`, rescoped on the card basis in PR #921.
+- Program board item `PVTI_lADODj3MGM4BqP6DzhIeyPo`, where the decision of 2026-11-13 is recorded.
 - Issues #741, #844 (sanctioned seeding paths), #888 (`add_project` accepts sqlite), #831 (K2 registration field), #909 (the chain declares its types), #910 (public reply reader), #911 (seed-spec gaps closed), #913 (guard docstring).
