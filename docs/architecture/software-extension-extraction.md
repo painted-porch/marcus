@@ -11,14 +11,15 @@ Every line range in §5 was regenerated from the file's own syntax tree on this 
 
 ## Summary
 
-**Total estimate: 41-63 engineer-days** across seven concerns.
+**Total estimate: 42-65 engineer-days** across seven concerns.
 
 Two things moved this number, and only one of them is the decision of 2026-11-13.
 
 The decision removed an unbuilt prerequisite.
 The earlier total of 31-43 days assumed the two verification gates stayed inside the kernel behind an in-process shim, with a further 8-12 days to build a "deferred-completion" mechanism if anyone wanted them genuinely out.
 Verification as a card needs no such mechanism, because nothing is held pending a verdict: the `implement` card closes on its own evidence and a dependent `verify` card carries the verdict.
-So that branch is gone and the shim is gone, replaced by one shared concern at 8-12 days (declare the task types, emit the verify cards, stand up the verifier process, wire the redo loop) that both gates then build on, with each gate's own estimate reduced because its call seam is deleted rather than wrapped.
+So that branch is gone and the shim is gone, replaced by one shared concern at 9-14 days (declare the task types, emit the verify cards, stand up the verifier process, wire the redo loop) that both gates then build on, with each gate's own estimate reduced because its call seam is deleted rather than wrapped.
+One small kernel change survives inside that concern, and it is not the one the earlier draft priced: a redo has to reset the dependent verification's status, or downstream work proceeds on top of rejected work (§2, "The verifier's protocol").
 
 The second thing is a gap this revision found while working out who lands verified work (§2, "Who lands the work").
 The kernel's evidence gate checks that a verdict is *present*, not what it *says*, and it must stay that way, because a kernel that reads a verdict's meaning is a kernel that understands one extension's semantics.
@@ -27,14 +28,14 @@ That takes 1,435 lines of git plumbing across 15 functions of `task.py` out of t
 Every one of those functions is already marked Extension in §5, and **none of the six concerns owned any of them**.
 That gap predates this revision and would have been just as real under the shim; the landing question is what surfaced it.
 
-So the honest comparison is not 41-63 against 31-43.
-It is that 41-63 is the first number in this document that covers the whole job: the earlier totals were low by the cost of the landing no matter which option had been chosen.
+So the honest comparison is not 42-65 against 31-43.
+It is that 42-65 is the first number in this document that covers the whole job: the earlier totals were low by the cost of the landing no matter which option had been chosen.
 
 | # | Concern | Engineer-days | Blocked on |
 | --- | --- | --- | --- |
 | 1 | Cost tracking (§4) | 3-5 remaining | Nothing. The generic transport shipped in PR #867; what is left is moving the two vendor-coupled modules and deciding the legacy duplicate's fate |
 | 2 | Decomposition & planning, clean half (§1, `nlp_task_utils.py`) | 1 | Nothing. Can start immediately |
-| 3 | **Verification as a card: the shared basis (described in §2)** | 8-12 | Nothing. The kernel precondition, declaring task types over MCP, landed 2026-11-14 in PR #919 |
+| 3 | **Verification as a card: the shared basis (described in §2)** | 9-14 | Nothing. The kernel precondition, declaring task types over MCP, landed 2026-11-14 in PR #919. Includes the one kernel change the decision needs |
 | 7 | **The landing: 1,435 lines of git plumbing, and who merges (§2)** | 6-10 | Concern 3, which stands up the verifier that will own it |
 | 4 | Validation gate (§2) | 10-15 | Concerns 3 and 7 |
 | 5 | Product smoke gate (§3) | 6-9 | Concerns 3 and 7. Shares `report_task_progress`'s completion path with #4, so do not run the two concurrently on parallel branches |
@@ -159,9 +160,10 @@ This changes concern #5's sizing materially — see its own section below.
 ## 2. The validation gate (`src/ai/validation/`)
 
 **Files:** `__init__.py` (27 lines), `task_filter.py` (90), `validation_models.py` (262), `retry_tracker.py` (216), `task_completeness_validator.py` (515, effectively dead code — no `src/` caller), `work_analyzer.py` (2246).
-**Sizing: 10-15 engineer-days**, on top of concern 3 (the shared basis, 8-12 days) and concern 7 (the landing, 6-10 days), both described below.
+**Sizing: 10-15 engineer-days**, on top of concern 3 (the shared basis, 9-14 days) and concern 7 (the landing, 6-10 days), both described below.
 Revised down from 12-18 by the decision of 2026-11-13: the earlier number carried the shim seam and its escalation machinery (`_handle_validation_failure`, `_alert_validation_unavailable`, `_stamp_validation_unavailable`, `_build_escalation_error_response`), which are now deleted rather than wrapped, and the gate's kernel reads become inputs the card carries rather than reads an out-of-process checker still somehow has to make.
-The earlier "+8-12 days if full pull-mode dispatch is attempted" branch is withdrawn; see below for why no such mechanism is needed.
+The earlier "+8-12 days if full pull-mode dispatch is attempted" branch is withdrawn: nothing is held pending a verdict, so the mechanism it would have built is not needed.
+One much smaller kernel change is, and it is costed in concern 3 rather than here; see "The verifier's protocol," below.
 
 ### The K3 boundary, already drawn in code
 
@@ -187,7 +189,8 @@ K3 (Accepted 2026-11-06) already splits this gate cleanly, and the split is smal
 
 An earlier version of this section said there was no mechanism for "a completion is held pending another agent's verdict," and sized building one at 8-12 days.
 That was the wrong question.
-Nothing needs to be held.
+Nothing needs to be held: the implement card closes and a dependent card carries the verdict.
+One small kernel change is needed, two subsections down, but it is not that one and it is not that size.
 
 Lawrence Gray decided on 2026-11-13, on Program board item `PVTI_lADODj3MGM4BqP6DzhIeyPo`:
 
@@ -213,8 +216,9 @@ Every kernel piece the software-building version needs is the same piece, alread
 ### What actually changes, and what it costs
 
 Five things change.
-Four of them need no new kernel mechanism.
-The fifth, the landing, needs no new kernel mechanism either, but only because the landing stops being the kernel's job at all; that is the subject of its own subsection below, and it is the largest single consequence of the decision.
+Three of them need no new kernel mechanism.
+The landing needs none either, but only because it stops being the kernel's job at all ("Who lands the work," below), and that is the largest single consequence of the decision.
+The fifth, re-verification after a rejection, does need one small kernel change, and the subsection after that explains why every way of avoiding it ungates downstream work.
 
 1. **`DONE` on an `implement` card stops meaning "verified."**
    It means the builder reported the evidence its type requires.
@@ -225,9 +229,10 @@ The fifth, the landing, needs no new kernel mechanism either, but only because t
    Under verification as a card the verifier lands the work itself, on a passing verdict, as its own action.
    It cannot become a kernel merge triggered by the verify card's close, for the reason in "Who lands the work" below.
    This is the single riskiest piece of the whole extraction: the trigger sits in `_record_progress`, the worst-tangled function in the file (§5), and the machinery behind it is 1,435 lines.
-3. **The in-process refusal becomes a redo.**
+3. **The in-process refusal becomes a redo, and the redo has to reach the verify card too.**
    Today a failed verdict refuses the completion and the same agent, still holding the task, tries again.
-   Under a card the verifier reports its verdict and calls `request_task_redo` on the card it checked.
+   Under a card the verifier calls `request_task_redo` on the card it checked, and the kernel has to reset the dependent verification along with it, or downstream work proceeds on top of rejected work.
+   This is the one kernel change the decision needs; see "The verifier's protocol" below.
 4. **A run's success signal has to read the verify cards.**
    The experiment runners and `RESULTS.md` records count completed cards today.
    With verification on its own cards, a board of closed `implement` cards and failed `verify` cards would read as a successful run.
@@ -263,26 +268,42 @@ That gap predates this revision; the landing question is what surfaced it.
 It is costed as concern 7 in the summary, at 6-10 days, and it has to move immediately after the shared basis and **before either gate's body moves**.
 That ordering is a hazard, not a preference: the moment verification leaves the completion path, the kernel is still merging on an `implement` card's close with nothing checking the work first, so a gate that moves out ahead of the landing opens a window in which unverified work lands on `main`.
 
-### The verifier's protocol on a rejected verdict, in order
+### The verifier's protocol on a rejected verdict, and the one kernel change it needs
 
-The order matters, and getting it wrong leaves the rejected work closed and unrepaired.
-Codex review found this too: closing a card releases the holder, because `_record_progress` deletes `state.agent_tasks[agent_id]` (`task.py:8475`), and `request_task_redo` refuses a caller that holds nothing (`caller_not_active`).
+Two Codex review rounds on PR #921 took three attempts at this protocol apart, and the third one is why this subsection ends with a kernel change rather than without one.
+
+**The ordering constraint is real.**
+Closing a card releases its holder, because `_record_progress` deletes `state.agent_tasks[agent_id]` (`task.py:8475`), and `request_task_redo` refuses a caller that holds nothing (`caller_not_active`).
 A verifier that reports its verdict first and asks for the redo second gets refused, and the rejected implementation stays `DONE`.
+So whatever else happens, the redo is requested while the verifier still holds its verify card.
 
-So, while it still holds its verify card:
+**Closing the verify card on a rejection ungates everything downstream.**
+`deps_allow_claim` (`src/core/task_claimability.py:98-113`) checks dependency *statuses*, not verdicts: an ordinary card becomes claimable when every dependency is `DONE`.
+A verify card closed with a rejected verdict is `DONE`, so an integration card or a follow-on implementation that depends on it becomes claimable immediately, on top of work that was just sent back.
 
-1. `request_task_redo` on the `implement` card it checked, with the reason and the defect kind.
-   This resets that card to `TODO` with a redo diagnostic, and the bound is the card's own `MAX_TASK_REDO_COUNT`.
-2. `create_tasks` with one new `verify` card whose `depends_on` names the `implement` card.
-   A runtime card may depend on a card already on the board, which is exactly K10's narrow accept (#841, PR #855), so this needs no new mechanism.
-3. Only then report its own verdict and close.
+**Reporting the verify card blocked instead does not fix it either.**
+`BLOCKED` is in `SETTLED_FOR_BEST_EFFORT`, so an integration card treats a blocked dependency as settled and may proceed in degraded mode (`task_claimability.py`, the integration branch).
+The gating a rejection needs is "not settled at all," and neither terminal status expresses that.
 
-Step 2 exists because `request_task_redo` resets the card it is given and nothing else.
-A verify card that has already closed stays closed, so without a successor nothing would ever re-check the repaired work.
-The alternative is a kernel change making a redo reopen its dependent verify cards, which is the same family as #803 (a redo leaving a stale claim in its dependents, fixed in PR #807 for the evidence but not for the status).
-The successor card is the better of the two on the merits and not just because it needs no kernel change: each verification attempt keeps its own card and its own evidence, so the board shows attempt one rejected and attempt two passing, where a reopened card would overwrite its own history.
+**A successor verify card cannot inherit the original's edges.**
+This revision's first draft recommended creating one, on the grounds that a card per attempt keeps each attempt's own evidence.
+That is true and it is still the nicer audit trail, but it does not work: the seeded `create_tasks` path is add-only and never rewires an existing card (`nlp.py:2108-2121`, K10's narrow accept), so a successor has no edge to the cards that depended on the original.
+Downstream work would start before the repair was verified, and the handoff would never deliver the successor's passing evidence to the consumers that needed it.
+The recommendation is withdrawn.
 
-Whichever is chosen, it belongs in concern 3 and is in its estimate.
+**So the verify card is the stable gating card, and the redo has to reset it.**
+The protocol is two steps, and the second is the kernel change:
+
+1. The verifier, while still holding its verify card, calls `request_task_redo` on the `implement` card it checked, with the reason and the defect kind.
+   The rejection is recorded there, in the redo diagnostic and in a `log_decision`, rather than as a closing evidence payload.
+2. The kernel resets both the implement card and its dependent verify-shaped cards to `TODO`, releasing the verifier's claim on its own card as it does.
+
+The verify card is then never `DONE` until a verdict passes, so everything downstream of it stays ungated for exactly as long as the work is unverified, which is the property the in-process gate had and the thing all three of the simpler protocols lose.
+
+**This is the one new kernel mechanism verification as a card needs.**
+It is small, and it is the status half of a bug whose evidence half is already fixed: #803 found that a redone task leaves a stale claim in its dependents so a verifier passes a superseded value, and PR #807 closed that by making a close replace the keys it contributed.
+Nothing yet resets a dependent verification's *status* when its subject is sent back.
+It is in concern 3's estimate, which this revision raises from 8-12 to 9-14 days to carry it.
 
 ### The declaration concern 3 would write
 
@@ -551,7 +572,7 @@ Neither remaining consequence blocks the other concerns from moving.
 **On additivity (Codex review on PR #866, still correct):** K8's three-consequence total of 6-8 engineer-days is not fully additive to this document's total.
 Consequence 3 (3-4 of those days) is the same deliverable §4 scopes and is now built, and §4's own 3-5-day remainder already reflects that.
 Consequence 2 remains genuinely additive at roughly 2-3 days; consequence 1's remaining weight is `log_artifact` alone, which this document does not scope.
-Net: this document's 41-63 days, plus K8 consequence 2, plus whatever `log_artifact` costs on its own schedule.
+Net: this document's 42-65 days, plus K8 consequence 2, plus whatever `log_artifact` costs on its own schedule.
 
 ## 7. Confirmation
 
@@ -564,7 +585,8 @@ The claims the revision turns on were each checked against the code rather than 
 Three claims in this revision's own first draft were wrong, found by Codex review on PR #921 and corrected here against the code.
 The draft said the merge could simply move to the verify card's close; the evidence gate passes any verdict whose keys are present (`task.py:1090-1113`), so that would have landed rejected work, and the correction is "Who lands the work" (§2) along with concern 7.
 The draft left the verifier's rejection path unordered; closing a card releases its holder (`task.py:8475`) and `request_task_redo` refuses a caller holding nothing, so the order is now stated explicitly (§2).
-The draft did not say what re-checks repaired work; `request_task_redo` resets the card it is given and nothing else, so a successor verify card is now part of the protocol.
+The draft did not say what re-checks repaired work, and its first answer to that was wrong too: it recommended a successor verify card, which cannot inherit the original's downstream edges because the seeded path is add-only, so downstream work would start on top of rejected work.
+The protocol now keeps one stable gating card and names the kernel change that makes it work, which is the status half of #803.
 
 ## Related
 
