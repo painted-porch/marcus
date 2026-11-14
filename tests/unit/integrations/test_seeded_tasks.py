@@ -410,3 +410,20 @@ class TestTypedSeedSpecs:
             existing_tasks=[_board_task("taken", "Older task")],
         )
         assert errors == ["tasks[0].id 'taken' already identifies a board task"]
+
+    def test_a_generated_id_never_collides_with_a_caller_supplied_one(self) -> None:
+        """Codex P2 on PR #919: a mixed batch keeps every id distinct.
+
+        A caller id spelled like another card's would-be synthetic id
+        used to give both cards the same id; after the board minted the
+        second card's real id the dependency remap collapsed the edge
+        into a self-dependency, blocking the card forever.
+        """
+        a, b = build_seeded_tasks(
+            [{"name": "a", "id": "seed-2-b"}, {"name": "b", "depends_on": ["a"]}],
+            "demo",
+        )
+        assert a.id == "seed-2-b"
+        assert b.id != a.id
+        assert b.id.startswith("seed-2-")
+        assert b.dependencies == ["seed-2-b"]

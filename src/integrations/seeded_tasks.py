@@ -327,11 +327,23 @@ def build_seeded_tasks(
         raise SeedTaskError("; ".join(errors))
     existing_tasks = existing_tasks or []
     now = datetime.now(timezone.utc)
-    ids = {
-        spec["name"].strip(): spec.get("id") or f"seed-{i + 1}-{_slug(spec['name'])}"
-        for i, spec in enumerate(specs)
-    }
-    caller_ids = set(ids.values()) if any("id" in spec for spec in specs) else set()
+    # Caller-supplied ids are taken as given; a generated id is allocated
+    # outside that set (Codex P2 on PR #919: a caller id spelled like
+    # another card's would-be synthetic id gave both cards one id, and
+    # the post-creation dependency remap then turned the second card's
+    # edge into a self-dependency).
+    caller_ids = {str(spec["id"]) for spec in specs if spec.get("id")}
+    ids: Dict[str, str] = {}
+    for i, spec in enumerate(specs):
+        if spec.get("id"):
+            ids[spec["name"].strip()] = str(spec["id"])
+            continue
+        candidate = f"seed-{i + 1}-{_slug(spec['name'])}"
+        bump = 0
+        while candidate in caller_ids:
+            bump += 1
+            candidate = f"seed-{i + 1}-{bump}-{_slug(spec['name'])}"
+        ids[spec["name"].strip()] = candidate
 
     def _resolve(dep: str) -> str:
         dep_name = dep.strip()
