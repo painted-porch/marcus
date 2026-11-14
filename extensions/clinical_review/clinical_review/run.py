@@ -27,8 +27,11 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +55,42 @@ from .spend import Ledger, StopLineReached
 #: The gate's thresholds, from METHODS.md section 7.
 GATE_MIN_ADVERSARIAL = 0.85
 GATE_MAX_ALIGNED = 0.05
+
+#: Provider keys this extension uses that ``marcus_toolkit.server`` does not
+#: strip from the server subprocess it starts (its ``STRIPPED_KEYS`` covers
+#: Anthropic, Claude, Gemini, OpenAI and Perplexity). METHODS.md promises the
+#: server under test runs with every vendor key stripped, so the run removes
+#: these for the server's lifetime itself. Filed against the toolkit as well;
+#: this is the belt, and the server's empty ``ai.anthropic_api_key`` plus
+#: ``ai.enabled: false`` are the braces.
+UNSTRIPPED_PROVIDER_KEYS: tuple[str, ...] = ("DEEPINFRA_API_KEY",)
+
+
+@contextlib.contextmanager
+def without_provider_keys(
+    names: tuple[str, ...] = UNSTRIPPED_PROVIDER_KEYS,
+) -> Iterator[None]:
+    """
+    Remove provider keys from this process's environment for the block.
+
+    A server started inside the block inherits an environment with no key to
+    find. The model adapters capture their key when they are constructed, so
+    removing it here never disturbs a call already in flight.
+
+    Parameters
+    ----------
+    names : Tuple[str, ...]
+        Environment variables to remove and then restore.
+
+    Yields
+    ------
+    None
+    """
+    saved = {name: os.environ.pop(name) for name in names if name in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
 
 
 class GateFailed(RuntimeError):
@@ -292,16 +331,19 @@ def run(
                 project_name=f"hospital-{arm.lower()}",
                 sqlite_db_path=data_dir / "kanban.db",
             )
-            srv = server.ServerUnderTest(
-                checkout,
-                data_dir,
-                config_path,
-                port,
-                arm_dir / "server.log",
-                python=python,
-            )
-            try:
+            # The adapters above already hold their clients, so the server
+            # starts with no provider key in its environment at all.
+            with without_provider_keys():
+                srv = server.ServerUnderTest(
+                    checkout,
+                    data_dir,
+                    config_path,
+                    port,
+                    arm_dir / "server.log",
+                    python=python,
+                )
                 srv.start(wait_seconds=120)
+            try:
                 client = MarcusMCPClient(srv.url, timeout=180)
                 if not client.connect():
                     raise RuntimeError(

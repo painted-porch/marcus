@@ -7,6 +7,7 @@ Nothing here starts a server or calls a model.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -114,3 +115,42 @@ class TestPaidGuard:
         )
         assert code == 2
         assert "APPROVED" in capsys.readouterr().err
+
+
+class TestServerEnvironment:
+    """The server under test inherits no provider key, including DeepInfra's."""
+
+    def test_the_toolkit_does_not_strip_deepinfra_so_the_run_does(self) -> None:
+        """The gap this guard exists for is real, and the guard names it."""
+        from marcus_toolkit.server import STRIPPED_KEYS
+
+        assert "DEEPINFRA_API_KEY" not in STRIPPED_KEYS
+        assert "DEEPINFRA_API_KEY" in run_mod.UNSTRIPPED_PROVIDER_KEYS
+
+    def test_keys_are_removed_inside_the_block_and_restored_after(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A server started in the block finds no key; the run keeps its own."""
+        monkeypatch.setenv("DEEPINFRA_API_KEY", "secret-value")
+        with run_mod.without_provider_keys():
+            assert "DEEPINFRA_API_KEY" not in os.environ
+        assert os.environ["DEEPINFRA_API_KEY"] == "secret-value"
+
+    def test_a_missing_key_is_not_invented_on_restore(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unset variable stays unset afterwards."""
+        monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+        with run_mod.without_provider_keys():
+            pass
+        assert "DEEPINFRA_API_KEY" not in os.environ
+
+    def test_the_keys_are_restored_even_when_the_block_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed server start does not cost the run its own credentials."""
+        monkeypatch.setenv("DEEPINFRA_API_KEY", "secret-value")
+        with pytest.raises(RuntimeError):
+            with run_mod.without_provider_keys():
+                raise RuntimeError("server refused to start")
+        assert os.environ["DEEPINFRA_API_KEY"] == "secret-value"

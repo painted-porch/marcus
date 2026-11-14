@@ -49,6 +49,7 @@ It ships as `extensions/clinical_review/` (`marcus-clinical-review`) with its te
 Five arms are preregistered in `~/marcus-experiments/hospital/METHODS.md`, including a no-board control that the two prior Marcus studies predict will match the board arm on catch rate, so what the board has to show is the refusal log, the terminal declined outcome and persuasion patterns as a query over the record, not a better number.
 The zero-spend gate (`python -m clinical_review.rehearsal`) drives a real Marcus with every vendor key stripped and the model off, and passes 13 of 13 checks: every card closed through the typed-evidence gate, the adviser refused every verify card, an unparseable check declined its card terminally (K5), a flagged chain rejected at its approve card, and no label from the answer key seeded onto any card.
 The paid run refuses to start without `--confirm-paid` and checks its stop line before every model call.
+It also strips its own provider key from the environment for the lifetime of each board arm's server, because `marcus_toolkit.server.STRIPPED_KEYS` covers five providers and not the one this extension uses (filed as painted-porch/marcus-toolkit#3); a test asserts that gap is real, so the local guard cannot be dropped silently.
 Nothing in it is a clinical tool, and no patient data is involved; the cases live outside the repository, as the Tow dataset does.
 
 ### Fixed
