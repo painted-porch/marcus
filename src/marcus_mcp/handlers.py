@@ -803,6 +803,72 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                                     "adjust priorities."
                                 ),
                             },
+                            "tasks": {
+                                "type": "array",
+                                "description": (
+                                    "A seeded board: put exactly these "
+                                    "tasks on the board, with no "
+                                    "decomposition and no model call. "
+                                    "Each item is a seed spec "
+                                    "(src/integrations/seeded_tasks.py). "
+                                    "Only 'name' is required. 'depends_on' "
+                                    "names another item by its name or "
+                                    "its id. Issue #911: 'task_type' "
+                                    "selects the kernel rules the card "
+                                    "falls under (for example find, "
+                                    "verify, synthesize), 'inputs' is "
+                                    "what the board hands the worker "
+                                    "that pulls it, and 'id' is the "
+                                    "card's final id ([A-Za-z0-9_-], "
+                                    "unique)."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "labels": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "depends_on": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "completion_criteria": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "estimated_hours": {"type": "number"},
+                                        "priority": {
+                                            "type": "string",
+                                            "enum": ["high", "medium", "low"],
+                                        },
+                                        "task_type": {"type": "string"},
+                                        "inputs": {"type": "object"},
+                                        "id": {"type": "string"},
+                                    },
+                                    "required": ["name"],
+                                },
+                            },
+                            "task_type_registrations": {
+                                "type": "object",
+                                "description": (
+                                    "ADR-0013 K2: the task types this "
+                                    "project's cards use, keyed by type "
+                                    "name, stamped on the project record "
+                                    "(issue #911). Each entry may carry "
+                                    "'evidence_schema' (the fields a "
+                                    "completion of that type must report), "
+                                    "'verifies_task_type' (the type whose "
+                                    "work this type checks, so it is never "
+                                    "offered to that work's author), "
+                                    "'checks_injectable' and "
+                                    "'injected_checks' (ADR-0013 K4), and "
+                                    "'requires_source_tree' (K3)."
+                                ),
+                                "additionalProperties": {"type": "object"},
+                            },
                         },
                     },
                 },
@@ -1139,6 +1205,72 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                                     "Used to assess timeline risks and "
                                     "adjust priorities."
                                 ),
+                            },
+                            "tasks": {
+                                "type": "array",
+                                "description": (
+                                    "A seeded board: put exactly these "
+                                    "tasks on the board, with no "
+                                    "decomposition and no model call. "
+                                    "Each item is a seed spec "
+                                    "(src/integrations/seeded_tasks.py). "
+                                    "Only 'name' is required. 'depends_on' "
+                                    "names another item by its name or "
+                                    "its id. Issue #911: 'task_type' "
+                                    "selects the kernel rules the card "
+                                    "falls under (for example find, "
+                                    "verify, synthesize), 'inputs' is "
+                                    "what the board hands the worker "
+                                    "that pulls it, and 'id' is the "
+                                    "card's final id ([A-Za-z0-9_-], "
+                                    "unique)."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "labels": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "depends_on": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "completion_criteria": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "estimated_hours": {"type": "number"},
+                                        "priority": {
+                                            "type": "string",
+                                            "enum": ["high", "medium", "low"],
+                                        },
+                                        "task_type": {"type": "string"},
+                                        "inputs": {"type": "object"},
+                                        "id": {"type": "string"},
+                                    },
+                                    "required": ["name"],
+                                },
+                            },
+                            "task_type_registrations": {
+                                "type": "object",
+                                "description": (
+                                    "ADR-0013 K2: the task types this "
+                                    "project's cards use, keyed by type "
+                                    "name, stamped on the project record "
+                                    "(issue #911). Each entry may carry "
+                                    "'evidence_schema' (the fields a "
+                                    "completion of that type must report), "
+                                    "'verifies_task_type' (the type whose "
+                                    "work this type checks, so it is never "
+                                    "offered to that work's author), "
+                                    "'checks_injectable' and "
+                                    "'injected_checks' (ADR-0013 K4), and "
+                                    "'requires_source_tree' (K3)."
+                                ),
+                                "additionalProperties": {"type": "object"},
                             },
                         },
                     },

@@ -241,3 +241,111 @@ async def test_create_project_handles_registration_errors(tmp_path: Path) -> Non
 
         # Should still return success (registration failure doesn't fail the operation)
         assert result["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_project_stamps_task_type_registrations_on_the_record() -> None:
+    """Issue #911: ``options.task_type_registrations`` lands on the ProjectConfig.
+
+    An extension seeding over MCP declares its task types in the same
+    call that mints the project record, so the typed-evidence gate and
+    offer-time eligibility read the declaration, not the literal
+    fallback, from the project's first card onward.
+    """
+    from src.integrations.kanban_interface import KanbanProvider
+    from src.marcus_mcp.tools.nlp import create_project
+
+    state = Mock()
+    state.log_event = Mock()
+    state.kanban_client = Mock()
+    state.kanban_client.provider = KanbanProvider.PLANKA
+    state.kanban_client.project_id = "1670692878487127607"
+    state.kanban_client.board_id = "1670692878621345337"
+    state.ai_engine = Mock()
+    state.subtask_manager = Mock()
+    state.project_registry = Mock()
+    state.project_manager = Mock()
+    state.project_registry.add_project = AsyncMock(return_value="reg-1")
+    state.project_registry.get_active_project = AsyncMock(return_value=None)
+    state.project_manager.switch_project = AsyncMock()
+    state.project_manager.get_kanban_client = AsyncMock(
+        return_value=state.kanban_client
+    )
+    state._subtasks_migrated = False
+    declaration = {
+        "find": {"evidence_schema": {"required": ["headline", "url"]}},
+        "verify": {
+            "evidence_schema": {"required": ["verdict", "checks"]},
+            "verifies_task_type": "find",
+        },
+    }
+
+    with patch(
+        "src.integrations.nlp_tools.NaturalLanguageProjectCreator"
+    ) as MockCreator:
+        MockCreator.return_value.create_project_from_description = AsyncMock(
+            return_value={
+                "success": True,
+                "project_name": "Citations",
+                "tasks_created": 2,
+                "task_ids": ["t-1", "t-2"],
+                "board": {"project_name": "Citations", "board_name": "Main Board"},
+            }
+        )
+        result = await create_project(
+            description="Verify two citations",
+            project_name="Citations",
+            options={"provider": "planka", "task_type_registrations": declaration},
+            state=state,
+        )
+
+    assert result["success"] is True
+    config = state.project_registry.add_project.call_args[0][0]
+    assert config.task_type_registrations == declaration
+
+
+@pytest.mark.asyncio
+async def test_create_project_without_the_option_registers_no_types() -> None:
+    """No declaration: the record carries an empty registration, exactly as before."""
+    from src.integrations.kanban_interface import KanbanProvider
+    from src.marcus_mcp.tools.nlp import create_project
+
+    state = Mock()
+    state.log_event = Mock()
+    state.kanban_client = Mock()
+    state.kanban_client.provider = KanbanProvider.PLANKA
+    state.kanban_client.project_id = "1670692878487127607"
+    state.kanban_client.board_id = "1670692878621345337"
+    state.ai_engine = Mock()
+    state.subtask_manager = Mock()
+    state.project_registry = Mock()
+    state.project_manager = Mock()
+    state.project_registry.add_project = AsyncMock(return_value="reg-2")
+    state.project_registry.get_active_project = AsyncMock(return_value=None)
+    state.project_manager.switch_project = AsyncMock()
+    state.project_manager.get_kanban_client = AsyncMock(
+        return_value=state.kanban_client
+    )
+    state._subtasks_migrated = False
+
+    with patch(
+        "src.integrations.nlp_tools.NaturalLanguageProjectCreator"
+    ) as MockCreator:
+        MockCreator.return_value.create_project_from_description = AsyncMock(
+            return_value={
+                "success": True,
+                "project_name": "Plain",
+                "tasks_created": 1,
+                "task_ids": ["t-1"],
+                "board": {"project_name": "Plain", "board_name": "Main Board"},
+            }
+        )
+        await create_project(
+            description="Build a plain thing",
+            project_name="Plain",
+            options={"provider": "planka"},
+            state=state,
+        )
+
+    config = state.project_registry.add_project.call_args[0][0]
+    assert config.task_type_registrations == {}

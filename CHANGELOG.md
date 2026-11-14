@@ -36,6 +36,12 @@ Gating on self-reported virtue invites the compliance theatre that forced Invari
 Every import of Marcus's own code goes through one module, `citation_verifier/kernel.py`, and a guard test fails if any other module imports `src.` or if that module imports more than the declared surface: `ProjectRegistry`, `register_sqlite_board`, `SQLiteKanban`, `write_task_metadata_rows`, the `Inspector` MCP client and one private helper of it the exporter borrows.
 The written contract is `docs/architecture/extension-contract.md`; `REPRODUCING.md` runs the chain by package name (`python -m citation_verifier.runner`, `.finder`, `.verifier`, `.export_bundles`, or the `tow-*` console scripts after `pip install -e extensions/citation_verifier`).
 Nothing is left at the old `dev-tools/experiments/runners/tow_*` paths.
+- The MCP-only write path for extensions (ADR-0013 K2, decided 2026-11-13; #911, #909, #910, #913).
+A seed spec on `create_project(options.tasks)` may now carry `task_type`, `inputs` and a caller-supplied `id`, and `depends_on` may name another spec by that id; the validator in `src/integrations/seeded_tasks.py` names every problem up front, the SQLite board honours all three at creation, and the `task_metadata` row Cato renders carries the card's type.
+`create_project` also accepts `options.task_type_registrations`, the project's ADR-0013 K2 task-type declaration, validated before any state is touched by the public `validate_task_type_registrations` in `src/core/project_registry.py` and stamped on the project record it mints; both options are advertised in the tool's schema.
+The AI-citation verifier seeds through that path now: one `create_project` call carries every card and the chain's declaration (`find`, `verify` with `verifies_task_type: find`, `approve`, `synthesize`, each with its evidence schema), the manifest records the registry id Marcus returns, and the extension's kernel door shrinks to the MCP client and its reply reader.
+That reader is public as `extract_text_from_result` in `src/worker/inspector.py`, with the old private name kept as an alias, so the extension contract names no private symbol.
+The kernel-surface guard says what it covers and names a stray module beside `pyproject.toml` instead of ignoring it.
 
 ### Fixed
 - A Marcus server start never calls the model provider (#905).

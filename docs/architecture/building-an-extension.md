@@ -64,8 +64,9 @@ See the next section for why.
 ### Today's state
 
 K2 is Accepted, and `ProjectConfig.task_type_registrations` (#831) is the field your declaration lives on.
-The two extensions that exist today (the AI-citation verifier and the numerical-report verifier) both construct their project's record directly in Python and call `registry.add_project()` — the same mechanism, used in-process rather than through a tool call. Writing your own declaration there today works the same way.
-The exact kernel surface an extension may import, and why in-process construction is still required today, is written down in `docs/architecture/extension-contract.md`; the citation verifier's `extensions/citation_verifier/citation_verifier/kernel.py` is the worked example.
+Since 2026-11-13 the declaration is written over MCP, in the same `create_project` call that mints the project record: pass it as `options.task_type_registrations` (issue #911).
+The AI-citation verifier does exactly this (`extensions/citation_verifier/citation_verifier/runner.py`, `TASK_TYPE_REGISTRATIONS`, issue #909).
+The exact kernel surface an extension may import, now the MCP client and nothing else, is written down in `docs/architecture/extension-contract.md`; the citation verifier's `extensions/citation_verifier/citation_verifier/kernel.py` is the worked example.
 
 **What writing a registration does not yet do.** Having a registration on the project record does not, by itself, make the kernel's own evidence and handoff mechanisms recognize your task types. `_apply_typed_evidence_gate` and the evidence-handoff path in `src/marcus_mcp/tools/task.py` still check a task's type against two hardcoded sets — `EVIDENCE_REQUIRED_TASK_TYPES = {"find", "verify", "synthesize"}` and that set plus `"approve"` — not against any project's registration.
 Concretely: a custom task type like `"check"` can report `completed` with no evidence at all and nothing refuses it, and evidence your worker does submit, matching your own `output_schema`, never reaches a dependent task through the handoff, because neither mechanism looks at an unrecognized type.
@@ -104,23 +105,26 @@ It runs a four-step chain of task types: `find` → `verify` → `approve` → `
 
 ### Seeding the chain
 
-`extensions/citation_verifier/citation_verifier/runner.py` seeds the board directly, writing each task with its `task_type` and an `output_schema` describing the evidence it expects:
+`extensions/citation_verifier/citation_verifier/runner.py` seeds the board with one `create_project` call over MCP.
+Each card is a seed spec carrying its `task_type`, its `inputs` and its final `id`, and the project's task types are declared once, in the same call:
 
 ```python
-# extensions/citation_verifier/citation_verifier/runner.py, the "find" task
+# extensions/citation_verifier/citation_verifier/runner.py, the "find" card
 {
-    "name": f"Find the source of {case}",
+    "id": "tow-b-tow-0001-find",
+    "name": "Find the source of tow-0001",
     "task_type": "find",
-    "inputs": {"case_id": case, "query": ...},
-    "output_schema": {
-        "type": "object",
-        "required": ["headline", "publisher", "date", "url"],
-    },
+    "inputs": {"case_id": "tow-0001", "query": ...},
+    "labels": ["tow", "case:tow-0001"],
 }
+
+# and, once per project (options.task_type_registrations):
+"find": {"evidence_schema": {"required": ["headline", "publisher", "date", "url"]}},
+"verify": {"evidence_schema": {"required": ["verdict", "checks"]}, "verifies_task_type": "find"},
 ```
 
-This is the registration step, today's version of it: the task type and its evidence shape are declared directly on the board, task by task, rather than once per project.
-(K2's own field, `ProjectConfig.task_type_registrations` (#831), replaces doing this per-task with a single declaration per project — see "Today's state" above.)
+This is the registration step, K2's own field written through the tool call that creates the project.
+The reply's `project_id` is what the workers register against.
 
 ### The worker's pull loop
 
@@ -174,12 +178,13 @@ This is enforced at the point the kernel decides what to offer (`filter_eligible
 | `src/marcus_mcp/coordinator/eligibility.py` | `filter_eligible_tasks` — K12's "no one checks their own work" guarantee |
 | `src/marcus_mcp/tools/task.py` | `request_next_task`, `report_task_progress`, `request_task_redo` — the tools every agent, including your extension's, calls |
 | `src/marcus_mcp/kanban_task_sync.py` | K13's guarantee that a board write is immediately visible to the kernel's own in-memory state — not something your extension needs to call, just something it can now rely on |
-| `extensions/citation_verifier/citation_verifier/runner.py` | A real, shipping extension's board-seeding code |
+| `extensions/citation_verifier/citation_verifier/runner.py` | A real, shipping extension's board-seeding code: one `create_project` call over MCP |
+| `src/integrations/seeded_tasks.py` | The seed spec `create_project(options.tasks)` accepts, including `task_type`, `inputs` and `id` (#911) |
 | `extensions/citation_verifier/citation_verifier/worker_common.py` | A real, shipping extension's pull-loop worker |
 
 ## How to verify your extension is built correctly
 
-1. Register your project's task types and evidence requirements on `ProjectConfig.task_type_registrations` when you build your project's record, the same way the two existing extensions construct it directly today.
+1. Declare your project's task types and evidence requirements as `options.task_type_registrations` on the `create_project` call that creates your board, the way the citation verifier does; never by importing the registry.
 2. Confirm your extension's worker calls `request_next_task` and never receives a task pushed to it outside that call.
 3. Confirm nothing under `src/marcus_mcp/` imports or calls a function defined in your extension's own code. If it does, you have built the kernel-calls-extension model this guide rules out.
 4. Confirm your verifier's check, if it has one, is declared at task-creation time (part of the contract), not authored by the same agent whose work it checks (ADR-0013 K4).

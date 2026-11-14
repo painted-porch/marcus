@@ -4,7 +4,7 @@ The AI-citation verifier, packaged as Marcus's first extension (ADR-0013 K11).
 
 ## What it does
 
-It seeds a `find -> verify -> approve -> synthesize` chain for a set of article excerpts onto a Marcus SQLite board, runs the finder and the verifier as pull-loop MCP agents, decides verdicts with deterministic checks the finder never sees, and exports one audit bundle per case.
+It seeds a `find -> verify -> approve -> synthesize` chain for a set of article excerpts onto a Marcus board with one `create_project` call over MCP, runs the finder and the verifier as pull-loop MCP agents, decides verdicts with deterministic checks the finder never sees, and exports one audit bundle per case.
 The board enforces the rules: nothing closes without its evidence, no agent verifies its own work, and a human signs off on a sample.
 The study it was built for is described in `../../REPRODUCING.md`.
 
@@ -27,14 +27,15 @@ A scripted version that also records the result lives at `~/marcus-experiments/c
 
 ## Where it touches the kernel
 
-Only `citation_verifier/kernel.py` imports Marcus's own code, and a guard test (`tests/unit/extensions/citation_verifier/test_kernel_surface.py`) keeps it that way.
+Only `citation_verifier/kernel.py` imports Marcus's own code, and what it imports is the MCP client and its reply reader, nothing else; a guard test (`tests/unit/extensions/citation_verifier/test_kernel_surface.py`) keeps it that way.
+The seeder needs a running Marcus: it creates the project, its cards and the chain's task-type declaration through `create_project`, and writes the registry id Marcus returns into the manifest for the workers.
 The contract behind that list is `../../docs/architecture/extension-contract.md`.
 
 ## Modules
 
 | Module | Purpose |
 | --- | --- |
-| `runner` | seeds cases, registers the board, writes the manifest and Cato's metadata rows |
+| `runner` | seeds cases over MCP (`create_project` with typed seed specs and the K2 declaration), writes the manifest |
 | `worker_common` | the shared pull-loop shell both workers use |
 | `finder`, `verifier` | the two live workers |
 | `checks`, `fetch` | the deterministic verdict and the robots-respecting fetch cache |

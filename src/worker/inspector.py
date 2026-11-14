@@ -90,19 +90,26 @@ from mcp.types import CallToolResult, TextContent
 T = TypeVar("T")
 
 
-def _extract_text_from_result(result: CallToolResult) -> str:
+def extract_text_from_result(result: CallToolResult) -> str:
     """
-    Extract text content from MCP tool call result.
+    Return the text of an MCP tool reply.
+
+    The one public way to read a tool reply's text, for this client's
+    own methods and for anything built on it (issue #910: the citation
+    extension's exporter used to reach the private name through its
+    kernel door, the only non-public symbol on the extension contract).
 
     Parameters
     ----------
     result : CallToolResult
-        The CallToolResult from MCP tool call
+        The reply from ``session.call_tool``.
 
     Returns
     -------
     str
-        The text content if available, empty string otherwise
+        The ``text`` of the first content item that carries one (a
+        ``TextContent``, or any object with a ``text`` attribute), or
+        the empty string when the reply has no content or no text item.
     """
     if not result.content:
         return ""
@@ -113,6 +120,10 @@ def _extract_text_from_result(result: CallToolResult) -> str:
             return str(content_item.text)
 
     return ""
+
+
+#: The pre-#910 name, kept so internal callers and older scripts keep working.
+_extract_text_from_result = extract_text_from_result
 
 
 def retry_with_backoff(

@@ -6,6 +6,7 @@ This module contains tools for natural language project/task creation:
 """
 
 import asyncio
+import inspect
 import logging
 import threading
 from datetime import datetime, timezone
@@ -651,6 +652,69 @@ def _validate_tasks_option(
     }
 
 
+async def _reject_seed_ids_already_on_the_board(
+    kanban_client: Any, options: Optional[Dict[str, Any]], project_name: str
+) -> Optional[Dict[str, Any]]:
+    """Refuse a seeded list whose caller-supplied ``id`` is already a card.
+
+    ``validate_seed_specs`` checks an ``id`` against the caller's own
+    project's tasks, but the SQLite board file is shared by every
+    project on the server and ``create_project`` mints a project with
+    no tasks to pass (Codex P2 on PR #919). Without this the insert of
+    that one card failed, the batch went on without it, and the reply
+    said success for a board missing a card and the edges into it. So
+    each supplied id is looked up on the board itself, before any card
+    is created.
+
+    Parameters
+    ----------
+    kanban_client : Any
+        The board the cards would be created on; must offer
+        ``get_task_by_id``.
+    options : Optional[Dict[str, Any]]
+        The tool options; only ``tasks`` entries carrying an ``id`` are
+        looked up.
+    project_name : str
+        For the log line.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A rejection with ``error_code: "tasks_invalid"`` naming every
+        taken id, or None when no supplied id is on the board.
+    """
+    specs = options.get("tasks") if isinstance(options, dict) else None
+    lookup = getattr(kanban_client, "get_task_by_id", None)
+    if not isinstance(specs, list) or lookup is None:
+        return None
+    problems: List[str] = []
+    for index, spec in enumerate(specs):
+        task_id = spec.get("id") if isinstance(spec, dict) else None
+        if not task_id:
+            continue
+        existing = lookup(str(task_id))
+        if inspect.isawaitable(existing):
+            existing = await existing
+        if existing is not None:
+            problems.append(
+                f"tasks[{index}].id {task_id!r} already identifies a board task"
+            )
+    if not problems:
+        return None
+    logger.warning(
+        f"seeded tasks for {project_name!r} rejected: id(s) already on the board: "
+        + "; ".join(problems)
+    )
+    return {
+        "success": False,
+        "error": "options.tasks is not a valid seeded task list: "
+        + "; ".join(problems),
+        "error_code": "tasks_invalid",
+        "error_type": "InvalidConfigurationError",
+        "problems": problems,
+    }
+
+
 #: The subject slug every project's objective primer is filed under.
 OBJECTIVE_SUBJECT = "project.objective"
 #: The ``Decision.kind`` of the primer; distinct from ``"assessment"`` so the
@@ -660,6 +724,59 @@ OBJECTIVE_KIND = "objective"
 #: project author's; Marcus only carries it.
 OBJECTIVE_AUTHOR = "marcus"
 _OBJECTIVE_MAX_CHARS = 4000
+
+
+def _validate_task_type_registrations_option(
+    options: Optional[Dict[str, Any]], project_name: str
+) -> Optional[Dict[str, Any]]:
+    """Reject a malformed ``options.task_type_registrations`` before any state.
+
+    Issue #911 (ADR-0013 K2): an extension seeding a typed chain over
+    MCP declares its task types in the same ``create_project`` call
+    that mints the project record, and the declaration is stamped on
+    that record (``ProjectConfig.task_type_registrations``). The
+    kernel's own rule for what a declaration may say lives in
+    ``src/core/project_registry.py``; it is applied here, up front, so
+    the refusal arrives before a board exists rather than as a warning
+    in the server log after the cards are already on it.
+
+    Parameters
+    ----------
+    options : Optional[Dict[str, Any]]
+        The ``create_project`` options.
+    project_name : str
+        For the log line.
+
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        A rejection response with ``error_code:
+        "task_type_registrations_invalid"``, or None when there is no
+        ``task_type_registrations`` option or it is valid.
+    """
+    if not isinstance(options, dict) or "task_type_registrations" not in options:
+        return None
+    from src.core.error_framework import InvalidConfigurationError
+    from src.core.project_registry import validate_task_type_registrations
+
+    try:
+        validate_task_type_registrations(options.get("task_type_registrations"))
+    except InvalidConfigurationError as exc:
+        problem = str(exc)
+        logger.warning(
+            f"create_project for {project_name!r} rejected: invalid "
+            f"task_type_registrations option: {problem}"
+        )
+        return {
+            "success": False,
+            "error": (
+                "options.task_type_registrations is not a valid task-type "
+                f"declaration: {problem}"
+            ),
+            "error_code": "task_type_registrations_invalid",
+            "error_type": "InvalidConfigurationError",
+        }
+    return None
 
 
 def _validate_objective_option(
@@ -1222,6 +1339,14 @@ async def _create_project_inner(
             _recent_create_project_calls.pop(dedup_key, None)
             return _objective_rejection
 
+        # Issue #911: a malformed K2 task-type declaration is refused here too.
+        _registrations_rejection = _validate_task_type_registrations_option(
+            options, project_name
+        )
+        if _registrations_rejection is not None:
+            _recent_create_project_calls.pop(dedup_key, None)
+            return _registrations_rejection
+
         # Log before calling the function
         state.log_event("create_project_calling", {"project_name": project_name})
 
@@ -1292,6 +1417,16 @@ async def _create_project_inner(
                         f"'{requested_provider}': {e}"
                     ),
                 }
+
+        # Codex P2 on PR #919: a seeded card's id already held by another
+        # project's card on the shared board is refused here, before the
+        # creator runs, not discovered as one failed insert mid-batch.
+        _collision = await _reject_seed_ids_already_on_the_board(
+            state.kanban_client, options, project_name
+        )
+        if _collision is not None:
+            _recent_create_project_calls.pop(dedup_key, None)
+            return _collision
 
         logger.info(f"Creating NEW project '{project_name}' (complexity={complexity})")
 
@@ -1418,6 +1553,12 @@ async def _create_project_inner(
                         "project_id",
                         getattr(state.kanban_client, "project_id", ""),
                     )
+                    # Issue #911 (ADR-0013 K2): the caller's task-type
+                    # declaration, validated before any state was
+                    # touched, is stamped on the record it belongs to.
+                    declared_types: Dict[str, Dict[str, Any]] = dict(
+                        (options or {}).get("task_type_registrations") or {}
+                    )
                     project_config = ProjectConfig(
                         id=str(kanban_project_id) if kanban_project_id else "",
                         name=f"{provider_project_name} - {provider_board_name}",
@@ -1426,6 +1567,7 @@ async def _create_project_inner(
                         created_at=datetime.now(timezone.utc),
                         last_used=datetime.now(timezone.utc),
                         tags=["auto-created", provider],
+                        task_type_registrations=declared_types,
                     )
 
                     # Register with Marcus registry
@@ -1877,6 +2019,13 @@ async def create_tasks(
     )
     if _tasks_rejection is not None:
         return _tasks_rejection
+    # Codex P2 on PR #919: the board is shared across projects, so a
+    # supplied id is also checked against cards outside this project.
+    _collision = await _reject_seed_ids_already_on_the_board(
+        kanban_client, options, project_name or "active project"
+    )
+    if _collision is not None:
+        return _collision
 
     project_id = current_project.provider_config.get("project_id")
     board_id = current_project.provider_config.get("board_id")

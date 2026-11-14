@@ -243,6 +243,18 @@ class TaskBuilder:
         if source_context:
             result["source_context"] = source_context
 
+        # Issue #911 (ADR-0013 K2): the typed-chain fields. ``task_type``
+        # and ``inputs`` always travel (their defaults, "implement" and
+        # {}, are exactly what the SQLite provider minted when they were
+        # absent, so an untyped task's card is unchanged). The caller's
+        # own ``id`` travels only for a seeded task whose spec supplied
+        # one -- a decomposer's "task_1" is a placeholder the dependency
+        # remap replaces, and must keep being replaced.
+        result["task_type"] = getattr(task, "task_type", "implement") or "implement"
+        result["inputs"] = dict(getattr(task, "inputs", None) or {})
+        if source_type == "seeded" and (source_context or {}).get("caller_id"):
+            result["id"] = task.id
+
         # DEBUG: Verify status is in result for About tasks
         if "About" in task.name:
             logger.info(

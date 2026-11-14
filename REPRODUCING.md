@@ -55,34 +55,37 @@ The commands below were run as written on 2026-11-01: four cases, thirteen tasks
 ```bash
 EXP=~/marcus-experiments/tow/rehearsal && mkdir -p $EXP/run
 
-# 1. Seed a 4-case board; this also registers it in Marcus's project registry.
-python -m citation_verifier.runner \
-  --dataset /path/to/GenAISearch_Data.csv \
-  --db $EXP/kanban.db --project tow-rehearsal \
-  --limit 4 --approval-rate 0.25 --seed 737 --manifest $EXP/manifest.json
-
-# 2. Write $EXP/config.json: copy config_marcus.example.json and set
+# 1. Write $EXP/config.json: copy config_marcus.example.json and set
 #    kanban.provider = "sqlite", kanban.sqlite_db_path = "$EXP/kanban.db",
-#    default_project_name = "tow-rehearsal - Main Board", project_name = "tow-rehearsal",
-#    ai.enabled = false, features.context = false, transport.http_port = 4777.
+#    ai.enabled = false, ai.anthropic_api_key = "", features.context = false,
+#    transport.http_port = 4777.
 
-# 3. Start the server FROM THE REPO ROOT (persistence paths are cwd-relative)
+# 2. Start the server FROM THE REPO ROOT (persistence paths are cwd-relative)
 #    with every engine key stripped from its environment.
 env -u OPENAI_API_KEY -u GEMINI_API_KEY -u PERPLEXITY_API_KEY -u CLAUDE_API_KEY -u ANTHROPIC_API_KEY \
   MARCUS_CONFIG=$EXP/config.json python -m src.marcus_mcp.server --http --all-tools
 
-# 4. In another shell (a new shell starts without EXP, so set it again): the fake
-#    finder, the verifier, the human approval, the verifier again.
+# 3. In another shell: seed a 4-case board over MCP. One create_project call
+#    carries the 13 cards and the chain's task-type declaration; Marcus mints
+#    the project and returns its registry id, which the manifest records.
+python -m citation_verifier.runner \
+  --dataset /path/to/GenAISearch_Data.csv \
+  --url http://127.0.0.1:4777/mcp --project tow-rehearsal \
+  --limit 4 --approval-rate 0.25 --seed 737 --manifest $EXP/manifest.json
+PROJECT=$(python -c "import json; print(json.load(open('$EXP/manifest.json'))['project_id'])")
+
+# 4. The fake finder, the verifier, the human approval, the verifier again,
+#    each with --project $PROJECT (the registry id from the manifest).
 EXP=~/marcus-experiments/tow/rehearsal
 python -m citation_verifier.finder --url http://localhost:4777/mcp \
-  --project tow-rehearsal --agent-id finder-fake-1 --vendor fakevendor --engine fake --idle-exits 3
+  --project $PROJECT --agent-id finder-fake-1 --vendor fakevendor --engine fake --idle-exits 3
 python -m citation_verifier.verifier --url http://localhost:4777/mcp \
-  --project tow-rehearsal --agent-id verifier-fetch-1 --vendor fetchcheck \
+  --project $PROJECT --agent-id verifier-fetch-1 --vendor fetchcheck \
   --cache-dir $EXP/fetch-cache --idle-exits 3
-python -m src.cli.approvals --url http://localhost:4777/mcp --project tow-rehearsal \
+python -m src.cli.approvals --url http://localhost:4777/mcp --project $PROJECT \
   --reviewer you --decide approved
 python -m citation_verifier.verifier --url http://localhost:4777/mcp \
-  --project tow-rehearsal --agent-id verifier-fetch-1 --vendor fetchcheck \
+  --project $PROJECT --agent-id verifier-fetch-1 --vendor fetchcheck \
   --cache-dir $EXP/fetch-cache --idle-exits 2
 
 # 5. Export the audit bundles.
@@ -117,20 +120,24 @@ python -m citation_verifier.condition_a \
 
 **2. Condition B (paid), one board per engine.** The board never assigns work, so attribution comes from environment design: seed one project per finder vendor, and register only that vendor's finder plus a different-vendor verifier. Repeat this for each of the four engines, changing `--project` and `--manifest`.
 
+Start the Marcus server for the run on port 4777 first, which is the port the seeder, the workers and the export command below use (the server defaults to 4298, so set it explicitly):
+
+```
+./marcus start --http --port 4777
+```
+
+Then seed one project per engine against it:
+
 ```
 python -m citation_verifier.runner \
     --dataset /path/to/GenAISearch_Data.csv \
-    --db ~/marcus-experiments/tow/repro/kanban.db \
+    --url http://127.0.0.1:4777/mcp \
     --project tow-b-openai \
     --limit 200 --approval-rate 0.1 --seed 737 \
     --manifest ~/marcus-experiments/tow/repro/manifest-openai.json
 ```
 
-Then start the Marcus server for that board on port 4777, which is the port the workers and the export command below use. The server defaults to 4298, so set it explicitly:
-
-```
-./marcus start --http --port 4777
-```
+The manifest records the registry `project_id` Marcus returned; pass it as `--project` to the workers, the approvals CLI and the exporter.
 
 Run the finder and the verifier pull-loop workers against it (`citation_verifier.finder` and `citation_verifier.verifier`, both default to `--url http://localhost:4777/mcp`). The board drains in a fixed order, because the `synthesize` task that renders a case's final answer depends on the human `approve` task. So run the finder and verifier until they idle, sign the sampled approvals with the approvals CLI (`python -m src.cli.approvals`), then run the verifier once more so the now-eligible `synthesize` tasks complete. Skipping that second verifier pass leaves the approved sample without final answers, and the grader scores them as declines.
 
@@ -159,7 +166,7 @@ python -m citation_verifier.condition_c \
 
 | File | Purpose |
 |---|---|
-| `extensions/citation_verifier/citation_verifier/runner.py` | Seeds Condition B cases onto a Marcus board, writes the ground-truth manifest |
+| `extensions/citation_verifier/citation_verifier/runner.py` | Seeds Condition B cases onto a Marcus board over MCP, writes the ground-truth manifest |
 | `extensions/citation_verifier/citation_verifier/condition_a.py` | Condition A: each engine alone |
 | `extensions/citation_verifier/citation_verifier/condition_c.py` | Condition C: verifier-only control |
 | `extensions/citation_verifier/citation_verifier/checks.py` | The five deterministic checks (`decide_verdict`) |

@@ -20,13 +20,29 @@ A seed spec is a list of mappings::
       priority: medium
 
 Only ``name`` is required. ``depends_on`` names another seeded task in the
-same call, by name, or -- issue #841, ADR-0013 K10 accepted narrowly
-2026-11-06 -- an existing task already on the board, by name or by id,
-scoped to the caller's project. The in-batch name is always tried first;
-the board is only consulted for a name the batch does not have. This is
-add-only: a dependency on an existing task declares a new edge into it and
-never rewires or otherwise touches that task, so a leased task can be
-depended on exactly as freely as a ``todo`` one.
+same call, by name or by its caller-supplied ``id``, or -- issue #841,
+ADR-0013 K10 accepted narrowly 2026-11-06 -- an existing task already on
+the board, by name or by id, scoped to the caller's project. The in-batch
+name is always tried first; the board is only consulted for a name the
+batch does not have. This is add-only: a dependency on an existing task
+declares a new edge into it and never rewires or otherwise touches that
+task, so a leased task can be depended on exactly as freely as a ``todo``
+one.
+
+Issue #911 (ADR-0013 K2, the MCP-only write path for extensions): a spec
+may also carry the three fields a typed chain needs and could not send
+over MCP before::
+
+    - name: Find the source of tow-0001
+      id: tow-0001-find
+      task_type: find
+      inputs: {case_id: tow-0001, query: "..."}
+
+``task_type`` selects which kernel rules apply to the card (the typed
+evidence gate, offer-time eligibility); ``inputs`` is what the board hands
+the worker that pulls it; ``id`` is the card's final id, so a seeder can
+find its cards again without reading the board back. The SQLite provider
+honours all three at creation (issue #844); the gap was only this schema.
 """
 
 from __future__ import annotations
@@ -46,7 +62,15 @@ _ALLOWED_KEYS = {
     "completion_criteria",
     "estimated_hours",
     "priority",
+    # Issue #911: the typed-chain fields.
+    "task_type",
+    "inputs",
+    "id",
 }
+#: The characters a caller-supplied ``id`` may use; the same rule
+#: ``SQLiteKanban._resolve_task_id`` enforces, so a bad id is refused
+#: here with every other problem instead of failing mid-creation.
+_ID_CHARSET = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class SeedTaskError(ValueError):
@@ -108,10 +132,14 @@ def validate_seed_specs(
     specs : Any
         The ``tasks`` option as received: must be a non-empty list of
         mappings with a unique, non-empty ``name`` each, ``depends_on``
-        naming only other seeded tasks or an existing board task (by
-        name or id), string lists for ``labels`` and
-        ``completion_criteria``, a positive ``estimated_hours``, and a
-        ``priority`` from :class:`Priority`.
+        naming only other seeded tasks (by name or caller-supplied
+        ``id``) or an existing board task (by name or id), string
+        lists for ``labels`` and ``completion_criteria``, a positive
+        ``estimated_hours``, a ``priority`` from :class:`Priority`,
+        and -- issue #911 -- an optional non-empty string
+        ``task_type``, a mapping ``inputs``, and a string ``id`` over
+        ``[A-Za-z0-9_-]`` that is unique in the batch and not already
+        a board task's id.
     existing_tasks : Optional[List[Task]]
         The caller's project's existing board tasks, consulted only
         for a ``depends_on`` name the batch itself does not have
@@ -127,6 +155,8 @@ def validate_seed_specs(
     if not isinstance(specs, list) or not specs:
         return ["tasks must be a non-empty list of task mappings"]
     names: List[str] = []
+    ids: List[str] = []
+    existing_ids = {task.id for task in existing_tasks or []}
     for index, spec in enumerate(specs):
         where = f"tasks[{index}]"
         if not isinstance(spec, dict):
@@ -157,6 +187,22 @@ def validate_seed_specs(
                 f"{where}.priority must be one of "
                 f"{', '.join(p.value for p in Priority)}"
             )
+        if "task_type" in spec:
+            task_type = spec["task_type"]
+            if not isinstance(task_type, str) or not task_type.strip():
+                errors.append(f"{where}.task_type must be a non-empty string")
+        if "inputs" in spec and not isinstance(spec["inputs"], dict):
+            errors.append(f"{where}.inputs must be a mapping")
+        if "id" in spec:
+            task_id = spec["id"]
+            if not isinstance(task_id, str) or not _ID_CHARSET.match(task_id):
+                errors.append(f"{where}.id must match [A-Za-z0-9_-]")
+            elif task_id in ids:
+                errors.append(f"{where} repeats the id {task_id!r}")
+            elif task_id in existing_ids:
+                errors.append(f"{where}.id {task_id!r} already identifies a board task")
+            else:
+                ids.append(task_id)
     edges: Dict[str, List[str]] = {}
     for index, spec in enumerate(specs):
         if not isinstance(spec, dict):
@@ -169,13 +215,24 @@ def validate_seed_specs(
             if not isinstance(dep, str):
                 continue  # already reported
             dep_name = dep.strip()
-            if dep_name == own:
+            # Names resolve before ids, here as in build_seeded_tasks, so a
+            # dependency on another task's name is never read as a
+            # self-edge just because it spells this task's id (Codex P2
+            # on PR #919).
+            if dep_name == own or (
+                dep_name == spec.get("id") and dep_name not in names
+            ):
                 errors.append(f"tasks[{index}] depends on itself")
-            elif dep_name in names:
-                # In-batch: only these edges can form a cycle -- a new
-                # task's edge into an existing board task cannot, since
-                # that task's own dependencies are already fixed.
-                edges.setdefault(own, []).append(dep_name)
+            elif dep_name in names or dep_name in ids:
+                # In-batch, by name or by caller-supplied id (#911):
+                # only these edges can form a cycle -- a new task's edge
+                # into an existing board task cannot, since that task's
+                # own dependencies are already fixed. The cycle check
+                # keys on names, so an id edge is recorded under the
+                # name it belongs to.
+                edges.setdefault(own, []).append(
+                    dep_name if dep_name in names else _name_for_id(specs, dep_name)
+                )
             else:
                 resolved_id, board_error = _resolve_against_board(
                     dep_name, existing_tasks or []
@@ -191,6 +248,14 @@ def validate_seed_specs(
     if cycle:
         errors.append("tasks form a dependency cycle: " + " -> ".join(cycle))
     return errors
+
+
+def _name_for_id(specs: List[Dict[str, Any]], task_id: str) -> str:
+    """Return the stripped name of the in-batch spec whose ``id`` is ``task_id``."""
+    for spec in specs:
+        if isinstance(spec, dict) and spec.get("id") == task_id:
+            return str(spec.get("name", "")).strip()
+    return task_id
 
 
 def _find_cycle(edges: Dict[str, List[str]]) -> List[str]:
@@ -246,13 +311,17 @@ def build_seeded_tasks(
     Returns
     -------
     List[Task]
-        TODO tasks with synthetic ids ``seed-<n>-<slug>``. A
-        ``depends_on`` naming another task in this batch resolves to
-        that synthetic id; one naming an existing board task resolves
+        TODO tasks with synthetic ids ``seed-<n>-<slug>``, or the
+        caller's own ``id`` where the spec gave one (issue #911; the
+        board honours it, and ``source_context["caller_id"]`` tells
+        the creation path to pass it through). A ``depends_on``
+        naming another task in this batch, by name or by id, resolves
+        to that task's id; one naming an existing board task resolves
         to that task's real, already-assigned id -- no rewrite is
-        needed because it was never synthetic. ``source_type`` is
-        ``"seeded"``, which is how the rest of the pipeline knows to
-        leave them exactly as given.
+        needed because it was never synthetic. ``task_type`` and
+        ``inputs`` are carried as given (defaults ``"implement"`` and
+        ``{}``). ``source_type`` is ``"seeded"``, which is how the rest
+        of the pipeline knows to leave them exactly as given.
 
     Raises
     ------
@@ -264,15 +333,30 @@ def build_seeded_tasks(
         raise SeedTaskError("; ".join(errors))
     existing_tasks = existing_tasks or []
     now = datetime.now(timezone.utc)
-    ids = {
-        spec["name"].strip(): f"seed-{i + 1}-{_slug(spec['name'])}"
-        for i, spec in enumerate(specs)
-    }
+    # Caller-supplied ids are taken as given; a generated id is allocated
+    # outside that set (Codex P2 on PR #919: a caller id spelled like
+    # another card's would-be synthetic id gave both cards one id, and
+    # the post-creation dependency remap then turned the second card's
+    # edge into a self-dependency).
+    caller_ids = {str(spec["id"]) for spec in specs if spec.get("id")}
+    ids: Dict[str, str] = {}
+    for i, spec in enumerate(specs):
+        if spec.get("id"):
+            ids[spec["name"].strip()] = str(spec["id"])
+            continue
+        candidate = f"seed-{i + 1}-{_slug(spec['name'])}"
+        bump = 0
+        while candidate in caller_ids:
+            bump += 1
+            candidate = f"seed-{i + 1}-{bump}-{_slug(spec['name'])}"
+        ids[spec["name"].strip()] = candidate
 
     def _resolve(dep: str) -> str:
         dep_name = dep.strip()
         if dep_name in ids:
             return ids[dep_name]
+        if dep_name in caller_ids:
+            return dep_name
         # validate_seed_specs above already guaranteed this resolves
         # cleanly against the board when it is not in-batch.
         resolved_id, _ = _resolve_against_board(dep_name, existing_tasks)
@@ -282,6 +366,9 @@ def build_seeded_tasks(
     tasks: List[Task] = []
     for spec in specs:
         name = spec["name"].strip()
+        source_context: Dict[str, Any] = {"seeded": True}
+        if spec.get("id"):
+            source_context["caller_id"] = True
         tasks.append(
             Task(
                 id=ids[name],
@@ -298,9 +385,11 @@ def build_seeded_tasks(
                 labels=list(spec.get("labels", []) or []),
                 project_name=project_name,
                 source_type=SEEDED_SOURCE_TYPE,
-                source_context={"seeded": True},
+                source_context=source_context,
                 completion_criteria=list(spec.get("completion_criteria", []) or [])
                 or None,
+                task_type=str(spec.get("task_type") or "implement").strip(),
+                inputs=dict(spec.get("inputs") or {}),
             )
         )
     return tasks

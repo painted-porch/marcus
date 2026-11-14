@@ -29,36 +29,46 @@ The software-building extension is the large cut this contract is meant to const
 An extension imports Marcus's code through **one module of its own**, and that module imports **only** the symbols below.
 For the citation verifier that module is `extensions/citation_verifier/citation_verifier/kernel.py`, and `tests/unit/extensions/citation_verifier/test_kernel_surface.py` fails if any other module imports `src.` or if `kernel.py` imports anything not on this list.
 
-| Symbol | From | What the extension uses it for | MCP equivalent today |
-| --- | --- | --- | --- |
-| `ProjectRegistry`, `register_sqlite_board` | `src/core/project_registry.py` | register a directly seeded SQLite board as a project, idempotently on `(project_id, db_path)`, with the legacy UUID-key migration (issue #741, GH-306) | `add_project(provider="sqlite", config={project_id, db_path})` (#888); honours the caller's `project_id` (#844); no migration of pre-GH-306 entries |
-| `SQLiteKanban` | `src/integrations/providers/sqlite_kanban.py` | create the seeded cards in one in-process pass, each with its final id, `task_type`, `inputs`, labels and dependencies (up to 800 cards for a full run) | `create_project(options.tasks=[...])` seed specs (`src/integrations/seeded_tasks.py`), which carry `name`, `labels`, `depends_on`, `estimated_hours`, `priority`, but **not** `task_type`, `inputs` or a caller-supplied `id` |
-| `write_task_metadata_rows` | `src/core/persistence.py` | the sanctioned write of the `task_metadata` rows Cato renders (issue #741 step 3) | none |
-| `Inspector` | `src/worker/inspector.py` | the MCP client the workers and the exporter use to talk to a running server | it *is* the MCP client; the workers call `register_agent`, `request_next_task`, `report_task_progress` and `export_case` through it |
-| `_extract_text_from_result` | `src/worker/inspector.py` | read the text of a tool reply in the exporter | a private helper; a smell, named here rather than hidden; the client should expose it publicly |
+| Symbol | From | What the extension uses it for |
+| --- | --- | --- |
+| `Inspector` | `src/worker/inspector.py` | the MCP client the seeder, the workers and the exporter use to talk to a running server; the seeder calls `create_project`, the workers call `register_agent`, `request_next_task` and `report_task_progress`, the exporter calls `export_case` |
+| `extract_text_from_result` | `src/worker/inspector.py` | read the text of a tool reply (public since #910; the private name it replaced was the one smell on this table) |
 
+That is the whole surface since 2026-11-13.
 Everything else the extension does, it does on its own: fetching pages, deciding verdicts, rendering answers, grading, exporting.
 The workers import zero kernel code directly; they reach `Inspector` through the shared shell `worker_common.py`.
 
-## The K2 question, answered: in-process record, or MCP write path?
+### What the surface was before the MCP-only write path
+
+The first cut (2026-11-07) also imported `ProjectRegistry`, `register_sqlite_board`, `SQLiteKanban` and `write_task_metadata_rows`, because the seeder wrote the board in-process.
+Those four left the surface when #911 closed the seed-spec gaps below and the seeder moved to one `create_project` call.
+`add_project(provider="sqlite", config={project_id, db_path})` (#888) remains the MCP way to register an already-seeded SQLite board; the citation verifier no longer needs it because `create_project` mints the record.
+
+## The K2 question, answered: the MCP write path
 
 ADR-0013 K2 left one implementation question open: does an extension construct its `ProjectConfig` in-process, or write through an MCP path?
-Packaging the citation verifier answers it with evidence rather than preference.
+Packaging the citation verifier (2026-11-07) answered it with evidence: at that date an extension had to construct in-process, because the MCP write path was missing three things a typed chain needs.
 
-**Today an extension must construct in-process, because the MCP write path is incomplete in three specific places.**
+1. **Seeding could not carry the task type.** `create_project(options.tasks)` seed specs had no `task_type` field, so every seeded card would have been an `implement` card and none of the kernel's verification rules would apply.
+2. **Seeding could not carry the inputs.** Each `find` card carries the excerpt and its metadata in `inputs`; seed specs had no `inputs` field.
+3. **Seeding could not carry a caller-supplied id.** The exporter finds a case's cards by their ids and labels (#844); seed specs had no `id` field.
 
-1. **Seeding cannot carry the task type.** The citation chain's whole design is four task types (`find`, `verify`, `approve`, `synthesize`) with per-type evidence rules and offer-time eligibility.
-   `create_project(options.tasks)` seed specs have no `task_type` field, so every seeded card would be an `implement` card and none of the kernel's verification rules would apply.
-2. **Seeding cannot carry the inputs.** Each `find` card carries the excerpt and its metadata in `inputs`; the verify card's evidence is computed from them.
-   Seed specs have no `inputs` field.
-3. **Seeding cannot carry a caller-supplied id, and metadata rows have no tool.**
-   The exporter finds a case's cards by their ids and labels (#844), and Cato renders cards from `task_metadata` rows that only `write_task_metadata_rows` writes.
+**Larry decided on 2026-11-13: extensions write their cards over MCP only.**
+#911 closed the gaps the same day, so the answer is now settled in code rather than in this document:
 
-Registration alone is already covered: `add_project(provider="sqlite", config={project_id, db_path})` does what `register_sqlite_board` does for a new registry, and the one thing it lacks (migrating a pre-GH-306 UUID-keyed entry) matters only to registries created before 2026-11-05.
+| Need | How an extension does it over MCP now |
+| --- | --- |
+| a card's `task_type`, `inputs` and final `id` | fields on the seed spec, `create_project(options.tasks=[...])`, validated by `validate_seed_specs` in `src/integrations/seeded_tasks.py` and advertised in the tool's schema |
+| the project's task-type declaration (K2, #909) | `create_project(options.task_type_registrations={...})`, validated up front by `validate_task_type_registrations` in `src/core/project_registry.py` and stamped on the `ProjectConfig` the call mints |
+| the `task_metadata` rows Cato renders | written by the creation path itself for every card, with the card's `task_type`; no separate write exists or is needed |
+| registering an already-seeded board | `add_project(provider="sqlite", ...)` (#888) |
 
-**What the software-building cut must satisfy, therefore:** either it keeps a one-module in-process surface like `kernel.py` (acceptable, auditable, the pattern this cut proves), or the kernel first closes the three MCP gaps above: `task_type`, `inputs` and `id` on seed specs, and a tool or a `create_project` option that writes `task_metadata` rows.
-Closing them is small (the fields exist on `SQLiteKanban.create_task` already; the gap is the seed-spec schema and validator), and would let an extension run on a different machine from the server with no kernel import at all.
-That is a decision for Larry, recorded here as the two options with their consequences; it is not made by this document.
+A `depends_on` in a seed spec may name another spec by its name or by its caller-supplied `id`.
+The full citation study is one call carrying 800 seed specs with dependencies; the cost of the change was the schema, not the transport.
+
+**What the software-building cut must satisfy, therefore:** seed its cards over MCP the same way, and import nothing from `src/` beyond the MCP client.
+An extension can run on a different machine from the server.
+The in-process door is closed for new extensions; `kernel.py` shows what remains.
 
 ## What packaging exercised, and what it did not
 
@@ -80,15 +90,15 @@ Whether software-building keeps an in-process gate behind a shim or adopts verif
 
 ## How a second extension uses this contract
 
-1. Put every kernel import in one module and copy `test_kernel_surface.py` with your own declared list.
-2. Register the project with `register_sqlite_board` (or `add_project` when the three gaps above are closed).
-3. Seed cards with their `task_type` and `inputs`, and declare the types on `ProjectConfig.task_type_registrations` (K2); the citation verifier does not yet declare them and relies on the kernel's literal fallback for `find`, `verify` and `synthesize`, which is a follow-up, not a precondition.
-4. Run workers as MCP clients only.
-5. Prove it live the way `~/marcus-experiments/citation-extension-live-check/run_rehearsal.sh` does: a real server, the real transport, every card closed through the kernel's gates, zero spend.
+1. Put every kernel import in one module and copy `test_kernel_surface.py` with your own declared list; today that list is the MCP client and its reply reader, nothing else.
+2. Create the project and its cards with one `create_project` call: `options.tasks` carries each card's `task_type`, `inputs` and `id`, and `options.task_type_registrations` declares the types (K2) with their evidence schemas and, for a verify-shaped type, `verifies_task_type`.
+   The reply's `project_id` is the registry id your workers register against.
+3. Run workers as MCP clients only.
+4. Prove it live the way `~/marcus-experiments/citation-extension-live-check/run_rehearsal.sh` does: a real server, the real transport, every card closed through the kernel's gates, zero spend.
 
 ## Related
 
 - ADR-0013 K1 (what the kernel is), K2 (how an extension registers), K4 and K8 (the pull model), K11 (verification first): `docs/architecture/adr/0013-kernel-and-extensions.md`.
 - The extension guide: `docs/architecture/building-an-extension.md`.
 - The software-building extraction scope: `docs/architecture/software-extension-extraction.md`.
-- Issues #741, #844 (sanctioned seeding paths), #888 (`add_project` accepts sqlite), #831 (K2 registration field).
+- Issues #741, #844 (sanctioned seeding paths), #888 (`add_project` accepts sqlite), #831 (K2 registration field), #909 (the chain declares its types), #910 (public reply reader), #911 (seed-spec gaps closed), #913 (guard docstring).

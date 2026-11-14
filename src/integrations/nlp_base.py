@@ -184,6 +184,11 @@ class NaturalLanguageTaskCreator(ABC):
                                 "dependencies": task.dependencies,
                                 "project_id": self.active_project_id,
                                 "source_type": getattr(task, "source_type", None),
+                                # Issue #911: the card's type, so a
+                                # typed chain seeded over MCP renders
+                                # as find/verify/... and not as a row of
+                                # untyped cards.
+                                "task_type": task_data.get("task_type", "implement"),
                                 "created_at": datetime.now(timezone.utc).isoformat(),
                             },
                         )
@@ -262,6 +267,40 @@ class NaturalLanguageTaskCreator(ABC):
 
         if failed_tasks:
             logger.error(f"Failed tasks: {[(t.name, e) for t, e in failed_tasks]}")
+
+        # A seeded board is exactly the cards the caller named, or it is
+        # refused (Codex P2 on PR #919): going on without a failed card
+        # would drop every edge into it and leave its dependents
+        # claimable at once, behind a reply that said success. The cards
+        # already created are named so the operator can see the board's
+        # actual state; they are not removed here.
+        if (
+            failed_tasks
+            and tasks
+            and all(getattr(t, "source_type", None) == "seeded" for t in tasks)
+        ):
+            from src.core.error_framework import ErrorContext, KanbanIntegrationError
+
+            raise KanbanIntegrationError(
+                board_name=getattr(self.kanban_client, "board_id", "unknown"),
+                operation="seeded_batch_creation",
+                context=ErrorContext(
+                    operation="create_tasks_on_board",
+                    integration_name="natural_language_tools",
+                    custom_context={
+                        "total_tasks": len(tasks),
+                        "failed_tasks": [t.name for t, _ in failed_tasks],
+                        "created_tasks": [t.name for t in created_tasks],
+                        "details": (
+                            "A seeded board is all or nothing: "
+                            f"{len(failed_tasks)} of {len(tasks)} cards failed "
+                            f"({', '.join(t.name for t, _ in failed_tasks)}); "
+                            f"{len(created_tasks)} were already created and "
+                            "remain on the board."
+                        ),
+                    },
+                ),
+            )
 
         # Check if no tasks were created at all
         if not created_tasks and tasks:
