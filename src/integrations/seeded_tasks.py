@@ -215,7 +215,13 @@ def validate_seed_specs(
             if not isinstance(dep, str):
                 continue  # already reported
             dep_name = dep.strip()
-            if dep_name == own or dep_name == spec.get("id"):
+            # Names resolve before ids, here as in build_seeded_tasks, so a
+            # dependency on another task's name is never read as a
+            # self-edge just because it spells this task's id (Codex P2
+            # on PR #919).
+            if dep_name == own or (
+                dep_name == spec.get("id") and dep_name not in names
+            ):
                 errors.append(f"tasks[{index}] depends on itself")
             elif dep_name in names or dep_name in ids:
                 # In-batch, by name or by caller-supplied id (#911):

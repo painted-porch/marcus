@@ -427,3 +427,17 @@ class TestTypedSeedSpecs:
         assert b.id != a.id
         assert b.id.startswith("seed-2-")
         assert b.dependencies == ["seed-2-b"]
+
+    def test_a_dependency_on_a_name_equal_to_my_own_id_is_not_a_self_edge(self) -> None:
+        """Codex P2 on PR #919: names resolve first, so this is a valid edge to ``x``."""
+        a, b = build_seeded_tasks(
+            [{"name": "a", "id": "x"}, {"name": "b", "id": "a", "depends_on": ["a"]}],
+            "demo",
+        )
+        assert a.id == "x"
+        assert b.dependencies == ["x"]
+
+    def test_a_dependency_on_my_own_id_is_still_a_self_edge(self) -> None:
+        """When no task is named that way, depending on your own id is refused."""
+        errors = validate_seed_specs([{"name": "b", "id": "me", "depends_on": ["me"]}])
+        assert errors == ["tasks[0] depends on itself"]
