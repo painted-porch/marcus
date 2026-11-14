@@ -38,12 +38,22 @@ from typing import Any
 from marcus_toolkit import integrity, record, server
 from marcus_toolkit.client import MarcusMCPClient
 
-from .arms import check_rows, generate, judge, read_jsonl
+from .arms import (
+    ADVISER_MAX_TOKENS,
+    CHECK_MAX_TOKENS,
+    JUDGE_MAX_TOKENS,
+    check_rows,
+    generate,
+    judge,
+    read_jsonl,
+)
 from .board import chains_for, refusals_naming_the_adviser, run_board_arm
 from .cases import load_cases, manifest_digest
 from .grader import board_verdicts, grade, render_results
 from .models import (
+    DEEPINFRA_BASE_URL,
     DEEPSEEK_V4_FLASH,
+    DEFAULT_TEMPERATURE,
     HAIKU_4_5,
     AnthropicChat,
     ChatModel,
@@ -196,6 +206,7 @@ def run(
     adviser_model: str = DEEPSEEK_V4_FLASH,
     second_vendor_model: str = HAIKU_4_5,
     reasoning_effort: str = "high",
+    adviser_weights: str = "",
 ) -> dict[str, Any]:
     """
     Run the whole experiment and write the record.
@@ -226,6 +237,9 @@ def run(
         The A0 judge and the arm A3 checker.
     reasoning_effort : str
         The adviser's thinking budget; ``high`` is the paper's setting.
+    adviser_weights : str
+        The adviser weights' published hash or version, recorded in the run
+        config. A hosted open-weights model has no other durable identity.
 
     Returns
     -------
@@ -245,9 +259,17 @@ def run(
         ("cases", f"{len(cases)}; manifest sha256 {manifest_digest(manifest)}"),
         (
             "adviser",
-            f"{adviser_model} via DeepInfra, reasoning_effort={reasoning_effort}",
+            f"{adviser_model} via {DEEPINFRA_BASE_URL}, "
+            f"reasoning_effort={reasoning_effort}",
         ),
         ("second_vendor", second_vendor_model),
+        ("temperature", DEFAULT_TEMPERATURE),
+        (
+            "max_output_tokens",
+            f"adviser {ADVISER_MAX_TOKENS}, checker {CHECK_MAX_TOKENS}, "
+            f"judge {JUDGE_MAX_TOKENS}",
+        ),
+        ("adviser_weights", adviser_weights or "not recorded"),
         ("stop_line_usd", f"{stop_line:.2f}"),
         ("seed", seed),
         ("salt", salt),
@@ -451,6 +473,11 @@ def main(argv: list[str] | None = None) -> int:
         "--stamp", default=None, help="reuse a record directory to resume"
     )
     parser.add_argument("--reasoning-effort", default="high")
+    parser.add_argument(
+        "--adviser-weights",
+        default="",
+        help="the adviser weights' published hash or version, for the record",
+    )
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument(
         "--confirm-paid",
@@ -476,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         stamp=args.stamp,
         python=args.python,
         reasoning_effort=args.reasoning_effort,
+        adviser_weights=args.adviser_weights,
     )
     print(json.dumps(outcome, indent=2))
     return 1 if outcome["stopped"] else 0

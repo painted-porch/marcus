@@ -24,6 +24,16 @@ DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 DEEPSEEK_V4_FLASH = "deepseek-ai/DeepSeek-V4-Flash"
 HAIKU_4_5 = "claude-haiku-4-5-20251001"
 
+#: Sampling temperature, sent explicitly on every call.
+#:
+#: The 2026-11-14 run sent none, so every call used whatever each provider
+#: happened to default to. The paper this replicates states it applied no
+#: sampling overrides, so that was arguably faithful, but "the provider's
+#: default" is not a setting: it is unrecorded, it differs between providers,
+#: and it can change under a finished study. 0.0 is sent instead so a run is
+#: reproducible and the value appears in its record.
+DEFAULT_TEMPERATURE = 0.0
+
 Messages = Sequence[dict[str, str]]
 
 
@@ -73,6 +83,9 @@ class DeepInfraChat:
         ``high`` is the paper's setting; ``none`` disables thinking.
     base_url : str
         The endpoint.
+    temperature : float
+        Sent on every call so the run records it (see
+        :data:`DEFAULT_TEMPERATURE`).
     """
 
     def __init__(
@@ -81,6 +94,7 @@ class DeepInfraChat:
         api_key: str | None = None,
         reasoning_effort: str = "high",
         base_url: str = DEEPINFRA_BASE_URL,
+        temperature: float = DEFAULT_TEMPERATURE,
     ) -> None:
         from openai import OpenAI
 
@@ -89,6 +103,8 @@ class DeepInfraChat:
             raise RuntimeError("DEEPINFRA_API_KEY is not set in this process")
         self.model_id = model_id
         self.reasoning_effort = reasoning_effort
+        self.temperature = temperature
+        self.base_url = base_url
         self._client = OpenAI(api_key=key, base_url=base_url)
 
     def complete(self, messages: Messages, *, max_tokens: int) -> Reply:
@@ -99,6 +115,7 @@ class DeepInfraChat:
             model=self.model_id,
             messages=cast(Any, list(messages)),
             max_tokens=max_tokens,
+            temperature=self.temperature,
             extra_body={"reasoning_effort": self.reasoning_effort},
         )
         choice = response.choices[0]
@@ -133,9 +150,16 @@ class AnthropicChat:
         The model id.
     api_key : Optional[str]
         The key; ``ANTHROPIC_API_KEY`` or ``CLAUDE_API_KEY`` when omitted.
+    temperature : float
+        Sent on every call so the run records it.
     """
 
-    def __init__(self, model_id: str = HAIKU_4_5, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str = HAIKU_4_5,
+        api_key: str | None = None,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> None:
         from anthropic import Anthropic
 
         key = (
@@ -147,6 +171,7 @@ class AnthropicChat:
         if not key:
             raise RuntimeError("no Anthropic key is set in this process")
         self.model_id = model_id
+        self.temperature = temperature
         self._client = Anthropic(api_key=key)
 
     def complete(self, messages: Messages, *, max_tokens: int) -> Reply:
@@ -161,6 +186,7 @@ class AnthropicChat:
             model=self.model_id,
             max_tokens=max_tokens,
             system=system or "You are a careful assistant.",
+            temperature=self.temperature,
             messages=cast(Any, turns),
         )
         text = "".join(getattr(block, "text", "") for block in response.content)

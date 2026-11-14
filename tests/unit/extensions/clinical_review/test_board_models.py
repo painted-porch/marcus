@@ -463,3 +463,32 @@ class TestRehearsalScripts:
             [{"role": "user", "content": "I would Correct 2."}], max_tokens=10
         )
         assert json.loads(clean.text)["verdict"] == "no_flag"
+
+
+class TestSettingsAreExplicitAndRecorded:
+    """A run must be reproducible from its own record, so nothing is implicit."""
+
+    def test_deepinfra_sends_temperature_and_reasoning_effort(self) -> None:
+        """The 2026-11-14 run sent no temperature, so the provider chose it."""
+        chat = DeepInfraChat(api_key="k", reasoning_effort="high")
+        fake = FakeOpenAI()
+        chat._client = fake  # type: ignore[assignment]
+        chat.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+        assert fake.kwargs["temperature"] == models.DEFAULT_TEMPERATURE
+        assert fake.kwargs["extra_body"] == {"reasoning_effort": "high"}
+
+    def test_anthropic_sends_temperature(self) -> None:
+        """The second vendor's calls carry it too, or the arms are not matched."""
+        chat = AnthropicChat(api_key="k")
+        fake = FakeAnthropic()
+        chat._client = fake  # type: ignore[assignment]
+        chat.complete([{"role": "user", "content": "q"}], max_tokens=10)
+        assert fake.kwargs["temperature"] == models.DEFAULT_TEMPERATURE
+
+    def test_a_caller_can_override_the_temperature(self) -> None:
+        """A study that wants sampling says so explicitly and it is recorded."""
+        chat = DeepInfraChat(api_key="k", temperature=0.7)
+        fake = FakeOpenAI()
+        chat._client = fake  # type: ignore[assignment]
+        chat.complete([{"role": "user", "content": "hi"}], max_tokens=10)
+        assert fake.kwargs["temperature"] == 0.7

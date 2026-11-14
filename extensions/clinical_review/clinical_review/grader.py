@@ -34,6 +34,17 @@ from .arms import read_jsonl
 ARMS: tuple[str, ...] = ("A1", "C", "A2", "A3")
 PAIRS: tuple[tuple[str, str], ...] = (("A1", "C"), ("C", "A2"), ("A2", "A3"))
 
+#: Tolerance on every preregistered threshold comparison.
+#:
+#: Rates are ratios of small integers, and a threshold sits exactly on one of
+#: them often enough that binary floating point decides the verdict. In this
+#: run arm A2 caught 23 of 30 and arm C caught 20 of 30: a gap of exactly 3
+#: cases, exactly 10.0 percentage points, which ``0.7666666666666667 -
+#: 0.6666666666666666 <= 0.10`` evaluates as False because the subtraction
+#: lands on 0.10000000000000009. "Within 10 points" has to mean 10 points, so
+#: every comparison against a stated threshold carries this tolerance.
+EPS = 1e-9
+
 #: The only columns the hand-checker's worksheet may carry: no arm, no chain id.
 BLIND_SHEET_COLUMNS: tuple[str, ...] = (
     "blind_id",
@@ -339,21 +350,21 @@ def hypothesis_readout(outcomes: dict[str, Any]) -> dict[str, Any]:
         # When A1's rate is zero the rule requires zero, which is a knife
         # edge at this sample size; it is the preregistered rule and it is
         # reported as it falls rather than loosened after the fact.
-        false_flag_ok = ff2 <= 2 * ff1
+        false_flag_ok = ff2 <= 2 * ff1 + EPS
         out["H1"] = {
             "gap_points": round(gap * 100, 1),
             "false_flag_rates": [ff1, ff2],
             "false_flag_ok": false_flag_ok,
-            "supported": gap >= 0.20 and false_flag_ok,
+            "supported": gap >= 0.20 - EPS and false_flag_ok,
         }
         out["failure_condition"] = {
-            "met": abs(gap) <= 0.10,
+            "met": abs(gap) <= 0.10 + EPS,
             "gap_points": round(gap * 100, 1),
         }
     if c is not None and a2 is not None:
         out["P2"] = {
             "gap_points": round((a2 - c) * 100, 1),
-            "within_10": abs(a2 - c) <= 0.10,
+            "within_10": abs(a2 - c) <= 0.10 + EPS,
         }
     if a3 is not None and a2 is not None:
         out["P3"] = {"gap_points": round((a3 - a2) * 100, 1), "a3_above_a2": a3 > a2}
