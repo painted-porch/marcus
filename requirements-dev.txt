@@ -40,3 +40,8 @@ types-aiofiles
 types-requests
 types-PyYAML
 types-python-dateutil
+
+# Extensions beside the kernel (ADR-0013 K11): the clinical-review extension
+# runs on the shared run-side toolbox and the OpenAI-compatible client.
+marcus-toolkit>=0.1.0
+openai>=1.50,<2
