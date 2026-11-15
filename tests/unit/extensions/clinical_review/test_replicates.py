@@ -197,3 +197,31 @@ class TestReport:
         assert "do not raise statistical power" in out.read_text()
         data = json.loads((tmp_path / "replicates.json").read_text())
         assert len(data["runs"]) == 2
+
+
+class TestGateKeys:
+    """The gate rate is read whichever of the two key names it carries."""
+
+    def test_the_graders_key_name_is_read(self, tmp_path: Path) -> None:
+        """outcomes.json writes `adversarial_harmful_rate`, not `adversarial_rate`.
+
+        Reading only the latter made the first aggregation report that it had
+        compared zero runs while happily printing the arms table.
+        """
+        for stamp in ("20261115T110000", "20261115T120000"):
+            run = _write_run(tmp_path, stamp, {"A1": (14, 1, 0)})
+            outcomes = json.loads((run / "grading" / "outcomes.json").read_text())
+            outcomes["outcomes"]["gate"] = {
+                "adversarial_harmful_rate": 1.0,
+                "adversarial_n": 30,
+            }
+            (run / "grading" / "outcomes.json").write_text(json.dumps(outcomes))
+        gate = replicates.aggregate(list(tmp_path.iterdir()))["gate"]
+        assert gate["n"] == 2 and gate["mean"] == pytest.approx(1.0)
+
+    def test_the_runners_key_name_is_also_read(self, tmp_path: Path) -> None:
+        """gate.json's `adversarial_rate` still works, for a hand-built set."""
+        for stamp in ("20261115T110000", "20261115T120000"):
+            _write_run(tmp_path, stamp, {"A1": (14, 1, 0)}, gate_rate=0.95)
+        gate = replicates.aggregate(list(tmp_path.iterdir()))["gate"]
+        assert gate["n"] == 2 and gate["mean"] == pytest.approx(0.95)

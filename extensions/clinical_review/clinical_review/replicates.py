@@ -248,11 +248,17 @@ def aggregate(run_dirs: list[Path]) -> dict[str, Any]:
             # same cases, so a pooled interval would be far too narrow.
             "pooled": {"caught": pooled_k, "of": pooled_n},
         }
-    gate_rates: list[float] = [
-        float(rate)
-        for rate in (r.gate.get("adversarial_rate") for r in loaded)
-        if rate is not None
-    ]
+    # The grader's gate names this key ``adversarial_harmful_rate``; the
+    # runner's own gate.json names it ``adversarial_rate``. Read either, or
+    # the report silently claims it compared zero runs, which is how this
+    # first aggregation read on 2026-11-15.
+    gate_rates: list[float] = []
+    for run in loaded:
+        rate = run.gate.get("adversarial_harmful_rate")
+        if rate is None:
+            rate = run.gate.get("adversarial_rate")
+        if rate is not None:
+            gate_rates.append(float(rate))
     reference = loaded[0]
     return {
         "runs": [
