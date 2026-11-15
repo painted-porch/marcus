@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -459,6 +460,118 @@ def render(agg: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def decompose(regenerated: dict[str, Any], frozen: dict[str, Any]) -> dict[str, Any]:
+    """
+    Split each arm's run-to-run variation into checker and adviser parts.
+
+    Two sets are needed because one cannot separate them. In the regenerated
+    set the adviser writes new advice every run and the checker re-reads it, so
+    the spread holds both. In the frozen set every run checks the identical 60
+    recommendations, so the spread is the checker alone.
+
+    Treating the two sources as independent, the adviser's contribution is
+    ``sqrt(total variance - checker variance)``. Sampling noise can make the
+    frozen spread the larger of the two, which would put a negative number
+    under that root; that is reported as ``None`` with a note rather than
+    squared away, because it means the two sets cannot be told apart at this
+    number of runs.
+
+    Parameters
+    ----------
+    regenerated : Dict[str, Any]
+        :func:`aggregate` over the set whose advice was regenerated each run.
+    frozen : Dict[str, Any]
+        :func:`aggregate` over the set whose advice was held fixed.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Per arm: both standard deviations in cases caught, the implied adviser
+        contribution, and which source dominates.
+    """
+    out: dict[str, Any] = {"arms": {}, "runs": {}}
+    out["runs"] = {
+        "regenerated": len(regenerated.get("runs", [])),
+        "frozen": len(frozen.get("runs", [])),
+    }
+    for arm in ARMS:
+        total = (regenerated.get("arms", {}).get(arm) or {}).get("caught_count")
+        checker = (frozen.get("arms", {}).get(arm) or {}).get("caught_count")
+        if not total or not checker:
+            continue
+        total_sd, checker_sd = total.get("sd"), checker.get("sd")
+        entry: dict[str, Any] = {
+            "total_sd": total_sd,
+            "checker_sd": checker_sd,
+            "regenerated_mean": total.get("mean"),
+            "frozen_mean": checker.get("mean"),
+        }
+        if total_sd is None or checker_sd is None:
+            entry["adviser_sd"] = None
+            entry["note"] = "a set with one run has no spread to split"
+        elif checker_sd > total_sd:
+            entry["adviser_sd"] = None
+            entry["note"] = (
+                "the frozen set varies at least as much as the regenerated "
+                "one, so at this number of runs the adviser's contribution "
+                "cannot be separated from noise"
+            )
+        else:
+            entry["adviser_sd"] = math.sqrt(total_sd**2 - checker_sd**2)
+            share = (checker_sd**2) / (total_sd**2) if total_sd else None
+            entry["checker_share_of_variance"] = share
+            entry["dominant_source"] = (
+                "the checker" if share is not None and share >= 0.5 else "the adviser"
+            )
+        out["arms"][arm] = entry
+    return out
+
+
+def render_decomposition(dec: dict[str, Any]) -> str:
+    """
+    Render the decomposition, naming what each column is measured on.
+
+    Parameters
+    ----------
+    dec : Dict[str, Any]
+        From :func:`decompose`.
+
+    Returns
+    -------
+    str
+        Markdown, one sentence per line.
+    """
+    runs = dec.get("runs", {})
+    lines = [
+        "# Where the run-to-run variation comes from",
+        "",
+        f"{runs.get('regenerated', 0)} runs that regenerated their advice, "
+        f"{runs.get('frozen', 0)} that re-checked one frozen set of it.",
+        "The frozen spread is the checker alone, because every run read the "
+        "identical 60 recommendations.",
+        "The regenerated spread holds the checker and the adviser together.",
+        "",
+        "| Arm | Mean, regenerated | Mean, frozen | SD, both sources | "
+        "SD, checker alone | Implied adviser SD | Dominant |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for arm in ARMS:
+        e = dec.get("arms", {}).get(arm)
+        if not e:
+            continue
+        lines.append(
+            f"| {arm} | {_fmt(e['regenerated_mean'])} | {_fmt(e['frozen_mean'])} | "
+            f"{_fmt(e['total_sd'])} | {_fmt(e['checker_sd'])} | "
+            f"{_fmt(e.get('adviser_sd'))} | {e.get('dominant_source', '—')} |"
+        )
+    notes = {arm: e["note"] for arm, e in dec.get("arms", {}).items() if e.get("note")}
+    if notes:
+        lines += ["", "Where a figure is missing:", ""]
+        for arm, note in notes.items():
+            lines.append(f"- {arm}: {note}.")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI: aggregate the given run directories and write the report."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -477,6 +590,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="average in runs whose record does not say they completed",
     )
+    parser.add_argument(
+        "--frozen",
+        default=None,
+        help=(
+            "a second runs root whose advice was held fixed; with it the "
+            "report splits each arm's spread into checker and adviser parts"
+        ),
+    )
     args = parser.parse_args(argv)
     root = Path(args.runs_root)
     dirs = (
@@ -486,6 +607,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     agg = aggregate(dirs, include_incomplete=args.include_incomplete)
     report = render(agg)
+    if args.frozen:
+        frozen_root = Path(args.frozen)
+        frozen = aggregate(
+            [d for d in frozen_root.iterdir() if d.is_dir()],
+            include_incomplete=args.include_incomplete,
+        )
+        dec = decompose(agg, frozen)
+        report = report + "\n" + render_decomposition(dec)
+        agg = {"regenerated": agg, "frozen": frozen, "decomposition": dec}
     if args.out:
         Path(args.out).write_text(report)
         (Path(args.out).parent / "replicates.json").write_text(

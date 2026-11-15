@@ -330,3 +330,74 @@ class TestCompletionFromEvidence:
         run = self._full_run(tmp_path, "20261115T110000", None)
         (run / "RESULTS.md").unlink()
         assert replicates.completed(run) is False
+
+
+class TestDecomposition:
+    """Splitting run-to-run variation into checker and adviser parts."""
+
+    def _set(self, root: Path, counts: list[int], name: str) -> dict[str, Any]:
+        """Build a set of runs whose A2 catch counts are the ones given."""
+        d = root / name
+        d.mkdir()
+        for i, caught in enumerate(counts):
+            _write_run(d, f"2026111{i}T110000", {"A2": (caught, 1, 0)})
+        return replicates.aggregate(list(d.iterdir()))
+
+    def test_a_flat_frozen_set_puts_the_variation_on_the_adviser(
+        self, tmp_path: Path
+    ) -> None:
+        """The checker never moves, so everything left is the advice."""
+        regenerated = self._set(tmp_path, [18, 20, 22, 23], "regen")
+        frozen = self._set(tmp_path, [21, 21, 21, 21], "frozen")
+        dec = replicates.decompose(regenerated, frozen)
+        a2 = dec["arms"]["A2"]
+        assert a2["checker_sd"] == pytest.approx(0.0)
+        assert a2["adviser_sd"] == pytest.approx(a2["total_sd"])
+        assert a2["dominant_source"] == "the adviser"
+        assert replicates.render_decomposition(dec).count("| A2 |") == 1
+
+    def test_a_frozen_set_as_spread_as_the_other_puts_it_on_the_checker(
+        self, tmp_path: Path
+    ) -> None:
+        """Identical advice, same spread: the checker is doing it."""
+        regenerated = self._set(tmp_path, [18, 20, 22, 23], "regen")
+        frozen = self._set(tmp_path, [18, 20, 22, 23], "frozen")
+        dec = replicates.decompose(regenerated, frozen)
+        a2 = dec["arms"]["A2"]
+        assert a2["checker_sd"] == pytest.approx(a2["total_sd"])
+        assert a2["adviser_sd"] == pytest.approx(0.0)
+        assert a2["dominant_source"] == "the checker"
+
+    def test_a_frozen_set_more_spread_reports_nothing_rather_than_a_root_of_a_negative(
+        self, tmp_path: Path
+    ) -> None:
+        """Noise can invert the two; say so instead of inventing a number."""
+        regenerated = self._set(tmp_path, [20, 21, 21, 22], "regen")
+        frozen = self._set(tmp_path, [17, 20, 22, 25], "frozen")
+        dec = replicates.decompose(regenerated, frozen)
+        a2 = dec["arms"]["A2"]
+        assert a2["adviser_sd"] is None
+        assert "cannot be separated" in a2["note"]
+        assert "cannot be separated" in replicates.render_decomposition(dec)
+
+    def test_a_single_run_set_has_no_spread_to_split(self, tmp_path: Path) -> None:
+        """One run gives no standard deviation, so no split is claimed."""
+        regenerated = self._set(tmp_path, [18, 22], "regen")
+        frozen = self._set(tmp_path, [21], "frozen")
+        dec = replicates.decompose(regenerated, frozen)
+        assert dec["arms"]["A2"]["adviser_sd"] is None
+        assert "one run" in dec["arms"]["A2"]["note"]
+
+    def test_the_rendered_table_names_what_each_column_measures(
+        self, tmp_path: Path
+    ) -> None:
+        """A reader must not have to guess which SD is which."""
+        text = replicates.render_decomposition(
+            replicates.decompose(
+                self._set(tmp_path, [18, 20, 22, 23], "regen"),
+                self._set(tmp_path, [21, 21, 21, 21], "frozen"),
+            )
+        )
+        assert "SD, checker alone" in text
+        assert "the identical 60 recommendations" in text
+        assert "holds the checker and the adviser together" in text
