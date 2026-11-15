@@ -57,13 +57,29 @@ def _write_run(
         f"run_at:  {stamp}\ntemperature:  {temperature}\n"
         f"spend_usd:  {spend}\ncompleted:  {completed}\n"
     )
-    for arm, (caught, _ff, _u) in arms.items():
+    for arm, (caught, ff, _u) in arms.items():
         d = run / "arms" / arm
         d.mkdir(parents=True)
         rows = []
+        # A real run carries 60 verdicts per arm: 30 cases in each of the two
+        # modes. An earlier fixture wrote 30, which made every run look
+        # unfinished to the completeness check.
         for i in range(30):
-            verdict = "flag" if i < caught else "no_flag"
-            rows.append({"chain_id": f"c{i:02d}", "arm": arm, "verdict": verdict})
+            rows.append(
+                {
+                    "chain_id": f"a{i:02d}",
+                    "arm": arm,
+                    "verdict": "flag" if i < caught else "no_flag",
+                }
+            )
+        for i in range(30):
+            rows.append(
+                {
+                    "chain_id": f"l{i:02d}",
+                    "arm": arm,
+                    "verdict": "flag" if i < ff else "no_flag",
+                }
+            )
         (d / "verdicts.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     return run
 
@@ -118,7 +134,7 @@ class TestAgreement:
         agg = replicates.aggregate(list(tmp_path.iterdir()))
         a = agg["agreement"]["A1"]
         assert a["runs_compared"] == 2
-        assert a["unanimous"] == 30 and a["unanimous_rate"] == 1.0
+        assert a["unanimous"] == 60 and a["unanimous_rate"] == 1.0
         assert a["split_items"] == 0
 
     def test_differing_runs_name_the_split_items(self, tmp_path: Path) -> None:
@@ -126,9 +142,9 @@ class TestAgreement:
         _write_run(tmp_path, "20261115T110000", {"A1": (14, 1, 0)})
         _write_run(tmp_path, "20261115T120000", {"A1": (16, 1, 0)})
         a = replicates.aggregate(list(tmp_path.iterdir()))["agreement"]["A1"]
-        assert a["unanimous"] == 28 and a["split_items"] == 2
-        assert set(a["split_detail"]) == {"c14", "c15"}
-        assert a["split_detail"]["c14"] == {"no_flag": 1, "flag": 1}
+        assert a["unanimous"] == 58 and a["split_items"] == 2
+        assert set(a["split_detail"]) == {"a14", "a15"}
+        assert a["split_detail"]["a14"] == {"no_flag": 1, "flag": 1}
 
     def test_one_run_reports_no_agreement_figure(self, tmp_path: Path) -> None:
         """Agreement over a single run is undefined, not 100%."""
@@ -256,3 +272,61 @@ class TestCompleteness:
         (run / "run-config.txt").write_text("run_at:  20261115T110000\n")
         assert replicates.load_run(run) is None
         assert replicates.load_run(run, include_incomplete=True) is not None
+
+
+class TestCompletionFromEvidence:
+    """Completion is established from the record when no marker is present."""
+
+    def _full_run(self, root: Path, stamp: str, marker: str | None) -> Path:
+        run = _write_run(
+            root,
+            stamp,
+            {a: (14, 1, 0) for a in ("A1", "C", "A2", "A3")},
+            completed=marker or "",
+        )
+        (run / "RESULTS.md").write_text("# results\n")
+        if marker is None:
+            (run / "run-config.txt").write_text(f"run_at:  {stamp}\nspend_usd:  0.2\n")
+        return run
+
+    def test_a_run_predating_the_marker_counts_when_its_record_is_complete(
+        self, tmp_path: Path
+    ) -> None:
+        """The marker arrived mid-experiment; earlier runs are not discarded."""
+        run = self._full_run(tmp_path, "20261114T060702", None)
+        assert replicates.completed(run) is True
+        assert replicates.load_run(run) is not None
+
+    def test_a_missing_arm_means_incomplete_whatever_the_config_says(
+        self, tmp_path: Path
+    ) -> None:
+        """Three arms of four is not a finished run."""
+        run = self._full_run(tmp_path, "20261115T110000", None)
+        (run / "arms" / "A3" / "verdicts.jsonl").unlink()
+        assert replicates.completed(run) is False
+
+    def test_a_short_arm_means_incomplete(self, tmp_path: Path) -> None:
+        """A stop line mid-arm leaves fewer than 60 verdicts."""
+        run = self._full_run(tmp_path, "20261115T110000", None)
+        f = run / "arms" / "A2" / "verdicts.jsonl"
+        f.write_text("\n".join(f.read_text().splitlines()[:40]) + "\n")
+        assert replicates.completed(run) is False
+
+    def test_a_stopped_line_means_incomplete(self, tmp_path: Path) -> None:
+        """A recorded stop beats the evidence."""
+        run = self._full_run(tmp_path, "20261115T110000", None)
+        with (run / "run-config.txt").open("a") as handle:
+            handle.write("stopped:  stop line reached\n")
+        assert replicates.completed(run) is False
+
+    def test_an_explicit_marker_wins_over_the_evidence(self, tmp_path: Path) -> None:
+        """A run that says no is taken at its word."""
+        run = self._full_run(tmp_path, "20261115T110000", "no")
+        (run / "RESULTS.md").write_text("# results\n")
+        assert replicates.completed(run) is False
+
+    def test_no_results_file_means_incomplete(self, tmp_path: Path) -> None:
+        """Grading writes RESULTS.md last, so its absence is decisive."""
+        run = self._full_run(tmp_path, "20261115T110000", None)
+        (run / "RESULTS.md").unlink()
+        assert replicates.completed(run) is False

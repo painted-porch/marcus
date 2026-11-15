@@ -35,6 +35,10 @@ from .grader import ARMS
 #: the off-board equivalent, ``missing`` a chain whose verify card never ran.
 UNUSABLE: frozenset[str] = frozenset({"indeterminate", "declined", "missing"})
 
+#: Chains per run: 30 cases in both modes. A run missing any of them in any
+#: arm did not finish, whatever its config says.
+EXPECTED_CHAINS = 60
+
 
 @dataclass
 class RunSummary:
@@ -90,6 +94,43 @@ def read_config(run_dir: Path) -> dict[str, str]:
     return out
 
 
+def completed(run_dir: Path, config: dict[str, str] | None = None) -> bool:
+    """
+    Decide whether a run finished, from its record rather than its say-so.
+
+    The ``completed`` config line was added after the first replicates had
+    already run, so a marker check alone excludes every earlier run and the
+    aggregation silently reports nothing. The line is honoured when present,
+    and otherwise completion is established from evidence a finished run
+    cannot fake: a written ``RESULTS.md``, every arm carrying a verdict for
+    each of the 60 chains, and no ``stopped`` line.
+
+    Parameters
+    ----------
+    run_dir : Path
+        The run record.
+    config : Optional[Dict[str, str]]
+        Its config lines, read when not supplied.
+
+    Returns
+    -------
+    bool
+    """
+    settings = config if config is not None else read_config(run_dir)
+    marker = settings.get("completed", "").strip().lower()
+    if marker:
+        return marker == "yes"
+    if "stopped" in settings:
+        return False
+    if not (run_dir / "RESULTS.md").is_file():
+        return False
+    for arm in ARMS:
+        rows = read_jsonl(run_dir / "arms" / arm / "verdicts.jsonl")
+        if len(rows) != EXPECTED_CHAINS:
+            return False
+    return True
+
+
 def load_run(run_dir: Path, include_incomplete: bool = False) -> RunSummary | None:
     """
     Summarise one run directory, or return None when it must not be averaged.
@@ -99,7 +140,7 @@ def load_run(run_dir: Path, include_incomplete: bool = False) -> RunSummary | No
     non-empty ``arms`` map whose unperformed checks look exactly like misses
     (Codex P2 on PR #922). Averaging that into completed replicates would pull
     every rate down and call it non-determinism. A run therefore joins the set
-    only when its own record says it completed, unless a caller asks for the
+    only when :func:`completed` says it did, unless a caller asks for the
     incomplete ones deliberately.
 
     Parameters
@@ -120,7 +161,7 @@ def load_run(run_dir: Path, include_incomplete: bool = False) -> RunSummary | No
     if not outcomes.get("arms"):
         return None
     config = read_config(run_dir)
-    if not include_incomplete and config.get("completed", "").lower() != "yes":
+    if not include_incomplete and not completed(run_dir, config):
         return None
     try:
         spend = float(config.get("spend_usd", "0") or 0)
