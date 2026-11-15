@@ -492,3 +492,76 @@ class TestSettingsAreExplicitAndRecorded:
         chat._client = fake  # type: ignore[assignment]
         chat.complete([{"role": "user", "content": "hi"}], max_tokens=10)
         assert fake.kwargs["temperature"] == 0.7
+
+
+class TestResumeSafety:
+    """A resumed arm reads its seeding marker instead of seeding again."""
+
+    def test_a_second_pass_does_not_reseed(self, tmp_path: Path) -> None:
+        """Codex P2: the kernel refuses ids already on the board, so this crashed."""
+        cases = [_case(1)]
+        recs = {
+            chain: {"recommendation": "r", "model": "m"}
+            for _c, chain, _m in board.chains_for(cases, "s")
+        }
+        fake = FakeChat(
+            lambda m: json.dumps({"verdict": "no_flag", "reason": "r", "source": "s"}),
+            model_id="claude-haiku-4-5",
+        )
+        kwargs: dict[str, Any] = dict(
+            arm="A3",
+            cases=cases,
+            salt="s",
+            recommendations=recs,
+            checker=Metered(fake, Ledger(tmp_path / "state", 10.0), "c"),
+            project_name="hospital-unit",
+            project_root=tmp_path / "arm" / "project-root",
+            state_dir=tmp_path / "state",
+            adviser_vendor="deepinfra",
+            verifier_vendor="anthropic",
+            approval_rate=0.0,
+            seed=918,
+            sleep=lambda _s: None,
+        )
+        first = BoardStub()
+        board.run_board_arm(first, **kwargs)  # type: ignore[arg-type]
+        marker = tmp_path / "arm" / "seeded.json"
+        assert marker.is_file()
+        assert json.loads(marker.read_text())["project_id"] == "proj-1"
+
+        second = BoardStub()
+        board.run_board_arm(second, **kwargs)  # type: ignore[arg-type]
+        assert not any(
+            name == "create_project" for name, _ in second.calls
+        ), "a resumed arm must not seed again"
+
+    def test_the_marker_records_what_was_seeded(self, tmp_path: Path) -> None:
+        """The marker carries the project id, the arm and the card count."""
+        cases = [_case(1), _case(2)]
+        recs = {
+            chain: {"recommendation": "r", "model": "m"}
+            for _c, chain, _m in board.chains_for(cases, "s")
+        }
+        fake = FakeChat(
+            lambda m: json.dumps({"verdict": "no_flag", "reason": "r", "source": "s"}),
+            model_id="claude-haiku-4-5",
+        )
+        board.run_board_arm(
+            BoardStub(),  # type: ignore[arg-type]
+            arm="A2",
+            cases=cases,
+            salt="s",
+            recommendations=recs,
+            checker=Metered(fake, Ledger(tmp_path / "state", 10.0), "c"),
+            project_name="hospital-unit",
+            project_root=tmp_path / "arm" / "project-root",
+            state_dir=tmp_path / "state",
+            adviser_vendor="",
+            verifier_vendor="",
+            approval_rate=0.0,
+            seed=918,
+            sleep=lambda _s: None,
+        )
+        marker = json.loads((tmp_path / "arm" / "seeded.json").read_text())
+        assert marker["arm"] == "A2" and marker["cards"] == 8
+        assert "refuse" in marker["note"]

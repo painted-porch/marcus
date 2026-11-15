@@ -90,14 +90,24 @@ def read_config(run_dir: Path) -> dict[str, str]:
     return out
 
 
-def load_run(run_dir: Path) -> RunSummary | None:
+def load_run(run_dir: Path, include_incomplete: bool = False) -> RunSummary | None:
     """
-    Summarise one run directory, or return None when it has no graded output.
+    Summarise one run directory, or return None when it must not be averaged.
+
+    A run that reached its stop line part-way through still gets graded, since
+    ``run.run`` grades whatever it has, so its ``outcomes.json`` carries a
+    non-empty ``arms`` map whose unperformed checks look exactly like misses
+    (Codex P2 on PR #922). Averaging that into completed replicates would pull
+    every rate down and call it non-determinism. A run therefore joins the set
+    only when its own record says it completed, unless a caller asks for the
+    incomplete ones deliberately.
 
     Parameters
     ----------
     run_dir : Path
         The run record.
+    include_incomplete : bool
+        Accept a run whose record does not say it completed. Off by default.
 
     Returns
     -------
@@ -110,6 +120,8 @@ def load_run(run_dir: Path) -> RunSummary | None:
     if not outcomes.get("arms"):
         return None
     config = read_config(run_dir)
+    if not include_incomplete and config.get("completed", "").lower() != "yes":
+        return None
     try:
         spend = float(config.get("spend_usd", "0") or 0)
     except ValueError:
@@ -207,7 +219,7 @@ def item_agreement(runs: list[RunSummary], arm: str) -> dict[str, Any]:
     }
 
 
-def aggregate(run_dirs: list[Path]) -> dict[str, Any]:
+def aggregate(run_dirs: list[Path], include_incomplete: bool = False) -> dict[str, Any]:
     """
     Combine every graded run in ``run_dirs``.
 
@@ -216,6 +228,9 @@ def aggregate(run_dirs: list[Path]) -> dict[str, Any]:
     run_dirs : List[Path]
         Run records, in any order; the earliest stamp is treated as the
         reference run for the reproducibility check.
+    include_incomplete : bool
+        Pass runs whose record does not say they completed, which are excluded
+        by default so a stop-line halt is not averaged in as a low score.
 
     Returns
     -------
@@ -223,7 +238,13 @@ def aggregate(run_dirs: list[Path]) -> dict[str, Any]:
         ``runs`` (per-run figures), ``arms`` (spread per arm), ``agreement``
         (per arm), ``gate`` (spread) and ``spend``.
     """
-    loaded = [r for r in (load_run(d) for d in sorted(run_dirs)) if r is not None]
+    loaded = [
+        r
+        for r in (
+            load_run(d, include_incomplete=include_incomplete) for d in sorted(run_dirs)
+        )
+        if r is not None
+    ]
     if not loaded:
         return {"runs": [], "arms": {}, "agreement": {}, "gate": {}, "spend": {}}
     arms: dict[str, Any] = {}
@@ -410,6 +431,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out", default=None, help="where to write REPLICATES.md; stdout by default"
     )
+    parser.add_argument(
+        "--include-incomplete",
+        action="store_true",
+        help="average in runs whose record does not say they completed",
+    )
     args = parser.parse_args(argv)
     root = Path(args.runs_root)
     dirs = (
@@ -417,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.only
         else [d for d in root.iterdir() if d.is_dir()]
     )
-    agg = aggregate(dirs)
+    agg = aggregate(dirs, include_incomplete=args.include_incomplete)
     report = render(agg)
     if args.out:
         Path(args.out).write_text(report)

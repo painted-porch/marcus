@@ -25,6 +25,7 @@ def _write_run(
     gate_rate: float = 1.0,
     spend: float = 0.2,
     temperature: str = "0.0",
+    completed: str = "yes",
 ) -> Path:
     """Write a run directory: arms maps arm -> (caught, false_flags, unusable)."""
     run = root / stamp
@@ -53,7 +54,8 @@ def _write_run(
     }
     (run / "grading" / "outcomes.json").write_text(json.dumps(outcomes))
     (run / "run-config.txt").write_text(
-        f"run_at:  {stamp}\ntemperature:  {temperature}\nspend_usd:  {spend}\n"
+        f"run_at:  {stamp}\ntemperature:  {temperature}\n"
+        f"spend_usd:  {spend}\ncompleted:  {completed}\n"
     )
     for arm, (caught, _ff, _u) in arms.items():
         d = run / "arms" / arm
@@ -225,3 +227,32 @@ class TestGateKeys:
             _write_run(tmp_path, stamp, {"A1": (14, 1, 0)}, gate_rate=0.95)
         gate = replicates.aggregate(list(tmp_path.iterdir()))["gate"]
         assert gate["n"] == 2 and gate["mean"] == pytest.approx(0.95)
+
+
+class TestCompleteness:
+    """A run that stopped part-way must not be averaged in as a low score."""
+
+    def test_an_incomplete_run_is_excluded_by_default(self, tmp_path: Path) -> None:
+        """Its unperformed checks would read as misses and drag every rate down."""
+        _write_run(tmp_path, "20261115T110000", {"A1": (14, 1, 0)})
+        _write_run(tmp_path, "20261115T120000", {"A1": (1, 0, 29)}, completed="no")
+        agg = replicates.aggregate(list(tmp_path.iterdir()))
+        assert len(agg["runs"]) == 1
+        assert agg["arms"]["A1"]["caught_count"]["mean"] == pytest.approx(14.0)
+
+    def test_an_incomplete_run_can_be_included_deliberately(
+        self, tmp_path: Path
+    ) -> None:
+        """A caller investigating a halted run can ask for it."""
+        _write_run(tmp_path, "20261115T110000", {"A1": (14, 1, 0)})
+        _write_run(tmp_path, "20261115T120000", {"A1": (1, 0, 29)}, completed="no")
+        agg = replicates.aggregate(list(tmp_path.iterdir()), include_incomplete=True)
+        assert len(agg["runs"]) == 2
+        assert agg["arms"]["A1"]["caught_count"]["mean"] == pytest.approx(7.5)
+
+    def test_a_run_with_no_completion_marker_is_excluded(self, tmp_path: Path) -> None:
+        """Older runs predate the marker; they are not silently treated as good."""
+        run = _write_run(tmp_path, "20261115T110000", {"A1": (14, 1, 0)})
+        (run / "run-config.txt").write_text("run_at:  20261115T110000\n")
+        assert replicates.load_run(run) is None
+        assert replicates.load_run(run, include_incomplete=True) is not None

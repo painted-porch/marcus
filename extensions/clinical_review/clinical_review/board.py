@@ -150,17 +150,45 @@ def run_board_arm(
     sampled = sample_approvals(chain_ids, approval_rate, seed)
     specs = build_seed_specs(pairs, sampled, project_name)
     project_root.mkdir(parents=True, exist_ok=True)
-    reply = seed_board(
-        client,
-        project_name=project_name,
-        description=(
-            f"Hospital arm {arm}: an advise -> verify -> approve chain per clinical "
-            "decision point, the verifier sealed from the dialogue (issue #918)."
-        ),
-        specs=specs,
-        project_root=str(project_root.resolve()),
-    )
-    project_id = str(reply["project_id"])
+
+    # A resumed arm must not seed again. The kernel refuses a caller-supplied
+    # id that is already on the board (``_reject_seed_ids_already_on_the_board``),
+    # so a run that reached its stop line mid-arm, leaving cards seeded but no
+    # verdicts written, would die on the reseed rather than carry on. The
+    # marker is written the moment seeding succeeds, so its presence means the
+    # cards exist and the project id to work them is known.
+    marker = project_root.parent / "seeded.json"
+    if marker.is_file():
+        project_id = str(json.loads(marker.read_text())["project_id"])
+    else:
+        reply = seed_board(
+            client,
+            project_name=project_name,
+            description=(
+                f"Hospital arm {arm}: an advise -> verify -> approve chain per "
+                "clinical decision point, the verifier sealed from the dialogue "
+                "(issue #918)."
+            ),
+            specs=specs,
+            project_root=str(project_root.resolve()),
+        )
+        project_id = str(reply["project_id"])
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "project_id": project_id,
+                    "arm": arm,
+                    "cards": len(specs),
+                    "note": (
+                        "Seeding happened. A resumed run reads this instead of "
+                        "seeding again, which the kernel would refuse."
+                    ),
+                },
+                indent=1,
+            )
+            + "\n"
+        )
 
     def logger(name: str) -> Callable[[dict[str, Any]], None]:
         path = state_dir / name / "board-calls.jsonl"

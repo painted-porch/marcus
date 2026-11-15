@@ -207,6 +207,7 @@ def run(
     second_vendor_model: str = HAIKU_4_5,
     reasoning_effort: str = "high",
     adviser_weights: str = "",
+    reuse_generation: Path | None = None,
 ) -> dict[str, Any]:
     """
     Run the whole experiment and write the record.
@@ -240,6 +241,13 @@ def run(
     adviser_weights : str
         The adviser weights' published hash or version, recorded in the run
         config. A hosted open-weights model has no other durable identity.
+    reuse_generation : Optional[Path]
+        A finished run whose ``generation.jsonl`` and ``judge.jsonl`` this run
+        copies instead of generating its own. With the advice held fixed, what
+        varies between runs is the checkers alone, which is the only way to
+        tell an unreliable checker from an adviser that writes different
+        advice every time. Without it each run regenerates, which measures the
+        pipeline end to end and cannot separate the two.
 
     Returns
     -------
@@ -277,6 +285,17 @@ def run(
     ]:
         rec.config_line(key, value)
     rec.write("marcus-version.txt", integrity.format_version(version))
+
+    if reuse_generation is not None:
+        for name in ("generation.jsonl", "judge.jsonl"):
+            source = Path(reuse_generation) / name
+            if not source.is_file():
+                raise RuntimeError(
+                    f"--reuse-generation {reuse_generation} has no {name}"
+                )
+            if not rec.path(name).is_file():
+                rec.path(name).write_text(source.read_text())
+        rec.config_line("reused_generation_from", str(reuse_generation))
 
     cases_by_id = {c.case_id: c for c in cases}
     chains = {
@@ -431,6 +450,9 @@ def run(
 
     spent = ledger.total()
     rec.config_line("spend_usd", f"{spent:.4f}")
+    # The replicate aggregation reads this: a run that stopped part-way is
+    # graded anyway, and its unperformed checks look like misses.
+    rec.config_line("completed", "no" if stopped else "yes")
     graded = grade(rec.dir, seed=seed)
     header = [
         f"Run `{rec.stamp}`, Marcus `{version['commit']}`, adviser `{adviser_model}` "
@@ -478,6 +500,14 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="the adviser weights' published hash or version, for the record",
     )
+    parser.add_argument(
+        "--reuse-generation",
+        default=None,
+        help=(
+            "a finished run directory whose generation and judge rows this run "
+            "reuses, so only the checkers vary between runs"
+        ),
+    )
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument(
         "--confirm-paid",
@@ -504,6 +534,9 @@ def main(argv: list[str] | None = None) -> int:
         python=args.python,
         reasoning_effort=args.reasoning_effort,
         adviser_weights=args.adviser_weights,
+        reuse_generation=(
+            Path(args.reuse_generation) if args.reuse_generation else None
+        ),
     )
     print(json.dumps(outcome, indent=2))
     return 1 if outcome["stopped"] else 0
