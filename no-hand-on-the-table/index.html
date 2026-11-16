@@ -81,8 +81,9 @@
   .verdict-stamp{display:flex;align-items:center;gap:16px;}
   .vd{font-family:var(--mono);font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink);text-align:right;white-space:nowrap;line-height:1.5;}
   .vd b{color:var(--red);font-size:16px;}
-  .held{background:var(--inner);border:1px dashed var(--line2);border-radius:4px;padding:16px 18px;}
-  .held p{font-size:16px;color:var(--ink);} .held p.small{margin-top:6px;font-size:14px;color:var(--mute);}
+  figure{margin:0;display:flex;flex-direction:column;gap:10px;}
+  video{width:100%;max-height:44vh;object-fit:contain;display:block;background:var(--inner);border:1px solid var(--line2);border-radius:4px;}
+  figcaption{font-size:14.5px;color:var(--mute);line-height:1.5;}
 
   .links{display:flex;flex-wrap:wrap;gap:10px;}
   .plink{font-family:var(--mono);font-size:13.5px;color:var(--ink);text-decoration:none;border:1px solid var(--line2);border-radius:3px;padding:7px 13px;}
@@ -139,14 +140,39 @@
 <section class="panel" id="p1">
   <div class="inner">
     <span class="eyebrow">Where the table came from</span>
-    <h2>A two-hundred-year-old game, with pieces that can think</h2>
+    <h2>A two-hundred-year-old game, with pieces that decide for themselves</h2>
     <p>In 1824 a Prussian lieutenant named Georg von Reisswitz brought the Berlin general staff a game: a real map, blue blocks against red, dice because battle is uncertain, and an umpire who told each side only what it could have seen. "This is not a game," the chief of staff said, "this is training for war." Every serious wargame since descends from that table.</p>
     <p>Two hundred years later Jennifer Whiteley posted a half-minute film and a worry. She had asked an AI model to show what happens when autonomous systems interact in warfare, and the model reached for von Reisswitz: twelve blue regiments in the west, twelve red in the east, a river between them. A human hand makes five moves in seven seconds and lifts away. Then each regiment breaks into 256 soldiers, 6,144 in all, and thirty times a second every one still standing decides for itself. About 1.7 million decisions, the number in her post, and nobody ordered any of them.</p>
-    <div class="held">
-      <span class="k">Film withheld</span>
-      <p>Her simulation, seed 1824, rendered by us from her engine's output. Published only with her permission; it will appear when she says so.</p>
-    </div>
     <p class="foot">Her worry, in her words: "We can test individual systems extensively, but what happens when the systems start interacting, adapting to each other and responding to each other's decisions?"</p>
+  </div>
+</section>
+
+<section class="panel" id="p1a">
+  <div class="inner">
+    <span class="eyebrow">Her wargame, running</span>
+    <figure>
+      <video src="media/world.mp4" poster="media/world-poster.jpg" muted playsinline controls preload="metadata"></video>
+      <figcaption>Jennifer Whiteley's simulation, seed 1824, rendered by us from her engine's output and published with her permission. Twelve blue regiments in the west, twelve red in the east, a river between them. The hand leaves the table at seven seconds, and after that nobody is in charge of anything.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="panel" id="p1b">
+  <div class="inner">
+    <span class="eyebrow">Two kinds of autonomy</span>
+    <h2>Her soldiers follow rules. Our commanders reason.</h2>
+    <p>Her soldiers are not language models. Each one follows a short fixed rule, the same rule for all of them, and the complexity in the film comes from 6,144 of them interacting rather than from any one of them reasoning. What we added on top is a different thing entirely, and the difference decides which part of this experiment transfers to any other system.</p>
+    <div class="vs">
+      <div class="side l">
+        <span class="n">6,144</span>
+        <span class="lbl"><b>Her soldiers.</b> Each follows a few fixed rules. About thirty decisions a second each. No language anywhere: a soldier has no words, no reasons and nothing to say. Deterministic, so the same seed replays the same battle exactly.</span>
+      </div>
+      <div class="side r">
+        <span class="n">10</span>
+        <span class="lbl"><b>Our commanders.</b> Each is Claude Sonnet 5. One decision per turn, taken over seconds rather than milliseconds. Every order carries a sentence of reasoning, written in language, that any commander on its side can read.</span>
+      </div>
+    </div>
+    <p class="foot">The soldiers were hers and we changed nothing about them. Everything we added sits above them.</p>
   </div>
 </section>
 
@@ -154,8 +180,9 @@
   <div class="inner">
     <span class="eyebrow">One layer up</span>
     <h2>Ten commanders who cannot talk to each other</h2>
-    <p>First we tested her claim that nothing in that web can be traced back. We moved one regiment, at the start, by one pixel, and the battle ended differently. So at the soldier level tracing is hopeless, and any legibility has to be built one layer up, where the decisions are large and few. That is the layer we built, and her soldiers were left exactly as she wrote them.</p>
-    <p>Above her regiments we put ten commanders. Five blue: <b>Captain Crunch, Colonel Sanders, Sergeant Pepper, Major Tom</b> and <b>Private Ryan</b>. Five red: General Tso, Colonel Mustard, Captain Morgan, Major Payne and Sergeant Slaughter. Each commander is a language model holding two or three regiments. Colonel Sanders, for instance, commands regiments 1, 6 and 11.</p>
+    <p>First we tested her claim that nothing in that web can be traced back. We moved one regiment, at the start, by one pixel, and the battle ended differently. So at the soldier level tracing is hopeless, and any legibility has to be built one layer up, where the decisions are large and few.</p>
+    <p>So above her regiments we put ten commanders. Five blue: <b>Captain Crunch, Colonel Sanders, Sergeant Pepper, Major Tom</b> and <b>Private Ryan</b>. Five red: General Tso, Colonel Mustard, Captain Morgan, Major Payne and Sergeant Slaughter. Each is a language model holding two or three regiments.</p>
+    <p>A soldier applies a rule. A commander reads a board, weighs what other commanders have written, and reasons in language about what to do next. That reasoning layer is what this experiment tests, and it is the layer where everything that follows went wrong.</p>
     <div class="rules">
       <div class="rule"><span class="n">sees</span><span><b>Each turn, for each of its own regiments:</b>
         <small>where it is, how many soldiers it has left, how heavily it is engaged, how much enemy is nearby and in which direction. The view from the front. Nothing about the other side's board.</small></span></div>
@@ -260,11 +287,10 @@
       <div class="side r"><span class="n count" data-target="4" data-suffix=" in 10">4 in 10</span><span class="lbl">battles with a staff officer where a blue regiment walked off the battlefield toward the empty corner. Eight orders in all.</span></div>
     </div>
     <h2>Same commanders, same board, same lie. One new piece on the table.</h2>
-    <div class="held">
-      <span class="k">Film withheld</span>
-      <p>Seed 1824, the last fourteen seconds. A blue ring follows regiment 4, which belongs to Private Ryan, as it leaves the fight at the river and walks left toward a red ring marked "the reported crossing". The battle ends before it arrives. Nothing was ever inside the red ring.</p>
-      <p class="small">Rendered from her engine's output; held until she says so.</p>
-    </div>
+    <figure>
+      <video src="media/march.mp4" poster="media/march-poster.jpg" muted playsinline controls preload="metadata"></video>
+      <figcaption>Seed 1824, the last fourteen seconds. A blue ring follows regiment 4, which belongs to Private Ryan, as it leaves the fight at the river and walks left toward a red ring marked "the reported crossing". The battle ends before it arrives. Nothing was ever inside the red ring.</figcaption>
+    </figure>
   </div>
 </section>
 
@@ -374,7 +400,7 @@
         <a class="plink" href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">Marcus on GitHub ↗</a>
         <a class="plink" href="../on-the-record/">The first file: On the Record →</a>
       </div>
-      <p class="foot" style="margin-top:14px">One wargame, one model in every seat, fifty battles. The simulation is Jennifer Whiteley's, used with her permission; nothing rendered from it is published without her say-so. The rest is ours. Contact: <a href="mailto:info@graylabs.ai">info@graylabs.ai</a>.</p>
+      <p class="foot" style="margin-top:14px">One wargame, one model in every seat, fifty battles. The simulation is Jennifer Whiteley's, used with her permission, as are the two films rendered from it. The rest is ours. Contact: <a href="mailto:info@graylabs.ai">info@graylabs.ai</a>.</p>
     </div>
   </div>
 </section>
