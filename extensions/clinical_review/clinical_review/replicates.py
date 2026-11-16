@@ -99,6 +99,10 @@ def completed(run_dir: Path, config: dict[str, str] | None = None) -> bool:
     """
     Decide whether a run finished, from its record rather than its say-so.
 
+    A ``superseded`` line excludes a run outright, whatever else its record
+    says: a defect found after the fact does not make the run incomplete, it
+    makes it unusable, and the reason belongs with the data.
+
     The ``completed`` config line was added after the first replicates had
     already run, so a marker check alone excludes every earlier run and the
     aggregation silently reports nothing. The line is honoured when present,
@@ -118,6 +122,12 @@ def completed(run_dir: Path, config: dict[str, str] | None = None) -> bool:
     bool
     """
     settings = config if config is not None else read_config(run_dir)
+    # A run superseded by a defect found afterwards is excluded by default.
+    # Marking it in its own record beats moving it to another directory: the
+    # reason travels with the data, and an aggregation cannot silently mix a
+    # broken run with a fixed one (deviation 12, the 600-token truncation).
+    if settings.get("superseded", "").strip():
+        return False
     marker = settings.get("completed", "").strip().lower()
     if marker:
         return marker == "yes"

@@ -401,3 +401,30 @@ class TestDecomposition:
         assert "SD, checker alone" in text
         assert "the identical 60 recommendations" in text
         assert "holds the checker and the adviser together" in text
+
+
+class TestSuperseded:
+    """A run invalidated by a defect found afterwards is excluded by default."""
+
+    def test_a_superseded_run_is_excluded_even_when_complete(
+        self, tmp_path: Path
+    ) -> None:
+        """Deviation 12: the truncation defect made six complete runs unusable."""
+        good = _write_run(tmp_path, "20261116T110000", {"A1": (18, 1, 0)})
+        (good / "RESULTS.md").write_text("# r\n")
+        bad = _write_run(tmp_path, "20261115T110000", {"A1": (14, 1, 9)})
+        (bad / "RESULTS.md").write_text("# r\n")
+        with (bad / "run-config.txt").open("a") as handle:
+            handle.write("superseded:  600-token truncation defect, deviation 12\n")
+        assert replicates.completed(bad) is False
+        agg = replicates.aggregate(list(tmp_path.iterdir()))
+        assert [r["stamp"] for r in agg["runs"]] == ["20261116T110000"]
+
+    def test_a_superseded_run_can_still_be_inspected_deliberately(
+        self, tmp_path: Path
+    ) -> None:
+        """Its rows are not deleted; a reader can ask for them."""
+        bad = _write_run(tmp_path, "20261115T110000", {"A1": (14, 1, 9)})
+        with (bad / "run-config.txt").open("a") as handle:
+            handle.write("superseded:  deviation 12\n")
+        assert replicates.load_run(bad, include_incomplete=True) is not None
