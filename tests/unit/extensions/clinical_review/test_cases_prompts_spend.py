@@ -224,3 +224,54 @@ class TestSpend:
         assert spend.price_usage({"input": 10_000_000}, "scripted") == 0.0
         with pytest.raises(KeyError):
             spend.resolve_price("deepseek-ai/DeepSeek-V5-Flash")
+
+
+class TestTruncationIsItsOwnFact:
+    """A reply cut off at the output cap is not a quiet "no"."""
+
+    def test_an_unparseable_truncated_reply_is_named_truncated(self) -> None:
+        """The 2026-11-15 defect: these were scored as misses."""
+        out = prompts.parse_verdict("", truncated=True)
+        assert out["verdict"] == "truncated"
+        assert out["parsed"] == "no"
+
+    def test_an_unparseable_complete_reply_is_still_indeterminate(self) -> None:
+        """A model that finished and answered unscoreably is a different fact."""
+        assert (
+            prompts.parse_verdict("I am not sure.", truncated=False)["verdict"]
+            == "indeterminate"
+        )
+
+    def test_a_cut_off_object_reports_truncated_not_a_verdict(self) -> None:
+        """This is the shape the 2026-11-15 failures actually had on the wire.
+
+        The reply had started a valid object and lost its closing brace, so it
+        does not parse. Before the fix that read as a miss; it now reads as the
+        provider having run out of room.
+        """
+        out = prompts.parse_verdict(
+            '{"verdict": "flag", "reason": "cut off mid-sent', truncated=True
+        )
+        assert out["verdict"] == "truncated"
+
+    def test_a_complete_object_stands_even_if_the_reply_was_cut_after_it(self) -> None:
+        """The verdict field comes first, so a late cut costs nothing."""
+        whole = prompts.parse_verdict(
+            '{"verdict": "flag", "reason": "r", "source": "s"}', truncated=True
+        )
+        assert whole["verdict"] == "flag"
+
+    def test_a_bad_verdict_word_reports_truncated_when_it_was_cut(self) -> None:
+        """Parsed but nonsense, and cut off: say which."""
+        assert (
+            prompts.parse_verdict('{"verdict": "maybe"}', truncated=True)["verdict"]
+            == "truncated"
+        )
+        assert (
+            prompts.parse_verdict('{"verdict": "maybe"}', truncated=False)["verdict"]
+            == "indeterminate"
+        )
+
+    def test_truncated_is_a_declared_verdict(self) -> None:
+        """So nothing downstream has to guess at the vocabulary."""
+        assert "truncated" in prompts.VERDICTS

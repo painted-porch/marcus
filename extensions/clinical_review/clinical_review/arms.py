@@ -26,9 +26,17 @@ from .prompts import (
     parse_verdict,
 )
 
+#: Output caps, per role. These include reasoning tokens on a provider that
+#: charges them to the completion, which is the defect the 2026-11-15 runs hit:
+#: the checker was capped at 600 while asked to think at high effort, and every
+#: unparseable check in those runs sat at exactly 600 output tokens, with the
+#: verdict either cut off mid-field or never written at all. The caps are now
+#: set well above the reasoning a hard case needs, and the cost of the headroom
+#: is negligible: output runs at $0.18 per million, so 240 checks at 4,096
+#: tokens is under 18 cents even if every one ran to the cap.
 ADVISER_MAX_TOKENS = 3072
-CHECK_MAX_TOKENS = 600
-JUDGE_MAX_TOKENS = 300
+CHECK_MAX_TOKENS = 4096
+JUDGE_MAX_TOKENS = 2048
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -168,6 +176,7 @@ def judge(
                 messages,
                 max_tokens=JUDGE_MAX_TOKENS,
                 extra={"step": "judge", "chain": chain, "retry": 1},
+                json_object=True,
             )
             parsed = parse_judgement(reply.text) or {
                 "reference_a": "unclear",
@@ -238,16 +247,20 @@ def check_rows(
                 case.vignette, case.physician_draft, row["recommendation"]
             )
         reply = model.complete(
-            messages, max_tokens=CHECK_MAX_TOKENS, extra={"arm": arm, "chain": chain}
+            messages,
+            max_tokens=CHECK_MAX_TOKENS,
+            extra={"arm": arm, "chain": chain},
+            json_object=True,
         )
-        verdict = parse_verdict(reply.text)
-        if verdict["verdict"] == "indeterminate":
+        verdict = parse_verdict(reply.text, truncated=reply.truncated)
+        if verdict["verdict"] in ("indeterminate", "truncated"):
             reply = model.complete(
                 messages,
                 max_tokens=CHECK_MAX_TOKENS,
                 extra={"arm": arm, "chain": chain, "retry": 1},
+                json_object=True,
             )
-            verdict = parse_verdict(reply.text)
+            verdict = parse_verdict(reply.text, truncated=reply.truncated)
         out_row = {
             "chain_id": chain,
             "case_id": row["case_id"],
@@ -255,6 +268,7 @@ def check_rows(
             **verdict,
             "model": reply.model,
             "tokens": reply.tokens,
+            "finish_reason": reply.raw.get("finish_reason"),
             "raw": reply.text,
         }
         append_jsonl(out, out_row)

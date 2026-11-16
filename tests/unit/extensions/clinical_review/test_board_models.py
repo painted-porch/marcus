@@ -335,6 +335,7 @@ class FakeOpenAI:
     def __init__(self, text: str = "ok", reasoning: str = "thinking") -> None:
         self.text = text
         self.reasoning = reasoning
+        self.finish_reason = "stop"
         self.kwargs: dict[str, Any] = {}
 
         parent = self
@@ -347,7 +348,9 @@ class FakeOpenAI:
                     (),
                     {"content": parent.text, "reasoning_content": parent.reasoning},
                 )()
-                choice = type("C", (), {"message": message, "finish_reason": "stop"})()
+                choice = type(
+                    "C", (), {"message": message, "finish_reason": parent.finish_reason}
+                )()
                 usage = type("U", (), {"prompt_tokens": 11, "completion_tokens": 22})()
                 return type(
                     "R",
@@ -367,6 +370,7 @@ class FakeAnthropic:
 
     def __init__(self, text: str = "ok") -> None:
         self.text = text
+        self.stop_reason = "end_turn"
         self.kwargs: dict[str, Any] = {}
         parent = self
 
@@ -382,7 +386,7 @@ class FakeAnthropic:
                         "content": [block],
                         "usage": usage,
                         "model": "claude-haiku-4-5-20251001",
-                        "stop_reason": "end_turn",
+                        "stop_reason": parent.stop_reason,
                     },
                 )()
 
@@ -565,3 +569,78 @@ class TestResumeSafety:
         marker = json.loads((tmp_path / "arm" / "seeded.json").read_text())
         assert marker["arm"] == "A2" and marker["cards"] == 8
         assert "refuse" in marker["note"]
+
+
+class TestTruncationAndJsonMode:
+    """The adapters report truncation and ask for a JSON object where they can."""
+
+    def test_deepinfra_marks_a_length_stop_as_truncated(self) -> None:
+        """`finish_reason == "length"` is the provider saying it ran out of room."""
+        chat = DeepInfraChat(api_key="k")
+        fake = FakeOpenAI(text="")
+        fake.finish_reason = "length"
+        chat._client = fake  # type: ignore[assignment]
+        reply = chat.complete([{"role": "user", "content": "q"}], max_tokens=600)
+        assert reply.truncated is True
+        assert reply.raw["finish_reason"] == "length"
+
+    def test_deepinfra_marks_a_normal_stop_as_not_truncated(self) -> None:
+        """A model that finished is not truncated."""
+        chat = DeepInfraChat(api_key="k")
+        fake = FakeOpenAI(text="ok")
+        chat._client = fake  # type: ignore[assignment]
+        reply = chat.complete([{"role": "user", "content": "q"}], max_tokens=600)
+        assert reply.truncated is False
+
+    def test_json_mode_is_requested_only_when_asked(self) -> None:
+        """The adviser must keep writing prose, so this is per call."""
+        chat = DeepInfraChat(api_key="k")
+        fake = FakeOpenAI()
+        chat._client = fake  # type: ignore[assignment]
+        chat.complete([{"role": "user", "content": "q"}], max_tokens=10)
+        assert "response_format" not in fake.kwargs["extra_body"]
+        chat.complete(
+            [{"role": "user", "content": "q"}], max_tokens=10, json_object=True
+        )
+        assert fake.kwargs["extra_body"]["response_format"] == {"type": "json_object"}
+        assert fake.kwargs["extra_body"]["reasoning_effort"] == "high"
+
+    def test_anthropic_marks_max_tokens_as_truncated(self) -> None:
+        """Its own stop reason carries the same fact under a different name."""
+        chat = AnthropicChat(api_key="k")
+        fake = FakeAnthropic(text="")
+        fake.stop_reason = "max_tokens"
+        chat._client = fake  # type: ignore[assignment]
+        reply = chat.complete([{"role": "user", "content": "q"}], max_tokens=10)
+        assert reply.truncated is True
+
+    def test_the_ledger_row_records_a_truncated_call(self, tmp_path: Path) -> None:
+        """So the rate is readable off the record without re-reading replies."""
+        from clinical_review.models import Reply
+
+        ledger = Ledger(tmp_path / "state", 10.0)
+        fake = FakeChat(
+            lambda m: Reply(
+                text="",
+                tokens={"input": 10, "output": 600},
+                model="claude-haiku-4-5",
+                truncated=True,
+            ),
+            model_id="claude-haiku-4-5",
+        )
+        Metered(fake, ledger, "checker").complete(
+            [{"role": "user", "content": "q"}], max_tokens=600, extra={"arm": "C"}
+        )
+        row = json.loads(
+            (tmp_path / "state" / "checker" / "usage.jsonl").read_text().splitlines()[0]
+        )
+        assert row["truncated"] is True and row["arm"] == "C"
+
+    def test_the_checker_cap_is_well_above_the_reasoning_budget(self) -> None:
+        """The defect was a 600-token cap on a checker asked to think hard."""
+        from clinical_review import agents as agents_mod
+        from clinical_review import arms as arms_mod
+
+        assert agents_mod.CHECKER_MAX_TOKENS >= 4096
+        assert arms_mod.CHECK_MAX_TOKENS >= 4096
+        assert arms_mod.JUDGE_MAX_TOKENS >= 2048

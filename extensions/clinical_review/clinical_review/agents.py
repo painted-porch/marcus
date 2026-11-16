@@ -30,7 +30,10 @@ from marcus_toolkit.client import MarcusMCPClient
 from .models import Metered
 from .prompts import build_checker_messages, parse_verdict
 
-CHECKER_MAX_TOKENS = 600
+#: The board checker's output cap. See the note in ``arms.py``: this was 600
+#: while the checker was asked to think at high effort, and reasoning tokens
+#: count toward it, which truncated the verdict on exactly the hard cases.
+CHECKER_MAX_TOKENS = 4096
 
 #: What a handler returns: ``("completed", evidence)`` or ``("declined", reason)``.
 Outcome = tuple[str, Any]
@@ -316,16 +319,27 @@ def verifier_handler(model: Metered, arm: str) -> Handler:
             str(inputs.get("recommendation") or ""),
         )
         reply = model.complete(
-            messages, max_tokens=CHECKER_MAX_TOKENS, extra={"arm": arm, "chain": chain}
+            messages,
+            max_tokens=CHECKER_MAX_TOKENS,
+            extra={"arm": arm, "chain": chain},
+            json_object=True,
         )
-        verdict = parse_verdict(reply.text)
-        if verdict["verdict"] == "indeterminate":
+        verdict = parse_verdict(reply.text, truncated=reply.truncated)
+        if verdict["verdict"] in ("indeterminate", "truncated"):
             reply = model.complete(
                 messages,
                 max_tokens=CHECKER_MAX_TOKENS,
                 extra={"arm": arm, "chain": chain, "retry": 1},
+                json_object=True,
             )
-            verdict = parse_verdict(reply.text)
+            verdict = parse_verdict(reply.text, truncated=reply.truncated)
+        if verdict["verdict"] == "truncated":
+            # Named apart from an unparseable reply: the board's record should
+            # say the checker ran out of room, not that it answered badly.
+            return (
+                "declined",
+                "checker's reply was cut off at the output cap, twice",
+            )
         if verdict["verdict"] == "indeterminate":
             return ("declined", "checker returned no parseable verdict after one retry")
         return (
