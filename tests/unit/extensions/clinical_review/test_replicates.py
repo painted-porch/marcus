@@ -453,3 +453,107 @@ class TestUndefinedFalseFlagRates:
         target.write_text(json.dumps(data))
         text = replicates.render(replicates.aggregate([tmp_path / "20261115T000001"]))
         assert "| A1 |" in text
+
+
+@pytest.mark.unit
+class TestCodeVersion:
+    """The report has to be able to say which commit each run executed."""
+
+    def test_reads_the_short_sha_from_the_checkout_line(self) -> None:
+        """A clean checkout reports its sha and nothing else."""
+        settings = {
+            "checkout": "/checkouts/wt @ 53c0851e6db35245b4fe244e010255d87a6d3845 (0 dirty)"
+        }
+        assert replicates.code_version(settings) == "53c0851e"
+
+    def test_marks_a_dirty_checkout(self) -> None:
+        """Uncommitted files make a run less reproducible, so they are shown."""
+        settings = {
+            "checkout": "/checkouts/wt @ 5003bd7722f235c2f4b829079d9725064514caad (2 dirty)"
+        }
+        assert replicates.code_version(settings) == "5003bd77+2dirty"
+
+    def test_says_so_when_no_commit_was_recorded(self) -> None:
+        """A missing line is reported as missing, never as a match."""
+        assert replicates.code_version({}) == "not recorded"
+        assert replicates.code_version({"checkout": "/checkouts/wt"}) == "not recorded"
+
+
+@pytest.mark.unit
+class TestComparabilityClaim:
+    """The opening claim must follow the record, not be asserted."""
+
+    def test_one_commit_is_called_the_same_code(self) -> None:
+        """Runs that match may be read as provider non-determinism."""
+        agg = {
+            "runs": [
+                {
+                    "stamp": "a",
+                    "temperature": "0.0",
+                    "code": "53c0851e",
+                    "spend_usd": 0.1,
+                },
+                {
+                    "stamp": "b",
+                    "temperature": "0.0",
+                    "code": "53c0851e",
+                    "spend_usd": 0.1,
+                },
+            ],
+            "arms": {},
+            "agreement": {},
+            "gate": replicates.spread([1.0, 1.0]),
+            "spend": {"total_usd": 0.2},
+            "reference_run": "a",
+        }
+        out = replicates.render(agg)
+        assert "the same code" in out
+        assert "did NOT all execute the same code" not in out
+
+    def test_differing_commits_are_disclosed(self) -> None:
+        """A set spanning commits says so and states the limit it imposes."""
+        agg = {
+            "runs": [
+                {
+                    "stamp": "a",
+                    "temperature": "0.0",
+                    "code": "53c0851e",
+                    "spend_usd": 0.1,
+                },
+                {
+                    "stamp": "b",
+                    "temperature": "0.0",
+                    "code": "735a3f8f",
+                    "spend_usd": 0.1,
+                },
+            ],
+            "arms": {},
+            "agreement": {},
+            "gate": replicates.spread([1.0, 1.0]),
+            "spend": {"total_usd": 0.2},
+            "reference_run": "a",
+        }
+        out = replicates.render(agg)
+        assert "did NOT all execute the same code" in out
+        assert "re-graded" in out
+
+
+@pytest.mark.unit
+class TestDecompositionWithoutFrozenRuns:
+    """An unmeasured split must not render as an empty table under prose."""
+
+    def test_reports_its_own_absence(self) -> None:
+        """With no frozen run the section says the split is not measured."""
+        out = replicates.render_decomposition(
+            {"runs": {"regenerated": 4, "frozen": 0}, "arms": {}}
+        )
+        assert "NOT" in out
+        assert "| Arm | Mean, regenerated" not in out
+
+    def test_also_when_arms_are_empty(self) -> None:
+        """A frozen count with no per-arm figures is still not a measurement."""
+        out = replicates.render_decomposition(
+            {"runs": {"regenerated": 4, "frozen": 2}, "arms": {}}
+        )
+        assert "NOT" in out
+        assert "| Arm | Mean, regenerated" not in out

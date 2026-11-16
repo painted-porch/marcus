@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -92,6 +93,37 @@ def read_config(run_dir: Path) -> dict[str, str]:
         key, _, value = line.partition(":")
         if key.strip():
             out[key.strip()] = value.strip()
+    return out
+
+
+def code_version(settings: dict[str, str]) -> str:
+    """
+    Report the extension commit a run executed, from its recorded config.
+
+    The run records a line like ``checkout: <path> @ <sha> (N dirty)``. The sha
+    is what matters for comparing runs: a set whose runs executed different
+    commits is not one set until the figures are shown to be unchanged across
+    them, so the report has to be able to say which commit each run ran.
+
+    Parameters
+    ----------
+    settings : Dict[str, str]
+        From :func:`read_config`.
+
+    Returns
+    -------
+    str
+        Short sha, with ``+dirty`` where the checkout had uncommitted files,
+        or ``not recorded``.
+    """
+    line = settings.get("checkout", "")
+    match = re.search(r"@\s*([0-9a-f]{7,40})", line)
+    if not match:
+        return "not recorded"
+    out = match.group(1)[:8]
+    dirty = re.search(r"\((\d+) dirty\)", line)
+    if dirty and dirty.group(1) != "0":
+        out += f"+{dirty.group(1)}dirty"
     return out
 
 
@@ -347,6 +379,7 @@ def aggregate(run_dirs: list[Path], include_incomplete: bool = False) -> dict[st
                 "stamp": r.stamp,
                 "spend_usd": r.spend_usd,
                 "temperature": r.settings.get("temperature", "not recorded"),
+                "code": code_version(r.settings),
                 "arms": {a: f["caught"] for a, f in r.arms.items()},
                 "false_flags": {a: f["false_flags"] for a, f in r.arms.items()},
                 "unusable": {a: f["unusable"] for a, f in r.arms.items()},
@@ -388,10 +421,30 @@ def render(agg: dict[str, Any]) -> str:
     lines = [
         "# Replicates: Hospital",
         "",
-        f"{len(runs)} graded runs, identical in every setting, "
-        f"${agg['spend']['total_usd']:.4f} in total.",
-        "Nothing varies between them, so any difference is the providers' own "
-        "non-determinism.",
+        f"{len(runs)} graded runs, " f"${agg['spend']['total_usd']:.4f} in total.",
+    ]
+    # Whether the runs are comparable is a fact about the record, not a phrase
+    # to assert. Runs that executed different commits are reported as such.
+    codes = sorted({str(r.get("code", "not recorded")) for r in runs})
+    temps = sorted({str(r["temperature"]) for r in runs})
+    if len(codes) == 1 and len(temps) == 1:
+        lines.append(
+            "Every run used the same settings and the same code "
+            f"(`{codes[0]}`), so any difference between them is the "
+            "providers' own non-determinism."
+        )
+    else:
+        lines.append(
+            "The settings were the same in every run, but the runs did NOT all "
+            f"execute the same code: {', '.join(f'`{c}`' for c in codes)}."
+        )
+        lines.append(
+            "Each run was re-graded afterwards with one single version, so the "
+            "scoring is uniform; what differs between them is the code that "
+            "generated and checked the advice, and that is a limit on reading "
+            "the spread below as non-determinism alone."
+        )
+    lines += [
         "",
         "**What these replicates do not do.** They do not raise statistical " "power.",
         "The power calculation is in decision points, and repeating the same "
@@ -446,12 +499,13 @@ def render(agg: dict[str, Any]) -> str:
         "",
         "## Run by run",
         "",
-        "| Run | Temperature | Spend |",
-        "| --- | --- | --- |",
+        "| Run | Temperature | Code | Spend |",
+        "| --- | --- | --- | --- |",
     ]
     for run in runs:
         lines.append(
-            f"| {run['stamp']} | {run['temperature']} | ${run['spend_usd']:.4f} |"
+            f"| {run['stamp']} | {run['temperature']} | "
+            f"`{run.get('code', 'not recorded')}` | ${run['spend_usd']:.4f} |"
         )
     reference = agg.get("reference_run")
     if reference:
@@ -560,11 +614,31 @@ def render_decomposition(dec: dict[str, Any]) -> str:
         Markdown, one sentence per line.
     """
     runs = dec.get("runs", {})
-    lines = [
+    head = [
         "# Where the run-to-run variation comes from",
         "",
         f"{runs.get('regenerated', 0)} runs that regenerated their advice, "
         f"{runs.get('frozen', 0)} that re-checked one frozen set of it.",
+    ]
+    # With no frozen run there is nothing to decompose, and an empty table under
+    # confident prose reads as a measurement that was made and came out blank.
+    # Say instead that the measurement is missing.
+    if not runs.get("frozen", 0) or not dec.get("arms"):
+        return (
+            "\n".join(
+                head
+                + [
+                    "",
+                    "The split between checker noise and adviser noise is NOT "
+                    "measured here, because it needs runs that re-checked one "
+                    "frozen set of advice and there are none.",
+                    "Every spread reported above therefore holds the checker and "
+                    "the adviser together, and neither can be credited with it.",
+                ]
+            )
+            + "\n"
+        )
+    lines = head + [
         "The frozen spread is the checker alone, because every run read the "
         "identical 60 recommendations.",
         "The regenerated spread holds the checker and the adviser together.",
