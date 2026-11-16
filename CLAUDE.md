@@ -1,6 +1,6 @@
 General Guidelines:
 - When writing commit messages, NEVER auto-add your agent name as co-author
-- When writing or substantially editing Markdown files, put each full sentence on its own line.  Preserve normal Markdown structure, but avoid wrapping multiple sentences onto one physical line
+- When writing or substantially editing Markdown that is read as source (docs, READMEs, specs, ADRs, issue and PR text), put each full sentence on its own line so a diff shows one changed sentence at a time.  Preserve normal Markdown structure, but avoid wrapping multiple sentences onto one physical line.  This does not apply to prose that will be read or pasted as it stands: letters, posts, messages, correspondence, scripts, anything written for a person rather than for a diff.  Write those in ordinary paragraphs
 - When making technical decisions, do not give much weight to development costs.  Instead, prefer quality, simplicity, robustness, scalability, and long term maintainability.
 - When doing bug fixes, always start with reproducing the bug in an E2E setting as closely aligned with how an end user might experience it.  This makes sure you find the real problem so your fix will actually solve it.
 - When end-to-end testing a product, be picky about the UI you see and be obsessed with pixel perfection.  If something clearly looks off, even if it is not directly related to what you are doing, try to get it fixed along with the other stuff.
