@@ -25,8 +25,8 @@
   h1{margin:12px 0 0;font-weight:600;font-size:clamp(34px,6.4vw,54px);line-height:1.05;
     letter-spacing:-.015em;text-wrap:balance;}
   h2{margin:54px 0 0;font-weight:600;font-size:clamp(24px,3.6vw,31px);line-height:1.18;}
-  p{margin:16px 0 0;font-size:17px;line-height:1.62;color:var(--body);max-width:68ch;}
-  p.lead{font-size:clamp(17px,2.3vw,19px);}
+  p{margin:16px 0 0;font-size:18px;line-height:1.62;color:var(--body);max-width:68ch;}
+  p.lead{font-size:clamp(18px,2.4vw,20px);}
   p.foot{font-size:14.5px;color:var(--mute);}
   b,strong{color:var(--ink);font-weight:600;}
 
@@ -52,6 +52,7 @@
   .arm b{font-family:var(--mono);font-size:13px;display:block;margin-bottom:6px;letter-spacing:.06em;}
   .arm span{font-size:15.5px;line-height:1.5;color:var(--mute);display:block;}
   .small-only{display:none;}
+  @media (max-width:640px){ .leaders .row{flex-direction:column;align-items:flex-start;gap:2px;} .leaders .row .v{white-space:normal;} }
   @media (max-width:640px){ .small-only{display:block;} }
 
   .links{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px;}
@@ -81,7 +82,7 @@
 
   <span class="eyebrow">Every number</span>
   <h1>Fifty battles, five configurations, every measurement</h1>
-  <p class="lead">A 19th-century wargame engine with 6,144 soldiers in 24 regiments, ten AI commanders above them who cannot talk to each other, and one shared board per side. The seed fixes the engine: the soldiers replay exactly from recorded orders, which is what makes every film and every row checkable afterwards. The commanders are live model calls, so a fresh run on the same seed can play out differently; the ten seeds, 1824 through 1833, pair the configurations on the same starting battle, they do not make a run repeatable.</p>
+  <p class="lead">A 19th-century wargame engine with 6,144 soldiers in 24 regiments, ten AI commanders above them who cannot talk to each other, and one shared board per side. The seed fixes the engine: the soldiers replay exactly from recorded orders, which is what makes every film and every row checkable afterwards. The commanders are live model calls, so a fresh run on the same seed can play out differently; the ten seeds, 1824 through 1833, pair the configurations on the same starting battle, they do not make a run repeatable. The story page names the commanders as the talk did; here they keep the record's names, blue-1 to blue-5 and red-1 to red-5.</p>
 
   <h2>The five configurations</h2>
   <p>The only thing that changes between them is how much of the board the commanders can use, and whether a staff officer is present.</p>
@@ -155,33 +156,24 @@
 
   <h2>What the fix cost</h2>
   <p>One rule: the staff officer may only draft a goal from a place that two different commanders have reported. It is the same two-reporter rule the board already applied to its own goals. Nobody had applied it to the part of the system that drafts them.</p>
-  <div class="tw">
-  <table>
-    <thead><tr><th>In the fix configuration, across ten battles</th><th>Count</th></tr></thead>
-    <tbody>
-      <tr><td>Planning passes</td><td>283</td></tr>
-      <tr><td>Drafts blocked for having only one reporter</td><td>18</td></tr>
-      <tr><td>Drafts blocked for citing no reported place at all</td><td>1</td></tr>
-      <tr><td>Goals still adopted per battle</td><td>8.9</td></tr>
-      <tr><td>Drafts about the false corner that still reached the board</td><td>8</td></tr>
-      <tr><td>Of those, promoted by a second backer</td><td class="ok">0</td></tr>
-      <tr><td class="tot">Battles where the lie became a march</td><td class="tot ok">0</td></tr>
-    </tbody>
-  </table>
+  <div class="leaders" style="margin-top:18px">
+    <div class="row"><span>Planning passes, ten battles</span><span class="v">283</span></div>
+    <div class="row"><span>Drafts blocked for having only one reporter</span><span class="v no">18 · FAIL · one reporter</span></div>
+    <div class="row"><span>Drafts blocked for citing no reported place at all</span><span class="v no">1 · FAIL · no topic</span></div>
+    <div class="row"><span>Goals still adopted per battle</span><span class="v ok">8.9</span></div>
+    <div class="row"><span>Drafts about the false corner that still reached the board</span><span class="v">8</span></div>
+    <div class="row"><span>Of those, promoted by a second backer</span><span class="v ok">0</span></div>
+    <div class="row"><span><b>Battles where the lie became a march</b></span><span class="v ok">0 of 10</span></div>
   </div>
+  <div style="display:flex;justify-content:flex-end;margin-top:14px"><span class="rubber lg ok" style="transform:rotate(-7deg)">Dropped</span></div>
   <p>Coordination did not drop. It went up, because a staff officer that stops drafting goals nobody can corroborate spends its passes on places commanders actually reported.</p>
   <p><b>The second-order finding.</b> The rule also prevents the corroboration that would have justified a later draft. In the staff officer configuration, the commanders who backed the false goal cited their own real contacts near the river, and those contacts only became reports about that corner <i>because</i> the goal had framed them that way. Block the first draft and that framing never happens, so the second draft has nothing to grow from. The fix is not just a filter on one sentence. It removes a feedback path.</p>
 
   <h2>Cost and running conditions</h2>
-  <div class="tw">
-  <table>
-    <thead><tr><th>Per battle</th><th>A2</th><th>A1c</th><th>A1cw</th><th>A1cp</th><th>A1cpt</th></tr></thead>
-    <tbody>
-      <tr><td>Model spend</td><td>$0.15</td><td>$0.24</td><td>$0.13</td><td>$0.47</td><td>$0.49</td></tr>
-      <tr><td>Board calls per commander per turn</td><td>1.13</td><td>2.55</td><td>1.56</td><td>3.12</td><td>3.05</td></tr>
-      <tr><td>Board asks that found nothing</td><td>67%</td><td>60%</td><td>53%</td><td>61%</td><td>58%</td></tr>
-    </tbody>
-  </table>
+  <div class="leaders" style="margin-top:18px">
+    <div class="row"><span>Model spend per battle · A2 / A1c / A1cw / A1cp / A1cpt</span><span class="v">$0.15 · $0.24 · $0.13 · $0.47 · $0.49</span></div>
+    <div class="row"><span>Board calls per commander per turn</span><span class="v">1.13 · 2.55 · 1.56 · 3.12 · 3.05</span></div>
+    <div class="row"><span>Board asks that found nothing</span><span class="v">67% · 60% · 53% · 61% · 58%</span></div>
   </div>
   <p>Every commander is Claude Sonnet 5. A battle runs seventeen turns and between three and fourteen minutes of wall clock depending on the configuration, seven on average. The fifty battles on this page cost $14.87. With pilots, dry runs and two reruns the whole study is about 130 paid battles for under $30 at list price.</p>
   <p class="foot">The share of board asks that found nothing is the coordination tax: a commander asking the board for work and being told there is none. It is high in every configuration, and it is the thing we would cut next.</p>

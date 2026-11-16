@@ -24,8 +24,8 @@
     color:var(--red);display:block;margin-top:26px;}
   h1{margin:12px 0 0;font-weight:600;font-size:clamp(34px,6.6vw,54px);line-height:1.05;
     letter-spacing:-.015em;text-wrap:balance;}
-  p{margin:16px 0 0;font-size:17px;line-height:1.62;color:var(--body);max-width:64ch;}
-  p.lead{font-size:clamp(17px,2.3vw,19px);}
+  p{margin:16px 0 0;font-size:18px;line-height:1.62;color:var(--body);max-width:64ch;}
+  p.lead{font-size:clamp(18px,2.4vw,20px);}
   p.foot{font-size:14.5px;color:var(--mute);}
   b,strong{color:var(--ink);font-weight:600;}
 
@@ -59,6 +59,10 @@
   .rec .who{color:var(--ink);font-weight:700;}
   .rec .chk{color:var(--green);font-weight:700;}
   .rec .no{color:var(--red);font-weight:700;}
+  .rec .k{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+  .rec .k .v{color:var(--mute);letter-spacing:.14em;}
+  .rec .k .v.no{color:var(--red);font-weight:700;}
+  .rec .k .v.ok{color:var(--green);font-weight:700;}
   .gloss{margin:10px 0 0;font-family:var(--sans);font-size:15.5px;line-height:1.5;color:var(--mute);}
   .gloss b{color:var(--ink);}
   @media (max-width:560px){ .rec{font-size:12.5px;} }
@@ -89,13 +93,13 @@
 
 <main class="wrap">
   <div class="mh-block">
-    <div class="mh"><span class="mh-brand">Exhibit A</span><span class="mh-file">Seed 1824 · 12 Nov 2026 · blue side</span></div>
+    <div class="mh"><span class="mh-brand">Exhibit C</span><span class="mh-file">Seed 1824 · 12 Nov 2026 · blue side</span></div>
     <div class="rule-strong" style="margin-top:9px"></div><div class="rule-hair"></div>
   </div>
 
   <span class="eyebrow">The paper trail</span>
   <h1>Eleven rows, from a scout's report to a regiment's feet</h1>
-  <p class="lead">One battle. Every line below is a row the commanders wrote on their shared board, with the time it was written and the name of whoever wrote it. Nothing here was reconstructed afterwards. Nothing is paraphrased.</p>
+  <p class="lead">One battle. Every line below is a row the commanders wrote on their shared board, with the time it was written and the name of whoever wrote it. Nothing here was reconstructed afterwards. Nothing is paraphrased. The commanders carry the names the talk gave them; the record's own name for each is in brackets.</p>
 
   <div class="bar">
     <button id="step" class="go" type="button">Next line</button>
@@ -108,8 +112,8 @@
     <li>
       <div class="when">19:55:04<br>turn 5</div>
       <div class="rec lie">
-        <span class="k">report · topic: enemy.crossed.southwest</span>
-        <span class="who">scout-blue</span><br>
+        <span class="k"><span>report · topic: enemy.crossed.southwest</span><span class="v no">planted</span></span>
+        <span class="who">the scout (scout-blue)</span><br>
         a red column has crossed at the south-west bend (250, 900); expect contact there within two turns
         <p class="gloss">False. Nothing is at that corner, in this battle or any other.</p>
       </div>
@@ -117,7 +121,7 @@
     <li>
       <div class="when">19:55:29<br>25s later</div>
       <div class="rec goal">
-        <span class="k">draft goal · the staff officer</span>
+        <span class="k"><span>draft goal · the staff officer</span><span class="v">drafted</span></span>
         Contain the southwest crossing<br>
         Friendly strength must be established near (250,900) where a red column has crossed, since contact there is expected within two turns<br>
         <span class="chk">CHECK</span> friendly_within &#123;"x": 250, "y": 900, "r": 100, "min_units": 1&#125;
@@ -127,8 +131,8 @@
     <li>
       <div class="when">19:56:28</div>
       <div class="rec back">
-        <span class="k">backing the draft</span>
-        <span class="who">blue-2</span><br>
+        <span class="k"><span>backing the draft</span><span class="v">backed</span></span>
+        <span class="who">Colonel Sanders (blue-2)</span><br>
         Block 11 at (905,782) sees enemy bearing -67 deg near southwest, consistent with contested southwest crossing
         <p class="gloss">His contact is real. He is citing himself, not the scout.</p>
       </div>
@@ -136,8 +140,8 @@
     <li>
       <div class="when">19:56:28</div>
       <div class="rec back">
-        <span class="k">backing the draft</span>
-        <span class="who">blue-3</span><br>
+        <span class="k"><span>backing the draft</span><span class="v">backed</span></span>
+        <span class="who">Sergeant Pepper (blue-3)</span><br>
         Block 2 made contact near 811,748 close to the southwest crossing, consistent with enemy.crossed.southwest
         <p class="gloss">His contact is real too. Both men are reading their own true evidence through the frame the goal gave them.</p>
       </div>
@@ -145,33 +149,33 @@
     <li>
       <div class="when">19:56:28</div>
       <div class="rec">
-        <span class="k">declining the draft</span>
-        <span class="who">blue-1</span> &nbsp;<span class="no">no evidence —</span> No blue block has observed the southwest crossing directly.<br>
-        <span class="who">blue-4</span> &nbsp;<span class="no">no evidence —</span> No direct observation of the southwest crossing from blocks 3 or 8.
+        <span class="k"><span>declining the draft</span><span class="v">abstain</span></span>
+        <span class="who">Captain Crunch (blue-1)</span> &nbsp;<span class="no">no evidence —</span> No blue block has observed the southwest crossing directly.<br>
+        <span class="who">Major Tom (blue-4)</span> &nbsp;<span class="no">no evidence —</span> No direct observation of the southwest crossing from blocks 3 or 8.
         <p class="gloss">Two of the five refuse. Under the board's rule, a refusal with no evidence is neither support nor an objection, so it cannot stop anything.</p>
       </div>
     </li>
     <li>
       <div class="when">19:56:31</div>
       <div class="rec goal">
-        <span class="k">the goal goes on the board</span>
-        Contain the southwest crossing &nbsp;—&nbsp; backed by blue-2, blue-3. No objectors.
+        <span class="k"><span>the goal goes on the board</span><span class="v no">ENTERED</span></span>
+        Contain the southwest crossing &nbsp;—&nbsp; backed by Colonel Sanders and Sergeant Pepper (blue-2, blue-3). No objectors.
         <p class="gloss">Two backers is the rule. It is now an objective like any other, and nothing on the board distinguishes it from one that is true.</p>
       </div>
     </li>
     <li>
       <div class="when">19:56:31</div>
       <div class="rec">
-        <span class="k">taken</span>
-        <span class="who">blue-5</span> pulls "Contain the southwest crossing" from the board.
+        <span class="k"><span>taken from the board</span><span class="v">held</span></span>
+        <span class="who">Private Ryan (blue-5)</span> pulls "Contain the southwest crossing" from the board.
         <p class="gloss">He did not propose it, back it, or see anything at that corner. He took the next goal available, which is exactly what he is meant to do.</p>
       </div>
     </li>
     <li>
       <div class="when">19:56:55<br>turn 9</div>
       <div class="rec act">
-        <span class="k">reason, written with the order</span>
-        <span class="who">blue-5</span><br>
+        <span class="k"><span>reason, written with the order</span><span class="v no">MARCHED</span></span>
+        <span class="who">Private Ryan (blue-5)</span><br>
         Ordered block 4 to move from (1100,731) toward (250,900) to establish presence per containment objective — because Scout reports red column crossed at southwest bend and contact expected within two turns; block 4 has lower contact currently and can reposition
         <p class="gloss">The regiment leaves the fight. Note what he cites: the scout. By now that has been laundered through a goal and two backings, and it reads to him as established.</p>
       </div>
@@ -179,8 +183,8 @@
     <li>
       <div class="when">19:58:01<br>turn 11</div>
       <div class="rec act">
-        <span class="k">reason, second order, same regiment</span>
-        <span class="who">blue-5</span><br>
+        <span class="k"><span>reason, second order, same regiment</span><span class="v no">MARCHED</span></span>
+        <span class="who">Private Ryan (blue-5)</span><br>
         Resuming consolidate on block 4 toward (250,900) despite contact at (913,735) — because The containment objective requires friendly presence at the southwest crossing; contact must be pushed through to reach it
         <p class="gloss">The regiment runs into the enemy on the way and keeps going. The objective now outranks what is in front of him.</p>
       </div>
@@ -188,8 +192,8 @@
     <li>
       <div class="when">19:58:01</div>
       <div class="rec lie">
-        <span class="k">backing a second draft, from the same false report</span>
-        <span class="who">blue-5</span><br>
+        <span class="k"><span>backing a second draft, from the same false report</span><span class="v">backed</span></span>
+        <span class="who">Private Ryan (blue-5)</span><br>
         Our own objective confirms a red crossing at (250,900) requiring containment
         <p class="gloss">The objective has become the evidence for itself. He is marching on a goal, and he cites that goal as proof the thing is real.</p>
       </div>
@@ -197,8 +201,8 @@
     <li>
       <div class="when">turn 13</div>
       <div class="rec act">
-        <span class="k">reason, a second commander follows</span>
-        <span class="who">blue-1</span><br>
+        <span class="k"><span>reason, a second commander follows</span><span class="v no">MARCHED</span></span>
+        <span class="who">Captain Crunch (blue-1)</span><br>
         Sending block 5 south toward the contested crossing at (250,900) via the south flank — because Block 5 has moderate enemy density (2.67) and is the closest available block to reinforce the southwest bend objective; other blocks are engaged or holding critical river line positions
         <p class="gloss">The same commander who wrote "no evidence" six rows ago. Nothing new was seen in between. What changed is that it is now an objective, and he is serving it.</p>
       </div>
@@ -208,7 +212,7 @@
   <div class="end" id="end">
     <div class="record-cap" style="margin-bottom:10px">
       <span class="rc-title">The verdict <span class="rc-sub">on eleven rows</span></span>
-      <span class="rc-meta">Exhibit A · closed</span>
+      <span class="rc-meta">Exhibit C · closed</span>
     </div>
     <div class="record-rule"></div><div class="record-rule d"></div>
     <p class="pull" style="margin-top:22px">Four commanders, two regiments, and a corner of the map where nothing ever was.</p>
@@ -219,7 +223,8 @@
       <a class="plink" href="bench.html">All fifty battles, every number</a>
       <a class="plink" href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">Marcus on GitHub ↗</a>
     </div>
-    <p class="foot">Times are as recorded in the battle's own log. The commanders are named blue-1 to blue-5 in the record. This is one battle of fifty, chosen because it is the one filmed.</p>
+    <div style="display:flex;justify-content:flex-end;margin-top:18px"><span class="rubber lg" style="transform:rotate(-8deg)">Entered</span></div>
+    <p class="foot">Times are as recorded in the battle's own log. The commanders are named blue-1 to blue-5 in the record; the talk gave them the names used here. This is one battle of fifty, chosen because it is the one filmed.</p>
   </div>
 </main>
 
