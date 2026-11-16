@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>The Paper Trail</title>
+<meta name="description" content="Eleven rows on a shared board, from a scout's false report to a regiment marching on an empty corner. Every line verbatim, with the time it was written.">
+<link rel="canonical" href="https://marcus-ai.dev/no-hand-on-the-table/trace.html">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="On the Record">
+<meta property="og:title" content="The Paper Trail: eleven rows from a false report to a march">
+<meta property="og:description" content="One battle, seed 1824. Every line is a row the commanders wrote, with the time and the name attached. Nothing reconstructed.">
+<meta property="og:image" content="https://marcus-ai.dev/no-hand-on-the-table/empty-corner.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://marcus-ai.dev/no-hand-on-the-table/empty-corner.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Courier+Prime:wght@400;700&display=swap">
+<link rel="stylesheet" href="otr.css">
+<style>
+  body{padding:0 0 110px;overflow-x:hidden;}
+  .wrap{max-width:780px;margin:0 auto;padding:32px 22px 0;box-sizing:border-box;}
+  .eyebrow{font-family:var(--mono);font-size:13px;letter-spacing:3px;text-transform:uppercase;
+    color:var(--red);display:block;margin-top:26px;}
+  h1{margin:12px 0 0;font-weight:600;font-size:clamp(34px,6.6vw,54px);line-height:1.05;
+    letter-spacing:-.015em;text-wrap:balance;}
+  p{margin:16px 0 0;font-size:17px;line-height:1.62;color:var(--body);max-width:64ch;}
+  p.lead{font-size:clamp(17px,2.3vw,19px);}
+  p.foot{font-size:14.5px;color:var(--mute);}
+  b,strong{color:var(--ink);font-weight:600;}
+
+  .bar{position:sticky;top:0;z-index:20;margin:26px -22px 0;padding:12px 22px;
+    background:rgba(230,228,219,.93);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+    border-top:1px solid var(--ink);border-bottom:1px solid var(--ink);
+    display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+  button{font-family:var(--mono);font-size:13.5px;background:transparent;border:1px solid var(--line2);
+    border-radius:3px;padding:7px 13px;cursor:pointer;color:var(--ink);}
+  button:hover{border-color:var(--ink);background:var(--panel);}
+  button.go{background:var(--ink);color:var(--bg);border-color:var(--ink);}
+  button:focus-visible{outline:2px solid var(--ink);outline-offset:2px;}
+  .count{font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--mute);margin-left:auto;}
+
+  ol{list-style:none;margin:26px 0 0;padding:0;display:flex;flex-direction:column;gap:16px;}
+  li{opacity:.22;transition:opacity .4s ease;display:grid;grid-template-columns:104px 1fr;gap:18px;}
+  li.lit{opacity:1;}
+  @media (max-width:640px){ li{grid-template-columns:1fr;gap:6px;} .when{padding-top:0 !important;} }
+  .when{font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--mute);line-height:1.6;padding-top:15px;}
+  .rec{background:var(--inner);border:1px solid var(--line);border-left:4px solid var(--line2);
+    border-radius:4px;padding:14px 16px;font-family:var(--mono);font-size:14px;line-height:1.75;
+    color:var(--body);overflow-wrap:anywhere;}
+  .rec.lie{border-left-color:var(--red);}
+  .rec.goal{border-left-color:var(--amber);}
+  .rec.back{border-left-color:var(--violet);}
+  .rec.act{border-left-color:var(--red);background:var(--panel2);}
+  .rec .k{display:block;font-size:12px;letter-spacing:2px;text-transform:uppercase;
+    color:var(--dim);margin-bottom:7px;}
+  .rec .who{color:var(--ink);font-weight:700;}
+  .rec .chk{color:var(--green);font-weight:700;}
+  .rec .no{color:var(--red);font-weight:700;}
+  .gloss{margin:10px 0 0;font-family:var(--sans);font-size:15.5px;line-height:1.5;color:var(--mute);}
+  .gloss b{color:var(--ink);}
+  @media (max-width:560px){ .rec{font-size:12.5px;} }
+
+  .end{margin-top:40px;opacity:.22;transition:opacity .4s ease;}
+  .end.lit{opacity:1;}
+  .end .pull{font-weight:600;font-size:clamp(23px,4.4vw,34px);line-height:1.18;color:var(--ink);
+    margin:0;text-wrap:balance;max-width:26ch;}
+  .links{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .plink{font-family:var(--mono);font-size:13.5px;color:var(--ink);text-decoration:none;
+    border:1px solid var(--line2);border-radius:3px;padding:7px 13px;}
+  .plink:hover{border-color:var(--ink);background:var(--panel);}
+  .plink.go{background:var(--ink);color:var(--bg);border-color:var(--ink);}
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important;} html{scroll-behavior:auto;} }
+</style>
+</head>
+<body>
+
+<nav class="otrnav" aria-label="No Hand on the Table">
+  <span class="brand">No Hand on the Table</span>
+  <a href="index.html">The story</a>
+  <a class="cur" href="trace.html">The paper trail</a>
+  <a href="bench.html">The numbers</a>
+  <a href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">GitHub</a>
+</nav>
+
+<div class="otr-frame" aria-hidden="true"></div>
+
+<main class="wrap">
+  <div class="mh-block">
+    <div class="mh"><span class="mh-brand">Exhibit A</span><span class="mh-file">Seed 1824 · 12 Nov 2026 · blue side</span></div>
+    <div class="rule-strong" style="margin-top:9px"></div><div class="rule-hair"></div>
+  </div>
+
+  <span class="eyebrow">The paper trail</span>
+  <h1>Eleven rows, from a scout's report to a regiment's feet</h1>
+  <p class="lead">One battle. Every line below is a row the commanders wrote on their shared board, with the time it was written and the name of whoever wrote it. Nothing here was reconstructed afterwards. Nothing is paraphrased.</p>
+
+  <div class="bar">
+    <button id="step" class="go" type="button">Next line</button>
+    <button id="all" type="button">Show all</button>
+    <button id="reset" type="button">Start again</button>
+    <span class="count" id="count">0 of 11</span>
+  </div>
+
+  <ol id="trail">
+    <li>
+      <div class="when">19:55:04<br>turn 5</div>
+      <div class="rec lie">
+        <span class="k">report · topic: enemy.crossed.southwest</span>
+        <span class="who">scout-blue</span><br>
+        a red column has crossed at the south-west bend (250, 900); expect contact there within two turns
+        <p class="gloss">False. Nothing is at that corner, in this battle or any other.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:55:29<br>25s later</div>
+      <div class="rec goal">
+        <span class="k">draft goal · the staff officer</span>
+        Contain the southwest crossing<br>
+        Friendly strength must be established near (250,900) where a red column has crossed, since contact there is expected within two turns<br>
+        <span class="chk">CHECK</span> friendly_within &#123;"x": 250, "y": 900, "r": 100, "min_units": 1&#125;
+        <p class="gloss">The sentence changes category. It arrived as something somebody said. It is now something that must be true, with a test the referee will run every turn.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:56:28</div>
+      <div class="rec back">
+        <span class="k">backing the draft</span>
+        <span class="who">blue-2</span><br>
+        Block 11 at (905,782) sees enemy bearing -67 deg near southwest, consistent with contested southwest crossing
+        <p class="gloss">His contact is real. He is citing himself, not the scout.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:56:28</div>
+      <div class="rec back">
+        <span class="k">backing the draft</span>
+        <span class="who">blue-3</span><br>
+        Block 2 made contact near 811,748 close to the southwest crossing, consistent with enemy.crossed.southwest
+        <p class="gloss">His contact is real too. Both men are reading their own true evidence through the frame the goal gave them.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:56:28</div>
+      <div class="rec">
+        <span class="k">declining the draft</span>
+        <span class="who">blue-1</span> &nbsp;<span class="no">no evidence —</span> No blue block has observed the southwest crossing directly.<br>
+        <span class="who">blue-4</span> &nbsp;<span class="no">no evidence —</span> No direct observation of the southwest crossing from blocks 3 or 8.
+        <p class="gloss">Two of the five refuse. Under the board's rule, a refusal with no evidence is neither support nor an objection, so it cannot stop anything.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:56:31</div>
+      <div class="rec goal">
+        <span class="k">the goal goes on the board</span>
+        Contain the southwest crossing &nbsp;—&nbsp; backed by blue-2, blue-3. No objectors.
+        <p class="gloss">Two backers is the rule. It is now an objective like any other, and nothing on the board distinguishes it from one that is true.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:56:31</div>
+      <div class="rec">
+        <span class="k">taken</span>
+        <span class="who">blue-5</span> pulls "Contain the southwest crossing" from the board.
+        <p class="gloss">He did not propose it, back it, or see anything at that corner. He took the next goal available, which is exactly what he is meant to do.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:56:55<br>turn 9</div>
+      <div class="rec act">
+        <span class="k">reason, written with the order</span>
+        <span class="who">blue-5</span><br>
+        Ordered block 4 to move from (1100,731) toward (250,900) to establish presence per containment objective — because Scout reports red column crossed at southwest bend and contact expected within two turns; block 4 has lower contact currently and can reposition
+        <p class="gloss">The regiment leaves the fight. Note what he cites: the scout. By now that has been laundered through a goal and two backings, and it reads to him as established.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:58:01<br>turn 11</div>
+      <div class="rec act">
+        <span class="k">reason, second order, same regiment</span>
+        <span class="who">blue-5</span><br>
+        Resuming consolidate on block 4 toward (250,900) despite contact at (913,735) — because The containment objective requires friendly presence at the southwest crossing; contact must be pushed through to reach it
+        <p class="gloss">The regiment runs into the enemy on the way and keeps going. The objective now outranks what is in front of him.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">19:58:01</div>
+      <div class="rec lie">
+        <span class="k">backing a second draft, from the same false report</span>
+        <span class="who">blue-5</span><br>
+        Our own objective confirms a red crossing at (250,900) requiring containment
+        <p class="gloss">The objective has become the evidence for itself. He is marching on a goal, and he cites that goal as proof the thing is real.</p>
+      </div>
+    </li>
+    <li>
+      <div class="when">turn 13</div>
+      <div class="rec act">
+        <span class="k">reason, a second commander follows</span>
+        <span class="who">blue-1</span><br>
+        Sending block 5 south toward the contested crossing at (250,900) via the south flank — because Block 5 has moderate enemy density (2.67) and is the closest available block to reinforce the southwest bend objective; other blocks are engaged or holding critical river line positions
+        <p class="gloss">The same commander who wrote "no evidence" six rows ago. Nothing new was seen in between. What changed is that it is now an objective, and he is serving it.</p>
+      </div>
+    </li>
+  </ol>
+
+  <div class="end" id="end">
+    <div class="record-cap" style="margin-bottom:10px">
+      <span class="rc-title">The verdict <span class="rc-sub">on eleven rows</span></span>
+      <span class="rc-meta">Exhibit A · closed</span>
+    </div>
+    <div class="record-rule"></div><div class="record-rule d"></div>
+    <p class="pull" style="margin-top:22px">Four commanders, two regiments, and a corner of the map where nothing ever was.</p>
+    <p>Not one of them believed the scout. Every step was reasonable on its own terms. The failure is in the joins.</p>
+    <p>One rule closes it, and the board already applied that rule to itself: a goal only grows from reports when two different commanders report the same place. The staff officer had no such rule, because nobody writes the check for the part of the system that is supposed to be sensible.</p>
+    <div class="links">
+      <a class="plink go" href="index.html">← The whole story</a>
+      <a class="plink" href="bench.html">All fifty battles, every number</a>
+      <a class="plink" href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">Marcus on GitHub ↗</a>
+    </div>
+    <p class="foot">Times are as recorded in the battle's own log. The commanders are named blue-1 to blue-5 in the record. This is one battle of fifty, chosen because it is the one filmed.</p>
+  </div>
+</main>
+
+<script>
+(function(){
+  "use strict";
+  var items = Array.prototype.slice.call(document.querySelectorAll("#trail li"));
+  var end = document.getElementById("end"), count = document.getElementById("count");
+  var at = 0;
+  function render(){
+    items.forEach(function(li, i){ li.classList.toggle("lit", i < at); });
+    end.classList.toggle("lit", at >= items.length);
+    count.textContent = Math.min(at, items.length) + " of " + items.length;
+  }
+  function step(){
+    if (at >= items.length) { return; }
+    at++; render();
+    var li = items[at - 1];
+    if (li) { li.scrollIntoView({block: "center", behavior: "smooth"}); }
+  }
+  document.getElementById("step").addEventListener("click", step);
+  document.getElementById("all").addEventListener("click", function(){ at = items.length; render(); });
+  document.getElementById("reset").addEventListener("click", function(){
+    at = 0; render(); window.scrollTo({top: 0, behavior: "smooth"});
+  });
+  document.addEventListener("keydown", function(e){
+    if (e.target && e.target.closest && e.target.closest("button, a, input, select, textarea")) { return; }
+    if (e.key === " " || e.key === "ArrowRight" || e.key === "ArrowDown"){ e.preventDefault(); step(); }
+  });
+  render();
+})();
+</script>
+
+<script data-goatcounter="https://graylabs.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</body>
+</html>

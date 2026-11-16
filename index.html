@@ -16,10 +16,11 @@
     letter-spacing:-.015em;margin:12px 0 0;text-wrap:balance;}
   .lead{font-size:clamp(18px,2.3vw,21px);line-height:1.56;color:var(--body);max-width:64ch;margin:20px 0 0;}
   .lead b{color:var(--ink);font-weight:600;}
-  .proofs{display:grid;grid-template-columns:1fr 1px 1fr;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink);margin-top:34px;}
+  .proofs{display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink);margin-top:34px;}
   .proofs .divider{background:var(--ink);}
-  .proof{padding:24px 28px;}
+  .proof{padding:24px 24px;}
   .proof:first-child{padding-left:0;}
+  .proof:last-child{padding-right:0;}
   .proof .n{font-family:var(--mono);font-size:12.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);}
   .proof h2{font-family:var(--sans);font-weight:600;font-size:23px;line-height:1.2;margin:8px 0 0;}
   .proof p{font-size:16px;line-height:1.55;color:var(--body);margin:10px 0 0;}
@@ -36,7 +37,7 @@
   .cta .put{font-family:var(--mono);font-size:14.5px;color:var(--ink);}
   .foot{margin-top:30px;font-size:14px;line-height:1.7;color:var(--mute);max-width:70ch;}
   .foot a{color:var(--red);}
-  @media (max-width:620px){
+  @media (max-width:900px){
     .proofs{grid-template-columns:1fr;} .proofs .divider{display:none;}
     .proof{padding:20px 0;border-top:1px solid var(--line);} .proof:first-child{border-top:none;}
   }
@@ -47,6 +48,7 @@
 <nav class="otrnav" aria-label="Marcus">
   <span class="brand">Marcus</span>
   <a href="on-the-record/">On the Record</a>
+  <a href="no-hand-on-the-table/">No Hand on the Table</a>
   <a href="https://docs.marcus-ai.dev" target="_blank" rel="noopener">Docs</a>
   <a href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">GitHub</a>
   <span class="spacer"><span class="put">Put it on the record →</span>
@@ -93,6 +95,20 @@
       <div class="links">
         <a class="plink go" href="on-the-record/">Read the receipts →</a>
         <a class="plink" href="on-the-record/not-a-fact-checker.html">Not a fact checker →</a>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="proof">
+      <div class="n">The second case on the record</div>
+      <h2>Watch a lie move through a group of agents</h2>
+      <p>Ten AI commanders over a 6,144-soldier wargame, coordinating through one shared board, never messaging each
+      other. In every battle a scout posted a false report. <b>Not one commander believed it.</b> Once a staff
+      officer turned it into an objective, regiments marched on it anyway, and the whole path is eleven rows on
+      the board, with times and names.</p>
+      <div class="stat"><span class="b">0 in 30</span> &nbsp;→&nbsp; <span class="a">4 in 10</span></div>
+      <div class="links">
+        <a class="plink go" href="no-hand-on-the-table/">Read the file →</a>
+        <a class="plink" href="no-hand-on-the-table/trace.html">The paper trail →</a>
       </div>
     </div>
   </div>
