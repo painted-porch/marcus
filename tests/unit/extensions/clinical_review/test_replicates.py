@@ -462,14 +462,16 @@ class TestCodeVersion:
     def test_reads_the_short_sha_from_the_checkout_line(self) -> None:
         """A clean checkout reports its sha and nothing else."""
         settings = {
-            "checkout": "/checkouts/wt @ 53c0851e6db35245b4fe244e010255d87a6d3845 (0 dirty)"
+            "checkout": "/checkouts/wt @ "
+            "53c0851e6db35245b4fe244e010255d87a6d3845 (0 dirty)"
         }
         assert replicates.code_version(settings) == "53c0851e"
 
     def test_marks_a_dirty_checkout(self) -> None:
         """Uncommitted files make a run less reproducible, so they are shown."""
         settings = {
-            "checkout": "/checkouts/wt @ 5003bd7722f235c2f4b829079d9725064514caad (2 dirty)"
+            "checkout": "/checkouts/wt @ "
+            "5003bd7722f235c2f4b829079d9725064514caad (2 dirty)"
         }
         assert replicates.code_version(settings) == "5003bd77+2dirty"
 

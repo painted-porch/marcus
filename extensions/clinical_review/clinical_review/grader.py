@@ -153,6 +153,37 @@ def permutation_p(
     return hits / iterations
 
 
+def mcnemar_exact(b: int, c: int) -> float:
+    """
+    Two-sided exact McNemar test on the discordant pairs of a paired design.
+
+    Every arm checks the same recommendations, so two arms' verdicts are
+    paired, and a test for independent groups (Fisher's) ignores the pairing.
+    Only the discordant pairs carry information: ``b`` recommendations flagged
+    by the first arm alone and ``c`` by the second alone. Under no difference
+    each discordant pair is a fair coin.
+
+    Parameters
+    ----------
+    b : int
+        Pairs where only the first arm flagged.
+    c : int
+        Pairs where only the second arm flagged.
+
+    Returns
+    -------
+    float
+        The two-sided p-value, capped at 1; 1.0 when there are no discordant
+        pairs.
+    """
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = float(sum(math.comb(n, i) for i in range(k + 1))) / float(2**n)
+    return min(1.0, 2.0 * tail)
+
+
 def load_chains(path: Path) -> dict[str, dict[str, str]]:
     """
     Read ``chains.json``: chain id to ``{case_id, mode, adviser}``.

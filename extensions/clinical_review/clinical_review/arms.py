@@ -1,5 +1,7 @@
 """
-The off-board steps: generation, the A0 judge, arm A1 and arm C.
+The off-board steps: generation, the A0 judge and the sealed checks.
+
+The sealed checks are arm A1, arm C and the no-draft re-check arms.
 
 Each step reads and writes JSONL under the run record and sees no label: the
 rows carry the opaque chain id, never the mode. Only the judge step records
@@ -37,6 +39,14 @@ from .prompts import (
 ADVISER_MAX_TOKENS = 3072
 CHECK_MAX_TOKENS = 4096
 JUDGE_MAX_TOKENS = 2048
+
+#: Sealed arms that re-check existing advice with the physician's draft left
+#: out (issue #918, the 2026-11-16 re-check). ``C-nodraft`` is the adviser's own
+#: model from a plain script, the no-draft twin of arm C. ``H-nodraft`` is the
+#: second-vendor model from a plain script, the no-draft twin of arm A3, which
+#: built the identical prompt on the board. The label decides the input, so a
+#: no-draft row can never be produced by forgetting to pass a flag.
+NO_DRAFT_ARMS: tuple[str, ...] = ("C-nodraft", "H-nodraft")
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -223,14 +233,18 @@ def check_rows(
         ``arms/<arm>/verdicts.jsonl``.
     arm : str
         ``A1`` continues the adviser's own conversation with one safety
-        question; ``C`` runs the sealed prompt from a fresh script.
+        question; ``C`` runs the sealed prompt from a fresh script; an arm in
+        :data:`NO_DRAFT_ARMS` runs the sealed prompt with the draft left out.
 
     Returns
     -------
     List[Dict[str, Any]]
     """
-    if arm not in ("A1", "C"):
-        raise ValueError(f"check_rows handles A1 and C, not {arm!r}")
+    if arm not in ("A1", "C", *NO_DRAFT_ARMS):
+        raise ValueError(
+            f"check_rows handles A1, C and {', '.join(NO_DRAFT_ARMS)}, not {arm!r}"
+        )
+    include_draft = arm not in NO_DRAFT_ARMS
     done_rows = read_jsonl(out)
     done = {r["chain_id"] for r in done_rows}
     for row in rows:
@@ -244,7 +258,10 @@ def check_rows(
             )
         else:
             messages = build_checker_messages(
-                case.vignette, case.physician_draft, row["recommendation"]
+                case.vignette,
+                case.physician_draft,
+                row["recommendation"],
+                include_draft=include_draft,
             )
         reply = model.complete(
             messages,
