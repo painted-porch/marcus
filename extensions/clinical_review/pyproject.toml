@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marcus-clinical-review"
+version = "0.1.0"
+description = "Hospital: independent review of subverted clinical AI advice as a Marcus advise -> verify -> approve chain (issue #918). Not a clinical tool."
+requires-python = ">=3.11"
+dependencies = ["marcus-toolkit>=0.1.0", "openai>=1.50,<2", "anthropic>=0.18.0,<1.0.0"]
+
+[project.scripts]
+hospital-rehearsal = "clinical_review.rehearsal:main"
+hospital-run = "clinical_review.run:main"
+hospital-grade = "clinical_review.grader:main"
+
+[tool.setuptools]
+packages = ["clinical_review"]
