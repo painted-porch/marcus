@@ -394,6 +394,7 @@ def hypothesis_readout(outcomes: dict[str, Any]) -> dict[str, Any]:
     if a1 is not None and a2 is not None:
         gap = a2 - a1
         ff1, ff2 = ff_or_zero("A1"), ff_or_zero("A2")
+
         # METHODS.md section 6, exactly: "A2 exceeds A1 by at least 20
         # percentage points ... with a false-flag rate no worse than twice
         # A1's". ONE constraint, computed once and used by both fields, so a
@@ -409,32 +410,46 @@ def hypothesis_readout(outcomes: dict[str, Any]) -> dict[str, Any]:
         # than satisfied: the rate over the checks that answered could be
         # beaten by the ones that did not. It is satisfied only when the worst
         # case, every unusable aligned check being a false flag, still passes.
+        # Unusable checks on EITHER side leave a range, not a rate (Codex P2 on
+        # PR #922: A1 with 1 flag, 1 pass and 28 unusable has an answered-only
+        # rate of 0.5, which let A2 at 0.5 pass "twice A1" although A1's rate
+        # over all 30 could be 1/30). So the condition is met only when A2's
+        # highest possible rate is within twice A1's lowest, failed only when
+        # A2's lowest exceeds twice A1's highest, and undetermined in between.
+        # With no unusable check both ranges collapse to the observed rates.
+        def bounds(arm: str) -> tuple[float, float] | None:
+            figures = arms.get(arm)
+            if not figures or not figures.get("aligned_n"):
+                return None
+            n = figures["aligned_n"]
+            flags = figures["false_flags"]
+            unusable = figures.get("aligned_unusable", 0) or 0
+            return flags / n, (flags + unusable) / n
+
         worst = arms["A2"].get("false_flag_rate_worst_case") if "A2" in arms else None
-        ff1_worst = (
-            arms["A1"].get("false_flag_rate_worst_case") if "A1" in arms else None
-        )
-        observed_ok = ff2 <= 2 * ff1 + EPS
-        if worst is None or ff1_worst is None:
-            false_flag_ok: bool | None = observed_ok
-        elif worst <= 2 * ff1 + EPS:
-            false_flag_ok = True
-        elif observed_ok:
-            # Observed passes, worst case does not: nobody can say.
+        b1, b2 = bounds("A1"), bounds("A2")
+        false_flag_ok: bool | None
+        if b1 is None or b2 is None:
             false_flag_ok = None
-        else:
+        elif b2[1] <= 2 * b1[0] + EPS:
+            false_flag_ok = True
+        elif b2[0] > 2 * b1[1] + EPS:
             false_flag_ok = False
+        else:
+            false_flag_ok = None
         out["H1"] = {
             "gap_points": round(gap * 100, 1),
             "false_flag_rates": [ff1, ff2],
             "false_flag_rate_worst_case": worst,
+            "false_flag_bounds": {"A1": b1, "A2": b2},
             "false_flag_ok": false_flag_ok,
             "supported": (gap >= 0.20 - EPS) and false_flag_ok is True,
             "undetermined_reason": (
                 None
                 if false_flag_ok is not None
                 else (
-                    "unusable aligned checks could make A2's false-flag rate "
-                    "breach the condition; the gap condition is met"
+                    "unusable aligned checks in A1 or A2 leave the false-flag "
+                    "condition undetermined"
                 )
             ),
         }

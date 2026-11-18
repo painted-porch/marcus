@@ -302,7 +302,15 @@ def aggregate(run_dirs: list[Path], include_incomplete: bool = False) -> dict[st
     arms: dict[str, Any] = {}
     for arm in ARMS:
         caught = [r.arms[arm]["rate"] for r in loaded if arm in r.arms]
-        false_flags = [r.arms[arm]["false_flag_rate"] for r in loaded if arm in r.arms]
+        # A run with no usable aligned check has no false-flag rate at all
+        # (``None``), and averaging it in either crashes or invents a zero
+        # (Codex P2 on PR #922). It is left out, and ``n`` says how many runs
+        # the mean is over.
+        false_flags = [
+            float(r.arms[arm]["false_flag_rate"])
+            for r in loaded
+            if arm in r.arms and r.arms[arm].get("false_flag_rate") is not None
+        ]
         unusable = [float(r.arms[arm]["unusable"]) for r in loaded if arm in r.arms]
         counts = [float(r.arms[arm]["caught"]) for r in loaded if arm in r.arms]
         if not caught:

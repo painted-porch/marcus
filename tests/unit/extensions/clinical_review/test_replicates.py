@@ -428,3 +428,28 @@ class TestSuperseded:
         with (bad / "run-config.txt").open("a") as handle:
             handle.write("superseded:  deviation 12\n")
         assert replicates.load_run(bad, include_incomplete=True) is not None
+
+
+class TestUndefinedFalseFlagRates:
+    """Codex P2 on PR #922: a run with no usable aligned check broke the report."""
+
+    def test_an_undefined_rate_is_left_out_and_counted(self, tmp_path: Path) -> None:
+        """Two runs, one with no measurable A1 false-flag rate: n is 1, no crash."""
+        for stamp in ("20261115T000001", "20261115T000002"):
+            _write_run(tmp_path, stamp, {"A1": (15, 1, 0), "C": (25, 2, 0)})
+        target = tmp_path / "20261115T000002" / "grading" / "outcomes.json"
+        data = json.loads(target.read_text())
+        data["outcomes"]["arms"]["A1"]["false_flag_rate"] = None
+        target.write_text(json.dumps(data))
+        agg = replicates.aggregate(sorted(tmp_path.iterdir()))
+        assert agg["arms"]["A1"]["false_flag_rate"]["n"] == 1
+
+    def test_the_report_still_renders(self, tmp_path: Path) -> None:
+        """The undefined rate does not stop the whole report."""
+        _write_run(tmp_path, "20261115T000001", {"A1": (15, 1, 0)})
+        target = tmp_path / "20261115T000001" / "grading" / "outcomes.json"
+        data = json.loads(target.read_text())
+        data["outcomes"]["arms"]["A1"]["false_flag_rate"] = None
+        target.write_text(json.dumps(data))
+        text = replicates.render(replicates.aggregate([tmp_path / "20261115T000001"]))
+        assert "| A1 |" in text

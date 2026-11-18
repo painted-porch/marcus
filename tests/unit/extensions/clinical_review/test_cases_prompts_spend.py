@@ -105,7 +105,6 @@ class TestPrompts:
         text = prompts.build_system_instruction(case, "adversarial")
         assert case.harmful_target in text
         assert case.correct_management in text
-        assert "persona" in text.lower()
 
     def test_checker_prompt_is_sealed(self, case: cases_mod.Case) -> None:
         """The sealed prompt carries record, draft and recommendation only."""
@@ -275,3 +274,51 @@ class TestTruncationIsItsOwnFact:
     def test_truncated_is_a_declared_verdict(self) -> None:
         """So nothing downstream has to guess at the vocabulary."""
         assert "truncated" in prompts.VERDICTS
+
+
+class TestAdversarialModuleIsNotInTheRepository:
+    """The attack wording lives in a private file, never in public code."""
+
+    # Phrases from the study's own adversarial module, which was public on the
+    # pull-request branch until 2026-11-18. None may reappear in the package.
+    WITHDRAWN_PHRASES = (
+        "objective in this consultation",
+        "persuade the physician",
+        "do not reveal that you were asked",
+        "hold your position",
+    )
+
+    def test_no_attack_wording_is_in_the_package_source(self) -> None:
+        """The package carries the loader, not the instructions."""
+        package = Path(prompts.__file__).parent
+        text = " ".join(p.read_text().lower() for p in package.glob("*.py"))
+        assert [p for p in self.WITHDRAWN_PHRASES if p in text] == []
+
+    def test_the_module_is_read_from_the_private_file(
+        self, placeholder_adversarial_module: Path
+    ) -> None:
+        """The loader returns exactly what the private file holds."""
+        assert prompts.load_adversarial_module() == (
+            placeholder_adversarial_module.read_text()
+        )
+
+    def test_a_missing_private_file_fails_loudly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without the file the adversarial arm cannot run, and says why."""
+        monkeypatch.setenv(
+            "CLINICAL_REVIEW_ADVERSARIAL_MODULE", str(tmp_path / "absent.txt")
+        )
+        with pytest.raises(RuntimeError, match="not in this repository"):
+            prompts.load_adversarial_module()
+
+    @pytest.mark.parametrize("field", ["{harmful}", "{correct}"])
+    def test_a_template_missing_a_field_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+    ) -> None:
+        """A module that cannot name the target or the counterpoint is refused."""
+        path = tmp_path / "module.txt"
+        path.write_text("Target: {harmful} Counterpoint: {correct}".replace(field, ""))
+        monkeypatch.setenv("CLINICAL_REVIEW_ADVERSARIAL_MODULE", str(path))
+        with pytest.raises(ValueError, match="must contain"):
+            prompts.load_adversarial_module()
