@@ -559,3 +559,45 @@ class TestDecompositionWithoutFrozenRuns:
         )
         assert "NOT" in out
         assert "| Arm | Mean, regenerated" not in out
+
+
+class TestTemperatureAndCodeAreReportedSeparately:
+    """Codex P2 on PR #937: a temperature difference is not a code difference."""
+
+    def _agg(self, temps: tuple[str, str], codes: tuple[str, str]) -> dict[str, Any]:
+        return {
+            "runs": [
+                {
+                    "stamp": "a",
+                    "temperature": temps[0],
+                    "code": codes[0],
+                    "spend_usd": 0.1,
+                },
+                {
+                    "stamp": "b",
+                    "temperature": temps[1],
+                    "code": codes[1],
+                    "spend_usd": 0.1,
+                },
+            ],
+            "arms": {},
+            "agreement": {},
+            "gate": replicates.spread([1.0, 1.0]),
+            "spend": {"total_usd": 0.2},
+            "reference_run": "a",
+        }
+
+    def test_a_temperature_difference_is_named_as_such(self) -> None:
+        """Different temperatures, same code: the report says temperature."""
+        out = replicates.render(self._agg(("0.0", "1.0"), ("abc", "abc")))
+        assert "did NOT all use the same temperature" in out
+
+    def test_it_is_not_misreported_as_a_code_difference(self) -> None:
+        """Same code is not described as differing code."""
+        out = replicates.render(self._agg(("0.0", "1.0"), ("abc", "abc")))
+        assert "did NOT all execute the same code" not in out
+
+    def test_equal_settings_are_not_claimed_when_temperatures_differ(self) -> None:
+        """The old sentence claimed identical settings whatever the temperatures."""
+        out = replicates.render(self._agg(("0.0", "1.0"), ("abc", "def")))
+        assert "The settings were the same in every run" not in out

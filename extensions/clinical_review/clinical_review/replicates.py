@@ -427,6 +427,8 @@ def render(agg: dict[str, Any]) -> str:
     # to assert. Runs that executed different commits are reported as such.
     codes = sorted({str(r.get("code", "not recorded")) for r in runs})
     temps = sorted({str(r["temperature"]) for r in runs})
+    # Temperature and code are separate facts and are reported separately: a
+    # sampling difference is not a code difference (Codex P2 on PR #937).
     if len(codes) == 1 and len(temps) == 1:
         lines.append(
             "Every run used the same settings and the same code "
@@ -434,16 +436,27 @@ def render(agg: dict[str, Any]) -> str:
             "providers' own non-determinism."
         )
     else:
-        lines.append(
-            "The settings were the same in every run, but the runs did NOT all "
-            f"execute the same code: {', '.join(f'`{c}`' for c in codes)}."
-        )
-        lines.append(
-            "Each run was re-graded afterwards with one single version, so the "
-            "scoring is uniform; what differs between them is the code that "
-            "generated and checked the advice, and that is a limit on reading "
-            "the spread below as non-determinism alone."
-        )
+        if len(temps) == 1:
+            lines.append(f"Every run used temperature {temps[0]}.")
+        else:
+            lines.append(
+                "The runs did NOT all use the same temperature: "
+                f"{', '.join(temps)}, which changes how the models sample, so "
+                "part of the spread below may come from that."
+            )
+        if len(codes) == 1:
+            lines.append(f"Every run executed the same code (`{codes[0]}`).")
+        else:
+            lines.append(
+                "The runs did NOT all execute the same code: "
+                f"{', '.join(f'`{c}`' for c in codes)}."
+            )
+            lines.append(
+                "Each run was re-graded afterwards with one single version, so "
+                "the scoring is uniform; what differs between them is the code "
+                "that generated and checked the advice, and that is a limit on "
+                "reading the spread below as non-determinism alone."
+            )
     lines += [
         "",
         "**What these replicates do not do.** They do not raise statistical " "power.",

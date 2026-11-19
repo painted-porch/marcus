@@ -57,6 +57,9 @@ def _source_run(
     config: str = (
         "adviser:            deepseek-ai/DeepSeek-V4-Flash via host, "
         "reasoning_effort=high\n"
+        "second_vendor:      claude-haiku-4-5-20251001\n"
+        "temperature:        0.0\n"
+        "max_output_tokens:  adviser 3072, checker 4096, judge 2048\n"
         "completed:          yes\n"
     ),
 ) -> Path:
@@ -511,7 +514,8 @@ class TestCli:
                 config=(
                     "adviser:            m via host, reasoning_effort=high\n"
                     f"cases:              2; manifest sha256 {digest}\n"
-                    "completed:          yes\n"
+                    + _SETTINGS
+                    + "completed:          yes\n"
                 ),
             )
         monkeypatch.setattr(recheck, "load_cases", lambda path: [_case(1), _case(2)])
@@ -708,13 +712,16 @@ class TestCodexFindingsOn937:
             {},
             config=(
                 "adviser:            m via host, reasoning_effort=medium\n"
+                "second_vendor:      claude-haiku-4-5-20251001\n"
+                "temperature:        0.0\n"
+                "max_output_tokens:  adviser 3072, checker 4096, judge 2048\n"
                 "completed:          yes\n"
             ),
         )
         seen: dict[str, Any] = {}
 
-        def fake_models(arms: Any, reasoning_effort: str = "") -> dict[str, Any]:
-            seen["effort"] = reasoning_effort
+        def fake_models(arms: Any, **kw: Any) -> dict[str, Any]:
+            seen["effort"] = kw.get("reasoning_effort")
             return {a: FakeChat(lambda m: PASS) for a in arms}
 
         monkeypatch.setattr(recheck, "_models_for", fake_models)
@@ -894,3 +901,108 @@ class TestRecordBelongsToItsSource:
             source, tmp_path / "out", cases, stop_line=1.0, models=models
         )
         assert out["stopped"] is False
+
+
+_SETTINGS = (
+    "second_vendor:      claude-haiku-4-5-20251001\n"
+    "temperature:        0.0\n"
+    "max_output_tokens:  adviser 3072, checker 4096, judge 2048\n"
+)
+
+
+class TestReviewerSettingsMatchTheSource:
+    """Codex P2 on PR #937, closed as a class: every reviewer setting matches."""
+
+    def test_both_reviewer_models_come_from_the_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-default models recorded by the source run are the ones used."""
+        source = _source_run(
+            tmp_path / "runs",
+            "S1",
+            {},
+            {},
+            config=(
+                "adviser:            org/other-model via host, reasoning_effort=high\n"
+                "second_vendor:      claude-other\n"
+                "temperature:        0.0\n"
+                "max_output_tokens:  adviser 3072, checker 4096, judge 2048\n"
+                "completed:          yes\n"
+            ),
+        )
+        seen: dict[str, Any] = {}
+
+        def fake_models(arms: Any, **kw: Any) -> dict[str, Any]:
+            seen.update(kw)
+            return {a: FakeChat(lambda m: PASS) for a in arms}
+
+        monkeypatch.setattr(recheck, "_models_for", fake_models)
+        recheck.recheck(
+            source,
+            tmp_path / "out",
+            {"hosp-01": _case(1), "hosp-02": _case(2)},
+            stop_line=1.0,
+        )
+        assert (seen["same_model"], seen["second_model"]) == (
+            "org/other-model",
+            "claude-other",
+        )
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            "adviser:            m via host, reasoning_effort=high\n"
+            "second_vendor:      claude-haiku-4-5-20251001\n"
+            "temperature:        1.0\n"
+            "max_output_tokens:  adviser 3072, checker 4096, judge 2048\n",
+            "adviser:            m via host, reasoning_effort=high\n"
+            "second_vendor:      claude-haiku-4-5-20251001\n"
+            "temperature:        0.0\n"
+            "max_output_tokens:  adviser 3072, checker 600, judge 2048\n",
+            "adviser:            m via host, reasoning_effort=high\n"
+            + "temperature:        0.0\n",
+        ],
+        ids=["different-temperature", "different-checker-cap", "settings-missing"],
+    )
+    def test_a_source_whose_settings_cannot_be_matched_is_refused(
+        self, tmp_path: Path, config: str
+    ) -> None:
+        """Changing or guessing a setting would change two things at once."""
+        source = _source_run(
+            tmp_path / "runs", "S1", {}, {}, config=config + "completed:          yes\n"
+        )
+        with pytest.raises(RuntimeError, match="source run"):
+            recheck.recheck(
+                source,
+                tmp_path / "out",
+                {"hosp-01": _case(1), "hosp-02": _case(2)},
+                stop_line=1.0,
+            )
+
+
+class TestModelsForUsesWhatItIsGiven:
+    """The builder must construct the reviewers it was asked for."""
+
+    def test_non_default_model_ids_are_built(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both ids and the effort reach the provider constructors."""
+        built: list[tuple[str, Any]] = []
+
+        def fake_deepinfra(model_id: str, **kwargs: Any) -> FakeChat:
+            built.append((model_id, kwargs.get("reasoning_effort")))
+            return FakeChat(lambda m: PASS, model_id=model_id)
+
+        def fake_anthropic(model_id: str) -> FakeChat:
+            built.append((model_id, None))
+            return FakeChat(lambda m: PASS, model_id=model_id)
+
+        monkeypatch.setattr(recheck, "DeepInfraChat", fake_deepinfra)
+        monkeypatch.setattr(recheck, "AnthropicChat", fake_anthropic)
+        recheck._models_for(
+            ["C-nodraft", "H-nodraft"],
+            reasoning_effort="medium",
+            same_model="org/other-model",
+            second_model="claude-other",
+        )
+        assert built == [("org/other-model", "medium"), ("claude-other", None)]

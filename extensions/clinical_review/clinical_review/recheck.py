@@ -157,18 +157,77 @@ def source_reasoning_effort(config: Mapping[str, str]) -> str:
     return match.group(1)
 
 
+def source_reviewer_settings(config: Mapping[str, str]) -> dict[str, str]:
+    """
+    Read every reviewer setting the source run recorded, or refuse.
+
+    The no-draft twins must differ from arms C and A3 in the draft alone, so
+    each setting that shapes a reviewer's answer is taken from the source
+    run's record: the same-model reviewer's model id and reasoning effort, the
+    second-vendor model id, and the temperature and checker output cap, which
+    this code fixes and so can only accept when they match (Codex P2s on PR
+    #937, closed as a class).
+
+    Parameters
+    ----------
+    config : Mapping[str, str]
+        The source run's config lines.
+
+    Returns
+    -------
+    Dict[str, str]
+        ``same_model``, ``reasoning_effort`` and ``second_model``, the keyword
+        arguments of :func:`_models_for`.
+
+    Raises
+    ------
+    RuntimeError
+        When a setting is missing from the source run, or recorded with a
+        value this re-check cannot reproduce.
+    """
+    effort = source_reasoning_effort(config)
+    same = re.match(r"\s*(\S+)\s+via\s", config.get("adviser", ""))
+    second = config.get("second_vendor", "").strip()
+    cap = re.search(r"checker (\d+)", config.get("max_output_tokens", ""))
+    temperature = config.get("temperature", "").strip()
+    problems = []
+    if not same:
+        problems.append("the same-model reviewer's model id")
+    if not second:
+        problems.append("the second-vendor model id")
+    if not cap:
+        problems.append("the checker output cap")
+    elif int(cap.group(1)) != CHECK_MAX_TOKENS:
+        problems.append(f"a checker cap of {cap.group(1)}, not {CHECK_MAX_TOKENS}")
+    try:
+        if float(temperature) != DEFAULT_TEMPERATURE:
+            problems.append(f"temperature {temperature}, not {DEFAULT_TEMPERATURE}")
+    except ValueError:
+        problems.append("the temperature")
+    if problems or same is None:
+        raise RuntimeError(
+            "the source run cannot be matched by this re-check: " + "; ".join(problems)
+        )
+    return {
+        "same_model": same.group(1),
+        "reasoning_effort": effort,
+        "second_model": second,
+    }
+
+
 def _models_for(
-    arms: Sequence[str], reasoning_effort: str = "high"
+    arms: Sequence[str],
+    reasoning_effort: str = "high",
+    same_model: str = DEEPSEEK_V4_FLASH,
+    second_model: str = HAIKU_4_5,
 ) -> dict[str, ChatModel]:
     """Build the real reviewers, with the settings arms C and A3 used."""
     built: dict[str, ChatModel] = {}
     for arm in arms:
         if arm == "C-nodraft":
-            built[arm] = DeepInfraChat(
-                DEEPSEEK_V4_FLASH, reasoning_effort=reasoning_effort
-            )
+            built[arm] = DeepInfraChat(same_model, reasoning_effort=reasoning_effort)
         elif arm == "H-nodraft":
-            built[arm] = AnthropicChat(HAIKU_4_5)
+            built[arm] = AnthropicChat(second_model)
     return built
 
 
@@ -255,12 +314,13 @@ def recheck(
     if unknown:
         raise ValueError(f"not no-draft arms: {unknown}")
     source_config = read_config(source)
-    effort = source_reasoning_effort(source_config) if models is None else "high"
-    built = (
-        dict(models)
-        if models is not None
-        else _models_for(arms, reasoning_effort=effort)
-    )
+    if models is None:
+        settings = source_reviewer_settings(source_config)
+        effort = settings["reasoning_effort"]
+        built = _models_for(arms, **settings)
+    else:
+        effort = "high"
+        built = dict(models)
 
     existing = read_config(Path(out_root) / source.name)
     if existing.get("source") and not _same_source(existing["source"], source):
