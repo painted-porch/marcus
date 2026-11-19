@@ -1006,3 +1006,27 @@ class TestModelsForUsesWhatItIsGiven:
             second_model="claude-other",
         )
         assert built == [("org/other-model", "medium"), ("claude-other", None)]
+
+
+class TestReportNamesTheModelsThatRan:
+    """Codex P2 on PR #937: labels come from the records, not from constants."""
+
+    def _report(self, tmp_path: Path, model: str) -> str:
+        source = _source_run(
+            tmp_path / "runs", "S1", {"C": {"adv1": "flag"}}, {"adv1": "yes"}
+        )
+        nodraft = tmp_path / "nodraft" / "S1"
+        _write_jsonl(
+            nodraft / "arms" / "C-nodraft" / "verdicts.jsonl",
+            [{"chain_id": "adv1", "verdict": "flag", "model": model}],
+        )
+        reports = [recheck.compare(source, nodraft)]
+        return recheck.render(recheck.aggregate(reports), reports)
+
+    def test_the_recorded_model_is_named(self, tmp_path: Path) -> None:
+        """A run checked by another model is labelled with that model."""
+        assert "org/other-model" in self._report(tmp_path, "org/other-model")
+
+    def test_a_default_name_is_not_invented(self, tmp_path: Path) -> None:
+        """The default model's name does not appear for a run it did not check."""
+        assert "DeepSeek V4 Flash" not in self._report(tmp_path, "org/other-model")

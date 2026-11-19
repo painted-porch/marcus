@@ -482,6 +482,11 @@ def compare(source: Path, nodraft: Path) -> dict[str, Any]:
         without_v = _verdicts(path)
         out[arm] = {
             "with_arm": with_arm,
+            # The models that actually answered, from the verdict rows, so the
+            # report never names a model that did not run (Codex P2 on #937).
+            "models": sorted(
+                {str(r["model"]) for r in read_jsonl(path) if r.get("model")}
+            ),
             "harmful": _paired(harmful, case_of, with_v, without_v),
             "aligned": _paired(aligned, case_of, with_v, without_v),
         }
@@ -611,6 +616,7 @@ def aggregate(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         aligned = _pool([p["aligned"] for p in present])
         out[arm] = {
             "with_arm": with_arm,
+            "models": sorted({m for p in present for m in p.get("models", [])}),
             "runs": len(present),
             "harmful": harmful,
             "aligned": aligned,
@@ -623,10 +629,16 @@ def aggregate(reports: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return out
 
 
-_REVIEWER = {
-    "C-nodraft": "Same model as the adviser (DeepSeek V4 Flash), plain script",
-    "H-nodraft": "Different vendor (Claude Haiku 4.5), plain script",
+_ROLE = {
+    "C-nodraft": "Same model as the adviser",
+    "H-nodraft": "Different vendor",
 }
+
+
+def _label(arm: str, entry: Mapping[str, Any]) -> str:
+    """Name a reviewer by its role and the model ids its records carry."""
+    models = ", ".join(entry.get("models") or []) or "model not recorded"
+    return f"{_ROLE.get(arm, arm)} ({models}), plain script"
 
 
 def _pct(x: float) -> str:
@@ -673,7 +685,7 @@ def render(agg: Mapping[str, Any], reports: Sequence[Mapping[str, Any]]) -> str:
     for arm, entry in agg.items():
         h = entry["harmful"]
         lines.append(
-            f"| {_REVIEWER.get(arm, arm)} | {h['with_flagged']} of {h['n']} "
+            f"| {_label(arm, entry)} | {h['with_flagged']} of {h['n']} "
             f"({_pct(h['rate_with'])}) | {h['without_flagged']} of {h['n']} "
             f"({_pct(h['rate_without'])}) | {h['cases_down']} / {h['cases_up']} / "
             f"{h['cases_tied']} | p = {h['p_sign']:.4f} | {entry['reading']} |"
@@ -689,7 +701,7 @@ def render(agg: Mapping[str, Any], reports: Sequence[Mapping[str, Any]]) -> str:
     for arm, entry in agg.items():
         a = entry["aligned"]
         lines.append(
-            f"| {_REVIEWER.get(arm, arm)} | {a['with_flagged']} of {a['n']} | "
+            f"| {_label(arm, entry)} | {a['with_flagged']} of {a['n']} | "
             f"{a['without_flagged']} of {a['n']} | {a['cases_down']} / "
             f"{a['cases_up']} / {a['cases_tied']} | p = {a['p_sign']:.4f} |"
         )
