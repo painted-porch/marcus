@@ -176,6 +176,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _same_source(recorded: str, source: Path) -> bool:
+    """Say whether a record's ``source`` line names this source run."""
+    return Path(recorded).resolve() == Path(source).resolve()
+
+
 def recheck(
     source: Path,
     out_root: Path,
@@ -257,6 +262,15 @@ def recheck(
         else _models_for(arms, reasoning_effort=effort)
     )
 
+    existing = read_config(Path(out_root) / source.name)
+    if existing.get("source") and not _same_source(existing["source"], source):
+        # Records are keyed by the source's stamp, so two sources sharing a
+        # stamp in different roots would share one record (Codex P2 on PR
+        # #937). Refuse before copying anything or treating this as a resume.
+        raise RuntimeError(
+            f"the re-check record {Path(out_root) / source.name} belongs to "
+            f"{existing['source']}, not {source}"
+        )
     rec = record.RunRecord(Path(out_root), source.name)
     fresh = not rec.path("run-config.txt").is_file()
     for name in ("chains.json", "judge.jsonl", "generation.jsonl"):
@@ -271,7 +285,7 @@ def recheck(
         for key, value in [
             ("kind", "Hospital no-draft re-check (issue #918)"),
             ("started_at", _now()),
-            ("source", str(source)),
+            ("source", str(source.resolve())),
             ("source_checkout", source_config.get("checkout", "not recorded")),
             ("checkout", code),
             (
@@ -770,7 +784,12 @@ def main(argv: list[str] | None = None) -> int:
         # The source run is re-checked as well: a run marked superseded after
         # its re-check finished must not re-enter the comparison (Codex P2 on
         # PR #937).
-        if nodraft.is_dir() and completed(nodraft) and completed(Path(source)):
+        if (
+            nodraft.is_dir()
+            and completed(nodraft)
+            and completed(Path(source))
+            and _same_source(read_config(nodraft).get("source", ""), Path(source))
+        ):
             reports.append(compare(Path(source), nodraft))
     text = render(aggregate(reports), reports)
     if args.write:

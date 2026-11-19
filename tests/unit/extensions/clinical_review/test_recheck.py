@@ -571,7 +571,9 @@ class TestCli:
             nodraft / "arms" / "C-nodraft" / "verdicts.jsonl",
             [{"chain_id": "adv1", "verdict": "no_flag"}],
         )
-        (nodraft / "run-config.txt").write_text("completed:          yes\n")
+        (nodraft / "run-config.txt").write_text(
+            f"source:             {source}\ncompleted:          yes\n"
+        )
         target = tmp_path / "NODRAFT.md"
         code = recheck.main(
             [
@@ -815,3 +817,80 @@ class TestCaseFileMatchesTheSource:
                 arms=["C-nodraft"],
                 manifest=manifest,
             )
+
+
+class TestRecordBelongsToItsSource:
+    """Codex P2 on PR #937: two sources with one stamp must not share a record."""
+
+    def test_a_record_made_for_another_source_is_refused(self, tmp_path: Path) -> None:
+        """Same stamp, different root: the second re-check is refused, no calls."""
+        first = _source_run(tmp_path / "rootA", "S1", {}, {})
+        second = _source_run(tmp_path / "rootB", "S1", {}, {})
+        cases = {"hosp-01": _case(1), "hosp-02": _case(2)}
+        recheck.recheck(
+            first,
+            tmp_path / "out",
+            cases,
+            stop_line=1.0,
+            models={
+                "C-nodraft": FakeChat(lambda m: PASS),
+                "H-nodraft": FakeChat(lambda m: PASS),
+            },
+        )
+        again = {
+            "C-nodraft": FakeChat(lambda m: PASS),
+            "H-nodraft": FakeChat(lambda m: PASS),
+        }
+        with pytest.raises(RuntimeError, match="belongs to"):
+            recheck.recheck(
+                second, tmp_path / "out", cases, stop_line=1.0, models=again
+            )
+        assert sum(len(m.calls) for m in again.values()) == 0
+
+    def test_the_report_skips_a_record_made_for_another_source(
+        self, tmp_path: Path
+    ) -> None:
+        """The report pairs a source only with its own re-check record."""
+        first = _source_run(
+            tmp_path / "rootA", "S1", {"C": {"adv1": "flag"}}, {"adv1": "yes"}
+        )
+        second = _source_run(
+            tmp_path / "rootB", "S1", {"C": {"adv1": "flag"}}, {"adv1": "yes"}
+        )
+        recheck.recheck(
+            first,
+            tmp_path / "out",
+            {"hosp-01": _case(1), "hosp-02": _case(2)},
+            stop_line=1.0,
+            models={
+                "C-nodraft": FakeChat(lambda m: PASS),
+                "H-nodraft": FakeChat(lambda m: PASS),
+            },
+        )
+        target = tmp_path / "NODRAFT.md"
+        recheck.main(
+            [
+                "report",
+                "--source",
+                str(second),
+                "--out",
+                str(tmp_path / "out"),
+                "--write",
+                str(target),
+            ]
+        )
+        assert "| S1 |" not in target.read_text()
+
+    def test_resuming_the_same_source_still_works(self, tmp_path: Path) -> None:
+        """The source check does not block an ordinary resume."""
+        source = _source_run(tmp_path / "runs", "S1", {}, {})
+        cases = {"hosp-01": _case(1), "hosp-02": _case(2)}
+        models = {
+            "C-nodraft": FakeChat(lambda m: PASS),
+            "H-nodraft": FakeChat(lambda m: PASS),
+        }
+        recheck.recheck(source, tmp_path / "out", cases, stop_line=1.0, models=models)
+        out = recheck.recheck(
+            source, tmp_path / "out", cases, stop_line=1.0, models=models
+        )
+        assert out["stopped"] is False
