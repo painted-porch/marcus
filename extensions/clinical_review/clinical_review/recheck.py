@@ -227,6 +227,25 @@ def recheck(
             f"{source} is not a completed, non-superseded run; "
             "only a finished run's advice is re-checked"
         )
+    if manifest is not None:
+        # The reviewer reads each vignette from the supplied cases, not from the
+        # saved advice, so a revised case file with the same case ids would
+        # re-check old advice against new clinical facts (Codex P2 on PR #937).
+        # Refuse before any paid call, on every start and every resume.
+        recorded = re.search(
+            r"manifest sha256 ([0-9a-f]{64})", read_config(source).get("cases", "")
+        )
+        if not recorded:
+            raise RuntimeError(
+                f"{source} records no case file fingerprint, so the re-check "
+                "cannot confirm it uses the same patient records"
+            )
+        if recorded.group(1) != manifest_digest(manifest):
+            raise RuntimeError(
+                f"the case file {manifest} differs from the one {source.name} "
+                "used; re-checking its advice against it would change the "
+                "patient records as well as the draft"
+            )
     unknown = [arm for arm in arms if arm not in NO_DRAFT_ARMS]
     if unknown:
         raise ValueError(f"not no-draft arms: {unknown}")

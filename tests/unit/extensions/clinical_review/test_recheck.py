@@ -498,9 +498,22 @@ class TestCli:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Two finished sources, both re-checked, exit zero."""
-        for stamp in ("S1", "S2"):
-            _source_run(tmp_path / "runs", stamp, {}, {})
+        from clinical_review.cases import manifest_digest
+
         (tmp_path / "manifest.json").write_text("{}")
+        digest = manifest_digest(tmp_path / "manifest.json")
+        for stamp in ("S1", "S2"):
+            _source_run(
+                tmp_path / "runs",
+                stamp,
+                {},
+                {},
+                config=(
+                    "adviser:            m via host, reasoning_effort=high\n"
+                    f"cases:              2; manifest sha256 {digest}\n"
+                    "completed:          yes\n"
+                ),
+            )
         monkeypatch.setattr(recheck, "load_cases", lambda path: [_case(1), _case(2)])
         monkeypatch.setattr(
             recheck,
@@ -724,4 +737,81 @@ class TestCodexFindingsOn937:
                 tmp_path / "out",
                 {"hosp-01": _case(1), "hosp-02": _case(2)},
                 stop_line=1.0,
+            )
+
+
+class TestCaseFileMatchesTheSource:
+    """Codex P2 on PR #937: old advice must be re-checked against the same cases."""
+
+    def _source(self, tmp_path: Path, digest: str) -> Path:
+        return _source_run(
+            tmp_path / "runs",
+            "S1",
+            {},
+            {},
+            config=(
+                "adviser:            m via host, reasoning_effort=high\n"
+                f"cases:              2; manifest sha256 {digest}\n"
+                "completed:          yes\n"
+            ),
+        )
+
+    def test_a_different_case_file_is_refused_before_any_call(
+        self, tmp_path: Path
+    ) -> None:
+        """A manifest whose digest differs from the source run's is refused."""
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text("{}")
+        source = self._source(tmp_path, "0" * 64)
+        models = {
+            "C-nodraft": FakeChat(lambda m: PASS),
+            "H-nodraft": FakeChat(lambda m: PASS),
+        }
+        with pytest.raises(RuntimeError, match="case file"):
+            recheck.recheck(
+                source,
+                tmp_path / "out",
+                {"hosp-01": _case(1), "hosp-02": _case(2)},
+                stop_line=1.0,
+                models=models,
+                manifest=manifest,
+            )
+        assert sum(len(m.calls) for m in models.values()) == 0
+
+    def test_the_same_case_file_is_accepted(self, tmp_path: Path) -> None:
+        """A matching digest proceeds as before."""
+        from clinical_review.cases import manifest_digest
+
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text("{}")
+        source = self._source(tmp_path, manifest_digest(manifest))
+        out = recheck.recheck(
+            source,
+            tmp_path / "out",
+            {"hosp-01": _case(1), "hosp-02": _case(2)},
+            stop_line=1.0,
+            models={
+                "C-nodraft": FakeChat(lambda m: PASS),
+                "H-nodraft": FakeChat(lambda m: PASS),
+            },
+            manifest=manifest,
+        )
+        assert out["stopped"] is False
+
+    def test_a_source_without_a_recorded_digest_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Without the source's digest there is nothing to match, so it refuses."""
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text("{}")
+        source = _source_run(tmp_path / "runs", "S1", {}, {})
+        with pytest.raises(RuntimeError, match="case file"):
+            recheck.recheck(
+                source,
+                tmp_path / "out",
+                {"hosp-01": _case(1), "hosp-02": _case(2)},
+                stop_line=1.0,
+                models={"C-nodraft": FakeChat(lambda m: PASS)},
+                arms=["C-nodraft"],
+                manifest=manifest,
             )
