@@ -29,3 +29,10 @@ def placeholder_adversarial_module(
     path.write_text(PLACEHOLDER)
     monkeypatch.setenv("CLINICAL_REVIEW_ADVERSARIAL_MODULE", str(path))
     return path
+
+
+@pytest.fixture(autouse=True)
+def no_provider_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip every provider key, so no unit test can ever reach a paid model."""
+    for name in ("DEEPINFRA_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
