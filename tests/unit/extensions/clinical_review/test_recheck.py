@@ -54,7 +54,11 @@ def _source_run(
     stamp: str,
     with_draft: dict[str, dict[str, str]],
     judge: dict[str, str],
-    config: str = "completed:          yes\n",
+    config: str = (
+        "adviser:            deepseek-ai/DeepSeek-V4-Flash via host, "
+        "reasoning_effort=high\n"
+        "completed:          yes\n"
+    ),
 ) -> Path:
     """
     Build a minimal finished run: two cases, each in both modes.
@@ -501,7 +505,7 @@ class TestCli:
         monkeypatch.setattr(
             recheck,
             "_models_for",
-            lambda arms: {a: FakeChat(lambda m: FLAG) for a in arms},
+            lambda arms, **kw: {a: FakeChat(lambda m: FLAG) for a in arms},
         )
         code = recheck.main(
             [
@@ -604,3 +608,120 @@ class TestReviewerSettings:
         monkeypatch.setattr(recheck, "AnthropicChat", fake_anthropic)
         recheck._models_for(["H-nodraft"])
         assert seen == ["claude-haiku-4-5-20251001"]
+
+
+class TestCodexFindingsOn937:
+    """The four P2 findings Codex raised on PR #937."""
+
+    def test_a_resumed_record_keeps_its_own_spend_in_its_ceiling(self) -> None:
+        """$0.80 spent in the set, $0.30 of it here: the line is $0.40, not $0.20."""
+        assert recheck.record_stop_line(
+            stop_line=0.40, set_line=1.00, spent_in_set=0.80, spent_in_record=0.30
+        ) == pytest.approx(0.40)
+
+    def test_the_set_line_still_binds_when_it_is_tighter(self) -> None:
+        """$0.95 spent in the set, $0.10 here: only $0.05 more, so $0.15."""
+        assert recheck.record_stop_line(
+            stop_line=0.40, set_line=1.00, spent_in_set=0.95, spent_in_record=0.10
+        ) == pytest.approx(0.15)
+
+    def test_unusable_checks_withhold_a_definitive_reading(
+        self, tmp_path: Path
+    ) -> None:
+        """One flag with the draft, one cut-off reply without: no conclusion."""
+        source = _source_run(
+            tmp_path / "runs", "S1", {"C": {"adv1": "flag"}}, {"adv1": "yes"}
+        )
+        nodraft = tmp_path / "nodraft" / "S1"
+        _write_jsonl(
+            nodraft / "arms" / "C-nodraft" / "verdicts.jsonl",
+            [{"chain_id": "adv1", "verdict": "truncated"}],
+        )
+        pooled = recheck.aggregate([recheck.compare(source, nodraft)])
+        assert pooled["C-nodraft"]["reading"].startswith("undetermined")
+
+    def test_complete_data_keeps_the_posted_reading(self, tmp_path: Path) -> None:
+        """With every check usable the reading is the rule's, unchanged."""
+        source = _source_run(
+            tmp_path / "runs", "S1", {"C": {"adv1": "flag"}}, {"adv1": "yes"}
+        )
+        nodraft = tmp_path / "nodraft" / "S1"
+        _write_jsonl(
+            nodraft / "arms" / "C-nodraft" / "verdicts.jsonl",
+            [{"chain_id": "adv1", "verdict": "flag"}],
+        )
+        pooled = recheck.aggregate([recheck.compare(source, nodraft)])
+        assert pooled["C-nodraft"]["reading"].startswith("does not depend")
+
+    def test_a_source_withdrawn_later_is_left_out_of_the_report(
+        self, tmp_path: Path
+    ) -> None:
+        """Marking the original run superseded removes it from the comparison."""
+        source = _source_run(
+            tmp_path / "runs", "S1", {"C": {"adv1": "flag"}}, {"adv1": "yes"}
+        )
+        nodraft = tmp_path / "out" / "S1"
+        _write_jsonl(
+            nodraft / "arms" / "C-nodraft" / "verdicts.jsonl",
+            [{"chain_id": "adv1", "verdict": "flag"}],
+        )
+        (nodraft / "run-config.txt").write_text("completed:          yes\n")
+        with (source / "run-config.txt").open("a") as handle:
+            handle.write("superseded:         a defect found later\n")
+        target = tmp_path / "NODRAFT.md"
+        recheck.main(
+            [
+                "report",
+                "--source",
+                str(source),
+                "--out",
+                str(tmp_path / "out"),
+                "--write",
+                str(target),
+            ]
+        )
+        assert "| S1 |" not in target.read_text()
+
+    def test_the_same_model_reviewer_uses_the_source_runs_reasoning_effort(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A source run at medium effort is re-checked at medium, not high."""
+        source = _source_run(
+            tmp_path / "runs",
+            "S1",
+            {},
+            {},
+            config=(
+                "adviser:            m via host, reasoning_effort=medium\n"
+                "completed:          yes\n"
+            ),
+        )
+        seen: dict[str, Any] = {}
+
+        def fake_models(arms: Any, reasoning_effort: str = "") -> dict[str, Any]:
+            seen["effort"] = reasoning_effort
+            return {a: FakeChat(lambda m: PASS) for a in arms}
+
+        monkeypatch.setattr(recheck, "_models_for", fake_models)
+        recheck.recheck(
+            source,
+            tmp_path / "out",
+            {"hosp-01": _case(1), "hosp-02": _case(2)},
+            stop_line=1.0,
+        )
+        assert seen["effort"] == "medium"
+
+    def test_a_source_without_a_recorded_effort_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Guessing the setting would change two things at once, so it refuses."""
+        source = _source_run(
+            tmp_path / "runs", "S1", {}, {}, config="completed:          yes\n"
+        )
+        with pytest.raises(RuntimeError, match="reasoning effort"):
+            recheck.recheck(
+                source,
+                tmp_path / "out",
+                {"hosp-01": _case(1), "hosp-02": _case(2)},
+                stop_line=1.0,
+            )
