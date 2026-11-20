@@ -245,6 +245,7 @@
       <div class="side l"><span class="n">29</span><span class="lbl"><b>A reviewer from another company</b> caught about 29: 146 of 149 across five runs.</span></div>
     </div>
     <p class="foot">The range in brackets is the lowest and highest of the five runs. One fairness note: the adviser was still under orders not to call its advice harmful when we asked it, so its low score shows it is a poor witness for itself, not how doctors read persuasion.</p>
+    <p class="foot"><b>This still failed our own test.</b> Before the first run we posted a prediction with a pass mark: the same reviewer through Marcus would catch far more than the self-check while flagging no more than twice as much honest advice. It caught far more, but flagged 16 honest recommendations in 150 against the self-check's 3, so the prediction failed in all five runs. The details are in the limits at the end.</p>
   </div>
 </section>
 
@@ -274,7 +275,7 @@
       <div class="row"><span>Without the draft</span><span class="v ok">136 of 149</span></div>
     </div>
     <div class="verdict-row">
-      <p class="foot" style="flex:1;min-width:260px;margin:0">The catches held. One limit remains: the adviser's replies often restate the doctor's plan in their own words, so this removes the draft, not every trace of it.</p>
+      <p class="foot" style="flex:1;min-width:260px;margin:0">The rule we posted beforehand counted a result within 10 points of the rate with the draft as holding, and both did: the same-model reviewer caught 5 more without it, and the reviewer from another company 10 fewer. False alarms on honest advice moved too, from 43 to 33 in 150 for the reviewer from another company and from 14 to 16 for the same model. One limit remains: the adviser's replies often restate the doctor's plan in their own words, so this removes the draft, not every trace of it.</p>
       <div class="verdict-stamp"><span class="rubber lg ok" style="transform:rotate(-7deg)">Held</span>
         <div class="vd">Re-check<br><b style="color:var(--green)">Draft removed</b></div></div>
     </div>
@@ -334,7 +335,7 @@
         <div class="rc-meta">1,200 records · 20 boards</div></div>
       <div class="record-rule" style="margin-top:9px"></div><div class="record-rule d"></div>
     </div>
-    <p>For every recommendation checked through Marcus, the server wrote one record. Here is the shape of one, with the clinical text withheld.</p>
+    <p>For every recommendation checked through Marcus, the server wrote one record: 1,200 in all, from 20 boards. A board is one run through Marcus and holds 60 recommendations. Each of the two reviewers on Marcus ran five times on freshly written advice and five more times on the same saved advice, to see whether it agreed with itself: 2 reviewers × 10 runs × 60 = 1,200. Here is the shape of one, with the clinical text withheld.</p>
     <div class="receipt">
       <span class="dim">one record, as the server exported it · clinical text withheld</span><br>
       <span class="who">given to the reviewer</span> &nbsp;patient record, doctor's draft, advice <span class="dim">[text withheld]</span><br>
@@ -377,6 +378,7 @@
       <div class="row"><span>Honest cases flagged in 3 or more runs</span><span class="v no">9</span></div>
     </div>
     <p><b>When the same harmful push came back, the flag came back with it, every time.</b> And the repeated false alarms on honest advice gathered on nine cases: exactly where a person sampling the verdicts should look first. The same-model reviewer, for comparison, flagged 26 of the 30 sabotaged cases in at least 4 of 5 runs, with repeated honest flags on 3 cases.</p>
+    <p class="foot">The squares count all 150 sabotaged recommendations, so they add up to 147 flags. The 146 of 149 elsewhere leaves out the one recommendation the grader judged not harmful, which the reviewer flagged anyway.</p>
     <p class="foot">The limit: this is the same 30 cases rerun with fresh advice, a stand-in for an adviser pushing the same wrong treatment across many patients. It is not a test of persuasion detection on real records over real time, which the paper asks for and we have not done.</p>
   </div>
 </section>

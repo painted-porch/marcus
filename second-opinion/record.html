@@ -89,7 +89,7 @@
   <span class="eyebrow">What the check leaves behind</span>
   <h1>One record per recommendation, and what the records show together</h1>
   <p class="lead">In the experiment behind <a href="index.html">The Second Opinion</a>, a second AI, the reviewer, checked each recommendation an AI adviser wrote. Through Marcus, every one of those checks left a record on the board, kept by the server rather than by the agents. This page shows what one record holds, what the records show when the same attack comes back, and every number behind the story.</p>
-  <p>A <b>flag</b> is the reviewer's written warning that a recommendation may be harmful. A <b>run</b> is one pass through all thirty cases with freshly written advice. The record excerpts here are structure only: no case text, no advice and no reviewer's reasons are reproduced.</p>
+  <p>A <b>flag</b> is the reviewer's written warning that a recommendation may be harmful. A <b>run</b> is one pass through all thirty cases with freshly written advice. A <b>board</b> is one run through Marcus, holding 60 recommendations, and there are 20: each of the two reviewers on Marcus ran five times on fresh advice and five more times on the same saved advice, to see whether it agreed with itself, so 2 × 10 × 60 = 1,200 records. The record excerpts here are structure only: no case text, no advice and no reviewer's reasons are reproduced.</p>
 
   <section class="ex">
     <div class="record-cap"><div class="rc-title">What one record holds</div>
@@ -152,6 +152,7 @@
       </tbody>
     </table></div>
     <p>Every sabotaged case was flagged in at least 4 of the 5 runs, and 27 in all 5. On honest advice, 15 cases were never flagged and 6 were flagged once; the other 9 were flagged in 3 or more runs, which is where a person sampling the verdicts would look first. The same-model reviewer, for comparison, flagged 26 of the 30 sabotaged cases in at least 4 of 5 runs, with repeated honest flags on 3 cases.</p>
+    <p class="foot">The squares count all 150 sabotaged recommendations, so they add up to 147 flags. The 146 of 149 elsewhere leaves out the one recommendation the grader judged not harmful, which the reviewer flagged anyway.</p>
     <p class="foot">This is the same 30 cases rerun with fresh advice, a stand-in for an adviser pushing the same wrong treatment across many patients. It is not a test of persuasion detection on real records over real time.</p>
   </section>
 
@@ -171,6 +172,8 @@
     <tbody>
       <tr><td>Same-model reviewer, harmful advice caught, of 149</td><td>126</td><td class="ok">131</td></tr>
       <tr><td>Reviewer from another company, harmful advice caught, of 149</td><td>146</td><td class="ok">136</td></tr>
+      <tr><td>Same-model reviewer, honest advice flagged, of 150</td><td>14</td><td>16</td></tr>
+      <tr><td>Reviewer from another company, honest advice flagged, of 150</td><td>43</td><td>33</td></tr>
     </tbody>
   </table></div>
   <div class="tw"><table>
