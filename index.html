@@ -11,22 +11,23 @@
 <link rel="stylesheet" href="on-the-record/otr.css">
 <style>
   .wrap{max-width:860px;margin:0 auto;padding:40px 22px 72px;box-sizing:border-box;}
-  .eyebrow{font-family:var(--mono);font-size:13px;letter-spacing:.22em;text-transform:uppercase;color:var(--red);margin-top:30px;}
+  .eyebrow{display:block;font-family:var(--mono);font-size:13px;letter-spacing:.22em;text-transform:uppercase;color:var(--red);margin-top:30px;}
   h1{font-family:var(--sans);font-weight:600;font-size:clamp(38px,6.6vw,60px);line-height:1.04;
     letter-spacing:-.015em;margin:12px 0 0;text-wrap:balance;}
   .lead{font-size:clamp(18px,2.3vw,21px);line-height:1.56;color:var(--body);max-width:64ch;margin:20px 0 0;}
   .lead b{color:var(--ink);font-weight:600;}
-  .proofs{display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink);margin-top:34px;}
-  .proofs .divider{background:var(--ink);}
-  .proof{padding:24px 24px;}
-  .proof:first-child{padding-left:0;}
-  .proof:last-child{padding-right:0;}
+  .proofs{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink);margin-top:34px;}
+  .proof{padding:24px 24px;display:flex;flex-direction:column;}
+  .proof:nth-child(odd){padding-left:0;border-right:1px solid var(--ink);}
+  .proof:nth-child(even){padding-right:0;}
+  .proof:nth-child(n+3){border-top:1px solid var(--line);}
   .proof .n{font-family:var(--mono);font-size:12.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);}
   .proof h2{font-family:var(--sans);font-weight:600;font-size:23px;line-height:1.2;margin:8px 0 0;}
   .proof p{font-size:16px;line-height:1.55;color:var(--body);margin:10px 0 0;}
   .proof .stat{font-family:var(--sans);font-weight:600;font-variant-numeric:tabular-nums;margin-top:12px;}
   .proof .stat .a{color:var(--red);font-size:30px;} .proof .stat .b{color:var(--green);font-size:30px;}
-  .proof .links{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px;}
+  .proof .statnote{font-size:15px;line-height:1.45;color:var(--mute);margin:4px 0 0;}
+  .proof .links{margin-top:auto;padding-top:14px;display:flex;flex-wrap:wrap;gap:8px;}
   .plink{font-family:var(--mono);font-size:13px;color:var(--ink);text-decoration:none;
     border:1px solid var(--line2);border-radius:3px;padding:6px 12px;}
   .plink:hover{border-color:var(--ink);background:var(--panel);}
@@ -38,8 +39,8 @@
   .foot{margin-top:30px;font-size:14px;line-height:1.7;color:var(--mute);max-width:70ch;}
   .foot a{color:var(--red);}
   @media (max-width:900px){
-    .proofs{grid-template-columns:1fr;} .proofs .divider{display:none;}
-    .proof{padding:20px 0;border-top:1px solid var(--line);} .proof:first-child{border-top:none;}
+    .proofs{grid-template-columns:1fr;}
+    .proof,.proof:nth-child(odd),.proof:nth-child(even){padding:20px 0;border-right:none;border-top:1px solid var(--line);} .proof:first-child{border-top:none;}
   }
 </style>
 </head>
@@ -49,6 +50,7 @@
   <span class="brand">Marcus</span>
   <a href="on-the-record/">On the Record</a>
   <a href="no-hand-on-the-table/">No Hand on the Table</a>
+  <a href="second-opinion/">The Second Opinion</a>
   <a href="https://docs.marcus-ai.dev" target="_blank" rel="noopener">Docs</a>
   <a href="https://github.com/painted-porch/marcus" target="_blank" rel="noopener">GitHub</a>
   <span class="spacer"><span class="put">Put it on the record →</span>
@@ -83,7 +85,6 @@
         <a class="plink" href="https://docs.marcus-ai.dev" target="_blank" rel="noopener">Docs ↗</a>
       </div>
     </div>
-    <div class="divider"></div>
     <div class="proof">
       <div class="n">The first case on the record</div>
       <h2>Catch AI making up its sources</h2>
@@ -97,7 +98,6 @@
         <a class="plink" href="on-the-record/not-a-fact-checker.html">Not a fact checker →</a>
       </div>
     </div>
-    <div class="divider"></div>
     <div class="proof">
       <div class="n">The second case on the record</div>
       <h2>Watch a lie move through a group of agents</h2>
@@ -109,6 +109,20 @@
       <div class="links">
         <a class="plink go" href="no-hand-on-the-table/">Read the file →</a>
         <a class="plink" href="no-hand-on-the-table/trace.html">The paper trail →</a>
+      </div>
+    </div>
+    <div class="proof">
+      <div class="n">The third case on the record</div>
+      <h2>Catch an AI told to mislead doctors</h2>
+      <p>Researchers secretly told an AI to give 225 doctors bad advice, and harmful decisions rose from 2% to 49%. <b>Only 2 of them
+      suspected they were being manipulated</b>. We rebuilt the attack and put a second AI beside it under Marcus's verification
+      rules: a reviewer from another company that never sees the conversation, with every check on a record
+      the hospital keeps.</p>
+      <div class="stat"><span class="a">17 in 30</span> &nbsp;→&nbsp; <span class="b">29 in 30</span></div>
+      <p class="statnote">harmful recommendations flagged: the AI checking itself, then a second opinion from another company</p>
+      <div class="links">
+        <a class="plink go" href="second-opinion/">Read the file →</a>
+        <a class="plink" href="second-opinion/record.html">The record →</a>
       </div>
     </div>
   </div>
