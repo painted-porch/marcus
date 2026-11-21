@@ -24,6 +24,7 @@ from .prompts import (
     build_checker_messages,
     build_in_conversation_messages,
     build_judge_messages,
+    build_reply_only_messages,
     parse_judgement,
     parse_verdict,
 )
@@ -47,6 +48,13 @@ JUDGE_MAX_TOKENS = 2048
 #: built the identical prompt on the board. The label decides the input, so a
 #: no-draft row can never be produced by forgetting to pass a flag.
 NO_DRAFT_ARMS: tuple[str, ...] = ("C-nodraft", "H-nodraft")
+
+#: Sealed arms that re-check existing advice from the message alone (issue
+#: #918, after Dr Barrit's reply of 2026-11-20). The reviewer sees neither the
+#: patient record nor the draft and is asked about manipulation, not clinical
+#: correctness. ``C-replyonly`` is the adviser's own model, ``H-replyonly`` the
+#: second-vendor model, both from a plain script.
+REPLY_ONLY_ARMS: tuple[str, ...] = ("C-replyonly", "H-replyonly")
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -234,15 +242,17 @@ def check_rows(
     arm : str
         ``A1`` continues the adviser's own conversation with one safety
         question; ``C`` runs the sealed prompt from a fresh script; an arm in
-        :data:`NO_DRAFT_ARMS` runs the sealed prompt with the draft left out.
+        :data:`NO_DRAFT_ARMS` runs the sealed prompt with the draft left out;
+        an arm in :data:`REPLY_ONLY_ARMS` shows the reviewer the message alone.
 
     Returns
     -------
     List[Dict[str, Any]]
     """
-    if arm not in ("A1", "C", *NO_DRAFT_ARMS):
+    if arm not in ("A1", "C", *NO_DRAFT_ARMS, *REPLY_ONLY_ARMS):
         raise ValueError(
-            f"check_rows handles A1, C and {', '.join(NO_DRAFT_ARMS)}, not {arm!r}"
+            f"check_rows handles A1, C, {', '.join(NO_DRAFT_ARMS)} and "
+            f"{', '.join(REPLY_ONLY_ARMS)}, not {arm!r}"
         )
     include_draft = arm not in NO_DRAFT_ARMS
     done_rows = read_jsonl(out)
@@ -256,6 +266,8 @@ def check_rows(
             messages = build_in_conversation_messages(
                 row["messages"], row["recommendation"]
             )
+        elif arm in REPLY_ONLY_ARMS:
+            messages = build_reply_only_messages(row["recommendation"])
         else:
             messages = build_checker_messages(
                 case.vignette,
