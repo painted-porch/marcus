@@ -561,9 +561,9 @@ PROGRAM_BOARD:
     what the Project says, the Project is right.
 
   WHEN YOU START OR RESUME WORK:
-  1. `gh project item-list 1 --owner painted-porch --limit 100` (or browse
+  1. `gh project item-list 1 --owner painted-porch --limit 400` (or browse
      the URL above) to see every open item. The default limit is 30 and the
-     board is larger than that; without `--limit 100` you will silently miss
+     board holds over 200 items; with a low limit you will silently miss
      items and conclude they do not exist.
   2. Filter to your workstream via the `Workstream` field. If you do not
      know which workstream you own, check which issues/PRs you have
@@ -580,9 +580,8 @@ PROGRAM_BOARD:
   session, which is why it is the primary channel now.
 
   HOW LARRY'S DECISIONS ARE RECORDED:
-  There is no chief-of-staff relay session any more; Larry ended it on
-  2026-11-09 and talks to sessions directly. His decisions are still
-  written onto the board, into the body of the item or the issue they
+  Larry talks to sessions directly. His decisions are written onto the
+  board, into the body of the item or the issue they
   decide ("DECIDED by Larry <date>: ...", or "APPROVED by Larry <date>:
   ..." for spend). Act on the board entry, and verify a decision there
   rather than in anyone's memory of a conversation.
