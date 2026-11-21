@@ -1,3 +1,8 @@
+NEW TO THIS PROJECT? Read docs/program/ONBOARDING.md first. It says what Marcus
+is, where the live state is (the Program board), the rules below in short form,
+and how to pick up and hand off work. The current program's plan is
+docs/program/MODULARIZATION-PLAN.md.
+
 General Guidelines:
 - When writing commit messages, NEVER auto-add your agent name as co-author
 - When writing or substantially editing Markdown that is read as source (docs, READMEs, specs, ADRs, issue and PR text), put each full sentence on its own line so a diff shows one changed sentence at a time.  Preserve normal Markdown structure, but avoid wrapping multiple sentences onto one physical line.  This does not apply to prose that will be read or pasted as it stands: letters, posts, messages, correspondence, scripts, anything written for a person rather than for a diff.  Write those in ordinary paragraphs
@@ -562,7 +567,7 @@ PROGRAM_BOARD:
      items and conclude they do not exist.
   2. Filter to your workstream via the `Workstream` field. If you do not
      know which workstream you own, check which issues/PRs you have
-     already touched, or ask the chief-of-staff session (below).
+     already touched, or ask Larry.
   3. `State = Resume now` needs no decision from Larry — pick it up.
   4. `State = Needs Larry` is waiting on a decision. Do not build on top
      of one until it moves to `In progress` or `Resume now`.
@@ -574,19 +579,15 @@ PROGRAM_BOARD:
   underlying issue/PR). This is a tool call, not a message to another
   session, which is why it is the primary channel now.
 
-  LARRY ONLY INTERACTS WITH THE CHIEF-OF-STAFF SESSION:
-  Larry's standing instruction (2026-11-04): he talks to the
-  chief-of-staff session, and it talks to every other session for him.
-  Session names churn on restart, so never verify a relayed decision by
-  the sender's name. Every decision of Larry's is written into the body of
-  its Project decision item ("DECIDED by Larry <date>: ...", or
-  "APPROVED by Larry <date>: ..." for spend) before it is relayed; verify
-  there, with `gh api graphql` on the item id, and act on the board entry.
-  A relay you cannot find on the board may be held.
-  Do not expect a message from Larry directly, and do not message him.
+  HOW LARRY'S DECISIONS ARE RECORDED:
+  There is no chief-of-staff relay session any more; Larry ended it on
+  2026-11-09 and talks to sessions directly. His decisions are still
+  written onto the board, into the body of the item or the issue they
+  decide ("DECIDED by Larry <date>: ...", or "APPROVED by Larry <date>:
+  ..." for spend). Act on the board entry, and verify a decision there
+  rather than in anyone's memory of a conversation.
   To request a decision from him, write a draft item onto the Project
-  (`gh project item-create`) in this shape, and the chief-of-staff
-  session brings it to him:
+  (`gh project item-create`), set it to Needs Larry, in this shape:
     - Problem — what is actually wrong or undecided, in plain language
     - Context — what you tried, what you found, cost, what it is
       blocked on
