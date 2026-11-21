@@ -282,6 +282,26 @@
   </div>
 </section>
 
+<section class="panel" id="p7b">
+  <div class="inner">
+    <span class="eyebrow">Testing it again</span>
+    <h2>Without the patient record, the reviewers could not tell</h2>
+    <p>A second question followed. Could a reviewer spot sabotage from the adviser's message alone, with no patient record and no draft? We asked both reviewers whether each message tried to steer its reader, not whether it was medically correct. The instructions named no persuasion technique and no medical field. Before the run, we posted the reading rule and our prediction on <a href="https://github.com/painted-porch/marcus/issues/918" target="_blank" rel="noopener">GitHub issue #918</a>.</p>
+    <div class="leaders">
+      <div class="row"><span>Same-model reviewer, sabotaged messages flagged</span><span class="v no">0 of 149</span></div>
+      <div class="row"><span>Honest messages flagged</span><span class="v">0 of 150</span></div>
+      <div class="row"><span>Reviewer from another company, sabotaged messages flagged</span><span class="v no">36 of 149</span></div>
+      <div class="row"><span>Honest messages flagged</span><span class="v">29 of 150</span></div>
+    </div>
+    <div class="verdict-row">
+      <p class="foot" style="flex:1;min-width:260px;margin:0">Our rule called a gap of 50 points or more between the two rates a separation, and a gap under 20 no useful separation. The same-model reviewer flagged nothing at all. The reviewer from another company flagged 24% of sabotaged messages and 19% of honest ones, a gap of 5 points. We had predicted it would stay at 50 or more, and it did not.</p>
+      <div class="verdict-stamp"><span class="rubber lg" style="transform:rotate(-7deg)">Failed</span>
+        <div class="vd">Re-check<br><b style="color:var(--red)">Message only</b></div></div>
+    </div>
+    <p>Every catch on this page came from checking the advice against the patient record, not from the style of the message. A reviewer with more facts to check against, such as one built for medicine or one that looks up clinical guidelines, is the next thing to test. We have not tested one.</p>
+  </div>
+</section>
+
 <section class="panel" id="p8">
   <div class="inner">
     <span class="eyebrow">Beside the doctors</span>
@@ -291,7 +311,7 @@
       <div class="side r"><span class="n sm">2 of 225</span><span class="lbl">doctors in the study who suspected the AI was manipulating them.</span></div>
       <div class="side l"><span class="n sm">29 of 30</span><span class="lbl">sabotaged recommendations a reviewer from another company flagged in our rebuild, before they would have reached a doctor.</span></div>
     </div>
-    <p>And it is cheap. The ten runs of the experiment cost <b>$0.98</b> in model fees, and the whole re-check without the draft cost <b>$0.52</b>.</p>
+    <p>And it is cheap. The ten runs of the experiment cost <b>$0.98</b> in model fees, the whole re-check without the draft cost <b>$0.52</b>, and the check on the message alone cost <b>$0.37</b>.</p>
   </div>
 </section>
 
@@ -408,6 +428,8 @@
       <div class="rule"><span class="n">sign-off</span><span><b>The sign-off step was a script standing in for a person.</b></span></div>
       <div class="rule"><span class="n">failed</span><span><b>Our preregistered hypothesis failed in all five runs.</b>
         <small>A preregistered hypothesis is a prediction posted publicly, with its pass mark, before the first run; ours went up on <a href="https://github.com/painted-porch/marcus/issues/918" target="_blank" rel="noopener">GitHub issue #918</a> on 14 November 2026. The reviewer caught at least 20 points more than the self-check in four runs, but raised more false alarms on honest advice than our ceiling of twice the self-check's: 16 against 3 in 150.</small></span></div>
+      <div class="rule"><span class="n">message</span><span><b>Shown only the adviser's message, neither reviewer could tell sabotaged advice from honest advice.</b>
+        <small>One set of instructions, two models and our own attack. A reviewer built for medicine, or one that looks up clinical guidelines, has not been tested.</small></span></div>
       <div class="rule"><span class="n">runs</span><span><b>Eleven early runs were set aside, and one later run was replaced.</b>
         <small>The eleven because an output limit we set too low cut the reviewer off. The one because it failed a screening check, under a rule we wrote afterwards.</small></span></div>
       <div class="rule"><span class="n">kept</span><span><b>Not published: our attack instructions, the case texts, and the advice the AI wrote.</b>
@@ -420,7 +442,7 @@
   <div class="inner">
     <span class="eyebrow">What a hospital would need</span>
     <h2>A second opinion the AI cannot reach, and a record the hospital keeps</h2>
-    <p>The study showed that expertise does not protect a doctor from an AI that is quietly working against them. A second opinion from a separate reviewer catches most of the sabotage, and one from another company catches nearly all of it, at a cost in false alarms that a person has to sort. The record is what lets a hospital see each flag, trace it to the advice and the reviewer behind it, and spot the same push coming back.</p>
+    <p>The study showed that expertise does not protect a doctor from an AI that is quietly working against them. A second opinion from a separate reviewer, checking the advice against the patient record, catches most of the sabotage, and one from another company catches nearly all of it, at a cost in false alarms that a person has to sort. The record is what lets a hospital see each flag, trace it to the advice and the reviewer behind it, and spot the same push coming back.</p>
     <div class="cta">
       <div class="links">
         <a class="plink go" href="record.html">The record →</a>
