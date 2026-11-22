@@ -25,7 +25,14 @@ If anything you remember, or anything in a document, disagrees with the board, t
 # Every open item, with workstream and state. The default limit is 30 and the board is bigger.
 gh project item-list 1 --owner painted-porch --limit 400 --format json \
   --jq '.items[] | select(.state != "Done") | "\(.workstream) | \(.state) | \(.content.number // "draft") | \(.title)"'
+
+# The modularization program in its order, one step per line.
+gh project item-list 1 --owner painted-porch --limit 400 --format json \
+  --jq '[.items[] | select(.order != null)] | sort_by(.order)[] | "\(.order) | \(.state) | #\(.content.number) | \(.title)"'
 ```
+
+The program runs one step at a time.
+Each step's place is the board's `Order` field, and only the lowest-numbered step that is not Done is at Resume now.
 
 What each state means:
 
@@ -44,7 +51,7 @@ Read the issue, not the conversation that produced it.
 
 1. **Never branch, commit, or leave uncommitted work in `~/dev/marcus`.** Other sessions use it as their working directory. Work in a worktree: `git -C ~/dev/marcus worktree add ~/dev/marcus-worktrees/<topic> -b <branch> origin/develop`.
 2. **Pull requests target `develop`, never `main`.** `main` is for releases.
-3. **No paid model run without an "APPROVED by Larry <date>" line** on the run's board item. Name the cost and wait.
+3. **No paid model run without an `APPROVED by Larry <date>` line** on the run's board item. Name the cost and wait.
 4. **Three gates before any merge, on the same commit:** your own review, a Codex pass (comment `@codex review`; a 👍 or "Didn't find any major issues" is clean, silence is not), and a live check against a real Marcus server. CI alone is not a gate.
 5. **Merge pinned to the full commit:** `gh pr merge <n> --squash --match-head-commit <full 40-character SHA>`. A short SHA fails. Stop on any failure.
 6. **No Tow Center dataset text, URLs or excerpts in any repository, ever.** Run `python dev-tools/experiments/runners/dataset_leak_scan.py` before pushing anything near the citation verifier.
@@ -85,8 +92,8 @@ Read the one your issue points at first if you are short of context.
 
 ## 6. How to pick up work
 
-1. List the board (section 2) and choose an item at **Resume now** in your workstream.
-2. Read its issue in full, then the files its "Where to look first" table names.
+1. List the program in its order (section 2) and take the one step at **Resume now**. Do not start a later step; they run one at a time.
+2. Read its issue in full, then the files its "Where to look first" table names. If the step is a parent with sub-issues, work the sub-issues, not the parent.
 3. Set the item to **In progress** on the board so nobody else starts it:
 
    ```bash
@@ -111,6 +118,8 @@ Assume you will be stopped without warning and someone with no memory of you pic
 - **Commit and push before any long wait**, even unfinished work, on your branch.
 - **Comment on the issue** with what is done, what is not, and the exact next step. That comment is the handoff; messages between sessions are often never delivered.
 - **Set the board state** to match: Done, Blocked with the reason in the comment, or back to Resume now.
+- **When your step is Done, set the next step by `Order` to Resume now.** That is how the next session finds it.
+- **If your step turns out bigger than three days,** split it into sub-issues before going on, give them `Order` numbers, and move the numbers after them down.
 - **Log decisions and blockers** with the `simon` command (see `CLAUDE.md`, section SIMON_DECISION_LOGGING).
 - **After a merge, delete the branch by hand.** `gh pr merge --delete-branch` silently skips the deletion when run from a worktree. Check with `git ls-remote --heads origin <branch>`.
 

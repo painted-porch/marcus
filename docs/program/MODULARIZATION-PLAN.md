@@ -34,6 +34,20 @@ These were decided by Lawrence Gray and are not open for re-decision by a sessio
 | 2026-11-21 | The numerical verifier's data files are never committed to a repository. |
 | 2026-11-21 | The website moves off the kernel repository into its own, with redirect instructions. |
 | 2026-11-21 | The Minecraft deliberation layer resumes after Track B is done. |
+| 2026-11-21 | The work runs one step at a time, not in parallel, in the order recorded on the board. Any issue estimated at more than three engineer-days is split into sub-issues of one to three days. |
+
+## The order
+
+The program is one sequence of 71 steps, done one at a time.
+Each step's position is the Program board's `Order` field, a number from 1 to 71.
+Only the lowest-numbered step that is not Done is at Resume now; every later step is Blocked until the one before it is Done.
+Each step's issue says which step comes before it.
+
+The twelve issues that were too big for one sitting are now parents.
+Their work is in their sub-issues, which GitHub shows on the parent and the board shows in the `Parent issue` field.
+A parent stays In progress until all its sub-issues close.
+
+A step that turns out bigger than three days while it is being done is split the same way before work continues, and the `Order` numbers after it move down to fit.
 
 ## Where everything ends up
 
@@ -74,12 +88,12 @@ Each move follows the five-step procedure below, so nothing that runs today brea
 | --- | --- | --- |
 | [#943](https://github.com/painted-porch/marcus/issues/943) | B1: citation verifier to `citation-verifier` | 2 to 3 |
 | [#944](https://github.com/painted-porch/marcus/issues/944) | B2: clinical review to `hospital`, and give its records a remote | 2 to 3 |
-| [#945](https://github.com/painted-porch/marcus/issues/945) | B3: numerical verifier to its own private repository | 8 to 14 |
+| [#945](https://github.com/painted-porch/marcus/issues/945) | B3: numerical verifier to its own private repository, in seven sub-issues (B3.1 to B3.7) | 8 to 14 |
 | [#946](https://github.com/painted-porch/marcus/issues/946) | B4: Minecraft and the war game pin a release; Minecraft's last kernel import goes | 1 to 2 |
 | [#947](https://github.com/painted-porch/marcus/issues/947) | B5: the website to its own repository | 1 to 2 |
 
 B1 to B4 wait for Track A's release.
-B5 does not depend on Track A and can run in any quiet week.
+B5 does not depend on Track A, but it takes its place in the single order after B4.
 
 ### Track C: extract software building
 
@@ -102,13 +116,20 @@ Its extraction is epic [#924](https://github.com/painted-porch/marcus/issues/924
 | [#935](https://github.com/painted-porch/marcus/issues/935) | 9: assemble `painted-porch/marcus-software` | not priced |
 | [#424](https://github.com/painted-porch/marcus/issues/424) | 10: split `task.py` into modules | not priced |
 
+Every step above except #948 is split into sub-issues numbered after it, so step 3 becomes 3.1 to 3.6, and so on.
+Two of them run out of their parent's position on purpose.
+Step 9.1, creating the `painted-porch/marcus-software` repository, runs first in Track C, because steps 1, 3, 4, 5, 6 and 7 move code into it.
+The move of `nlp_task_utils.py` belongs to step 7.5, not step 2, because the decomposer and four other kernel modules still import it until the decomposer leaves.
+
 Step 3 builds on Track A's contract, because it declares task types over MCP.
+Steps that change the door (3.1, 3.2, 4.4, 6.2, 7.1, 7.2, 8b.3) update the contract spec, its version and the contract tests in the same pull request.
 
 ### The orderings that are hazards, not preferences
 
 - **Track A before any Track B move.** A moved project has to pin something.
 - **Inside Track C, step 4 before steps 5 and 6.** If either gate body leaves the kernel before the landing does, the kernel keeps merging work that nothing has checked.
 - **Steps 5 and 6 never run concurrently.** Both rewrite the same region of `report_task_progress` in `src/marcus_mcp/tools/task.py`.
+- **Verify cards stay off until a verifier runs.** Step 3.5 adds them behind an option that is off by default, and step 3.6 turns it on only when software runs launch a verifier; otherwise every card downstream of an unclaimed verify card waits forever.
 
 ## The five-step move, for every project in Track B
 
