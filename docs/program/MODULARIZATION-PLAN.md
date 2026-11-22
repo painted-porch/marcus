@@ -35,6 +35,12 @@ These were decided by Lawrence Gray and are not open for re-decision by a sessio
 | 2026-11-21 | The website moves off the kernel repository into its own, with redirect instructions. |
 | 2026-11-21 | The Minecraft deliberation layer resumes after Track B is done. |
 | 2026-11-21 | The work runs one step at a time, not in parallel, in the order recorded on the board. Any issue estimated at more than three engineer-days is split into sub-issues of one to three days. |
+| 2026-11-21 | The website's repository is `marcus-site`. |
+| 2026-11-21 | `citation-verifier` is public. |
+| 2026-11-21 | The clinical review's records go to a separate private repository, `hospital-records`, not into `hospital` with the code. |
+| 2026-11-22 | `marcus-software` is public. |
+| 2026-11-21 | Nothing is done on the numerical verifier's framing or its Condition D run; that decision item is parked. The B3 move stays in the order. |
+| 2026-11-21 | The Minecraft item on citing a decision as grounds (Agent Invariant 2) is Blocked, waiting with the deliberation layer. |
 
 ## The order
 
@@ -54,13 +60,13 @@ A step that turns out bigger than three days while it is being done is split the
 | Project | Today | After |
 | --- | --- | --- |
 | Kernel | `painted-porch/marcus`, mixed with everything below | `painted-porch/marcus`, kernel only, with a contract spec and contract tests |
-| AI-citation verifier | `extensions/citation_verifier/` in the kernel repository | `painted-porch/citation-verifier` |
-| Clinical review ("The Second Opinion") | `extensions/clinical_review/` in the kernel repository | `painted-porch/hospital` (private) |
+| AI-citation verifier | `extensions/citation_verifier/` in the kernel repository | `painted-porch/citation-verifier` (public) |
+| Clinical review ("The Second Opinion") | `extensions/clinical_review/` in the kernel repository | `painted-porch/hospital` (private), and its records in `painted-porch/hospital-records` (private) |
 | Numerical verifier | `dev-tools/experiments/runners/numeric_*.py` plus three unmerged branches | `painted-porch/numeric-verifier` (private), data files never committed |
 | War game ("No Hand on the Table") | `painted-porch/no-hand-on-the-table` | unchanged, pins a kernel release |
 | Minecraft | `painted-porch/marcus-minecraft` | unchanged, last kernel import removed, pins a kernel release |
-| Software building | tangled through the kernel's `src/` | `painted-porch/marcus-software` |
-| Website, marcus-ai.dev | `gh-pages` branch of the kernel repository | its own repository, proposed `painted-porch/marcus-site` |
+| Software building | tangled through the kernel's `src/` | `painted-porch/marcus-software` (public) |
+| Website, marcus-ai.dev | `gh-pages` branch of the kernel repository | `painted-porch/marcus-site` |
 | Toolkit | `painted-porch/marcus-toolkit`, on PyPI | unchanged, pins a kernel release instead of a commit |
 
 Experiment records stay outside every repository, in `~/marcus-experiments/`.
