@@ -280,6 +280,21 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "Defaults to the message."
                         ),
                     },
+                    "cost": {
+                        "type": "array",
+                        "description": (
+                            "Optional: the model calls this work made, one "
+                            "object per call, recorded in the cost ledger "
+                            "when the report is accepted (#742). Each "
+                            "carries seq (stable across a resend), at, "
+                            "provider, model, token counts and optionally "
+                            "usd, priced_by, api, basis ('attested' or "
+                            "'vendor_usage_block') and reported_by ('agent' "
+                            "or 'harness'). Marcus stamps the agent, task, "
+                            "project and run."
+                        ),
+                        "items": {"type": "object"},
+                    },
                     "start_command": {
                         "type": "string",
                         "description": (
@@ -1458,6 +1473,7 @@ async def handle_tool_call(
                     verifications=arguments.get("verifications"),
                     evidence=arguments.get("evidence"),
                     lease_epoch=arguments.get("lease_epoch"),
+                    cost=arguments.get("cost"),
                 )
 
         elif name == "report_blocker":

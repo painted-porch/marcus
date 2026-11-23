@@ -1893,6 +1893,7 @@ class MarcusServer:
                 lease_epoch: Optional[int] = None,
                 subject: Optional[str] = None,
                 observation: Optional[str] = None,
+                cost: Optional[List[Dict[str, Any]]] = None,
             ) -> Dict[str, Any]:
                 """Report progress on a task.
 
@@ -1912,6 +1913,11 @@ class MarcusServer:
                 ``exit_code`` + ``stdout``).  Marcus judges the evidence
                 against the per-type bar.  See the report_task_progress
                 docstring in tools/task.py for the full contract.
+
+                ``cost`` (issue #742): the model calls this work made, one
+                object per call, recorded in the cost ledger when the
+                report is accepted.  The reply's ``cost`` key says what
+                was recorded.
                 """
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
 
@@ -1931,6 +1937,7 @@ class MarcusServer:
                     lease_epoch=lease_epoch,
                     subject=subject,
                     observation=observation,
+                    cost=cost,
                 )
 
                 # Log MCP tool response

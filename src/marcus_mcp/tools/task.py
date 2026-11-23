@@ -45,6 +45,7 @@ from src.core.task_claimability import deps_allow_claim as _deps_allow_claim
 from src.core.task_claimability import is_integration_task as _is_integration_task
 from src.core.task_claimability import phase_satisfied_by
 from src.core.task_classification import get_task_type
+from src.cost_tracking.report_cost import record_report_cost
 from src.integrations.behavior_evidence import (
     behavior_evidence_contract,
     has_behavior_contract,
@@ -7393,6 +7394,7 @@ async def report_task_progress(
     lease_epoch: Optional[int] = None,
     subject: Optional[str] = None,
     observation: Optional[str] = None,
+    cost: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Report progress, and leave a counted marker on the board with it.
 
@@ -7424,12 +7426,17 @@ async def report_task_progress(
         different agents are counted together.
     observation : Optional[str]
         The crew-relevant observation; defaults to ``message``.
+    cost : Optional[List[Dict[str, Any]]]
+        The model calls this work made, one object per call (issue #742).
+        Recorded in the cost ledger by
+        :func:`~src.cost_tracking.report_cost.record_report_cost` when the
+        board accepts the report; a refused report records nothing.
 
     Returns
     -------
     Dict[str, Any]
         The progress report's own result, plus ``marker`` when a subject
-        was given.
+        was given and ``cost`` (the recorder's receipt) when a cost list was.
     """
     result = await _record_progress(
         agent_id=agent_id,
@@ -7444,6 +7451,11 @@ async def report_task_progress(
         evidence=evidence,
         lease_epoch=lease_epoch,
     )
+    report_accepted = not (isinstance(result, dict) and result.get("success") is False)
+    if cost is not None and isinstance(result, dict):
+        result["cost"] = record_report_cost(
+            state, agent_id, task_id, cost, accepted=report_accepted
+        )
     if not subject or not str(subject).strip():
         return result
     if isinstance(result, dict) and result.get("success") is False:
