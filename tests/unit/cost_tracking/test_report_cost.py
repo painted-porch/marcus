@@ -139,6 +139,48 @@ class TestARecordedCall:
         row = _rows(store)[0]
         assert (row["basis"], row["reported_by"]) == ("vendor_usage_block", "harness")
 
+    def test_a_run_captured_before_the_report_wins_over_a_later_lookup(
+        self, state: SimpleNamespace, store: CostStore
+    ) -> None:
+        """The run the report started in is the one its calls land in.
+
+        Codex P2 on PR #1013: the last completion can drain the board and
+        close the run before its cost is recorded, which filed the calls
+        under ``unassigned`` and broke deduplication against calls already
+        recorded under the real run.
+        """
+        store.close_latest_open_run_for_project(_PROJECT)
+
+        reply = record_report_cost(
+            state, "finder-1", "task-7", [_call()], accepted=True, run_id="run-1"
+        )
+
+        assert (reply["run_id"], _rows(store)[0]["run_id"]) == ("run-1", "run-1")
+
+    def test_resolve_report_run_reads_the_open_run(
+        self, state: SimpleNamespace
+    ) -> None:
+        """The capture is the same lookup the recorder would make."""
+        from src.cost_tracking.report_cost import resolve_report_run
+
+        assert resolve_report_run(state, "finder-1") == "run-1"
+
+    def test_resolve_report_run_never_raises(self) -> None:
+        """No project, no store or a broken store all give ``None``."""
+        from unittest.mock import Mock
+
+        from src.cost_tracking.report_cost import resolve_report_run
+
+        broken = Mock()
+        broken.get_latest_open_run_for_project.side_effect = RuntimeError("x")
+        states = [
+            SimpleNamespace(cost_store=broken, agent_project_map={"a": _PROJECT}),
+            SimpleNamespace(cost_store=None, agent_project_map={"a": _PROJECT}),
+            SimpleNamespace(cost_store=broken, agent_project_map={}),
+        ]
+
+        assert [resolve_report_run(s, "a") for s in states] == [None, None, None]
+
     def test_a_project_with_no_open_run_records_under_unassigned(
         self, tmp_path: Path
     ) -> None:

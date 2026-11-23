@@ -45,7 +45,7 @@ from src.core.task_claimability import deps_allow_claim as _deps_allow_claim
 from src.core.task_claimability import is_integration_task as _is_integration_task
 from src.core.task_claimability import phase_satisfied_by
 from src.core.task_classification import get_task_type
-from src.cost_tracking.report_cost import record_report_cost
+from src.cost_tracking.report_cost import record_report_cost, resolve_report_run
 from src.integrations.behavior_evidence import (
     behavior_evidence_contract,
     has_behavior_contract,
@@ -7438,6 +7438,9 @@ async def report_task_progress(
         The progress report's own result, plus ``marker`` when a subject
         was given and ``cost`` (the recorder's receipt) when a cost list was.
     """
+    # Read the run before the report can publish DONE: the last completion
+    # can drain the board, and the drain closes the run (Codex P2 on #1013).
+    cost_run_id = resolve_report_run(state, agent_id) if cost is not None else None
     result = await _record_progress(
         agent_id=agent_id,
         task_id=task_id,
@@ -7454,7 +7457,12 @@ async def report_task_progress(
     report_accepted = not (isinstance(result, dict) and result.get("success") is False)
     if cost is not None and isinstance(result, dict):
         result["cost"] = record_report_cost(
-            state, agent_id, task_id, cost, accepted=report_accepted
+            state,
+            agent_id,
+            task_id,
+            cost,
+            accepted=report_accepted,
+            run_id=cost_run_id,
         )
     if not subject or not str(subject).strip():
         return result

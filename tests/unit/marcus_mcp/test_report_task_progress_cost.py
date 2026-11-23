@@ -89,6 +89,46 @@ class TestTheToolRecordsCost:
         assert ("cost" in reply, recorder.called) == (False, False)
 
 
+class TestTheRunIsCapturedFirst:
+    """The run is read before the report can publish terminal state."""
+
+    @pytest.mark.asyncio
+    async def test_the_run_is_resolved_before_the_report_and_passed_on(self) -> None:
+        """Codex P2 on PR #1013: a drain during the close must not move cost."""
+        from src.marcus_mcp.tools import task as task_tools
+
+        order = []
+
+        def _resolve(state: Any, agent_id: str) -> str:
+            order.append("resolve")
+            return "run-1"
+
+        async def _progress(**_kwargs: Any) -> Dict[str, Any]:
+            order.append("progress")
+            return {"success": True}
+
+        recorder = Mock(return_value={"recorded": True})
+        with (
+            patch.object(task_tools, "_record_progress", new=_progress),
+            patch.object(task_tools, "resolve_report_run", new=_resolve),
+            patch.object(task_tools, "record_report_cost", new=recorder),
+        ):
+            await task_tools.report_task_progress(
+                agent_id="finder-1",
+                task_id="task-7",
+                status="completed",
+                progress=100,
+                message="done",
+                state=Mock(),
+                cost=[_CALL],
+            )
+
+        assert (order, recorder.call_args.kwargs["run_id"]) == (
+            ["resolve", "progress"],
+            "run-1",
+        )
+
+
 class TestBothTransportsCarryCost:
     """HTTP and stdio advertise and forward the same argument."""
 

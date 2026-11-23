@@ -576,7 +576,7 @@ Each entry of `cost` is one model call.
 | `reported_by` | `agent` or `harness` | no | default `agent`; `harness` says a process other than the model relayed the numbers |
 
 **What the kernel stamps.**
-The agent is the caller, the card is the report's `task_id`, the project is the agent's registration, the run is the project's open run (or `"unassigned"` when none is open), and the attribution is `held`.
+The agent is the caller, the card is the report's `task_id`, the project is the agent's registration, the run is the project's run that was open when the report arrived (or `"unassigned"` when none was), so a completion that drains the board still lands in its own run, and the attribution is `held`.
 A record that tries to set any of these is refused.
 
 **The receipt.**

@@ -151,6 +151,42 @@ def _usage_record(
     )
 
 
+def resolve_report_run(state: Any, agent_id: str) -> Optional[str]:
+    """Return the open run a report's cost belongs to, captured up front.
+
+    The report that closes a project's last card can drain the board, and a
+    drain closes the run. Read after the report, the run would already be
+    gone, so the calls would land under ``"unassigned"`` and stop
+    deduplicating against calls already recorded under the real run (Codex
+    P2 on PR #1013). ``report_task_progress`` therefore calls this before
+    the report can publish anything, and hands the answer to
+    :func:`record_report_cost`.
+
+    Parameters
+    ----------
+    state : Any
+        Marcus server state; ``cost_store`` and ``agent_project_map`` are read.
+    agent_id : str
+        The reporting agent.
+
+    Returns
+    -------
+    Optional[str]
+        The project's open run id, or ``None`` when the agent has no project,
+        the server has no cost store, the project has no open run, or the
+        lookup fails. Never raises.
+    """
+    project_id = project_for_agent(agent_id, state)
+    store = getattr(state, "cost_store", None)
+    if not project_id or store is None:
+        return None
+    try:
+        run_id = store.get_latest_open_run_for_project(project_id)
+    except Exception:  # noqa: BLE001 - the capture never fails the report
+        return None
+    return str(run_id) if run_id else None
+
+
 def _not_recorded(reason: str) -> Dict[str, Any]:
     """Return the reply for a cost list the kernel did not record."""
     return {"recorded": False, "reason": reason}
@@ -162,6 +198,7 @@ def record_report_cost(
     task_id: str,
     cost: Any,
     accepted: bool,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record the model calls a worker reported with its progress.
 
@@ -179,6 +216,10 @@ def record_report_cost(
     accepted : bool
         Whether the board accepted the report. A refused report records
         nothing.
+    run_id : Optional[str]
+        The run captured by :func:`resolve_report_run` before the report
+        ran. When omitted, the project's open run is looked up now, and
+        ``"unassigned"`` is used when there is none.
 
     Returns
     -------
@@ -210,7 +251,10 @@ def record_report_cost(
         return _not_recorded("this server has no cost store")
 
     try:
-        run_id = store.get_latest_open_run_for_project(project_id) or _UNASSIGNED_RUN
+        if not run_id:
+            run_id = (
+                store.get_latest_open_run_for_project(project_id) or _UNASSIGNED_RUN
+            )
         rejected: List[Dict[str, Any]] = []
         positions: List[int] = []
         records: List[UsageRecord] = []
