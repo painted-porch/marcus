@@ -155,7 +155,10 @@ def events_for_tasks(store: CostStore, task_ids: Sequence[str]) -> List[Dict[str
     -------
     List[Dict[str, Any]]
         One dict per token_events row: agent_id, task_id, provider,
-        model, token counts, and timestamp.
+        model, token counts, timestamp, and the row's provenance:
+        ``basis`` (``attested``, ``vendor_usage_block`` or ``metered``),
+        ``reported_by`` and the reporter's own ``reported_usd``. Each is
+        ``None`` on a row written before #742 carried it.
     """
     ids = [t for t in task_ids if t]
     if not ids:
@@ -164,7 +167,8 @@ def events_for_tasks(store: CostStore, task_ids: Sequence[str]) -> List[Dict[str
     rows = store.conn.execute(
         f"""
         SELECT agent_id, task_id, provider, model,
-               input_tokens, output_tokens, total_tokens, timestamp
+               input_tokens, output_tokens, total_tokens, timestamp,
+               basis, reported_by, reported_usd
         FROM token_events
         WHERE task_id IN ({placeholders})
         ORDER BY timestamp
@@ -181,6 +185,9 @@ def events_for_tasks(store: CostStore, task_ids: Sequence[str]) -> List[Dict[str
             "output_tokens": r[5],
             "total_tokens": r[6],
             "timestamp": r[7],
+            "basis": r[8],
+            "reported_by": r[9],
+            "reported_usd": r[10],
         }
         for r in rows
     ]

@@ -26,7 +26,6 @@ Submodules
    src.marcus_mcp.client_manager
    src.marcus_mcp.dual_transport_server
    src.marcus_mcp.handlers
-   src.marcus_mcp.handlers_fixed
    src.marcus_mcp.server
    src.marcus_mcp.tool_groups
    src.marcus_mcp.utils

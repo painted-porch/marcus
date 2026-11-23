@@ -5,7 +5,8 @@
 Marcus is a coordination kernel: a shared task board that AI agents pull work from, plus the rules that decide what is claimable, what counts as done, and what gets measured.
 An *extension* is a separate program that puts work on that board and runs agents against it for one purpose, such as verifying AI citations or building software.
 ADR-0013 decided that Marcus is the kernel and everything else is an extension.
-This document is the written contract between the two: the exact kernel surface an extension may depend on, what each piece is for, and what the first extension cut taught us.
+This document explains why the door between the two has its shape, what each piece is for, and what the first extension cut taught us.
+The door itself, versioned, with every tool's arguments and reply, is specified in [`kernel-contract.md`](kernel-contract.md); where the two disagree, that document is right.
 
 It was written from the first cut, the AI-citation verifier (`extensions/citation_verifier/`), packaged on 2026-11-07 after Larry chose it as the first extension (ADR-0013 K11).
 The numerical-report verifier is next, once its owner rebases it off its unmerged branch.

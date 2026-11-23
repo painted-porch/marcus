@@ -185,6 +185,57 @@ class TestTheToolForwardsTheSubject:
         assert impl.await_args.kwargs.get("subject") is None
 
 
+class TestTheStdioToolForwardsTheSubject:
+    """stdio advertises and forwards ``subject`` the way HTTP does (#939).
+
+    The stdio handlers keep their own hand-written schema and dispatcher.
+    Both had been left behind when HTTP gained ``subject``: the schema did
+    not name it and the dispatcher dropped it, so a decision sent over
+    stdio lost its subject with no error.
+    """
+
+    def test_the_stdio_schema_names_subject_as_optional(self) -> None:
+        """Agents on stdio are told the argument exists."""
+        from src.marcus_mcp.handlers import get_all_tool_definitions
+
+        schema = get_all_tool_definitions()["log_decision"].inputSchema
+
+        assert ("subject" in schema["properties"], "subject" in schema["required"]) == (
+            True,
+            False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_stdio_dispatcher_forwards_subject(self) -> None:
+        """What a stdio agent sends is what the implementation receives."""
+        from unittest.mock import Mock
+
+        from src.marcus_mcp import handlers
+
+        state = Mock()
+        state._current_client_id = "alpha"
+        state._registered_clients = {"alpha": {"client_type": "agent"}}
+        impl = AsyncMock(return_value={"success": True, "decision_id": "dec_1"})
+        with (
+            patch.object(handlers, "log_decision", new=impl),
+            patch.object(handlers, "rehydrate_on_tool_call", new=AsyncMock()),
+            patch.object(handlers, "get_audit_logger", return_value=AsyncMock()),
+            patch.object(handlers, "touch_on_tool_call", new=AsyncMock()),
+        ):
+            await handlers.handle_tool_call(
+                "log_decision",
+                {
+                    "agent_id": "alpha",
+                    "task_id": "task-1",
+                    "decision": "I planted saplings because the camp ran out of logs.",
+                    "subject": "wood.shortage",
+                },
+                state,
+            )
+
+        assert impl.await_args.kwargs["subject"] == "wood.shortage"
+
+
 class TestADecisionIsNeverAnOpinion:
     """The line Larry drew: a decision is a record of why, never a vote."""
 

@@ -280,6 +280,21 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "Defaults to the message."
                         ),
                     },
+                    "cost": {
+                        "type": "array",
+                        "description": (
+                            "Optional: the model calls this work made, one "
+                            "object per call, recorded in the cost ledger "
+                            "when the report is accepted (#742). Each "
+                            "carries seq (stable across a resend), at, "
+                            "provider, model, token counts and optionally "
+                            "usd, priced_by, api, basis ('attested' or "
+                            "'vendor_usage_block') and reported_by ('agent' "
+                            "or 'harness'). Marcus stamps the agent, task, "
+                            "project and run."
+                        ),
+                        "items": {"type": "object"},
+                    },
                     "start_command": {
                         "type": "string",
                         "description": (
@@ -535,6 +550,16 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                             "'I chose X because Y. This affects Z.'"
                         ),
                     },
+                    "subject": {
+                        "type": "string",
+                        "description": (
+                            "Optional slug naming the board subject this "
+                            "decision answers (the same slugs opinions use, "
+                            "such as 'wood.shortage'). Normalised like an "
+                            "opinion's subject. A decision never counts as "
+                            "an opinion."
+                        ),
+                    },
                 },
                 "required": ["agent_id", "task_id", "decision"],
             },
@@ -597,18 +622,6 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     "task_id": {
                         "type": "string",
                         "description": "Task ID to get context for",
-                    },
-                    "project_root": {
-                        "type": "string",
-                        "description": (
-                            "Absolute path to the project root "
-                            "directory. "
-                            "Used to discover artifacts created in "
-                            "the project workspace. "
-                            "All agents working on this project "
-                            "should pass the same path "
-                            "to see each other's artifacts."
-                        ),
                     },
                 },
                 "required": ["task_id"],
@@ -1049,7 +1062,7 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                         "default": True,
                     },
                 },
-                "required": ["name", "provider"],
+                "required": ["name", "provider", "config"],
             },
         ),
         types.Tool(
@@ -1095,189 +1108,6 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                 "required": ["project_id"],
             },
         ),
-        # Natural Language Tools (also available to humans)
-        types.Tool(
-            name="create_project",
-            description=(
-                "Create a complete project from natural language "
-                "description. "
-                "Automatically generates tasks, assigns priorities, "
-                "and creates "
-                "kanban board structure based on project complexity "
-                "and deployment needs."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "description": {
-                        "type": "string",
-                        "description": (
-                            "Natural language description of what "
-                            "you want to build. "
-                            "Be specific about features and "
-                            "functionality. "
-                            "Example: 'Create a todo app with user "
-                            "authentication, "
-                            "task categories, and email reminders'"
-                        ),
-                    },
-                    "project_name": {
-                        "type": "string",
-                        "description": (
-                            "A short, memorable name for your "
-                            "project. "
-                            "This will be used as the kanban board "
-                            "title. "
-                            "Example: 'TodoMaster' or "
-                            "'Task Tracker Pro'"
-                        ),
-                    },
-                    "options": {
-                        "type": "object",
-                        "description": (
-                            "Optional configuration to control "
-                            "project scope and complexity. "
-                            "All fields are optional - sensible "
-                            "defaults will be used."
-                        ),
-                        "properties": {
-                            "complexity": {
-                                "type": "string",
-                                "description": (
-                                    "Project complexity level "
-                                    "(default: 'standard'). "
-                                    "- 'prototype': Quick MVP with "
-                                    "minimal features (3-8 tasks) "
-                                    "- 'standard': Full-featured "
-                                    "project (10-20 tasks) "
-                                    "- 'enterprise': Production-ready "
-                                    "with all features (25+ tasks)"
-                                ),
-                                "enum": ["prototype", "standard", "enterprise"],
-                                "default": "standard",
-                            },
-                            "deployment": {
-                                "type": "string",
-                                "description": (
-                                    "Deployment scope "
-                                    "(default: 'none'). "
-                                    "- 'none': Local development only, "
-                                    "no deployment tasks "
-                                    "- 'internal': Include staging/team "
-                                    "deployment tasks "
-                                    "- 'production': Full production "
-                                    "deployment with monitoring"
-                                ),
-                                "enum": ["none", "internal", "production"],
-                                "default": "none",
-                            },
-                            "team_size": {
-                                "type": "integer",
-                                "description": (
-                                    "Number of developers (1-20). "
-                                    "Defaults based on complexity: "
-                                    "prototype=1, standard=3, "
-                                    "enterprise=5. "
-                                    "Affects task parallelization "
-                                    "and estimates."
-                                ),
-                                "minimum": 1,
-                                "maximum": 20,
-                            },
-                            "tech_stack": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": (
-                                    "Technologies/frameworks to use. "
-                                    "Example: ['Python', 'React', "
-                                    "'PostgreSQL', 'Docker']. "
-                                    "Helps generate appropriate setup "
-                                    "and configuration tasks."
-                                ),
-                            },
-                            "deadline": {
-                                "type": "string",
-                                "format": "date",
-                                "description": (
-                                    "Project deadline in ISO format "
-                                    "(YYYY-MM-DD). "
-                                    "Example: '2024-12-31'. "
-                                    "Used to assess timeline risks and "
-                                    "adjust priorities."
-                                ),
-                            },
-                            "tasks": {
-                                "type": "array",
-                                "description": (
-                                    "A seeded board: put exactly these "
-                                    "tasks on the board, with no "
-                                    "decomposition and no model call. "
-                                    "Each item is a seed spec "
-                                    "(src/integrations/seeded_tasks.py). "
-                                    "Only 'name' is required. 'depends_on' "
-                                    "names another item by its name or "
-                                    "its id. Issue #911: 'task_type' "
-                                    "selects the kernel rules the card "
-                                    "falls under (for example find, "
-                                    "verify, synthesize), 'inputs' is "
-                                    "what the board hands the worker "
-                                    "that pulls it, and 'id' is the "
-                                    "card's final id ([A-Za-z0-9_-], "
-                                    "unique)."
-                                ),
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": {"type": "string"},
-                                        "description": {"type": "string"},
-                                        "labels": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                        "depends_on": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                        "completion_criteria": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                        "estimated_hours": {"type": "number"},
-                                        "priority": {
-                                            "type": "string",
-                                            "enum": ["high", "medium", "low"],
-                                        },
-                                        "task_type": {"type": "string"},
-                                        "inputs": {"type": "object"},
-                                        "id": {"type": "string"},
-                                    },
-                                    "required": ["name"],
-                                },
-                            },
-                            "task_type_registrations": {
-                                "type": "object",
-                                "description": (
-                                    "ADR-0013 K2: the task types this "
-                                    "project's cards use, keyed by type "
-                                    "name, stamped on the project record "
-                                    "(issue #911). Each entry may carry "
-                                    "'evidence_schema' (the fields a "
-                                    "completion of that type must report), "
-                                    "'verifies_task_type' (the type whose "
-                                    "work this type checks, so it is never "
-                                    "offered to that work's author), "
-                                    "'checks_injectable' and "
-                                    "'injected_checks' (ADR-0013 K4), and "
-                                    "'requires_source_tree' (K3)."
-                                ),
-                                "additionalProperties": {"type": "object"},
-                            },
-                        },
-                    },
-                },
-                "required": ["description", "project_name"],
-            },
-        ),
         types.Tool(
             name="add_feature",
             description="Add a feature to existing project using natural language",
@@ -1303,42 +1133,6 @@ def get_tool_definitions(role: str = "agent") -> List[types.Tool]:
                     },
                 },
                 "required": ["feature_description"],
-            },
-        ),
-        # Scheduling and Planning Tools
-        types.Tool(
-            name="get_optimal_agent_count",
-            description=(
-                "Calculate optimal number of agents using Critical Path "
-                "Method (CPM) analysis.\n\n"
-                "Analyzes the unified dependency graph (including parent "
-                "tasks and subtasks) to determine the optimal agent count "
-                "for maximum efficiency.\n\n"
-                "Returns:\n"
-                "- optimal_agents: Recommended number of agents\n"
-                "- critical_path_hours: Duration of longest dependency "
-                "chain\n"
-                "- max_parallelism: Maximum tasks that can run "
-                "simultaneously\n"
-                "- efficiency_gain: Percentage improvement vs single agent\n"
-                "- estimated_completion_hours: Expected completion time\n\n"
-                "Optionally includes detailed parallel opportunities showing "
-                "when multiple tasks can be worked on simultaneously."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "include_details": {
-                        "type": "boolean",
-                        "description": (
-                            "Include detailed parallel opportunities "
-                            "analysis (shows time points where multiple "
-                            "tasks can run in parallel)"
-                        ),
-                        "default": False,
-                    },
-                },
-                "required": [],
             },
         ),
         # Operator remedy for a stranded or stuck assignment (issue #900).
@@ -1679,6 +1473,7 @@ async def handle_tool_call(
                     verifications=arguments.get("verifications"),
                     evidence=arguments.get("evidence"),
                     lease_epoch=arguments.get("lease_epoch"),
+                    cost=arguments.get("cost"),
                 )
 
         elif name == "report_blocker":
@@ -1847,6 +1642,7 @@ async def handle_tool_call(
                     task_id=task_id,
                     decision=decision,
                     state=state,
+                    subject=arguments.get("subject"),
                 )
 
         elif name == "give_opinion":

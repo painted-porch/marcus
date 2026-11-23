@@ -1805,8 +1805,8 @@ class MarcusServer:
                 agent_id: str,
                 name: str,
                 role: str,
+                project_id: str,
                 skills: List[str] = [],
-                project_id: str = "",
                 vendor: str = "",
                 principal: str = "agent",
             ) -> Dict[str, Any]:
@@ -1893,6 +1893,7 @@ class MarcusServer:
                 lease_epoch: Optional[int] = None,
                 subject: Optional[str] = None,
                 observation: Optional[str] = None,
+                cost: Optional[List[Dict[str, Any]]] = None,
             ) -> Dict[str, Any]:
                 """Report progress on a task.
 
@@ -1912,6 +1913,11 @@ class MarcusServer:
                 ``exit_code`` + ``stdout``).  Marcus judges the evidence
                 against the per-type bar.  See the report_task_progress
                 docstring in tools/task.py for the full contract.
+
+                ``cost`` (issue #742): the model calls this work made, one
+                object per call, recorded in the cost ledger when the
+                report is accepted.  The reply's ``cost`` key says what
+                was recorded.
                 """
                 from src.logging.mcp_tool_logger import log_mcp_tool_response
 
@@ -1931,6 +1937,7 @@ class MarcusServer:
                     lease_epoch=lease_epoch,
                     subject=subject,
                     observation=observation,
+                    cost=cost,
                 )
 
                 # Log MCP tool response
@@ -2296,11 +2303,24 @@ class MarcusServer:
         if "list_projects" in allowed_tools:
 
             @app.tool()  # type: ignore[misc]
-            async def list_projects() -> List[Dict[str, Any]]:
-                """List all available projects."""
+            async def list_projects(
+                filter_tags: Optional[List[str]] = None,
+                provider: Optional[str] = None,
+            ) -> List[Dict[str, Any]]:
+                """List all available projects, optionally filtered.
+
+                Parameters
+                ----------
+                filter_tags : Optional[List[str]]
+                    Only projects carrying one of these tags.
+                provider : Optional[str]
+                    Only projects on this board provider.
+                """
                 from .tools.project_management import list_projects as impl
 
-                return await impl(server, {})
+                return await impl(
+                    server, {"filter_tags": filter_tags, "provider": provider}
+                )
 
         if "select_project" in allowed_tools:
 
@@ -2340,11 +2360,24 @@ class MarcusServer:
         if "switch_project" in allowed_tools:
 
             @app.tool()  # type: ignore[misc]
-            async def switch_project(project_name: str) -> Dict[str, Any]:
-                """Switch to a different project."""
+            async def switch_project(
+                project_id: Optional[str] = None,
+                project_name: Optional[str] = None,
+            ) -> Dict[str, Any]:
+                """Switch to a different project, by id or by name.
+
+                Parameters
+                ----------
+                project_id : Optional[str]
+                    The project's registry id.
+                project_name : Optional[str]
+                    The project's name, used when no id is given.
+                """
                 from .tools.project_management import switch_project as impl
 
-                return await impl(server, {"project_name": project_name})
+                return await impl(
+                    server, {"project_id": project_id, "project_name": project_name}
+                )
 
         if "get_current_project" in allowed_tools:
 
@@ -2359,33 +2392,63 @@ class MarcusServer:
 
             @app.tool()  # type: ignore[misc]
             async def add_feature(
-                description: str,
-                context: Optional[Dict[str, Any]] = None,
+                feature_description: str,
+                integration_point: str = "auto_detect",
             ) -> Dict[str, Any]:
-                """Add a feature to existing project using natural language."""
+                """Add a feature to existing project using natural language.
+
+                Parameters
+                ----------
+                feature_description : str
+                    The feature to add, in plain language.
+                integration_point : str
+                    ``auto_detect``, ``after_current``, ``parallel`` or
+                    ``new_phase``.
+                """
                 from .tools.nlp import add_feature as impl
 
                 return await impl(
-                    feature_description=description,
-                    integration_point="current",
+                    feature_description=feature_description,
+                    integration_point=integration_point,
                     state=server,
                 )
 
         if "get_usage_report" in allowed_tools:
 
             @app.tool()  # type: ignore[misc]
-            async def get_usage_report(
-                start_date: Optional[str] = None,
-                end_date: Optional[str] = None,
-                group_by: str = "day",
-            ) -> Dict[str, Any]:
-                """Generate usage analytics and audit reports."""
+            async def get_usage_report(days: int = 7) -> Dict[str, Any]:
+                """Generate a usage report from the audit log.
+
+                Parameters
+                ----------
+                days : int
+                    How many days back the report covers.
+                """
                 from .tools.audit_tools import get_usage_report as impl
 
-                return await impl(
-                    days=7,
-                    state=server,
-                )
+                return await impl(days=days, state=server)
+
+        if "get_cost_summary" in allowed_tools:
+
+            @app.tool()  # type: ignore[misc]
+            async def get_cost_summary(
+                run_id: Optional[str] = None,
+                project_id: Optional[str] = None,
+            ) -> Dict[str, Any]:
+                """Return a cost summary for one run or one project.
+
+                Parameters
+                ----------
+                run_id : Optional[str]
+                    A run id; the reply breaks that run down by role, agent,
+                    task, operation and model.
+                project_id : Optional[str]
+                    A project id; the reply gives the project's totals and
+                    its runs.
+                """
+                from .tools.cost_tracking import get_cost_summary as impl
+
+                return await impl(run_id=run_id, project_id=project_id, state=server)
 
         if "export_case" in allowed_tools:
 
