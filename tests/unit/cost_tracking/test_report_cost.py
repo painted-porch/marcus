@@ -169,6 +169,12 @@ class TestARefusedRecord:
             (_call(reported_by="controller"), "reported_by"),
             (_call(task_id="other"), "task_id"),
             ("not a dict", "object"),
+            # Codex P2 on PR #1013: an unhashable value once raised inside
+            # the set-membership check and dropped the whole batch.
+            (_call(basis=[]), "basis"),
+            (_call(reported_by={}), "reported_by"),
+            (_call(api=["x"]), "api"),
+            (_call(priced_by={"t": 1}), "priced_by"),
         ],
     )
     def test_the_refusal_names_the_record_and_the_field(

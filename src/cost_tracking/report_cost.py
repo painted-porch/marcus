@@ -92,6 +92,14 @@ def _shape_error(record: Any) -> Optional[str]:
         value = record.get(name)
         if not isinstance(value, str) or not value.strip():
             return f"{name} must be a non-empty string, got {value!r}"
+    # Optional strings are type-checked before anything uses them: an
+    # unhashable value would raise inside a set-membership test, and a list
+    # would fail the SQLite insert, either of which once dropped the whole
+    # batch instead of this one record (Codex P2 on PR #1013).
+    for name in ("basis", "reported_by", "api", "priced_by"):
+        value = record.get(name)
+        if value is not None and not isinstance(value, str):
+            return f"{name} must be a string, got {type(value).__name__}"
     basis = record.get("basis", "attested")
     if basis not in COST_RECORD_BASES:
         return f"basis must be one of {sorted(COST_RECORD_BASES)}, got {basis!r}"
