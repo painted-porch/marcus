@@ -147,7 +147,8 @@ The registration is the only source of the project for every later write by this
 The `task` carries `id`, `name`, `description`, `task_type`, `inputs`, `labels`, `project_id`, `project_name`, `priority`, `completion_criteria`, `acceptance_criteria`, `injected_checks`, `output_schema` and `instructions`.
 
 **Reply when nothing is offered:** `success: false`, `message`, `retry_after_seconds`, `retry_reason` and `drain` (`drained`, `reason`, `tasks_total`, `tasks_done`, `tasks_blocked`, `tasks_claimable`, `tasks_in_flight`, `tasks_unclaimable`, `tasks_stranded`, `stranded_task_ids`).
-`drain.drained: true` means the project's board has nothing left that any agent could ever claim, and a worker may exit.
+**Reply when the board is drained:** `success: false`, `status: "BOARD_DRAINED"`, `should_exit: true`, `drain` and `message`.
+It means the agent's project has nothing left that any agent could ever claim, and the worker should exit.
 
 **Rules.**
 The agent chooses to ask; the kernel never pushes a card (Agent Invariant 1).
@@ -580,7 +581,8 @@ A record that tries to set any of these is refused.
 
 **The receipt.**
 The reply's `cost` key is `{"recorded": true, "run_id", "batch_id", "accepted", "already_present", "rejected"}`, where each `rejected` entry is `{"index", "reason"}` and `index` is the record's position in the list you sent.
-A malformed record is refused by itself; the rest still land.
+A record with a bad field is refused by itself, and the rest still land.
+An entry that is not an object at all, or a `cost` that is not a list, fails the whole call at the transport, as any argument of the wrong type does, and nothing in the report is applied.
 
 **When nothing is recorded.**
 The receipt is `{"recorded": false, "reason"}` when the board refused the report, when the agent is not registered to a project, or when the server has no cost store.
