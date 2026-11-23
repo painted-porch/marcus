@@ -281,6 +281,48 @@ class TestExportCase:
         assert cost["task_id"] == "t-find"
         assert cost["input_tokens"] == 120
 
+    @pytest.mark.asyncio
+    async def test_a_reported_cost_carries_its_provenance(self, tmp_path: Path) -> None:
+        """Testimony is labelled as testimony in the bundle (#742).
+
+        A cost a worker reported with its progress is attested, not
+        metered, and the bundle must say so beside the numbers, along with
+        who relayed it and the worker's own price.
+        """
+        from types import SimpleNamespace
+
+        from src.cost_tracking.cost_store import CostStore
+        from src.cost_tracking.report_cost import record_report_cost
+
+        state = _closed_case_state()
+        store = CostStore(db_path=tmp_path / "costs.db")
+        record_report_cost(
+            SimpleNamespace(cost_store=store, agent_project_map={"finder-1": "p"}),
+            "finder-1",
+            "t-find",
+            [
+                {
+                    "seq": 1,
+                    "at": "2026-10-04T12:00:00Z",
+                    "provider": "anthropic",
+                    "model": "claude-haiku-4-5",
+                    "input_tokens": 120,
+                    "usd": 0.0382,
+                }
+            ],
+            accepted=True,
+        )
+        state.cost_store = store
+
+        bundle = await export_case(CASE, state)
+
+        cost = bundle["costs"][0]
+        assert (cost["basis"], cost["reported_by"], cost["reported_usd"]) == (
+            "attested",
+            "agent",
+            0.0382,
+        )
+
 
 def _verify_task_id(state: Mock) -> str:
     """The case's verify task id, read from the fixture rather than assumed."""

@@ -83,7 +83,8 @@ The full project rules are in [`CLAUDE.md`](../../CLAUDE.md) at the repository r
 | --- | --- |
 | [`MODULARIZATION-PLAN.md`](MODULARIZATION-PLAN.md) | the goal, the decisions, the three tracks and their order |
 | `docs/architecture/adr/0013-kernel-and-extensions.md` | the thirteen decisions that define kernel and extension |
-| `docs/architecture/extension-contract.md` | what an extension may take from the kernel |
+| `docs/architecture/kernel-contract.md` | the door, versioned: every tool an extension may call, its arguments and reply, and the rules behind them |
+| `docs/architecture/extension-contract.md` | why the door has that shape, and what the first extension cut taught |
 | `docs/architecture/building-an-extension.md` | how an extension is built, with a worked example |
 | `docs/architecture/software-extension-extraction.md` | the inventory behind Track C, with every `task.py` function classified |
 | `extensions/citation_verifier/` | the first finished extension; the shape the others copy |

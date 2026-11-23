@@ -217,6 +217,22 @@ class TestNothingIsRecorded:
 
         assert (reply["recorded"], len(_rows(store))) == (False, 0)
 
+    def test_a_failing_cost_store_is_reported_never_raised(self) -> None:
+        """A broken ledger never fails the progress report it rides on."""
+        from unittest.mock import Mock
+
+        broken = Mock()
+        broken.get_latest_open_run_for_project.side_effect = RuntimeError("disk full")
+        state = SimpleNamespace(
+            cost_store=broken, agent_project_map={"finder-1": _PROJECT}
+        )
+
+        reply = record_report_cost(
+            state, "finder-1", "task-7", [_call()], accepted=True
+        )
+
+        assert (reply["recorded"], "disk full" in reply["reason"]) == (False, True)
+
     def test_a_server_with_no_cost_store_records_nothing(self) -> None:
         """Said in the reply, never raised into the report."""
         state = SimpleNamespace(

@@ -197,7 +197,7 @@ class TestTheDocumentMatchesTheCode:
         from src.marcus_mcp.kernel_contract import CONTRACT_TOOLS
 
         headings = set(
-            re.findall(r"^#### `([a-z_]+)`$", _CONTRACT_DOC.read_text(), re.MULTILINE)
+            re.findall(r"^##### `([a-z_]+)`$", _CONTRACT_DOC.read_text(), re.MULTILINE)
         )
 
         assert headings == set(CONTRACT_TOOLS)
