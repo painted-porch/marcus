@@ -111,7 +111,8 @@ async def switch_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, An
         MarcusServer instance
     arguments : Dict[str, Any]
         - project_id: ID of project to switch to
-        - name: Alternative - full project name from list_projects (if unique)
+        - project_name: Alternative - full project name from list_projects
+          (if unique). ``name`` is accepted as an older spelling.
 
     Returns
     -------
@@ -119,12 +120,14 @@ async def switch_project(server: Any, arguments: Dict[str, Any]) -> Dict[str, An
         Success status and project details
     """
     project_id = arguments.get("project_id")
-    name = arguments.get("name")
+    # Both schemas advertise ``project_name``; ``name`` is the spelling this
+    # function read before #939, kept so an older caller still works.
+    name = arguments.get("project_name") or arguments.get("name")
 
     if not project_id and not name:
         return {
             "success": False,
-            "error": "Either project_id or name must be provided",
+            "error": "Either project_id or project_name must be provided",
         }
 
     # Find project by name if ID not provided

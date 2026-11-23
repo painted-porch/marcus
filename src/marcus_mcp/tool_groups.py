@@ -24,6 +24,7 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "create_tasks",  # Create tasks on existing project/board
         "add_feature",  # NLP feature addition
         "get_usage_report",
+        "get_cost_summary",  # Per-run / per-project cost (#409, #742)
         "export_case",  # #737 audit bundle; carries raw evidence, human-only
         "unassign_task",  # Manually unassign stuck tasks
         # Scheduling
@@ -72,6 +73,7 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         "ping",
         "authenticate",
         "get_usage_report",
+        "get_cost_summary",  # Per-run / per-project cost (#409, #742)
         "export_case",  # #737 audit bundle; carries raw evidence
         # Project management
         "get_project_status",
@@ -110,21 +112,6 @@ TOOL_GROUPS: Dict[str, Set[str]] = {
         # System health
         "check_assignment_health",
         "check_board_health",
-        # Pipeline analysis tools
-        "pipeline_replay_start",
-        "pipeline_replay_forward",
-        "pipeline_replay_backward",
-        "pipeline_replay_jump",
-        "what_if_start",
-        "what_if_simulate",
-        "what_if_compare",
-        "pipeline_compare",
-        "pipeline_report",
-        "pipeline_monitor_dashboard",
-        "pipeline_monitor_flow",
-        "pipeline_predict_risk",
-        "pipeline_recommendations",
-        "pipeline_find_similar",
         # Prediction and AI intelligence tools
         "predict_completion_time",
         "predict_task_outcome",
